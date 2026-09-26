@@ -76,6 +76,13 @@ jobs:
       - name: Install PlatformIO
         run: pip install platformio esptool
 
+      # Translation coverage (issue #99). Fails only on a translation whose
+      # printf placeholders differ from its English -- the device would refuse
+      # it and show English, so it is a bug in the .lang file. Missing and
+      # unusually long translations are reported, not failed.
+      - name: Audit UI translations
+        run: python3 tools/i18n_audit.py
+
       - name: Build firmware (verify all environments compile)
         run: |
           pio run -e tdeck

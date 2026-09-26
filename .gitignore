@@ -19,3 +19,6 @@ ota_signing_key.pem
 # step, so it is rewritten before every compile. Tracking it meant it went dirty
 # after every release, and the committed copy was never the one that shipped.
 src/release_notes.h
+
+# Generated from lang/*.lang by tools/gen_lang_builtin.py on every build (#99).
+src/i18n_builtin.h

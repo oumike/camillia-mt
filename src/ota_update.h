@@ -58,6 +58,12 @@ bool otaCheckLatestRelease(OtaCheckResult &out);
 
 // Downloads and installs the latest release binary for this device target.
 // If tag is null/empty, it fetches the latest release tag first.
+// The error otaInstallLatestRelease() reports when the release is bigger than
+// this device's app slot -- a device still on the old 3.2 MB partition table
+// (issue #99). Short, because the update screen shows it on one line; callers
+// compare against it to show the full explanation afterwards.
+extern const char kOtaErrNeedsUsbInstall[];
+
 bool otaInstallLatestRelease(const char *tag,
                              char *errOut,
                              size_t errLen,

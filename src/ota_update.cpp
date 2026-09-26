@@ -698,6 +698,8 @@ bool otaCheckLatestRelease(OtaCheckResult &out) {
 // Structural rather than a size comparison against partitions.csv, so it stays
 // correct if the slot sizes change. It fails closed — anything unrecognised
 // gets no update offered.
+const char kOtaErrNeedsUsbInstall[] = "Please re-flash from Camillia's website";
+
 bool otaLayoutSupportsUpdate() {
     const esp_partition_t *slot0 = esp_partition_find_first(
         ESP_PARTITION_TYPE_APP, ESP_PARTITION_SUBTYPE_APP_OTA_0, nullptr);
@@ -819,6 +821,17 @@ bool otaInstallLatestRelease(const char *tag,
     }
 
     int contentLen = http.getSize();
+    // A release built for bigger app slots than this device's partition table
+    // has (the 3.2 MB -> 6.25 MB change, issue #99) cannot be installed over
+    // the air: OTA never rewrites the table. Update.begin() would refuse it too,
+    // before writing a byte, but only with a bare error number. Nothing is
+    // written either way and the running firmware is untouched.
+    if (contentLen > 0 && (size_t)contentLen > next->size) {
+        Serial.printf("[ota] release is %u KB, app slot is %u KB: needs a USB install\n",
+                      (unsigned)(contentLen / 1024), (unsigned)(next->size / 1024));
+        http.end();
+        return setErr(errOut, errLen, kOtaErrNeedsUsbInstall);
+    }
     size_t updateSize = (contentLen > 0) ? (size_t)contentLen : (size_t)UPDATE_SIZE_UNKNOWN;
     if (!Update.begin(updateSize)) {
         char msg[96];

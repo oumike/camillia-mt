@@ -998,6 +998,30 @@ node sees it.
   — reaches the broker through the ordinary uplink instead, which needs the
   channel's uplink flag on.
 
+### Language
+
+**Language: <name>** picks the language of the on-device interface: English
+(the default), Español, Français, Română or Italiano. Activating it opens a
+dropdown of the languages, each written in its own language, with Cancel and
+Save. On a keyboard build, Up/Down (or the wheel/trackball) changes the choice,
+Enter saves and Backspace/Esc cancels.
+
+**Saving a different language reboots the device**, like Theme and Orientation:
+the status line says `<language> - rebooting...` and the device comes back in it.
+Saving the language already in use just closes the dropdown. Anything not yet
+translated shows in English. Web Config's **Display** section has the same
+**Language** setting (the web page itself stays in English), and an exported
+config carries it as `language:` under `display:`.
+
+**Accent suggestions.** With a language other than English selected, typing a
+letter that has accented forms in that language, such as `e` in French or `s` in
+Romanian, pops a small row of them above the field: the plain letter first,
+then the variants. Tap one to swap the letter you just typed for it. On a
+keyboard, **Tab**, the wheel/trackball or the arrow keys step through the row
+and swap the letter in place as they go. Enter keeps the choice, and any other
+key simply carries on typing. Spanish also offers `¿` after `?` and `¡` after
+`!`. Suggestions appear in the message composer and the node name fields.
+
 ### Battery display
 
 **Battery Display** on the Config screen (and under Display in web config)

@@ -553,6 +553,21 @@ documents where each pin value came from.
   published its update check fails and it stays where it is. Reflash once over
   USB — `pio run -e heltec-v4 -t upload`, or the seeded env to come back up
   portrait — and it rejoins the normal update path.
+- **App slots grew from 3.2 MB to 6.25 MB (issue #99).** The UI translations and
+  the accented fonts they need no longer fit the old slots. Every 16 MB board that
+  used `partitions.csv` now uses `partitions_16mb.csv`, and `partitions_16mb_fs.csv`
+  has the same slots. Both keep `nvs` and `coredump` at their old offsets, so
+  settings, channels and the node identity survive the move.
+  - **A device still on the old table must be flashed over USB once**
+    (`pio run -e <env> -t upload`, or the web flasher without a full erase). OTA
+    never rewrites the partition table, and a release bigger than the old slot is
+    refused before anything is written: the running firmware is untouched and the
+    update check reports that the release needs a USB flash.
+  - On `partitions_16mb_fs.csv` boards (Heltec V4, Mesh Deck) `littlefs` moved to
+    make room and shrank to 3.3 MB, so the first boot formats it: message history
+    and the node archive start empty.
+  - The Cardputer (8 MB) stays on `partitions.csv` and builds English-only
+    (`-DI18N_ENABLED=0`: no translations, LVGL's ASCII fonts).
 - These envs moved from `partitions.csv` to `partitions_16mb_fs.csv` to give the
   board a filesystem, since it has no SD slot. The app slots and NVS are at the
   same offsets in both tables, so an OTA between them is safe — but **OTA does

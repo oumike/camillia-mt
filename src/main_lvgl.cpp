@@ -25,6 +25,7 @@
 #include "xeddsa.h"
 #include "mesh_radio.h"
 #include "mqtt_bridge.h"
+#include "i18n.h"   // TR(): UI translations (issue #99)
 #include "node_db.h"
 #include "dm_mgr.h"
 #include "ignore_list.h"
@@ -1551,6 +1552,10 @@ static bool s_cfgAwaitEnterRelease = false;
 static bool s_cfgInfoPanelFocused = false;
 static bool s_cfgDebugLog = (MY_DEBUG_MONITOR != 0);
 static char s_otaWorkerBootNotice[160] = "";
+// Shown after the reboot when an update was too big for this device's app slot
+// (kOtaErrNeedsUsbInstall). Kept under the notice buffer's 160 bytes.
+static const char *const kOtaNoticeNeedsUsb = TR_NOOP(
+    "Please re-flash from Camillia's website for language support.");
 static uint32_t s_selectedMsgReplyPacketId = 0;
 // Sender of the message under the chat cursor, so Enter can act on the person
 // who wrote it. 0 means "nothing actionable": either no message is selected, or
@@ -2063,11 +2068,11 @@ static const lv_font_t *scaledChatFont(const lv_font_t *base) {
 
 static const char *fontSizeName(uint8_t size) {
     switch (size) {
-        case FONT_SIZE_SMALL:  return "Small";
-        case FONT_SIZE_LARGE:  return "Large";
-        case FONT_SIZE_XLARGE: return "Extra Large";
+        case FONT_SIZE_SMALL:  return TR("Small");
+        case FONT_SIZE_LARGE:  return TR("Large");
+        case FONT_SIZE_XLARGE: return TR("Extra Large");
         case FONT_SIZE_MEDIUM:
-        default:               return "Medium";
+        default:               return TR("Medium");
     }
 }
 static bool s_pagerChatCursorMode = false;
@@ -2515,13 +2520,13 @@ static constexpr bool kModalRowDescriptions = true;
 // and Outline retain their renderer meanings.
 static const char *chatStyleName(uint8_t style) {
     switch (style) {
-        case CHAT_STYLE_BUBBLES: return "Bubbles";
-        case CHAT_STYLE_OUTLINE: return "Outline";
+        case CHAT_STYLE_BUBBLES: return TR("Bubbles");
+        case CHAT_STYLE_OUTLINE: return TR("Outline");
         default:
 #if defined(DEVICE_TDECK_PRO)
             return "Default";
 #else
-            return "Classic";
+            return TR("Classic");
 #endif
     }
 }
@@ -2538,7 +2543,7 @@ static int chatStyleStepSelection(int current, int delta) {
     return cfgChatStyleAllowed(next) ? next : current;
 }
 static const char *chatNameStyleName(uint8_t style) {
-    return (style == CHAT_NAME_LONG) ? "Long" : "Short";
+    return (style == CHAT_NAME_LONG) ? TR("Long") : TR("Short");
 }
 // Resolve the sender label shown in chat, honoring the Chat Names setting.
 // Long style uses the node's advertised long name when known; otherwise (and
@@ -3050,7 +3055,9 @@ static size_t appendTextLiteral(char *dst, size_t dstLen, size_t writePos, const
 }
 
 // Codepoints that carry ordinary punctuation meaning but sit outside what the
-// built-in Montserrat faces can draw (ASCII 0x20-0x7F, plus degree and bullet).
+// Montserrat faces can draw: ASCII, Latin-1, Latin Extended-A, bullet and the
+// euro sign (src/fonts/latin/, issue #99 -- accented letters render as they
+// are and need no folding). Curly quotes, dashes and the ellipsis are not in it.
 // The emoji fallback face is no help — it holds emoji, not Latin punctuation —
 // so anything left in this range reaches LVGL's missing-glyph box. Phone
 // keyboards and desktop autocorrect emit these constantly: an iOS "..." becomes
@@ -3195,6 +3202,7 @@ enum CfgActionId {
     CFG_ACTION_CHAT_COLORS,
     CFG_ACTION_FONT_SIZE,
     CFG_ACTION_ORIENTATION,
+    CFG_ACTION_LANGUAGE,       // UI language (issue #99)
     CFG_ACTION_BRIGHTNESS,
     CFG_ACTION_SCREEN_TIMEOUT,
     #if FEATURE_LOCK_SCREEN
@@ -3369,22 +3377,22 @@ struct UserMsgColorOption {
 };
 
 static constexpr UserMsgColorOption kUserMsgColors[] = {
-    {rgb565(0xFF, 0xFF, 0xFF), "White"},
-    {rgb565(0xC0, 0xC0, 0xC0), "Silver"},
-    {rgb565(0xFF, 0x3B, 0x30), "Red"},
-    {rgb565(0xFF, 0x95, 0x00), "Orange"},
-    {rgb565(0xFF, 0xE0, 0x00), "Yellow"},
-    {rgb565(0x7C, 0xFC, 0x00), "Lime"},
-    {rgb565(0x34, 0xC7, 0x59), "Green"},
-    {rgb565(0x30, 0xD0, 0xC0), "Teal"},
-    {rgb565(0x00, 0xE5, 0xFF), "Cyan"},
-    {rgb565(0x5A, 0xC8, 0xFA), "Sky"},
-    {rgb565(0x3B, 0x82, 0xF6), "Blue"},
-    {rgb565(0x5E, 0x5C, 0xE6), "Indigo"},
-    {rgb565(0xAF, 0x52, 0xDE), "Purple"},
-    {rgb565(0xFF, 0x2D, 0x95), "Magenta"},
-    {rgb565(0xFF, 0x6F, 0xB5), "Pink"},
-    {rgb565(0xB5, 0x65, 0x1D), "Brown"},
+    {rgb565(0xFF, 0xFF, 0xFF), TR_NOOP("White")},
+    {rgb565(0xC0, 0xC0, 0xC0), TR_NOOP("Silver")},
+    {rgb565(0xFF, 0x3B, 0x30), TR_NOOP("Red")},
+    {rgb565(0xFF, 0x95, 0x00), TR_NOOP("Orange")},
+    {rgb565(0xFF, 0xE0, 0x00), TR_NOOP("Yellow")},
+    {rgb565(0x7C, 0xFC, 0x00), TR_NOOP("Lime")},
+    {rgb565(0x34, 0xC7, 0x59), TR_NOOP("Green")},
+    {rgb565(0x30, 0xD0, 0xC0), TR_NOOP("Teal")},
+    {rgb565(0x00, 0xE5, 0xFF), TR_NOOP("Cyan")},
+    {rgb565(0x5A, 0xC8, 0xFA), TR_NOOP("Sky")},
+    {rgb565(0x3B, 0x82, 0xF6), TR_NOOP("Blue")},
+    {rgb565(0x5E, 0x5C, 0xE6), TR_NOOP("Indigo")},
+    {rgb565(0xAF, 0x52, 0xDE), TR_NOOP("Purple")},
+    {rgb565(0xFF, 0x2D, 0x95), TR_NOOP("Magenta")},
+    {rgb565(0xFF, 0x6F, 0xB5), TR_NOOP("Pink")},
+    {rgb565(0xB5, 0x65, 0x1D), TR_NOOP("Brown")},
 };
 
 static constexpr int kUserMsgColorCount =
@@ -3445,25 +3453,25 @@ static bool s_appliedNavBar = false;
 
 static const char *msgAlertSoundName(uint8_t mode) {
     switch (mode) {
-        case MSG_ALERT_SOUND_CHIRPY: return "Chirpy";
-        case MSG_ALERT_SOUND_BASS:   return "Bass";
-        case MSG_ALERT_SOUND_OFF:    return "Off";
+        case MSG_ALERT_SOUND_CHIRPY: return TR("Chirpy");
+        case MSG_ALERT_SOUND_BASS:   return TR("Bass");
+        case MSG_ALERT_SOUND_OFF:    return TR("Off");
         case MSG_ALERT_SOUND_DEFAULT:
-        default:                     return "Default";
+        default:                     return TR("Default");
     }
 }
 
 static const char *notifyLedColorName(uint8_t color) {
     switch (cfgCoerceNotifyLedColor((int)color)) {
-        case NOTIFY_LED_COLOR_RED:     return "Red";
-        case NOTIFY_LED_COLOR_GREEN:   return "Green";
-        case NOTIFY_LED_COLOR_BLUE:    return "Blue";
-        case NOTIFY_LED_COLOR_YELLOW:  return "Yellow";
-        case NOTIFY_LED_COLOR_CYAN:    return "Cyan";
-        case NOTIFY_LED_COLOR_MAGENTA: return "Magenta";
-        case NOTIFY_LED_COLOR_WHITE:   return "White";
-        case NOTIFY_LED_COLOR_OFF:     return "Off";
-        default:                       return "Blue";
+        case NOTIFY_LED_COLOR_RED:     return TR("Red");
+        case NOTIFY_LED_COLOR_GREEN:   return TR("Green");
+        case NOTIFY_LED_COLOR_BLUE:    return TR("Blue");
+        case NOTIFY_LED_COLOR_YELLOW:  return TR("Yellow");
+        case NOTIFY_LED_COLOR_CYAN:    return TR("Cyan");
+        case NOTIFY_LED_COLOR_MAGENTA: return TR("Magenta");
+        case NOTIFY_LED_COLOR_WHITE:   return TR("White");
+        case NOTIFY_LED_COLOR_OFF:     return TR("Off");
+        default:                       return TR("Blue");
     }
 }
 
@@ -4942,107 +4950,107 @@ static const char *cfgActionLabel(int actionId, char *buf, size_t bufLen) {
     switch (actionId) {
         case CFG_ACTION_WIFI_TOGGLE:
             if (!s_cfg.wifiEnabled) {
-                snprintf(buf, bufLen, "WiFi: Off");
+                snprintf(buf, bufLen, "%s", TR("WiFi: Off"));
             } else if ((uint32_t)WiFi.localIP() != 0) {
                 // Real STA/network address (MQTT etc.), shown regardless of web config.
-                snprintf(buf, bufLen, "WiFi: On (%s)", WiFi.localIP().toString().c_str());
+                snprintf(buf, bufLen, TR("WiFi: On (%s)"), WiFi.localIP().toString().c_str());
             } else if (webCfgRunning()) {
-                snprintf(buf, bufLen, "WiFi: On (%s)", webCfgIP());  // AP fallback
+                snprintf(buf, bufLen, TR("WiFi: On (%s)"), webCfgIP());  // AP fallback
             } else if (wifiForceApMode()) {
-                snprintf(buf, bufLen, "WiFi: On (AP mode)");
+                snprintf(buf, bufLen, "%s", TR("WiFi: On (AP mode)"));
             } else if (!wifiHasActiveCreds()) {
-                snprintf(buf, bufLen, "WiFi: On (AP MODE ONLY)");
+                snprintf(buf, bufLen, "%s", TR("WiFi: On (AP MODE ONLY)"));
             } else {
-                snprintf(buf, bufLen, "WiFi: On (connecting %s)", wifiActiveSsid());
+                snprintf(buf, bufLen, TR("WiFi: On (connecting %s)"), wifiActiveSsid());
             }
             break;
         case CFG_ACTION_CHOOSE_WIFI:
             if (s_wifiUsingKnownOverride && s_wifiSelectedSsid[0]) {
-                snprintf(buf, bufLen, "Choose WiFi: %s", s_wifiSelectedSsid);
+                snprintf(buf, bufLen, TR("Choose WiFi: %s"), s_wifiSelectedSsid);
             } else if (s_cfg.wifiSsid[0]) {
-                snprintf(buf, bufLen, "Choose WiFi: %s", s_cfg.wifiSsid);
+                snprintf(buf, bufLen, TR("Choose WiFi: %s"), s_cfg.wifiSsid);
             } else {
-                snprintf(buf, bufLen, "Choose WiFi: (none)");
+                snprintf(buf, bufLen, "%s", TR("Choose WiFi: (none)"));
             }
             break;
 #if HAS_BLE_KEYBOARD
         case CFG_ACTION_BLE_KBD_TOGGLE: {
             if (!s_cfg.bleKbdEnabled) {
-                snprintf(buf, bufLen, "BT Keyboard: Off");
+                snprintf(buf, bufLen, "%s", TR("BT Keyboard: Off"));
             } else {
                 char status[80];
                 bleKeyboardStatusText(status, sizeof(status));
-                snprintf(buf, bufLen, "BT Keyboard: %s", status);
+                snprintf(buf, bufLen, TR("BT Keyboard: %s"), status);
             }
         } break;
         case CFG_ACTION_BLE_KBD_PAIR:
             if (s_cfg.bleKbdName[0]) {
-                snprintf(buf, bufLen, "Pair BT Keyboard: %s", s_cfg.bleKbdName);
+                snprintf(buf, bufLen, TR("Pair BT Keyboard: %s"), s_cfg.bleKbdName);
             } else {
-                snprintf(buf, bufLen, "Pair BT Keyboard: (none)");
+                snprintf(buf, bufLen, "%s", TR("Pair BT Keyboard: (none)"));
             }
             break;
 #endif
         case CFG_ACTION_WEBCFG:
             if (!s_cfg.wifiEnabled) {
-                snprintf(buf, bufLen, "Web Config: Off (WiFi off)");
+                snprintf(buf, bufLen, "%s", TR("Web Config: Off (WiFi off)"));
             } else if (s_cfg.mqttEnabled) {
-                snprintf(buf, bufLen, "Web Config: Off (MQTT on)");
+                snprintf(buf, bufLen, "%s", TR("Web Config: Off (MQTT on)"));
             } else if (!s_webCfgEnabled) {
-                snprintf(buf, bufLen, "Web Config: Disabled");
+                snprintf(buf, bufLen, "%s", TR("Web Config: Disabled"));
             } else if (webCfgRunning()) {
                 // AP mode serves the reduced page; name it so the missing tabs
                 // read as the mode, not a failure. Chat-paused outranks it —
                 // that one costs the user messages.
                 if (webCfgChatPaused()) {
-                    snprintf(buf, bufLen, "Web Config: On (chat PAUSED)");
+                    snprintf(buf, bufLen, "%s", TR("Web Config: On (chat PAUSED)"));
                 } else {
-                    snprintf(buf, bufLen, webCfgIsLite() ? "Web Config: On (Lite)"
-                                                         : "Web Config: On");
+                    snprintf(buf, bufLen, webCfgIsLite() ? TR("Web Config: On (Lite)")
+                                                         : TR("Web Config: On"));
                 }
             } else {
-                snprintf(buf, bufLen, "Web Config: Enabled");
+                snprintf(buf, bufLen, "%s", TR("Web Config: Enabled"));
             }
             break;
 #if HAS_VNC_HOST
         case CFG_ACTION_VNC_HOST: {
             if (!s_cfg.wifiEnabled) {
-                snprintf(buf, bufLen, "VNC Host: Off (WiFi off)");
+                snprintf(buf, bufLen, "%s", TR("VNC Host: Off (WiFi off)"));
             } else if (!s_vncEnabled && !vncNetworkConnected()) {
-                snprintf(buf, bufLen, "VNC Host: Unavailable (WiFi not connected)");
+                snprintf(buf, bufLen, "%s", TR("VNC Host: Unavailable (WiFi not connected)"));
             } else if (!s_vncEnabled) {
-                snprintf(buf, bufLen, "VNC Host: Off");
+                snprintf(buf, bufLen, "%s", TR("VNC Host: Off"));
             } else if (!vncNetworkConnected()) {
-                snprintf(buf, bufLen, "VNC Host: On (network disconnected)");
+                snprintf(buf, bufLen, "%s", TR("VNC Host: On (network disconnected)"));
             } else if (vncHostClientConnected()) {
-                snprintf(buf, bufLen, "VNC Host: On (browser connected)");
+                snprintf(buf, bufLen, "%s", TR("VNC Host: On (browser connected)"));
             } else if (vncHostIP()[0]) {
-                snprintf(buf, bufLen, "VNC Host: http://%s:%u/",
+                snprintf(buf, bufLen, TR("VNC Host: http://%s:%u/"),
                          vncHostIP(), (unsigned)vncHostPort());
             } else {
                 const String ip = WiFi.localIP().toString();
-                snprintf(buf, bufLen, "VNC Host: http://%s:%u/",
+                snprintf(buf, bufLen, TR("VNC Host: http://%s:%u/"),
                          ip.c_str(), (unsigned)vncHostPort());
             }
         } break;
 #endif
         case CFG_ACTION_GPS_TOGGLE:
             if (s_cfg.gpsEnabled) {
-                snprintf(buf, bufLen, "GPS: Enabled (Hardware)");
+                snprintf(buf, bufLen, "%s", TR("GPS: Enabled (Hardware)"));
             } else {
-                snprintf(buf, bufLen, "GPS: Disabled (Default Coords)");
+                snprintf(buf, bufLen, "%s", TR("GPS: Disabled (Default Coords)"));
             }
             break;
         case CFG_ACTION_SHARE_LOCATION:
-            snprintf(buf, bufLen, "Share Location: %s", s_cfg.shareLocation ? "On" : "Off");
+            snprintf(buf, bufLen, TR("Share Location: %s"), s_cfg.shareLocation ? TR("On") : TR("Off"));
             break;
         case CFG_ACTION_POSITION_PRECISION:
-            snprintf(buf, bufLen, "Location Precision: %s",
-                     positionPrecisionLabel(s_cfg.positionPrecision));
+            snprintf(buf, bufLen, TR("Location Precision: %s"),
+                     TR(positionPrecisionLabel(s_cfg.positionPrecision)));
             break;
         case CFG_ACTION_NODE_NAME:
-            snprintf(buf, bufLen, "Node Name: %s (%s)",
-                     s_cfg.nodeLong[0]  ? s_cfg.nodeLong  : "unset",
+            snprintf(buf, bufLen, TR("Node Name: %s (%s)"),
+                     s_cfg.nodeLong[0]  ? s_cfg.nodeLong  : TR("unset"),
                      s_cfg.nodeShort[0] ? s_cfg.nodeShort : "----");
             break;
         case CFG_ACTION_PRESET:
@@ -5050,100 +5058,104 @@ static const char *cfgActionLabel(int actionId, char *buf, size_t bufLen) {
             // modemPreset still holds the last preset in that state (it is what
             // Custom was edited away from), so naming it here would report a
             // preset the radio is not actually running.
-            snprintf(buf, bufLen, "Preset (%s)",
-                     !s_cfg.loraUsePreset ? "Custom"
+            snprintf(buf, bufLen, TR("Preset (%s)"),
+                     !s_cfg.loraUsePreset ? TR("Custom")
                        : kPresets[s_cfg.modemPreset < PRESET_COUNT
                                   ? s_cfg.modemPreset : PRESET_LONG_FAST].name);
             break;
         case CFG_ACTION_EXPORT:
-            snprintf(buf, bufLen, "Export Config");
+            snprintf(buf, bufLen, "%s", TR("Export Config"));
             break;
         case CFG_ACTION_IMPORT:
-            snprintf(buf, bufLen, "Import Config");
+            snprintf(buf, bufLen, "%s", TR("Import Config"));
             break;
         case CFG_ACTION_THEME:
-            snprintf(buf, bufLen, "Theme: %s", uiThemePresetNameFromCfg());
+            snprintf(buf, bufLen, TR("Theme: %s"), uiThemePresetNameFromCfg());
             break;
         case CFG_ACTION_OWNER_COLOR:
-            snprintf(buf, bufLen, "My Message Color: %s",
+            snprintf(buf, bufLen, TR("My Message Color: %s"),
                      (s_cfg.userMsgColor < kUserMsgColorCount)
-                         ? kUserMsgColors[s_cfg.userMsgColor].name
-                         : "Default");
+                         ? TR(kUserMsgColors[s_cfg.userMsgColor].name)
+                         : TR("Default"));
             break;
         case CFG_ACTION_UNITS:
-            snprintf(buf, bufLen, "Units: %s", s_cfg.displayUnits ? "Imperial" : "Metric");
+            snprintf(buf, bufLen, TR("Units: %s"), s_cfg.displayUnits ? TR("Imperial") : TR("Metric"));
             break;
 #if HAS_RUNTIME_ORIENTATION
         case CFG_ACTION_ORIENTATION:
-            snprintf(buf, bufLen, "Orientation: %s",
+            snprintf(buf, bufLen, TR("Orientation: %s"),
                      uiOrientName(s_cfg.uiOrientation));
             break;
 #endif
+        case CFG_ACTION_LANGUAGE:
+            snprintf(buf, bufLen, TR("Language: %s"),
+                     kUiLangNames[s_cfg.uiLanguage < LANG_COUNT ? s_cfg.uiLanguage : LANG_EN]);
+            break;
         case CFG_ACTION_BATT_DISPLAY:
-            snprintf(buf, bufLen, "Battery Display: %s",
-                     s_cfg.battDisplayMode == BATT_DISPLAY_VOLTAGE ? "Voltage" : "Percent");
+            snprintf(buf, bufLen, TR("Battery Display: %s"),
+                     s_cfg.battDisplayMode == BATT_DISPLAY_VOLTAGE ? TR("Voltage") : TR("Percent"));
             break;
         case CFG_ACTION_CHAT_STYLE:
 #if defined(DEVICE_TDECK_PRO)
-            snprintf(buf, bufLen, "Chat Type: %s", chatStyleName(s_cfg.chatStyle));
+            snprintf(buf, bufLen, TR("Chat Type: %s"), chatStyleName(s_cfg.chatStyle));
 #else
-            snprintf(buf, bufLen, "Chat Style: %s", chatStyleName(s_cfg.chatStyle));
+            snprintf(buf, bufLen, TR("Chat Style: %s"), chatStyleName(s_cfg.chatStyle));
 #endif
             break;
         case CFG_ACTION_CHAT_NAMES:
-            snprintf(buf, bufLen, "Chat Names: %s", chatNameStyleName(s_cfg.chatNameStyle));
+            snprintf(buf, bufLen, TR("Chat Names: %s"), chatNameStyleName(s_cfg.chatNameStyle));
             break;
         case CFG_ACTION_CHAT_COLORS:
-            snprintf(buf, bufLen, "Chat Colors: %s",
-                     s_cfg.chatColorsEnabled ? "On" : "Off");
+            snprintf(buf, bufLen, TR("Chat Colors: %s"),
+                     s_cfg.chatColorsEnabled ? TR("On") : TR("Off"));
             break;
         case CFG_ACTION_FONT_SIZE:
-            snprintf(buf, bufLen, "Font Size: %s", fontSizeName(s_cfg.fontSize));
+            snprintf(buf, bufLen, TR("Font Size: %s"), fontSizeName(s_cfg.fontSize));
             break;
         case CFG_ACTION_BRIGHTNESS:
-            snprintf(buf, bufLen, "Brightness: %u%%", (unsigned)s_cfg.brightness);
+            snprintf(buf, bufLen, TR("Brightness: %u%%"), (unsigned)s_cfg.brightness);
             break;
         case CFG_ACTION_SCREEN_TIMEOUT:
-            snprintf(buf, bufLen, "Screen Timeout: %s",
+            snprintf(buf, bufLen, TR("Screen Timeout: %s"),
                      screenTimeoutName(s_cfg.screenOnSecs));
             break;
         #if FEATURE_LOCK_SCREEN
         case CFG_ACTION_LOCK_SCREEN:
-            snprintf(buf, bufLen, "Lock Screen: %s",
-                     s_cfg.lockScreenEnabled ? "On" : "Off");
+            snprintf(buf, bufLen, TR("Lock Screen: %s"),
+                     s_cfg.lockScreenEnabled ? TR("On") : TR("Off"));
             break;
         case CFG_ACTION_LOCK_SCREEN_OFF:
-            snprintf(buf, bufLen, "Lock Screen Off: %s",
+            snprintf(buf, bufLen, TR("Lock Screen Off: %s"),
                      lockScreenOffName(s_cfg.lockScreenOffSecs));
             break;
         #endif
         #if HAS_SCROLL_INVERT
         case CFG_ACTION_INVERT_SCROLL:
-            snprintf(buf, bufLen, "Invert Scrolling: %s", s_cfg.invertScroll ? "On" : "Off");
+            snprintf(buf, bufLen, TR("Invert Scrolling: %s"), s_cfg.invertScroll ? TR("On") : TR("Off"));
             break;
         #endif
         #if HAS_NAV_BAR_TOGGLE
         case CFG_ACTION_NAV_BAR:
-            snprintf(buf, bufLen, "Nav Bar: %s", s_cfg.navBarEnabled ? "On" : "Off");
+            snprintf(buf, bufLen, TR("Nav Bar: %s"), s_cfg.navBarEnabled ? TR("On") : TR("Off"));
             break;
         #endif
         case CFG_ACTION_BATT_CAL:
             if (s_cfg.battCalTrim == 0) {
-                snprintf(buf, bufLen, "Battery Calibration: Off");
+                snprintf(buf, bufLen, "%s", TR("Battery Calibration: Off"));
             } else {
                 char trimBuf[12];
-                snprintf(buf, bufLen, "Battery Calibration: %s",
+                snprintf(buf, bufLen, TR("Battery Calibration: %s"),
                          battTrimText((int)s_cfg.battCalTrim, trimBuf, sizeof(trimBuf)));
             }
             break;
         case CFG_ACTION_NEIGHBOR_INFO:
-            snprintf(buf, bufLen, "Neighborhood Info: %s", s_cfg.neighborInfoEnabled ? "On" : "Off");
+            snprintf(buf, bufLen, TR("Neighborhood Info: %s"), s_cfg.neighborInfoEnabled ? TR("On") : TR("Off"));
             break;
         case CFG_ACTION_MESH_BEACON:
-            snprintf(buf, bufLen, "Mesh Beacons: %s", s_cfg.meshBeaconListen ? "On" : "Off");
+            snprintf(buf, bufLen, TR("Mesh Beacons: %s"), s_cfg.meshBeaconListen ? TR("On") : TR("Off"));
             break;
         case CFG_ACTION_SNF_CLIENT:
-            snprintf(buf, bufLen, "Store&Fwd Client: %s", s_cfg.snfClientEnabled ? "On" : "Off");
+            snprintf(buf, bufLen, TR("Store&Fwd Client: %s"), s_cfg.snfClientEnabled ? TR("On") : TR("Off"));
             break;
         case CFG_ACTION_SNF_REQUEST:
             // Names the router when one has been heard: a request can only go to
@@ -5151,72 +5163,72 @@ static const char *cfgActionLabel(int actionId, char *buf, size_t bufLen) {
             if (snfRouterKnown()) {
                 char who[16];
                 liveNodeLabel(snfRouterId(), who, sizeof(who), false);
-                snprintf(buf, bufLen, "Request S&F Replay (%s)", who);
+                snprintf(buf, bufLen, TR("Request S&F Replay (%s)"), who);
             } else {
-                snprintf(buf, bufLen, "Request S&F Replay (no router)");
+                snprintf(buf, bufLen, "%s", TR("Request S&F Replay (no router)"));
             }
             break;
         case CFG_ACTION_MQTT_TOGGLE:
             if (!s_cfg.wifiEnabled) {
-                snprintf(buf, bufLen, "MQTT Bridge: Off (WiFi off)");
+                snprintf(buf, bufLen, "%s", TR("MQTT Bridge: Off (WiFi off)"));
             } else {
-                snprintf(buf, bufLen, "MQTT Bridge: %s", s_cfg.mqttEnabled ? "On" : "Off");
+                snprintf(buf, bufLen, TR("MQTT Bridge: %s"), s_cfg.mqttEnabled ? TR("On") : TR("Off"));
             }
             break;
         case CFG_ACTION_MSG_ALERT:
-            snprintf(buf, bufLen, "Notification Sound: %s", msgAlertSoundName(s_cfg.msgAlertSound));
+            snprintf(buf, bufLen, TR("Notification Sound: %s"), msgAlertSoundName(s_cfg.msgAlertSound));
             break;
         #if HAS_VOLUME_CONTROL
         case CFG_ACTION_VOLUME:
-            snprintf(buf, bufLen, "Volume: %u%%", (unsigned)s_cfg.volumePct);
+            snprintf(buf, bufLen, TR("Volume: %u%%"), (unsigned)s_cfg.volumePct);
             break;
         #endif
         #if defined(DEVICE_MESH_DECK)
         case CFG_ACTION_NOTIFY_LED_CHANNEL_COLOR:
-            snprintf(buf, bufLen, "Channel Message LED: %s",
+            snprintf(buf, bufLen, TR("Channel Message LED: %s"),
                      notifyLedColorName(s_cfg.notifyLedColorChannel));
             break;
         case CFG_ACTION_NOTIFY_LED_DM_COLOR:
-            snprintf(buf, bufLen, "Direct Message LED: %s",
+            snprintf(buf, bufLen, TR("Direct Message LED: %s"),
                      notifyLedColorName(s_cfg.notifyLedColorDm));
             break;
         #endif
         #if HAS_KB_BLINK
         case CFG_ACTION_KB_BLINK:
-            snprintf(buf, bufLen, "Keyboard Blink: %s", s_cfg.kbBlinkEnabled ? "On" : "Off");
+            snprintf(buf, bufLen, TR("Keyboard Blink: %s"), s_cfg.kbBlinkEnabled ? TR("On") : TR("Off"));
             break;
         case CFG_ACTION_KB_BLINK_CHAN_FLASHES:
-            snprintf(buf, bufLen, "Blink Flashes (Channel): %u",
+            snprintf(buf, bufLen, TR("Blink Flashes (Channel): %u"),
                      (unsigned)cfgCoerceKbFlashes((int)s_cfg.kbBlinkChanFlashes));
             break;
         case CFG_ACTION_KB_BLINK_DM_FLASHES:
-            snprintf(buf, bufLen, "Blink Flashes (DM): %u",
+            snprintf(buf, bufLen, TR("Blink Flashes (DM): %u"),
                      (unsigned)cfgCoerceKbFlashes((int)s_cfg.kbBlinkDmFlashes));
             break;
         #endif
         #if HAS_LIGHT_NOTIFY
         case CFG_ACTION_NOTIFY_LIGHT_TIMEOUT:
-            snprintf(buf, bufLen, "Notification Light Timeout: %s",
-                     notifyLightTimeoutName(s_cfg.notifyLightTimeoutS));
+            snprintf(buf, bufLen, TR("Notification Light Timeout: %s"),
+                     TR(notifyLightTimeoutName(s_cfg.notifyLightTimeoutS)));
             break;
         #endif
         #if HAS_KB_BACKLIGHT_LEVEL
         case CFG_ACTION_KB_BACKLIGHT_LEVEL:
-            snprintf(buf, bufLen, "Keyboard Light: %s",
-                     kbBacklightLevelName(s_cfg.kbBacklightLevel));
+            snprintf(buf, bufLen, TR("Keyboard Light: %s"),
+                     TR(kbBacklightLevelName(s_cfg.kbBacklightLevel)));
             break;
         #endif
         case CFG_ACTION_SPLASH_MELODY:
-            snprintf(buf, bufLen, "Splash Melody: %s", s_cfg.splashMelodyEnabled ? "On" : "Off");
+            snprintf(buf, bufLen, TR("Splash Melody: %s"), s_cfg.splashMelodyEnabled ? TR("On") : TR("Off"));
             break;
         case CFG_ACTION_CHANNEL_CFG:
-            snprintf(buf, bufLen, "Channel Configuration");
+            snprintf(buf, bufLen, "%s", TR("Channel Configuration"));
             break;
         case CFG_ACTION_OTA_UPDATE:
             if (s_cfgOtaInstallArmed && s_cfgOtaLatestTag[0]) {
-                snprintf(buf, bufLen, "Firmware Update: Install %s", s_cfgOtaLatestTag);
+                snprintf(buf, bufLen, TR("Firmware Update: Install %s"), s_cfgOtaLatestTag);
             } else {
-                snprintf(buf, bufLen, "Firmware Update Check");
+                snprintf(buf, bufLen, "%s", TR("Firmware Update Check"));
             }
             break;
         case CFG_ACTION_OTA_CHANNEL:
@@ -5228,61 +5240,61 @@ static const char *cfgActionLabel(int actionId, char *buf, size_t bufLen) {
             // HTTP request takes, so the row says one is running before it
             // starts. Without it the UI just stops for up to 12 seconds with
             // nothing on screen accounting for it.
-            snprintf(buf, bufLen, "Release Channel: %s%s",
+            snprintf(buf, bufLen, TR("Release Channel: %s%s"),
                      cfgOtaChannelName(otaResolveChannel(s_cfg.otaChannel)),
                      s_otaCheckRowNote);
             break;
         case CFG_ACTION_RELEASE_NOTES:
-            snprintf(buf, bufLen, "Release Notes");
+            snprintf(buf, bufLen, "%s", TR("Release Notes"));
             break;
         case CFG_ACTION_TIME_DATE:
-            snprintf(buf, bufLen, "Time and Date: %s",
-                     (s_cfg.timeSource == TIME_SOURCE_MANUAL) ? "Manual" : "Auto");
+            snprintf(buf, bufLen, TR("Time and Date: %s"),
+                     (s_cfg.timeSource == TIME_SOURCE_MANUAL) ? TR("Manual") : TR("Auto"));
             break;
         case CFG_ACTION_CLOCK_FORMAT:
-            snprintf(buf, bufLen, "Clock Format: %s",
-                     (s_cfg.clockFormat == CLOCK_FORMAT_12H) ? "12-hour" : "24-hour");
+            snprintf(buf, bufLen, TR("Clock Format: %s"),
+                     (s_cfg.clockFormat == CLOCK_FORMAT_12H) ? TR("12-hour") : TR("24-hour"));
             break;
         case CFG_ACTION_RESET_CHAT_COLORS:
-            snprintf(buf, bufLen, "Reset Chat Colors");
+            snprintf(buf, bufLen, "%s", TR("Reset Chat Colors"));
             break;
         case CFG_ACTION_CLEAR_MSGS:
-            snprintf(buf, bufLen, "Clear Messages");
+            snprintf(buf, bufLen, "%s", TR("Clear Messages"));
             break;
         case CFG_ACTION_ARCHIVE_NODES:
             // Same "(no card)" caveat as the row below, for the same reason:
             // with nothing to write to, an evicted node is simply dropped, and
             // the row is the only place that can keep saying so.
-            snprintf(buf, bufLen, "Archive Dropped Nodes: %s%s",
-                     s_cfg.nodeArchiveEnabled ? "On" : "Off",
-                     (s_cfg.nodeArchiveEnabled && !nodeArchiveAvailable()) ? " (no card)" : "");
+            snprintf(buf, bufLen, TR("Archive Dropped Nodes: %s%s"),
+                     s_cfg.nodeArchiveEnabled ? TR("On") : TR("Off"),
+                     (s_cfg.nodeArchiveEnabled && !nodeArchiveAvailable()) ? TR(" (no card)") : "");
             break;
         case CFG_ACTION_SHOW_ARCHIVED:
             // The card state is part of the label rather than a popup on the
             // toggle: switching this on with no card in the slot does nothing
             // visible on the Nodes screen, and the row is the only place that
             // can keep saying why.
-            snprintf(buf, bufLen, "Show Archived Nodes: %s%s",
-                     s_cfg.nodeArchiveShow ? "On" : "Off",
-                     (s_cfg.nodeArchiveShow && !nodeArchiveAvailable()) ? " (no card)" : "");
+            snprintf(buf, bufLen, TR("Show Archived Nodes: %s%s"),
+                     s_cfg.nodeArchiveShow ? TR("On") : TR("Off"),
+                     (s_cfg.nodeArchiveShow && !nodeArchiveAvailable()) ? TR(" (no card)") : "");
             break;
         case CFG_ACTION_CLEAR_NODES_KEEP_FAVS:
-            snprintf(buf, bufLen, "Clear Nodes (Keep Favorites)");
+            snprintf(buf, bufLen, "%s", TR("Clear Nodes (Keep Favorites)"));
             break;
         case CFG_ACTION_CLEAR_NODES:
-            snprintf(buf, bufLen, "Clear Nodes (All)");
+            snprintf(buf, bufLen, "%s", TR("Clear Nodes (All)"));
             break;
         case CFG_ACTION_FACTORY_RESET:
-            snprintf(buf, bufLen, "Factory Reset");
+            snprintf(buf, bufLen, "%s", TR("Factory Reset"));
             break;
 #if HAS_SD_MALWARE_SCAN
         case CFG_ACTION_SD_SCAN:
-            snprintf(buf, bufLen, "Scan SD Card for Malware%s",
-                     sdCardMounted() ? "" : " (no card)");
+            snprintf(buf, bufLen, TR("Scan SD Card for Malware%s"),
+                     sdCardMounted() ? "" : TR(" (no card)"));
             break;
 #endif
         default:
-            snprintf(buf, bufLen, "(unknown)");
+            snprintf(buf, bufLen, "%s", TR("(unknown)"));
             break;
     }
     return buf;
@@ -5378,8 +5390,8 @@ static bool cfgActionConfirmSentence(int actionId, char *buf, size_t bufLen) {
             // Phrased from the destination, and it names the reboot -- which the
             // row does and the old prompt never mentioned, leaving the reboot to
             // arrive as a surprise after the one question the user was asked.
-            snprintf(buf, bufLen, "Turn MQTT Bridge %s and reboot?",
-                     s_cfg.mqttEnabled ? "off" : "on");
+            snprintf(buf, bufLen, TR("Turn MQTT Bridge %s and reboot?"),
+                     s_cfg.mqttEnabled ? TR("off") : TR("on"));
             return true;
         default:
             return false;
@@ -5477,16 +5489,16 @@ static bool webCfgStopBleKeyboardForWeb() {
     return true;
 }
 
-static const char kBleKbdWebExclusiveNotice[] =
+static const char *const kBleKbdWebExclusiveNotice = TR_NOOP(
     "Web Config stopped.\n\n"
     "The Bluetooth keyboard and Web Config share one radio and cannot run at "
     "the same time.\n\n"
-    "Turn the keyboard off to use Web Config again.";
-static const char kWebBleKbdExclusiveNotice[] =
+    "Turn the keyboard off to use Web Config again.");
+static const char *const kWebBleKbdExclusiveNotice = TR_NOOP(
     "BT Keyboard turned off.\n\n"
     "Web Config and the Bluetooth keyboard share one radio and cannot run at "
     "the same time.\n\n"
-    "Turn Web Config off to use the keyboard again.";
+    "Turn Web Config off to use the keyboard again.");
 #endif
 
 #if HAS_VNC_HOST
@@ -5613,11 +5625,11 @@ static const char *otaCheckBlockedReason() {
 #else
     // A third-party installer's layout keeps another firmware in the slot an
     // update would land in, so there is nothing worth checking for.
-    if (!otaLayoutSupportsUpdate()) return "OTA needs the factory image (flash layout)";
-    if (!s_cfg.wifiEnabled) return "Update check needs WiFi on";
+    if (!otaLayoutSupportsUpdate()) return TR("OTA needs the factory image (flash layout)");
+    if (!s_cfg.wifiEnabled) return TR("Update check needs WiFi on");
     // Also the AP/web-config case: the station is not associated there, so
     // there is no route to the release proxy.
-    if (WiFi.status() != WL_CONNECTED) return "Update check needs WiFi connected";
+    if (WiFi.status() != WL_CONNECTED) return TR("Update check needs WiFi connected");
     return nullptr;
 #endif
 }
@@ -5631,7 +5643,7 @@ static void otaRequestCheckNow() {
     s_otaCheckRequested = true;
     s_otaCheckRequestedDueMs = millis() + kOtaManualCheckSettleMs;
     s_otaCheckDeadlineMs = millis() + kOtaCheckRequestLifetimeMs;
-    utf8util::copyTruncate(s_otaCheckRowNote, sizeof(s_otaCheckRowNote), " - checking...");
+    utf8util::copyTruncate(s_otaCheckRowNote, sizeof(s_otaCheckRowNote), TR(" - checking..."));
 }
 
 static bool s_otaWorkerUiReady = true;
@@ -6610,10 +6622,17 @@ static bool runOtaWorkerModeIfRequested() {
     Serial.printf("[ota-worker] install failed: %s\n", err);
     {
         char notice[sizeof(s_otaWorkerBootNotice)] = {};
-        snprintf(notice,
-                 sizeof(notice),
-                 "OTA install failed: %s",
-                 err[0] ? err : "unknown");
+        if (strcmp(err, kOtaErrNeedsUsbInstall) == 0) {
+            // The one failure the user has to act on, so it gets words rather
+            // than an error string. A key rather than the sentence itself: the
+            // notice is shown after the reboot, through TR(), in the UI font.
+            snprintf(notice, sizeof(notice), "%s", kOtaNoticeNeedsUsb);
+        } else {
+            snprintf(notice,
+                     sizeof(notice),
+                     "OTA install failed: %s",
+                     err[0] ? err : "unknown");
+        }
         setOtaWorkerBootNotice(notice);
     }
     delay(2200);
@@ -7073,9 +7092,9 @@ static inline uint8_t uiRotationValue() {
 // One name per code, for the Config row, the confirm dialog and the boot log.
 static inline const char *uiOrientName(uint8_t o) {
     switch (o) {
-        case UI_ORIENT_PORTRAIT:     return "Portrait";
-        case UI_ORIENT_PORTRAIT_180: return "Portrait 180";
-        default:                     return "Landscape";
+        case UI_ORIENT_PORTRAIT:     return TR("Portrait");
+        case UI_ORIENT_PORTRAIT_180: return TR("Portrait 180");
+        default:                     return TR("Landscape");
     }
 }
 
@@ -7956,17 +7975,34 @@ static void alignGlanceHero(GlanceHeader &w, bool wxShown) {
 static void updateGlanceHeader(GlanceHeader &w) {
     if (!w.node || !w.time || !w.date) return;
 
-    const char *nodeName = s_cfg.nodeLong[0] ? s_cfg.nodeLong : "Unknown";
+    const char *nodeName = s_cfg.nodeLong[0] ? s_cfg.nodeLong : TR("Unknown");
     lv_label_set_text(w.node, nodeName);
 
     char timeText[LIVE_CLOCK_BUF] = "--:--";
-    char dateText[24] = "Date unavailable";
+    char dateText[48]; snprintf(dateText, sizeof(dateText), "%s", TR("Date unavailable"));
     const time_t now = time(nullptr);
     if (now >= kClockSetEpoch) {
         struct tm localTime;
         localtime_r(&now, &localTime);
         liveFormatClock(localTime, timeText, sizeof(timeText));
-        strftime(dateText, sizeof(dateText), "%a, %b %d, %Y", &localTime);
+        if (i18nGetLang() == LANG_EN) {
+            strftime(dateText, sizeof(dateText), "%a, %b %d, %Y", &localTime);
+        } else {
+            // strftime() only knows English names. Day first, as every other
+            // UI language writes it; the names come from the translations.
+            static const char *const kWday[7] = {
+                TR_NOOP("Sun"), TR_NOOP("Mon"), TR_NOOP("Tue"), TR_NOOP("Wed"),
+                TR_NOOP("Thu"), TR_NOOP("Fri"), TR_NOOP("Sat")
+            };
+            static const char *const kMon[12] = {
+                TR_NOOP("Jan"), TR_NOOP("Feb"), TR_NOOP("Mar"), TR_NOOP("Apr"),
+                TR_NOOP("May"), TR_NOOP("Jun"), TR_NOOP("Jul"), TR_NOOP("Aug"),
+                TR_NOOP("Sep"), TR_NOOP("Oct"), TR_NOOP("Nov"), TR_NOOP("Dec")
+            };
+            snprintf(dateText, sizeof(dateText), TR("%s, %d %s %d"),
+                     TR(kWday[localTime.tm_wday % 7]), localTime.tm_mday,
+                     TR(kMon[localTime.tm_mon % 12]), localTime.tm_year + 1900);
+        }
     }
     lv_label_set_text(w.time, timeText);
 
@@ -8034,18 +8070,18 @@ static void updateGlanceHeader(GlanceHeader &w) {
             };
             const char *dir = kCompass[((wx.dirDeg % 360 + 360) % 360 + 22) / 45 % 8];
             char gust[24] = "";
-            if (wx.gust > wx.wind) snprintf(gust, sizeof(gust), ", gusts %d", wx.gust);
+            if (wx.gust > wx.wind) snprintf(gust, sizeof(gust), TR(", gusts %d"), wx.gust);
             char where[64] = "";
             const uint32_t ageMin = weatherAgeMs() / 60000UL;
             if (wx.place[0]) {
-                snprintf(where, sizeof(where), "\n%s, %lu min ago",
+                snprintf(where, sizeof(where), TR("\n%s, %lu min ago"),
                          wx.place, (unsigned long)ageMin);
             } else {
-                snprintf(where, sizeof(where), "\n%lu min ago", (unsigned long)ageMin);
+                snprintf(where, sizeof(where), TR("\n%lu min ago"), (unsigned long)ageMin);
             }
             char text[224];
             snprintf(text, sizeof(text),
-                     "%d%s  %s\nFeels %d%s, humidity %d%%\nWind %s %d %s%s%s",
+                     TR("%d%s  %s\nFeels %d%s, humidity %d%%\nWind %s %d %s%s%s"),
                      wx.temp, wx.tempUnit, wx.desc,
                      wx.feels, wx.tempUnit, wx.humidityPct,
                      dir, wx.wind, wx.windUnit, gust, where);
@@ -8169,7 +8205,7 @@ static void buildGlanceHeader(lv_obj_t *parent, GlanceHeader &w,
     lv_obj_set_style_text_font(w.title, kSleepOverlayTitleFont, 0);
     lv_obj_set_style_text_color(w.title, pal.ink, 0);
     lv_obj_set_style_text_align(w.title, LV_TEXT_ALIGN_CENTER, 0);
-    lv_label_set_text(w.title, "Camillia");
+    lv_label_set_text(w.title, TR("Camillia"));
     lv_obj_align(w.title, LV_ALIGN_TOP_MID, 0, kTdeckProTitleTop);
 
     // A rule under the wordmark, separating "which device is this" from
@@ -10267,6 +10303,12 @@ static void applyLoadedConfigInvariants() {
     // settings and export it to YAML while plainly being portrait.
     s_cfg.uiOrientation = s_uiOrient;
 #endif
+    // UI language (issue #99). Every load path comes through here before any
+    // UI is built, so TR() answers in the stored language from the first
+    // label. An index this build does not know -- a newer build's language,
+    // restored onto an older one -- reads as English rather than past the end.
+    if (s_cfg.uiLanguage >= LANG_COUNT) s_cfg.uiLanguage = LANG_EN;
+    i18nSetLang(s_cfg.uiLanguage);
     if (!s_cfg.wifiEnabled) {
         s_cfg.mqttEnabled = false;
         s_webCfgEnabled   = false;
@@ -11259,6 +11301,295 @@ static void pagerExitChatCursorMode(bool clearSelection) {
     s_lastRenderedChannel = -1;
 }
 
+// ── Accent suggestions (issue #99) ───────────────────────────────────────────
+// With a language other than English selected, typing a letter that has
+// accented forms in that language pops a small row of them just above the
+// field. Tapping one replaces the letter just typed. Keyboard-only boards step
+// through the row with Tab or the trackball/wheel/arrows, which swap the letter
+// in place as they go -- the box is a menu of what the next step will put
+// there, so the text is already right when the box goes away. Enter keeps it
+// and closes the box; any other key just carries on typing.
+//
+// Per language rather than one big table: a Spanish writer has no use for ă,
+// and a row of nine variants does not fit a 240 px screen anyway. Each list is
+// the letters that language actually writes, commonest first. Every glyph here
+// is in the Latin fonts (tools/gen_latin_fonts.sh).
+static constexpr uint8_t kAccentMax = 4;   // the longest list below
+struct AccentSet { char base; const char *v[kAccentMax]; };   // unused slots null
+
+#define ACCENT_SET(ch, ...) { ch, { __VA_ARGS__ } }
+
+static const AccentSet kAccentsEs[] = {
+    ACCENT_SET('a', "\xC3\xA1"), ACCENT_SET('A', "\xC3\x81"),
+    ACCENT_SET('e', "\xC3\xA9"), ACCENT_SET('E', "\xC3\x89"),
+    ACCENT_SET('i', "\xC3\xAD"), ACCENT_SET('I', "\xC3\x8D"),
+    ACCENT_SET('o', "\xC3\xB3"), ACCENT_SET('O', "\xC3\x93"),
+    ACCENT_SET('u', "\xC3\xBA", "\xC3\xBC"), ACCENT_SET('U', "\xC3\x9A", "\xC3\x9C"),
+    ACCENT_SET('n', "\xC3\xB1"), ACCENT_SET('N', "\xC3\x91"),
+    ACCENT_SET('?', "\xC2\xBF"), ACCENT_SET('!', "\xC2\xA1"),
+};
+static const AccentSet kAccentsFr[] = {
+    ACCENT_SET('a', "\xC3\xA0", "\xC3\xA2", "\xC3\xA6"),
+    ACCENT_SET('A', "\xC3\x80", "\xC3\x82", "\xC3\x86"),
+    ACCENT_SET('e', "\xC3\xA9", "\xC3\xA8", "\xC3\xAA", "\xC3\xAB"),
+    ACCENT_SET('E', "\xC3\x89", "\xC3\x88", "\xC3\x8A", "\xC3\x8B"),
+    ACCENT_SET('i', "\xC3\xAE", "\xC3\xAF"), ACCENT_SET('I', "\xC3\x8E", "\xC3\x8F"),
+    ACCENT_SET('o', "\xC3\xB4", "\xC5\x93"), ACCENT_SET('O', "\xC3\x94", "\xC5\x92"),
+    ACCENT_SET('u', "\xC3\xB9", "\xC3\xBB", "\xC3\xBC"),
+    ACCENT_SET('U', "\xC3\x99", "\xC3\x9B", "\xC3\x9C"),
+    ACCENT_SET('c', "\xC3\xA7"), ACCENT_SET('C', "\xC3\x87"),
+    ACCENT_SET('y', "\xC3\xBF"), ACCENT_SET('Y', "\xC5\xB8"),
+};
+// Comma-below ș ț (U+0219/021B), the correct Romanian forms, not the cedilla
+// ş ţ that older keyboards substitute.
+static const AccentSet kAccentsRo[] = {
+    ACCENT_SET('a', "\xC4\x83", "\xC3\xA2"), ACCENT_SET('A', "\xC4\x82", "\xC3\x82"),
+    ACCENT_SET('i', "\xC3\xAE"), ACCENT_SET('I', "\xC3\x8E"),
+    ACCENT_SET('s', "\xC8\x99"), ACCENT_SET('S', "\xC8\x98"),
+    ACCENT_SET('t', "\xC8\x9B"), ACCENT_SET('T', "\xC8\x9A"),
+};
+static const AccentSet kAccentsIt[] = {
+    ACCENT_SET('a', "\xC3\xA0"), ACCENT_SET('A', "\xC3\x80"),
+    ACCENT_SET('e', "\xC3\xA8", "\xC3\xA9"), ACCENT_SET('E', "\xC3\x88", "\xC3\x89"),
+    ACCENT_SET('i', "\xC3\xAC", "\xC3\xAD", "\xC3\xAE"),
+    ACCENT_SET('I', "\xC3\x8C", "\xC3\x8D", "\xC3\x8E"),
+    ACCENT_SET('o', "\xC3\xB2", "\xC3\xB3"), ACCENT_SET('O', "\xC3\x92", "\xC3\x93"),
+    ACCENT_SET('u', "\xC3\xB9", "\xC3\xBA"), ACCENT_SET('U', "\xC3\x99", "\xC3\x9A"),
+};
+#undef ACCENT_SET
+
+static const AccentSet *accentSetFor(char c) {
+    const AccentSet *sets = nullptr;
+    size_t count = 0;
+    switch (i18nGetLang()) {
+        case LANG_ES: sets = kAccentsEs; count = sizeof(kAccentsEs) / sizeof(kAccentsEs[0]); break;
+        case LANG_FR: sets = kAccentsFr; count = sizeof(kAccentsFr) / sizeof(kAccentsFr[0]); break;
+        case LANG_RO: sets = kAccentsRo; count = sizeof(kAccentsRo) / sizeof(kAccentsRo[0]); break;
+        case LANG_IT: sets = kAccentsIt; count = sizeof(kAccentsIt) / sizeof(kAccentsIt[0]); break;
+        default: return nullptr;   // English: no box at all
+    }
+    for (size_t i = 0; i < count; i++) {
+        if (sets[i].base == c) return &sets[i];
+    }
+    return nullptr;
+}
+
+static lv_obj_t *s_accentBox = nullptr;
+static lv_obj_t *s_accentTa = nullptr;     // the field the box edits
+static lv_obj_t *s_accentCells[kAccentMax + 1] = {};
+static const AccentSet *s_accentSet = nullptr;
+static char s_accentBase[2] = {};
+static int s_accentIdx = 0;                // 0 = the plain letter, i = v[i-1]
+static uint32_t s_accentPrevLen = 0;       // s_accentTa's byte length last seen
+static bool s_accentEditing = false;       // our own edit: ignore its VALUE_CHANGED
+
+static int accentOptionCount(const AccentSet *set) {
+    int n = 1;   // the plain letter
+    while (set && n <= kAccentMax && set->v[n - 1]) n++;
+    return n;
+}
+
+static const char *accentOption(int idx) {
+    if (!s_accentSet || idx <= 0) return s_accentBase;
+    return s_accentSet->v[idx - 1];
+}
+
+static void accentBoxHide() {
+    // Async: a tap on one of its own cells is what closes it, and LVGL must
+    // not free the object whose event it is still dispatching.
+    if (lvObjValid(s_accentBox)) lv_obj_delete_async(s_accentBox);
+    s_accentBox = nullptr;
+    s_accentSet = nullptr;
+    for (auto &c : s_accentCells) c = nullptr;
+}
+
+static bool accentBoxVisible() {
+    return s_accentSet && lvObjValid(s_accentBox) && lvObjValid(s_accentTa);
+}
+
+static void accentBoxHighlight() {
+    for (int i = 0; i <= kAccentMax; i++) {
+        if (!s_accentCells[i]) continue;
+        const bool sel = (i == s_accentIdx);
+        lv_obj_set_style_bg_color(s_accentCells[i],
+                                  themedColorHex(sel ? 0x2F6BD8 : 0x16386F), 0);
+        lv_obj_set_style_border_width(s_accentCells[i], sel ? 2 : 0, 0);
+    }
+}
+
+// Swap the character before the cursor for option `idx`. The character there
+// is always the base letter or one of its variants: the box closes on any
+// other edit.
+static void accentReplaceWith(int idx) {
+    if (!accentBoxVisible()) return;
+    s_accentEditing = true;
+    lv_textarea_delete_char(s_accentTa);
+    lv_textarea_add_text(s_accentTa, accentOption(idx));
+    s_accentEditing = false;
+    const char *t = lv_textarea_get_text(s_accentTa);
+    s_accentPrevLen = t ? (uint32_t)strlen(t) : 0;
+    s_accentIdx = idx;
+    if (s_accentTa == s_composeInput) updateComposeCharCount();
+    accentBoxHighlight();
+}
+
+static void onAccentCellClicked(lv_event_t *e) {
+    const int idx = (int)(intptr_t)lv_event_get_user_data(e);
+    accentReplaceWith(idx);
+    accentBoxHide();
+}
+
+static void accentBoxShow(lv_obj_t *ta, const AccentSet *set, char base) {
+    accentBoxHide();
+    if (!s_rootScreen || !set || !set->v[0]) return;
+    s_accentSet = set;
+    s_accentBase[0] = base;
+    s_accentBase[1] = '\0';
+    s_accentIdx = 0;
+
+    const lv_font_t *font = &lv_font_montserrat_16;
+    const int cellW = 30, cellH = 30, gap = 4, pad = 4;
+    const int n = accentOptionCount(set);
+
+    s_accentBox = lv_obj_create(s_rootScreen);
+    lv_obj_remove_style_all(s_accentBox);
+    lv_obj_clear_flag(s_accentBox, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_set_style_bg_color(s_accentBox, themedColorHex(0x0E285B), 0);
+    lv_obj_set_style_bg_opa(s_accentBox, LV_OPA_COVER, 0);
+    lv_obj_set_style_radius(s_accentBox, 6, 0);
+    lv_obj_set_style_border_width(s_accentBox, 1, 0);
+    lv_obj_set_style_border_color(s_accentBox, lv_color_hex(0x8FB5E6), 0);
+    lv_obj_set_style_pad_all(s_accentBox, pad, 0);
+    lv_obj_set_style_pad_column(s_accentBox, gap, 0);
+    lv_obj_set_flex_flow(s_accentBox, LV_FLEX_FLOW_ROW);
+    lv_obj_set_size(s_accentBox, n * cellW + (n - 1) * gap + pad * 2, cellH + pad * 2);
+
+    // The plain letter first, so the row reads "what you typed, then what it
+    // could be" and a tap on it is a way to say no.
+    for (int i = 0; i < n; i++) {
+        lv_obj_t *cell = lv_btn_create(s_accentBox);
+        lv_obj_set_size(cell, cellW, cellH);
+        lv_obj_set_style_radius(cell, 4, 0);
+        lv_obj_set_style_pad_all(cell, 0, 0);
+        lv_obj_set_style_shadow_width(cell, 0, 0);
+        lv_obj_set_style_border_color(cell, lv_color_hex(0xE8F1FF), 0);
+        lv_obj_add_event_cb(cell, onAccentCellClicked, LV_EVENT_CLICKED, (void *)(intptr_t)i);
+        lv_obj_t *lbl = lv_label_create(cell);
+        lv_obj_set_style_text_font(lbl, font, 0);
+        lv_obj_set_style_text_color(lbl, lv_color_hex(0xE8F1FF), 0);
+        lv_label_set_text(lbl, accentOption(i));
+        lv_obj_center(lbl);
+        s_accentCells[i] = cell;
+    }
+    accentBoxHighlight();
+
+    // Just above the field, centred on the screen; below it when the field is
+    // too close to the top. Coordinates are relative to the root screen, which
+    // is what the box is a child of.
+    lv_obj_update_layout(s_accentBox);
+    lv_area_t fa, ra;
+    lv_obj_get_coords(ta, &fa);
+    lv_obj_get_coords(s_rootScreen, &ra);
+    const int32_t bw = lv_obj_get_width(s_accentBox);
+    const int32_t bh = lv_obj_get_height(s_accentBox);
+    const int32_t rw = lv_obj_get_width(s_rootScreen);
+    int32_t y = fa.y1 - ra.y1 - bh - 4;
+    if (y < 0) y = fa.y2 - ra.y1 + 4;
+    lv_obj_set_pos(s_accentBox, (rw - bw) / 2, y);
+    lv_obj_move_foreground(s_accentBox);
+}
+
+// Byte offset of the textarea cursor. The cursor position is in characters.
+static uint32_t accentCursorByte(lv_obj_t *ta, const char *t) {
+    uint32_t chars = lv_textarea_get_cursor_pos(ta);
+    uint32_t i = 0;
+    while (t[i] && chars > 0) {
+        i++;
+        while (t[i] && utf8util::isContinuationByte((uint8_t)t[i])) i++;
+        chars--;
+    }
+    return i;
+}
+
+static void onAccentFieldChanged(lv_event_t *e) {
+    if (s_accentEditing) return;
+    lv_obj_t *ta = lv_event_get_target_obj(e);
+    const char *t = lv_textarea_get_text(ta);
+    const uint32_t len = t ? (uint32_t)strlen(t) : 0;
+    const uint32_t prevLen = (ta == s_accentTa) ? s_accentPrevLen : len;
+    s_accentTa = ta;
+    s_accentPrevLen = len;
+    accentBoxHide();
+    // Exactly one ASCII byte more than last time: one letter typed. A paste,
+    // an emoji or a delete never opens the box.
+    if (len != prevLen + 1) return;
+    const uint32_t cur = accentCursorByte(ta, t);
+    if (cur == 0) return;
+    const char c = t[cur - 1];
+    if ((uint8_t)c < 0x20 || (uint8_t)c >= 0x7F) return;
+    const AccentSet *set = accentSetFor(c);
+    if (set) accentBoxShow(ta, set, c);
+}
+
+static void onAccentFieldFocus(lv_event_t *e) {
+    // Re-baseline on focus so the first key typed into a pre-filled field
+    // (a node name, a draft) is judged against what is actually there.
+    lv_obj_t *ta = lv_event_get_target_obj(e);
+    const char *t = lv_textarea_get_text(ta);
+    s_accentTa = ta;
+    s_accentPrevLen = t ? (uint32_t)strlen(t) : 0;
+}
+
+static void onAccentFieldDeleted(lv_event_t *e) {
+    if (lv_event_get_target_obj(e) != s_accentTa) return;
+    accentBoxHide();
+    s_accentTa = nullptr;
+    s_accentPrevLen = 0;
+}
+
+// Give a text field accent suggestions. For fields people write words in --
+// messages and names -- not passwords, keys or filters.
+static void accentAttach(lv_obj_t *ta) {
+    if (!ta) return;
+    const char *t = lv_textarea_get_text(ta);
+    s_accentTa = ta;
+    s_accentPrevLen = t ? (uint32_t)strlen(t) : 0;
+    lv_obj_add_event_cb(ta, onAccentFieldChanged, LV_EVENT_VALUE_CHANGED, nullptr);
+    lv_obj_add_event_cb(ta, onAccentFieldFocus, LV_EVENT_FOCUSED, nullptr);
+    lv_obj_add_event_cb(ta, onAccentFieldDeleted, LV_EVENT_DELETE, nullptr);
+}
+
+// Physical keys while the box is up. Returns true when the key was the box's.
+static bool accentHandleKey(char k) {
+    if (!accentBoxVisible()) return false;
+    const int n = accentOptionCount(s_accentSet);
+    switch (k) {
+        case KEY_TAB:
+        case KEY_SCROLL_DN:
+        case KEY_NEXT_CHAN:
+            accentReplaceWith((s_accentIdx + 1) % n);
+            return true;
+        case KEY_SCROLL_UP:
+        case KEY_PREV_CHAN:
+            accentReplaceWith((s_accentIdx + n - 1) % n);
+            return true;
+        case KEY_ENTER:
+        case KEY_ROLLER:
+            // Only when the box has been used. Untouched, Enter is still Send.
+            if (s_accentIdx == 0) {
+                accentBoxHide();
+                return false;
+            }
+            accentBoxHide();
+            return true;
+        default:
+            // Anything else: the choice stands and the key does its own job.
+            // Typing reopens the box for the next letter if it has accents.
+            accentBoxHide();
+            return false;
+    }
+}
+
 static void closeComposePrompt() {
     // The emoji picker is a child of compose; never leave it orphaned.
     closeEmojiPicker();
@@ -11399,14 +11730,14 @@ static void sendQuickEmoji(const char *emoji, uint32_t tapbackId = 0) {
         DmConv *dm = selectedDmConversation();
         if (!dm || dm->nodeId == 0) return;
         if (!DMs.sendDm(s_myNodeId, dm->nodeId, emoji)) {
-            DMs.addMessage(dm->nodeId, nullptr, "", "! TX failed", TFT_RED, false, -1, 0);
+            DMs.addMessage(dm->nodeId, nullptr, "", TR("! TX failed"), TFT_RED, false, -1, 0);
         }
     } else {
         int txChan = (s_activeChannel >= 0 && s_activeChannel < MESH_CHANNELS)
                    ? s_activeChannel : 0;
         if (!Channels.sendText(s_myNodeId, emoji, s_cfg.okToMqtt, txChan,
                                tapbackId, tapbackId ? 1 : 0)) {
-            Channels.addMessage(txChan, "", "! TX failed", TFT_RED, 0);
+            Channels.addMessage(txChan, "", TR("! TX failed"), TFT_RED, 0);
         }
     }
     refreshChatView(true);
@@ -11650,10 +11981,10 @@ static void openEmojiPicker(bool sendMode, bool symbolTray) {
     // has to make room for the X above the tray.
     reserveHeltecCloseXRow(hint);
 #else
-    lv_label_set_text_fmt(hint, symbolTray ? "Move • Enter=Insert • %s=Close"
-                                : tapback  ? "Move • Enter=React • %s=Close"
-                                : sendMode ? "Move • Enter=Send • %s=Close"
-                                           : "Move • Enter=Add • %s=Close",
+    lv_label_set_text_fmt(hint, symbolTray ? TR("Move • Enter=Insert • %s=Close")
+                                : tapback  ? TR("Move • Enter=React • %s=Close")
+                                : sendMode ? TR("Move • Enter=Send • %s=Close")
+                                           : TR("Move • Enter=Add • %s=Close"),
                           modalCloseKeyLabel());
 #endif
 
@@ -11876,13 +12207,13 @@ static void configureOnScreenKeyboard(lv_obj_t *keyboard) {
 // the composer opened over, and a channel name would be an outright lie.
 static void composeSetTitle(bool isReply) {
     if (!lvObjValid(s_composeTitle)) return;
-    const char *kind = isReply ? "Reply" : "New Message";
+    const char *kind = isReply ? TR("Reply") : TR("New Message");
     if (s_composeTarget == COMPOSE_TARGET_DM) {
         lv_label_set_text(s_composeTitle, kind);
         return;
     }
     const char *chan = channelName(s_composeChannelIdx);
-    if (!chan || !chan[0]) chan = "Channel";
+    if (!chan || !chan[0]) chan = TR("Channel");
     char text[64];
     snprintf(text, sizeof(text), "%s: %s", kind, chan);
     lv_label_set_text(s_composeTitle, text);
@@ -12109,9 +12440,10 @@ static void openComposePrompt(uint32_t replyPacketId,
     lv_textarea_set_one_line(s_composeInput, true);
 #endif
     lv_textarea_set_max_length(s_composeInput, MESH_TEXT_MAX_LEN);
-    lv_textarea_set_placeholder_text(s_composeInput, "Type message...");
+    lv_textarea_set_placeholder_text(s_composeInput, TR("Type message..."));
     showTextareaCursor(s_composeInput);
     lv_obj_add_event_cb(s_composeInput, onComposeInputChanged, LV_EVENT_VALUE_CHANGED, nullptr);
+    accentAttach(s_composeInput);
 
     s_composeCharCount = lv_label_create(s_composeModal);
     lv_obj_set_width(s_composeCharCount, lv_pct(100));
@@ -12139,7 +12471,7 @@ static void openComposePrompt(uint32_t replyPacketId,
                         LV_EVENT_CLICKED, nullptr);
     lv_obj_t *emojiLbl = lv_label_create(emojiBtn);
     lv_obj_set_style_text_font(emojiLbl, emojiFont(&lv_font_montserrat_16), 0);
-    setLabelTextEmojiSafe(emojiLbl, "\U0001F600");
+    setLabelTextEmojiSafe(emojiLbl, TR("\U0001F600"));
     lv_obj_center(emojiLbl);
 
     lv_obj_t *cancelBtn = lv_btn_create(row);
@@ -12148,7 +12480,7 @@ static void openComposePrompt(uint32_t replyPacketId,
     lv_obj_add_event_cb(cancelBtn, onComposeCancelPressed, LV_EVENT_CLICKED, nullptr);
     lv_obj_t *cancelLbl = lv_label_create(cancelBtn);
     lv_obj_set_style_text_font(cancelLbl, &lv_font_montserrat_10, 0);
-    lv_label_set_text(cancelLbl, "Cancel");
+    lv_label_set_text(cancelLbl, TR("Cancel"));
     lv_obj_center(cancelLbl);
 
     lv_obj_t *sendBtn = lv_btn_create(row);
@@ -12157,7 +12489,7 @@ static void openComposePrompt(uint32_t replyPacketId,
     lv_obj_add_event_cb(sendBtn, onComposeSendPressed, LV_EVENT_CLICKED, nullptr);
     lv_obj_t *sendLbl = lv_label_create(sendBtn);
     lv_obj_set_style_text_font(sendLbl, &lv_font_montserrat_10, 0);
-    lv_label_set_text(sendLbl, "Send");
+    lv_label_set_text(sendLbl, TR("Send"));
     lv_obj_center(sendLbl);
 
     s_composeKeyboard = lv_keyboard_create(s_composeModal);
@@ -12369,9 +12701,10 @@ static void openComposePrompt(uint32_t replyPacketId,
     lv_textarea_set_one_line(s_composeInput, true);
 #endif
     lv_textarea_set_max_length(s_composeInput, MESH_TEXT_MAX_LEN);
-    lv_textarea_set_placeholder_text(s_composeInput, "Type message...");
+    lv_textarea_set_placeholder_text(s_composeInput, TR("Type message..."));
     showTextareaCursor(s_composeInput);
     lv_obj_add_event_cb(s_composeInput, onComposeInputChanged, LV_EVENT_VALUE_CHANGED, nullptr);
+    accentAttach(s_composeInput);
 
 #if HAS_COMPOSE_EMOJI_BTN
     // The emoji button, at the right-hand end of the row the box shares. Narrow
@@ -12394,7 +12727,7 @@ static void openComposePrompt(uint32_t replyPacketId,
 
         lv_obj_t *emojiLbl = lv_label_create(s_composeEmojiBtn);
         lv_obj_set_style_text_font(emojiLbl, emojiFont(&lv_font_montserrat_16), 0);
-        setLabelTextEmojiSafe(emojiLbl, "\U0001F600");
+        setLabelTextEmojiSafe(emojiLbl, TR("\U0001F600"));
         lv_obj_center(emojiLbl);
 #if defined(DEVICE_TLORA_PAGER_TFT)
         // Only the Pager paints a focus: it is the one board here reaching this
@@ -12431,9 +12764,9 @@ static void openComposePrompt(uint32_t replyPacketId,
 #if defined(DEVICE_CARDPUTER_LORA_HAT)
     // Emoji isn't a compose action anymore — it's the 'E' quick-send tray on the
     // chat/DM screen (see openEmojiPicker), so it's off the compose legend.
-    lv_label_set_text(hint, "Enter=Send  Esc=Cancel  Bksp=Del");
+    lv_label_set_text(hint, TR("Enter=Send  Esc=Cancel  Bksp=Del"));
 #else
-    lv_label_set_text(hint, "Enter=Send  Bksp(empty)=Cancel");
+    lv_label_set_text(hint, TR("Enter=Send  Bksp(empty)=Cancel"));
 #endif
 
 #if defined(DEVICE_TLORA_PAGER_TFT)
@@ -12516,10 +12849,10 @@ static void updateComposeCharCount() {
     // "200/200" rather than "200 of 200": the count shares its line with the
     // key legend, and on a 240 px panel the long form runs into it once the
     // message passes 100 characters.
-    lv_label_set_text_fmt(s_composeCharCount, "%u/%d",
+    lv_label_set_text_fmt(s_composeCharCount, TR("%u/%d"),
                           (unsigned)used, (int)MESH_TEXT_MAX_LEN);
 #else
-    lv_label_set_text_fmt(s_composeCharCount, "%u of %d",
+    lv_label_set_text_fmt(s_composeCharCount, TR("%u of %d"),
                           (unsigned)used, (int)MESH_TEXT_MAX_LEN);
 #endif
 }
@@ -12555,10 +12888,10 @@ static void sendComposeMessage() {
     }
     if (s_myNodeId == 0) {
         if (s_composeTarget == COMPOSE_TARGET_DM && s_composeDmNodeId != 0) {
-            DMs.addMessage(s_composeDmNodeId, nullptr, "", "! TX failed (node id)", TFT_RED,
+            DMs.addMessage(s_composeDmNodeId, nullptr, "", TR("! TX failed (node id)"), TFT_RED,
                            false, -1, 0);
         } else {
-            Channels.addMessage(txChan, "", "! TX failed (node id)", TFT_RED, 0);
+            Channels.addMessage(txChan, "", TR("! TX failed (node id)"), TFT_RED, 0);
         }
         closeComposePrompt();
         refreshChatView(true);
@@ -12569,13 +12902,13 @@ static void sendComposeMessage() {
     if (s_composeTarget == COMPOSE_TARGET_DM && s_composeDmNodeId != 0) {
         sentOk = DMs.sendDm(s_myNodeId, s_composeDmNodeId, msg);
         if (!sentOk) {
-            DMs.addMessage(s_composeDmNodeId, nullptr, "", "! TX failed", TFT_RED,
+            DMs.addMessage(s_composeDmNodeId, nullptr, "", TR("! TX failed"), TFT_RED,
                            false, -1, 0);
         }
     } else {
         sentOk = Channels.sendText(s_myNodeId, msg, s_cfg.okToMqtt, txChan, s_composeReplyPacketId);
         if (!sentOk) {
-            Channels.addMessage(txChan, "", "! TX failed", TFT_RED, 0);
+            Channels.addMessage(txChan, "", TR("! TX failed"), TFT_RED, 0);
         }
     }
 
@@ -12688,6 +13021,11 @@ static void initCfgActions() {
     // panel itself does. It is also the only row here that reboots, which is a
     // reason to keep it off the path someone scrolls through to reach the rest.
     s_cfgActions[s_cfgActionCount++] = CFG_ACTION_ORIENTATION;
+    #endif
+    // Beside Orientation: the other row here that reboots, and a whole-UI
+    // setting of the same kind. Absent from English-only builds.
+    #if I18N_ENABLED
+    s_cfgActions[s_cfgActionCount++] = CFG_ACTION_LANGUAGE;
     #endif
     // A comfort setting, changed once to taste. Only on boards with a trackball
     // to invert.
@@ -12841,9 +13179,9 @@ static void deviceInfoFormatHeard(uint32_t lastHeardMs, char *out, size_t outLen
         snprintf(out, outLen, "%02d/%02d %s",
                  lt.tm_mon + 1, lt.tm_mday, clock);
     } else if (ageS < 3600UL) {
-        snprintf(out, outLen, "%lum ago", (unsigned long)(ageS / 60UL));
+        snprintf(out, outLen, TR("%lum ago"), (unsigned long)(ageS / 60UL));
     } else {
-        snprintf(out, outLen, "%luh ago", (unsigned long)(ageS / 3600UL));
+        snprintf(out, outLen, TR("%luh ago"), (unsigned long)(ageS / 3600UL));
     }
 }
 
@@ -12877,8 +13215,8 @@ static int buildDeviceInfoLines(char info[][96], int maxLines) {
     for (int i = 0; i < 32; i++) {
         if (myPubKey[i] != 0) { hasPubKey = true; break; }
     }
-    if (n < maxLines) snprintf(info[n++], 96, "Firmware: %s", APP_VERSION);
-    if (n < maxLines) snprintf(info[n++], 96, "Node ID: !%08lx", (unsigned long)s_myNodeId);
+    if (n < maxLines) snprintf(info[n++], 96, TR("Firmware: %s"), APP_VERSION);
+    if (n < maxLines) snprintf(info[n++], 96, TR("Node ID: !%08lx"), (unsigned long)s_myNodeId);
     // A TRACKER that is not sharing location transmits no position at all, which
     // is the whole of the role — and nothing else on the device says so, since
     // Share Location looks perfectly reasonable on its own. Called out here
@@ -12887,24 +13225,24 @@ static int buildDeviceInfoLines(char info[][96], int maxLines) {
     if (n < maxLines) {
         const bool trackerNotSharing =
             (s_cfg.deviceRole == 5 /*TRACKER*/) && !s_cfg.shareLocation;
-        snprintf(info[n++], 96, "Role: %s%s", cfgDeviceRoleName(s_cfg.deviceRole),
-                 trackerNotSharing ? " (not sharing location)" : "");
+        snprintf(info[n++], 96, TR("Role: %s%s"), cfgDeviceRoleName(s_cfg.deviceRole),
+                 trackerNotSharing ? TR(" (not sharing location)") : "");
     }
-    if (n < maxLines) snprintf(info[n++], 96, "PKI key: %s", hasPubKey ? "present" : "missing");
-    if (n < maxLines) snprintf(info[n++], 96, "Long: %s", s_cfg.nodeLong);
-    if (n < maxLines) snprintf(info[n++], 96, "Short: %s", s_cfg.nodeShort);
-    if (n < maxLines) snprintf(info[n++], 96, "Preset: %s",
+    if (n < maxLines) snprintf(info[n++], 96, TR("PKI key: %s"), hasPubKey ? TR("present") : TR("missing"));
+    if (n < maxLines) snprintf(info[n++], 96, TR("Long: %s"), s_cfg.nodeLong);
+    if (n < maxLines) snprintf(info[n++], 96, TR("Short: %s"), s_cfg.nodeShort);
+    if (n < maxLines) snprintf(info[n++], 96, TR("Preset: %s"),
                                s_cfg.loraUsePreset
                                    ? kPresets[s_cfg.modemPreset < PRESET_COUNT ? s_cfg.modemPreset : 0].name
-                                   : "Custom");
-    if (n < maxLines) snprintf(info[n++], 96, "Freq: %.3f MHz", s_cfg.loraFreq);
+                                   : TR("Custom"));
+    if (n < maxLines) snprintf(info[n++], 96, TR("Freq: %.3f MHz"), s_cfg.loraFreq);
     // One decimal: the custom bandwidths include 62.5 and 31.25 kHz, which the
     // old %.0f rendered as a plain "62" — the same digits as the config code,
     // but not the bandwidth the radio is actually running.
     if (n < maxLines) snprintf(info[n++], 96, "BW %.4g SF %d CR 4/%d",
                                (double)s_cfg.loraBw, s_cfg.loraSf, s_cfg.loraCr);
-    if (n < maxLines) snprintf(info[n++], 96, "Pwr %d dBm Hops %d", s_cfg.loraPower, s_cfg.loraHopLimit);
-    if (n < maxLines) snprintf(info[n++], 96, "Relayed: %lu", (unsigned long)s_rebroadcastCount);
+    if (n < maxLines) snprintf(info[n++], 96, TR("Pwr %d dBm Hops %d"), s_cfg.loraPower, s_cfg.loraHopLimit);
+    if (n < maxLines) snprintf(info[n++], 96, TR("Relayed: %lu"), (unsigned long)s_rebroadcastCount);
 
 #if HAS_FILE_STORAGE
     // Storage, and on a board with a slot, what the last mount attempt made of
@@ -12923,9 +13261,9 @@ static int buildDeviceInfoLines(char info[][96], int maxLines) {
             // flash, and "is the card in" is not a question it can be asked.
             if (n < maxLines) {
                 if (sdCardMounted()) {
-                    snprintf(info[n++], 96, "Storage: %s %s", storageName(), sizeBuf);
+                    snprintf(info[n++], 96, TR("Storage: %s %s"), storageName(), sizeBuf);
                 } else {
-                    snprintf(info[n++], 96, "Storage: %s (not mounted)", storageName());
+                    snprintf(info[n++], 96, TR("Storage: %s (not mounted)"), storageName());
                 }
             }
         } else if (sd.mounted) {
@@ -12935,7 +13273,7 @@ static int buildDeviceInfoLines(char info[][96], int maxLines) {
                     // The clock it answered at is the useful half: a card that
                     // mounts only at 400 kHz is working but marginal, and that
                     // is worth seeing before it starts failing writes.
-                    snprintf(info[n++], 96, "SD: %s %s @%lu kHz",
+                    snprintf(info[n++], 96, TR("SD: %s %s @%lu kHz"),
                              type[0] ? type : "card", sizeBuf,
                              (unsigned long)(sd.mountedHz / 1000UL));
                 } else {
@@ -12943,14 +13281,14 @@ static int buildDeviceInfoLines(char info[][96], int maxLines) {
                 }
             }
         } else {
-            if (n < maxLines) snprintf(info[n++], 96, "SD: no card");
+            if (n < maxLines) snprintf(info[n++], 96, TR("SD: no card"));
             if (n < maxLines) {
                 char when[16];
                 if (sd.retryInMs > 0) {
-                    snprintf(when, sizeof(when), "retry %lus",
+                    snprintf(when, sizeof(when), TR("retry %lus"),
                              (unsigned long)((sd.retryInMs + 999UL) / 1000UL));
                 } else {
-                    snprintf(when, sizeof(when), "retry now");
+                    snprintf(when, sizeof(when), TR("retry now"));
                 }
 #if defined(HAS_SD_MMC) && HAS_SD_MMC
                 snprintf(info[n++], 96, "SD: %s, %u fails", when, (unsigned)sd.failStreak);
@@ -12959,8 +13297,8 @@ static int buildDeviceInfoLines(char info[][96], int maxLines) {
                 // nothing answering after the whole ladder says empty slot or
                 // dead card, while a single-rate miss is just the damped retry
                 // and says nothing yet.
-                snprintf(info[n++], 96, "SD: %s, %s, %u fails",
-                         sd.triedAllSpeeds ? "all rates tried" : "one rate tried",
+                snprintf(info[n++], 96, TR("SD: %s, %s, %u fails"),
+                         sd.triedAllSpeeds ? TR("all rates tried") : TR("one rate tried"),
                          when, (unsigned)sd.failStreak);
 #endif
             }
@@ -12984,20 +13322,20 @@ static int buildDeviceInfoLines(char info[][96], int maxLines) {
         if (newest) {
             char idBuf[12], when[24];
             deviceInfoFormatHeard(newest->lastHeardMs, when, sizeof(when));
-            snprintf(info[n++], 96, "Newest: %s %s",
+            snprintf(info[n++], 96, TR("Newest: %s %s"),
                      deviceInfoNodeLabel(newest, idBuf, sizeof(idBuf)), when);
         } else {
-            snprintf(info[n++], 96, "Newest: none heard yet");
+            snprintf(info[n++], 96, TR("Newest: none heard yet"));
         }
     }
     if (n < maxLines) {
         if (oldest) {
             char idBuf[12], when[24];
             deviceInfoFormatHeard(oldest->lastHeardMs, when, sizeof(when));
-            snprintf(info[n++], 96, "Oldest: %s %s",
+            snprintf(info[n++], 96, TR("Oldest: %s %s"),
                      deviceInfoNodeLabel(oldest, idBuf, sizeof(idBuf)), when);
         } else {
-            snprintf(info[n++], 96, "Oldest: none heard yet");
+            snprintf(info[n++], 96, TR("Oldest: none heard yet"));
         }
     }
     return n;
@@ -13136,13 +13474,13 @@ static void refreshCfgModal() {
         // there is a visible reason the list just changed. Same cue as Nodes.
         char headerText[48];
         if (s_cfgActionCount == 0) {
-            snprintf(headerText, sizeof(headerText), "[%s] no match", s_cfgFilter);
+            snprintf(headerText, sizeof(headerText), TR("[%s] no match"), s_cfgFilter);
         } else {
             snprintf(headerText, sizeof(headerText), "[%s] %d", s_cfgFilter, s_cfgActionCount);
         }
         lv_label_set_text(s_cfgHeaderStatus, headerText);
     } else {
-        lv_label_set_text(s_cfgHeaderStatus, "Ready");
+        lv_label_set_text(s_cfgHeaderStatus, TR("Ready"));
     }
 
     lv_obj_clean(s_cfgActionList);
@@ -13237,7 +13575,7 @@ static void refreshCfgModal() {
     lv_obj_set_style_pad_top(infoHeader, 3, 0);
     lv_obj_set_style_pad_bottom(infoHeader, 3, 0);
     lv_label_set_long_mode(infoHeader, LV_LABEL_LONG_DOT);
-    lv_label_set_text(infoHeader, "Device Info");
+    lv_label_set_text(infoHeader, TR("Device Info"));
 
     for (int i = 0; i < infoCount; i++) {
         lv_obj_t *row = lv_label_create(s_cfgInfoList);
@@ -13363,7 +13701,7 @@ static void refreshCfgWifiPickerModal() {
         // user picks by, and the "AP" row reads as a choice on its own.
         char rowText[96];
         snprintf(rowText, sizeof(rowText), "%s",
-                 entry.ssid[0] ? entry.ssid : "(not set)");
+                 entry.ssid[0] ? entry.ssid : TR("(not set)"));
 
         lv_obj_t *row = lv_label_create(s_cfgWifiList);
         lv_obj_set_width(row, lv_pct(100));
@@ -13415,21 +13753,21 @@ static void applyCfgWifiSelection(int idx) {
     const KnownWifiEntry &entry = s_cfgKnownWifi[idx];
     if (idx == 0) {
         if (!entry.ssid[0]) {
-            snprintf(s_cfgStatus, sizeof(s_cfgStatus), "Configured WiFi is empty");
+            snprintf(s_cfgStatus, sizeof(s_cfgStatus), "%s", TR("Configured WiFi is empty"));
             return;
         }
         s_wifiUsingKnownOverride = false;
         memset(s_wifiSelectedSsid, 0, sizeof(s_wifiSelectedSsid));
         memset(s_wifiSelectedPass, 0, sizeof(s_wifiSelectedPass));
-        snprintf(s_cfgStatus, sizeof(s_cfgStatus), "WiFi selected: %s", entry.ssid);
+        snprintf(s_cfgStatus, sizeof(s_cfgStatus), TR("WiFi selected: %s"), entry.ssid);
     } else {
         s_wifiUsingKnownOverride = true;
         strncpy(s_wifiSelectedSsid, entry.ssid, sizeof(s_wifiSelectedSsid) - 1);
         strncpy(s_wifiSelectedPass, entry.pass, sizeof(s_wifiSelectedPass) - 1);
         if (wifiForceApMode()) {
-            snprintf(s_cfgStatus, sizeof(s_cfgStatus), "AP mode selected");
+            snprintf(s_cfgStatus, sizeof(s_cfgStatus), "%s", TR("AP mode selected"));
         } else {
-            snprintf(s_cfgStatus, sizeof(s_cfgStatus), "WiFi selected: %s", entry.ssid);
+            snprintf(s_cfgStatus, sizeof(s_cfgStatus), TR("WiFi selected: %s"), entry.ssid);
         }
     }
 
@@ -13454,7 +13792,7 @@ static void applyCfgWifiSelection(int idx) {
     // undone on the next boot, and neither can start meanwhile. The row says
     // what is missing instead — the same answer the Web Config row gives.
     if (forceAp && !s_cfg.wifiEnabled) {
-        snprintf(s_cfgStatus, sizeof(s_cfgStatus), "AP mode selected - enable WiFi first");
+        snprintf(s_cfgStatus, sizeof(s_cfgStatus), "%s", TR("AP mode selected - enable WiFi first"));
     } else if (forceAp) {
         // MQTT first: the bridge dials out to a broker, and a device serving
         // its own network has no route to one. It is also mutually exclusive
@@ -13498,10 +13836,10 @@ static void applyCfgWifiSelection(int idx) {
             if (forceAp) {
                 // Says AP, and says where: the address is the whole point of
                 // the mode, and it is not the one the station network gave.
-                snprintf(s_cfgStatus, sizeof(s_cfgStatus), "AP mode: %s", webCfgIP());
+                snprintf(s_cfgStatus, sizeof(s_cfgStatus), TR("AP mode: %s"), webCfgIP());
             } else {
                 snprintf(s_cfgStatus, sizeof(s_cfgStatus),
-                         webCfgIsLite() ? "Web Lite: %s" : "Web: %s", webCfgIP());
+                         webCfgIsLite() ? TR("Web Lite: %s") : TR("Web: %s"), webCfgIP());
             }
             // Same two notices the CFG row raises when it starts the server,
             // in the same order: a board that pauses chat for Wi-Fi is costing
@@ -13512,13 +13850,13 @@ static void applyCfgWifiSelection(int idx) {
             }
 #if HAS_BLE_KEYBOARD
             else if (stoppedBleKbd) {
-                openCfgActionMessageModal(kWebBleKbdExclusiveNotice);
+                openCfgActionMessageModal(TR(kWebBleKbdExclusiveNotice));
             }
 #endif
         } else {
             s_webCfgEnabled = false;
             persistWebCfgEnabled();
-            snprintf(s_cfgStatus, sizeof(s_cfgStatus), "Web Config start failed");
+            snprintf(s_cfgStatus, sizeof(s_cfgStatus), "%s", TR("Web Config start failed"));
         }
     }
 }
@@ -13532,15 +13870,15 @@ static constexpr int kForceApWifiIndex = 1;
 // would then refuse — the reason comes back for the picker's notice line.
 static bool knownWifiEntryDeletable(int idx, const char **whyNot) {
     if (idx < 0 || idx >= s_cfgKnownWifiCount) {
-        if (whyNot) *whyNot = "No network selected";
+        if (whyNot) *whyNot = TR("No network selected");
         return false;
     }
     if (strncmp(s_cfgKnownWifi[idx].ssid, kForceApSsid, sizeof(kForceApSsid)) == 0) {
-        if (whyNot) *whyNot = "AP mode cannot be removed";
+        if (whyNot) *whyNot = TR("AP mode cannot be removed");
         return false;
     }
     if (!s_cfgKnownWifi[idx].ssid[0]) {
-        if (whyNot) *whyNot = "No network in that slot";
+        if (whyNot) *whyNot = TR("No network in that slot");
         return false;
     }
     return true;
@@ -13647,15 +13985,15 @@ static void deleteSelectedKnownWifi() {
         s_wifiStaKickIntervalMs = kWifiKickMinMs;
 
         if (fallback == kForceApWifiIndex) {
-            snprintf(notice, sizeof(notice), "Removed %s - no networks left, AP mode", ssid);
+            snprintf(notice, sizeof(notice), TR("Removed %s - no networks left, AP mode"), ssid);
         } else {
-            snprintf(notice, sizeof(notice), "Removed %s - now %s",
+            snprintf(notice, sizeof(notice), TR("Removed %s - now %s"),
                      ssid, s_cfgKnownWifi[fallback].ssid);
         }
     } else {
         if (s_cfgWifiSelection >= s_cfgKnownWifiCount) s_cfgWifiSelection = s_cfgKnownWifiCount - 1;
         if (s_cfgWifiSelection < 0) s_cfgWifiSelection = 0;
-        snprintf(notice, sizeof(notice), "Removed %s", ssid);
+        snprintf(notice, sizeof(notice), TR("Removed %s"), ssid);
     }
 
     refreshCfgWifiPickerModal();
@@ -13754,7 +14092,7 @@ static void openCfgWifiDeleteConfirm() {
     lv_obj_set_style_text_font(title, &lv_font_montserrat_16, 0);
     lv_obj_set_style_text_color(title, titleTextColor, 0);
     lv_obj_set_style_text_align(title, LV_TEXT_ALIGN_CENTER, 0);
-    lv_label_set_text(title, "Delete WiFi?");
+    lv_label_set_text(title, TR("Delete WiFi?"));
 
     lv_obj_t *body = lv_label_create(s_cfgWifiDelModal);
     lv_obj_set_width(body, lv_pct(100));
@@ -13771,8 +14109,8 @@ static void openCfgWifiDeleteConfirm() {
     // deleted — so it used to promise "rhinohome ... will switch to rhinohome".
     if (isActive) {
         lv_label_set_text_fmt(body,
-                              "%s\nIn use - will switch to the next configured "
-                              "WiFi network, or AP mode if none is available",
+                              TR("%s\nIn use - will switch to the next configured "
+                              "WiFi network, or AP mode if none is available"),
                               ssid);
     } else {
         lv_label_set_text(body, ssid);
@@ -13817,13 +14155,13 @@ static void openCfgWifiDeleteConfirm() {
     #else
         lv_obj_set_style_text_color(lbl, lv_color_hex(0xFFFFFF), 0);
     #endif
-        lv_label_set_text(lbl, text);
+        lv_label_set_text(lbl, TR(text));
         lv_obj_center(lbl);
         return btn;
     };
 #if UI_TOUCH_ONLY_PROFILE
     makeDelBtn(btnRow, "No", noBtnBg, onCfgWifiDelNoPressed);
-    makeDelBtn(btnRow, "Yes", yesBtnBg, onCfgWifiDelYesPressed);
+    makeDelBtn(btnRow, TR("Yes"), yesBtnBg, onCfgWifiDelYesPressed);
 #else
     makeDelBtn(btnRow, "(N)o", noBtnBg, onCfgWifiDelNoPressed);
     makeDelBtn(btnRow, "(Y)es", yesBtnBg, onCfgWifiDelYesPressed);
@@ -13899,7 +14237,7 @@ static void refreshCfgColorPickerModal() {
         lv_obj_center(lbl);
         lv_obj_set_style_text_font(lbl, &lv_font_montserrat_12, 0);
         lv_obj_set_style_text_color(lbl, lv_color_hex(0x1A1A1A), 0);
-        lv_label_set_text(lbl, "Reset to Default");
+        lv_label_set_text(lbl, TR("Reset to Default"));
         if (sel) lv_obj_scroll_to_view(reset, LV_ANIM_OFF);
     }
 
@@ -13927,8 +14265,8 @@ static void refreshCfgColorPickerModal() {
 // The colour a row would apply, for the confirm sentence. Mirrors the naming
 // in applyCfgColorSelection() below rather than duplicating its assignment.
 static const char *cfgColorNavName(int navIdx) {
-    if (navIdx <= 0) return "Default";
-    return kUserMsgColors[navIdx - 1].name;
+    if (navIdx <= 0) return TR("Default");
+    return TR(kUserMsgColors[navIdx - 1].name);
 }
 
 static void applyCfgColorSelection(int navIdx);
@@ -13941,12 +14279,12 @@ static void cfgColorAsk(int navIdx) {
     if (s_cfg.userMsgColor == want) {   // nothing to change, nothing to ask
         closeCfgColorPickerModal();
         snprintf(s_cfgStatus, sizeof(s_cfgStatus),
-                 "My Message Color: %s (unchanged)", cfgColorNavName(navIdx));
+                 TR("My Message Color: %s (unchanged)"), cfgColorNavName(navIdx));
         refreshCfgModal();
         return;
     }
     snprintf(s_cfgConfirmText, sizeof(s_cfgConfirmText),
-             "Set message colour to %s and reboot?", cfgColorNavName(navIdx));
+             TR("Set message colour to %s and reboot?"), cfgColorNavName(navIdx));
     openCfgConfirmModal(-1, s_cfgConfirmText,
                         [](int i) { applyCfgColorSelection(i); }, navIdx);
 }
@@ -13956,13 +14294,13 @@ static void applyCfgColorSelection(int navIdx) {
     const char *name;
     if (navIdx == 0) {
         s_cfg.userMsgColor = 0xFF;
-        name = "Default";
+        name = TR("Default");
     } else {
         s_cfg.userMsgColor = (uint8_t)(navIdx - 1);
-        name = kUserMsgColors[navIdx - 1].name;
+        name = TR(kUserMsgColors[navIdx - 1].name);
     }
     persistConfigToPrefs();
-    snprintf(s_cfgStatus, sizeof(s_cfgStatus), "My Message Color: %s - rebooting...", name);
+    snprintf(s_cfgStatus, sizeof(s_cfgStatus), TR("My Message Color: %s - rebooting..."), name);
     closeCfgColorPickerModal();
     refreshCfgModal();
     lv_timer_handler();
@@ -14057,9 +14395,9 @@ static void paintCfgBrightnessRow(lv_obj_t *slider, lv_obj_t *label,
 // input styles cannot disagree about where focus is.
 static void refreshCfgBrightnessFocus() {
     paintCfgBrightnessRow(s_cfgBrightSlider, s_cfgBrightScreenLabel, s_cfgBrightValue,
-                          "Screen", s_cfgBrightFocus == 0);
+                          TR("Screen"), s_cfgBrightFocus == 0);
     paintCfgBrightnessRow(s_cfgBrightLockSlider, s_cfgBrightLockLabel, s_cfgBrightLockValue,
-                          "Lock screen", s_cfgBrightFocus == 1);
+                          TR("Lock screen"), s_cfgBrightFocus == 1);
     // The modal is height-capped and scrolls, so moving focus has to carry the
     // row with it. Without this the lock row is selectable off the bottom of
     // the shorter panels, which reads as the keys having done nothing.
@@ -14143,11 +14481,11 @@ static void appendHeltecCancelSaveRow(lv_obj_t *parent, lv_event_cb_t cancelCb,
             lv_obj_t *lbl = lv_label_create(btn);
             lv_obj_set_style_text_font(lbl, &lv_font_montserrat_12, 0);
             lv_obj_set_style_text_color(lbl, lv_color_hex(0xE8F1FF), 0);
-            lv_label_set_text(lbl, text);
+            lv_label_set_text(lbl, TR(text));
             lv_obj_center(lbl);
         }
     };
-    Local::make(row, "Cancel", cancelCb);
+    Local::make(row, TR("Cancel"), cancelCb);
     Local::make(row, commitText, commitCb);
 }
 #endif  // HAS_TOUCH
@@ -14195,14 +14533,14 @@ static void cancelCfgBrightness() {
 static void applyCfgBrightness() {
     persistConfigToPrefs();
 #if FEATURE_LOCK_SCREEN
-    snprintf(s_cfgStatus, sizeof(s_cfgStatus), "Brightness: %u%%  Lock: %u%%",
+    snprintf(s_cfgStatus, sizeof(s_cfgStatus), TR("Brightness: %u%%  Lock: %u%%"),
              (unsigned)s_cfg.brightness,
              (unsigned)cfgCoerceBrightness(s_cfg.lockScreenBrightness));
     // The lock row previews on the live panel, so saving from it would otherwise
     // leave the UI sitting at the glance level until something else repainted.
     applyBrightness();
 #else
-    snprintf(s_cfgStatus, sizeof(s_cfgStatus), "Brightness: %u%%",
+    snprintf(s_cfgStatus, sizeof(s_cfgStatus), TR("Brightness: %u%%"),
              (unsigned)s_cfg.brightness);
 #endif
     closeCfgBrightnessModal();
@@ -14301,7 +14639,7 @@ static void openCfgBrightnessModal() {
     lv_obj_set_style_text_font(title, &lv_font_montserrat_16, 0);
     lv_obj_set_style_text_color(title, lv_color_hex(0xD9E8FF), 0);
     lv_obj_set_style_text_align(title, LV_TEXT_ALIGN_CENTER, 0);
-    lv_label_set_text(title, "Brightness");
+    lv_label_set_text(title, TR("Brightness"));
 
 #if FEATURE_LOCK_SCREEN
     s_cfgBrightScreenLabel = lv_label_create(s_cfgBrightModal);
@@ -14393,14 +14731,14 @@ static void openCfgBrightnessModal() {
     lv_obj_set_style_text_align(hint, LV_TEXT_ALIGN_CENTER, 0);
 #if FEATURE_LOCK_SCREEN
 #if defined(DEVICE_TLORA_PAGER_TFT)
-    lv_label_set_text(hint, "j/k=Adjust  Wheel=Row  Enter=Save  Backspace=Cancel");
+    lv_label_set_text(hint, TR("j/k=Adjust  Wheel=Row  Enter=Save  Backspace=Cancel"));
 #elif defined(DEVICE_M9)
-    lv_label_set_text(hint, "j/k or </>=Adjust  Up/Dn=Row  Enter=Save  Back=Cancel");
+    lv_label_set_text(hint, TR("j/k or </>=Adjust  Up/Dn=Row  Enter=Save  Back=Cancel"));
 #else
-    lv_label_set_text(hint, "j/k=Adjust  </>=Row  Enter=Save  Backspace=Cancel");
+    lv_label_set_text(hint, TR("j/k=Adjust  </>=Row  Enter=Save  Backspace=Cancel"));
 #endif
 #else
-    lv_label_set_text(hint, "j/k=Adjust  Enter=Save  Backspace=Cancel");
+    lv_label_set_text(hint, TR("j/k=Adjust  Enter=Save  Backspace=Cancel"));
 #endif
 #endif
 
@@ -14468,7 +14806,7 @@ static void cancelCfgVolume() {
 
 static void applyCfgVolume() {
     persistConfigToPrefs();
-    snprintf(s_cfgStatus, sizeof(s_cfgStatus), "Volume: %u%%",
+    snprintf(s_cfgStatus, sizeof(s_cfgStatus), TR("Volume: %u%%"),
              (unsigned)s_cfg.volumePct);
     closeCfgVolumeModal();
     refreshCfgModal();
@@ -14541,7 +14879,7 @@ static void openCfgVolumeModal() {
     lv_obj_set_style_text_font(title, &lv_font_montserrat_16, 0);
     lv_obj_set_style_text_color(title, lv_color_hex(0xD9E8FF), 0);
     lv_obj_set_style_text_align(title, LV_TEXT_ALIGN_CENTER, 0);
-    lv_label_set_text(title, "Volume");
+    lv_label_set_text(title, TR("Volume"));
 
     s_cfgVolValue = lv_label_create(s_cfgVolModal);
     lv_obj_set_width(s_cfgVolValue, lv_pct(100));
@@ -14569,7 +14907,7 @@ static void openCfgVolumeModal() {
     lv_obj_set_style_text_font(hint, &lv_font_montserrat_10, 0);
     lv_obj_set_style_text_color(hint, lv_color_hex(0xA7C7FF), 0);
     lv_obj_set_style_text_align(hint, LV_TEXT_ALIGN_CENTER, 0);
-    lv_label_set_text(hint, "j/k=Adjust  Enter=Save  Backspace=Cancel");
+    lv_label_set_text(hint, TR("j/k=Adjust  Enter=Save  Backspace=Cancel"));
 
     // Silent on open: announce the level visually, do not beep before asked.
     setCfgVolumePreview(s_cfgVolOriginal, false);
@@ -14587,7 +14925,7 @@ static void cfgSliderShow(int idx) {
     if (idx >= s_cfgSliderSpec->count) idx = s_cfgSliderSpec->count - 1;
     s_cfgSliderStaged = idx;
     if (lvObjValid(s_cfgSliderValue) && s_cfgSliderSpec->labelFor) {
-        lv_label_set_text(s_cfgSliderValue, s_cfgSliderSpec->labelFor(idx));
+        lv_label_set_text(s_cfgSliderValue, TR(s_cfgSliderSpec->labelFor(idx)));
     }
 }
 
@@ -14747,7 +15085,7 @@ static void openCfgSliderModal(const CfgSliderPicker *spec, int startIdx) {
     lv_obj_set_style_text_font(title, &lv_font_montserrat_16, 0);
     lv_obj_set_style_text_color(title, lv_color_hex(0xD9E8FF), 0);
     lv_obj_set_style_text_align(title, LV_TEXT_ALIGN_CENTER, 0);
-    lv_label_set_text(title, spec->title);
+    lv_label_set_text(title, TR(spec->title));
 
     s_cfgSliderValue = lv_label_create(s_cfgSliderModal);
     lv_obj_set_width(s_cfgSliderValue, lv_pct(100));
@@ -14789,13 +15127,13 @@ static void openCfgSliderModal(const CfgSliderPicker *spec, int startIdx) {
         // this modal is one surface whose colour the theme decides.
         lv_obj_set_style_text_color(ends, lv_color_hex(0xD9E8FF), 0);
         lv_obj_set_style_text_align(ends, LV_TEXT_ALIGN_CENTER, 0);
-        lv_label_set_text_fmt(ends, "%s  <->  %s", spec->leftEnd, spec->rightEnd);
+        lv_label_set_text_fmt(ends, TR("%s  <->  %s"), TR(spec->leftEnd), TR(spec->rightEnd));
     }
 
     const bool hasCheck = (spec->checkLabel && spec->checkValue);
     if (hasCheck) {
         s_cfgSliderCheck = lv_checkbox_create(s_cfgSliderModal);
-        lv_checkbox_set_text(s_cfgSliderCheck, spec->checkLabel);
+        lv_checkbox_set_text(s_cfgSliderCheck, TR(spec->checkLabel));
         lv_obj_set_style_text_font(s_cfgSliderCheck, &lv_font_montserrat_12, 0);
         // The same theme-mapped ink as the end captions above; see there.
         lv_obj_set_style_text_color(s_cfgSliderCheck, lv_color_hex(0xD9E8FF), 0);
@@ -14818,14 +15156,14 @@ static void openCfgSliderModal(const CfgSliderPicker *spec, int startIdx) {
     lv_obj_set_style_text_align(hint, LV_TEXT_ALIGN_CENTER, 0);
     if (hasCheck) {
 #if defined(DEVICE_M9)
-        lv_label_set_text_fmt(hint, "Up/Down=Select  Left/Right=Change  Enter=Save  %s=Cancel",
+        lv_label_set_text_fmt(hint, TR("Up/Down=Select  Left/Right=Change  Enter=Save  %s=Cancel"),
                               modalCloseKeyLabel());
 #else
-        lv_label_set_text_fmt(hint, "Move=Adjust  Space=Toggle  Enter=Save  %s=Cancel",
+        lv_label_set_text_fmt(hint, TR("Move=Adjust  Space=Toggle  Enter=Save  %s=Cancel"),
                               modalCloseKeyLabel());
 #endif
     } else {
-        lv_label_set_text_fmt(hint, "Move=Adjust  Enter=Save  %s=Cancel", modalCloseKeyLabel());
+        lv_label_set_text_fmt(hint, TR("Move=Adjust  Enter=Save  %s=Cancel"), modalCloseKeyLabel());
     }
     lv_label_set_long_mode(hint, LV_LABEL_LONG_WRAP);
 #endif
@@ -14839,10 +15177,10 @@ static void openCfgSliderModal(const CfgSliderPicker *spec, int startIdx) {
 // ── Location precision ───────────────────────────────────────────────────────
 
 static const char *cfgPosPrecLabelFor(int idx) {
-    static char buf[24];
+    static char buf[48];
     if (idx < 0 || idx >= kPositionPrecisionCount) idx = 0;
-    if (kPositionPrecisions[idx].bits >= 32) return "Precise";
-    snprintf(buf, sizeof(buf), "Within %s", kPositionPrecisions[idx].label);
+    if (kPositionPrecisions[idx].bits >= 32) return TR("Precise");
+    snprintf(buf, sizeof(buf), TR("Within %s"), kPositionPrecisions[idx].label);
     return buf;
 }
 
@@ -14852,10 +15190,10 @@ static void cfgPosPrecApply(int idx) {
     s_cfg.positionPrecision = chosen;
     persistConfigToPrefs();
     if (chosen >= 32) {
-        snprintf(s_cfgStatus, sizeof(s_cfgStatus), "Location sent exactly");
+        snprintf(s_cfgStatus, sizeof(s_cfgStatus), "%s", TR("Location sent exactly"));
     } else {
-        snprintf(s_cfgStatus, sizeof(s_cfgStatus), "Location rounded to %s",
-                 positionPrecisionLabel(chosen));
+        snprintf(s_cfgStatus, sizeof(s_cfgStatus), TR("Location rounded to %s"),
+                 TR(positionPrecisionLabel(chosen)));
     }
 }
 
@@ -14866,12 +15204,12 @@ static void openCfgPosPrecModal() {
         if (kPositionPrecisions[i].bits == cur) { startIdx = i; break; }
     }
     static const CfgSliderPicker kSpec = {
-        "Location Precision",
+        TR_NOOP("Location Precision"),
         kPositionPrecisionCount,
         cfgPosPrecLabelFor,
         cfgPosPrecApply,
-        "exact",
-        "vague",
+        TR_NOOP("exact"),
+        TR_NOOP("vague"),
     };
     openCfgSliderModal(&kSpec, startIdx);
 }
@@ -14881,8 +15219,8 @@ static void openCfgPosPrecModal() {
 
 static const char *cfgLightTimeoutLabelFor(int idx) {
     if (idx < 0 || idx >= kNotifyLightTimeoutCount) idx = 0;
-    if (kNotifyLightTimeouts[idx].secs == 0) return "Until read";
-    return kNotifyLightTimeouts[idx].label;
+    if (kNotifyLightTimeouts[idx].secs == 0) return TR("Until read");
+    return TR(kNotifyLightTimeouts[idx].label);
 }
 
 static void cfgLightTimeoutApply(int idx) {
@@ -14890,10 +15228,10 @@ static void cfgLightTimeoutApply(int idx) {
     s_cfg.notifyLightTimeoutS = kNotifyLightTimeouts[idx].secs;
     persistConfigToPrefs();
     if (s_cfg.notifyLightTimeoutS == 0) {
-        snprintf(s_cfgStatus, sizeof(s_cfgStatus), "Light reminds until read");
+        snprintf(s_cfgStatus, sizeof(s_cfgStatus), "%s", TR("Light reminds until read"));
     } else {
-        snprintf(s_cfgStatus, sizeof(s_cfgStatus), "Light reminds for %s",
-                 notifyLightTimeoutName(s_cfg.notifyLightTimeoutS));
+        snprintf(s_cfgStatus, sizeof(s_cfgStatus), TR("Light reminds for %s"),
+                 TR(notifyLightTimeoutName(s_cfg.notifyLightTimeoutS)));
     }
 }
 
@@ -14903,12 +15241,12 @@ static void openCfgLightTimeoutModal() {
         if (kNotifyLightTimeouts[i].secs == s_cfg.notifyLightTimeoutS) { startIdx = i; break; }
     }
     static const CfgSliderPicker kSpec = {
-        "Notification Light Timeout",
+        TR_NOOP("Notification Light Timeout"),
         kNotifyLightTimeoutCount,
         cfgLightTimeoutLabelFor,
         cfgLightTimeoutApply,
-        "5 sec",
-        "until read",
+        TR_NOOP("5 sec"),
+        TR_NOOP("until read"),
     };
     openCfgSliderModal(&kSpec, startIdx);
 }
@@ -14917,7 +15255,7 @@ static void openCfgLightTimeoutModal() {
 #if HAS_KB_BACKLIGHT_LEVEL
 static const char *cfgKbBacklightLabelFor(int idx) {
     if (idx < 0 || idx >= kKbBacklightLevelCount) idx = 0;
-    return kKbBacklightLevels[idx].label;
+    return TR(kKbBacklightLevels[idx].label);
 }
 
 // Pushes the stored level at the hardware, by whatever route this board takes.
@@ -14941,7 +15279,7 @@ static void cfgKbBacklightApply(int idx) {
 
     LV_UNUSED(was);
     if (s_cfg.kbBacklightLevel == 0) {
-        snprintf(s_cfgStatus, sizeof(s_cfgStatus), "Keyboard light off");
+        snprintf(s_cfgStatus, sizeof(s_cfgStatus), "%s", TR("Keyboard light off"));
 #if defined(DEVICE_M9)
     } else if (was == 0) {
         // M9 only, and the one change that does not take effect now: its
@@ -14952,12 +15290,12 @@ static void cfgKbBacklightApply(int idx) {
         // The T-Deck has no such rule -- its backlight is a plain duty the
         // keyboard applies immediately, in either direction.
         snprintf(s_cfgStatus, sizeof(s_cfgStatus),
-                 "Keyboard light %s - after a power cycle",
-                 kbBacklightLevelName(s_cfg.kbBacklightLevel));
+                 TR("Keyboard light %s - after a power cycle"),
+                 TR(kbBacklightLevelName(s_cfg.kbBacklightLevel)));
 #endif
     } else {
-        snprintf(s_cfgStatus, sizeof(s_cfgStatus), "Keyboard light %s",
-                 kbBacklightLevelName(s_cfg.kbBacklightLevel));
+        snprintf(s_cfgStatus, sizeof(s_cfgStatus), TR("Keyboard light %s"),
+                 TR(kbBacklightLevelName(s_cfg.kbBacklightLevel)));
     }
 }
 
@@ -14967,12 +15305,12 @@ static void openCfgKbBacklightModal() {
         if (kKbBacklightLevels[i].level == s_cfg.kbBacklightLevel) { startIdx = i; break; }
     }
     static const CfgSliderPicker kSpec = {
-        "Keyboard Light",
+        TR_NOOP("Keyboard Light"),
         kKbBacklightLevelCount,
         cfgKbBacklightLabelFor,
         cfgKbBacklightApply,
-        "low",
-        "off",
+        TR_NOOP("low"),
+        TR_NOOP("off"),
     };
     openCfgSliderModal(&kSpec, startIdx);
 }
@@ -14995,20 +15333,20 @@ struct ScreenTimeoutOption {
 };
 
 static const ScreenTimeoutOption kScreenTimeouts[] = {
-    {   15, "15 sec" },
-    {   30, "30 sec" },
-    {   60, "1 min"  },
-    {  120, "2 min"  },
-    {  300, "5 min"  },
-    {  600, "10 min" },
+    {   15, TR_NOOP("15 sec") },
+    {   30, TR_NOOP("30 sec") },
+    {   60, TR_NOOP("1 min")  },
+    {  120, TR_NOOP("2 min")  },
+    {  300, TR_NOOP("5 min")  },
+    {  600, TR_NOOP("10 min") },
     // A device on a bench is watched rather than carried, and the only thing
     // above ten minutes used to be Never — which is a different decision, not a
     // longer one. These two also stop the slider quietly shortening a browser-set
     // value: 1800 opened on 10 min and was written back as 600 the moment the
     // user saved, even if they had only come to look (issue #93).
-    { 1800, "30 min" },
-    { 3600, "60 min" },
-    {    0, "Never"  },
+    { 1800, TR_NOOP("30 min") },
+    { 3600, TR_NOOP("60 min") },
+    {    0, TR_NOOP("Never")  },
 };
 static constexpr int kScreenTimeoutCount =
     (int)(sizeof(kScreenTimeouts) / sizeof(kScreenTimeouts[0]));
@@ -15018,13 +15356,13 @@ static constexpr int kScreenTimeoutCount =
 // because callers copy the text immediately (lv_label_set_text, snprintf).
 static const char *screenTimeoutName(uint32_t secs) {
     for (int i = 0; i < kScreenTimeoutCount; i++) {
-        if (kScreenTimeouts[i].secs == secs) return kScreenTimeouts[i].label;
+        if (kScreenTimeouts[i].secs == secs) return TR(kScreenTimeouts[i].label);
     }
     static char buf[16];
     if (secs >= 60 && (secs % 60) == 0) {
-        snprintf(buf, sizeof(buf), "%u min", (unsigned)(secs / 60));
+        snprintf(buf, sizeof(buf), TR("%u min"), (unsigned)(secs / 60));
     } else {
-        snprintf(buf, sizeof(buf), "%u sec", (unsigned)secs);
+        snprintf(buf, sizeof(buf), TR("%u sec"), (unsigned)secs);
     }
     return buf;
 }
@@ -15051,7 +15389,7 @@ static int screenTimeoutNearestIdx(uint32_t secs) {
 
 static const char *cfgScreenTimeoutLabelFor(int idx) {
     if (idx < 0 || idx >= kScreenTimeoutCount) idx = 0;
-    return kScreenTimeouts[idx].label;
+    return TR(kScreenTimeouts[idx].label);
 }
 
 static void cfgScreenTimeoutApply(int idx) {
@@ -15063,21 +15401,21 @@ static void cfgScreenTimeoutApply(int idx) {
     // seconds could put the panel out before the user has read the confirmation.
     s_lastActivityMs = millis();
     if (s_cfg.screenOnSecs == 0) {
-        snprintf(s_cfgStatus, sizeof(s_cfgStatus), "Screen stays on");
+        snprintf(s_cfgStatus, sizeof(s_cfgStatus), "%s", TR("Screen stays on"));
     } else {
-        snprintf(s_cfgStatus, sizeof(s_cfgStatus), "Screen sleeps after %s",
+        snprintf(s_cfgStatus, sizeof(s_cfgStatus), TR("Screen sleeps after %s"),
                  screenTimeoutName(s_cfg.screenOnSecs));
     }
 }
 
 static void openCfgScreenTimeoutModal() {
     static const CfgSliderPicker kSpec = {
-        "Screen Timeout",
+        TR_NOOP("Screen Timeout"),
         kScreenTimeoutCount,
         cfgScreenTimeoutLabelFor,
         cfgScreenTimeoutApply,
-        "15 sec",
-        "never",
+        TR_NOOP("15 sec"),
+        TR_NOOP("never"),
     };
     openCfgSliderModal(&kSpec, screenTimeoutNearestIdx(s_cfg.screenOnSecs));
 }
@@ -15097,22 +15435,22 @@ static const LockScreenOffOption kLockScreenOffs[] = {
     // Three short steps below the five-minute grid. A lock screen is a glance
     // surface, and half a minute of it is a reasonable thing to want; going
     // straight from 30 sec to 5 min would make the slider useless in between.
-    {   30, "30 sec" },
-    {   60, "1 min"  },
-    {  120, "2 min"  },
-    {  300, "5 min"  },
-    {  600, "10 min" },
-    {  900, "15 min" },
-    { 1200, "20 min" },
-    { 1500, "25 min" },
-    { 1800, "30 min" },
-    { 2100, "35 min" },
-    { 2400, "40 min" },
-    { 2700, "45 min" },
-    { 3000, "50 min" },
-    { 3300, "55 min" },
-    { 3600, "60 min" },
-    {    0, "Stay on" },
+    {   30, TR_NOOP("30 sec") },
+    {   60, TR_NOOP("1 min")  },
+    {  120, TR_NOOP("2 min")  },
+    {  300, TR_NOOP("5 min")  },
+    {  600, TR_NOOP("10 min") },
+    {  900, TR_NOOP("15 min") },
+    { 1200, TR_NOOP("20 min") },
+    { 1500, TR_NOOP("25 min") },
+    { 1800, TR_NOOP("30 min") },
+    { 2100, TR_NOOP("35 min") },
+    { 2400, TR_NOOP("40 min") },
+    { 2700, TR_NOOP("45 min") },
+    { 3000, TR_NOOP("50 min") },
+    { 3300, TR_NOOP("55 min") },
+    { 3600, TR_NOOP("60 min") },
+    {    0, TR_NOOP("Stay on") },
 };
 static constexpr int kLockScreenOffCount =
     (int)(sizeof(kLockScreenOffs) / sizeof(kLockScreenOffs[0]));
@@ -15122,11 +15460,11 @@ static constexpr int kLockScreenOffCount =
 // screenTimeoutName()'s is: callers copy the text immediately.
 static const char *lockScreenOffName(uint32_t secs) {
     for (int i = 0; i < kLockScreenOffCount; i++) {
-        if (kLockScreenOffs[i].secs == secs) return kLockScreenOffs[i].label;
+        if (kLockScreenOffs[i].secs == secs) return TR(kLockScreenOffs[i].label);
     }
     static char buf[16];
-    if (secs < 60U) snprintf(buf, sizeof(buf), "%u sec", (unsigned)secs);
-    else            snprintf(buf, sizeof(buf), "%u min", (unsigned)(secs / 60));
+    if (secs < 60U) snprintf(buf, sizeof(buf), TR("%u sec"), (unsigned)secs);
+    else            snprintf(buf, sizeof(buf), TR("%u min"), (unsigned)(secs / 60));
     return buf;
 }
 
@@ -15152,7 +15490,7 @@ static int lockScreenOffNearestIdx(uint32_t secs) {
 
 static const char *cfgLockScreenOffLabelFor(int idx) {
     if (idx < 0 || idx >= kLockScreenOffCount) idx = 0;
-    return kLockScreenOffs[idx].label;
+    return TR(kLockScreenOffs[idx].label);
 }
 
 static void cfgLockScreenOffApply(int idx) {
@@ -15164,21 +15502,21 @@ static void cfgLockScreenOffApply(int idx) {
     // whenever the last one started either way.
     s_lockScreenSinceMs = millis();
     if (s_cfg.lockScreenOffSecs == LOCK_SCREEN_OFF_NEVER) {
-        snprintf(s_cfgStatus, sizeof(s_cfgStatus), "Lock screen stays on");
+        snprintf(s_cfgStatus, sizeof(s_cfgStatus), "%s", TR("Lock screen stays on"));
     } else {
-        snprintf(s_cfgStatus, sizeof(s_cfgStatus), "Screen off after %s on lock",
+        snprintf(s_cfgStatus, sizeof(s_cfgStatus), TR("Screen off after %s on lock"),
                  lockScreenOffName(s_cfg.lockScreenOffSecs));
     }
 }
 
 static void openCfgLockScreenOffModal() {
     static const CfgSliderPicker kSpec = {
-        "Lock Screen Off",
+        TR_NOOP("Lock Screen Off"),
         kLockScreenOffCount,
         cfgLockScreenOffLabelFor,
         cfgLockScreenOffApply,
-        "5 min",
-        "stay on",
+        TR_NOOP("5 min"),
+        TR_NOOP("stay on"),
     };
     openCfgSliderModal(&kSpec, lockScreenOffNearestIdx(s_cfg.lockScreenOffSecs));
 }
@@ -15236,7 +15574,7 @@ static void refreshCfgBattCalReadout(bool force) {
     if (lvObjValid(s_cfgBattCalDetail)) {
         char trimBuf[12];
         char buf[48];
-        snprintf(buf, sizeof(buf), "sensor %.2f V    trim %s",
+        snprintf(buf, sizeof(buf), TR("sensor %.2f V    trim %s"),
                  (double)batteryReadVoltageUntrimmed(),
                  battTrimText((int)s_cfg.battCalTrim, trimBuf, sizeof(trimBuf)));
         lv_label_set_text(s_cfgBattCalDetail, buf);
@@ -15280,7 +15618,7 @@ static void cancelCfgBattCal() {
 static void applyCfgBattCal() {
     persistConfigToPrefs();
     char trimBuf[12];
-    snprintf(s_cfgStatus, sizeof(s_cfgStatus), "Battery trim: %s",
+    snprintf(s_cfgStatus, sizeof(s_cfgStatus), TR("Battery trim: %s"),
              battTrimText((int)s_cfg.battCalTrim, trimBuf, sizeof(trimBuf)));
     closeCfgBattCalModal();
     refreshCfgModal();
@@ -15358,7 +15696,7 @@ static void openCfgBattCalModal() {
     lv_obj_set_style_text_font(title, &lv_font_montserrat_16, 0);
     lv_obj_set_style_text_color(title, lv_color_hex(0xD9E8FF), 0);
     lv_obj_set_style_text_align(title, LV_TEXT_ALIGN_CENTER, 0);
-    lv_label_set_text(title, "Battery Calibration");
+    lv_label_set_text(title, TR("Battery Calibration"));
 
     s_cfgBattCalValue = lv_label_create(s_cfgBattCalModal);
     lv_obj_set_width(s_cfgBattCalValue, lv_pct(100));
@@ -15398,10 +15736,10 @@ static void openCfgBattCalModal() {
         lv_label_set_long_mode(how, LV_LABEL_LONG_WRAP);
         lv_label_set_text(how,
                           kBattPctFromGauge
-                              ? "Match the voltage to a meter reading.\n"
-                                "Percent comes from the fuel gauge and does not change."
-                              : "Match the voltage to a meter reading.\n"
-                                "Percent follows it. 0% = uncalibrated.");
+                              ? TR("Match the voltage to a meter reading.\n"
+                                "Percent comes from the fuel gauge and does not change.")
+                              : TR("Match the voltage to a meter reading.\n"
+                                "Percent follows it. 0% = uncalibrated."));
     }
 
 #if UI_TOUCH_ONLY_PROFILE
@@ -15415,7 +15753,7 @@ static void openCfgBattCalModal() {
     lv_obj_set_style_text_font(hint, &lv_font_montserrat_10, 0);
     lv_obj_set_style_text_color(hint, lv_color_hex(0xA7C7FF), 0);
     lv_obj_set_style_text_align(hint, LV_TEXT_ALIGN_CENTER, 0);
-    lv_label_set_text(hint, "j/k=Adjust  Enter=Save  Backspace=Cancel");
+    lv_label_set_text(hint, TR("j/k=Adjust  Enter=Save  Backspace=Cancel"));
 #endif
 
     setCfgBattCalPreview(s_cfgBattCalOriginal);
@@ -15507,11 +15845,11 @@ static void applyChatStyleSelection(int style) {
         refreshChatView(true);
     }
 #if defined(DEVICE_TDECK_PRO)
-    snprintf(s_cfgStatus, sizeof(s_cfgStatus), "Chat Type: %s%s",
-             chatStyleName((uint8_t)style), changed ? "" : " (unchanged)");
+    snprintf(s_cfgStatus, sizeof(s_cfgStatus), TR("Chat Type: %s%s"),
+             chatStyleName((uint8_t)style), changed ? "" : TR(" (unchanged)"));
 #else
-    snprintf(s_cfgStatus, sizeof(s_cfgStatus), "Chat Style: %s%s",
-             chatStyleName((uint8_t)style), changed ? "" : " (unchanged)");
+    snprintf(s_cfgStatus, sizeof(s_cfgStatus), TR("Chat Style: %s%s"),
+             chatStyleName((uint8_t)style), changed ? "" : TR(" (unchanged)"));
 #endif
     closeChatStyleModal();
     refreshCfgModal();
@@ -15585,9 +15923,9 @@ static void openChatStyleModal() {
 #endif
     lv_obj_set_style_text_align(title, LV_TEXT_ALIGN_CENTER, 0);
 #if defined(DEVICE_TDECK_PRO)
-    lv_label_set_text(title, "Chat Type");
+    lv_label_set_text(title, TR("Chat Type"));
 #else
-    lv_label_set_text(title, "Chat Style");
+    lv_label_set_text(title, TR("Chat Style"));
 #endif
 
     lv_obj_t *hint = lv_label_create(s_chatStyleModal);
@@ -15815,9 +16153,9 @@ static void rebuildThemeRows() {
             // Brackets are the armed cue, present before anything is typed —
             // the same signal the CFG and Nodes headers give.
             if (s_themeVisibleCount == 0) {
-                lv_label_set_text_fmt(s_themeFilterLabel, "[%s] no match", s_themeFilter);
+                lv_label_set_text_fmt(s_themeFilterLabel, TR("[%s] no match"), s_themeFilter);
             } else {
-                lv_label_set_text_fmt(s_themeFilterLabel, "[%s] %d",
+                lv_label_set_text_fmt(s_themeFilterLabel, TR("[%s] %d"),
                                       s_themeFilter, s_themeVisibleCount);
             }
         } else {
@@ -15852,7 +16190,7 @@ static void cfgThemeAsk(int idx) {
         return;
     }
     snprintf(s_cfgConfirmText, sizeof(s_cfgConfirmText),
-             "Switch to theme %s and reboot?", p.name);
+             TR("Switch to theme %s and reboot?"), p.name);
     openCfgConfirmModal(-1, s_cfgConfirmText,
                         [](int i) { applyThemeSelection(i); }, idx);
 }
@@ -15864,12 +16202,12 @@ static void applyThemeSelection(int idx) {
     if (!uiThemeChoiceAt(s_themeVisible[idx], p)) return;
     if (p.theme == s_cfg.uiTheme && p.mode == s_cfg.uiMode) {
         // No change — just return to the CFG screen.
-        snprintf(s_cfgStatus, sizeof(s_cfgStatus), "Theme: %s (unchanged)", p.name);
+        snprintf(s_cfgStatus, sizeof(s_cfgStatus), TR("Theme: %s (unchanged)"), p.name);
         closeThemeModal();
         refreshCfgModal();
         return;
     }
-    snprintf(s_cfgStatus, sizeof(s_cfgStatus), "Theme: %s - rebooting...", p.name);
+    snprintf(s_cfgStatus, sizeof(s_cfgStatus), TR("Theme: %s - rebooting..."), p.name);
     closeThemeModal();
     // Same sequence the orientation row uses: paint the status line, give it a
     // moment to actually reach the panel, then go.
@@ -15960,7 +16298,7 @@ static void openThemeModal() {
     lv_obj_set_style_text_font(title, &lv_font_montserrat_16, 0);
     lv_obj_set_style_text_color(title, lv_color_hex(0xD9E8FF), 0);
     lv_obj_set_style_text_align(title, LV_TEXT_ALIGN_CENTER, 0);
-    lv_label_set_text(title, "Theme");
+    lv_label_set_text(title, TR("Theme"));
 
     // Doubles as the filter readout: it shows what has been typed and how many
     // themes still match, and the key legend when nothing has been.
@@ -16034,8 +16372,8 @@ static void applyChatNameSelection(int style) {
         s_lastRenderedChannel = -1;
         refreshChatView(true);
     }
-    snprintf(s_cfgStatus, sizeof(s_cfgStatus), "Chat Names: %s%s",
-             chatNameStyleName((uint8_t)style), changed ? "" : " (unchanged)");
+    snprintf(s_cfgStatus, sizeof(s_cfgStatus), TR("Chat Names: %s%s"),
+             chatNameStyleName((uint8_t)style), changed ? "" : TR(" (unchanged)"));
     closeChatNameModal();
     refreshCfgModal();
 }
@@ -16098,7 +16436,7 @@ static void openChatNameModal() {
     lv_obj_set_style_text_font(title, &lv_font_montserrat_16, 0);
     lv_obj_set_style_text_color(title, lv_color_hex(0xD9E8FF), 0);
     lv_obj_set_style_text_align(title, LV_TEXT_ALIGN_CENTER, 0);
-    lv_label_set_text(title, "Chat Names");
+    lv_label_set_text(title, TR("Chat Names"));
 
     lv_obj_t *hint = lv_label_create(s_chatNameModal);
     lv_obj_set_width(hint, lv_pct(100));
@@ -16113,10 +16451,10 @@ static void openChatNameModal() {
 #endif
     );
 
-    static const char *kNameLabel[CHAT_NAME_MAX + 1] = { "Short", "Long" };
+    static const char *kNameLabel[CHAT_NAME_MAX + 1] = { TR_NOOP("Short"), TR_NOOP("Long") };
     static const char *kNameDesc[CHAT_NAME_MAX + 1] = {
-        "4-char short name (ABCD)",
-        "Full node name when known",
+        TR_NOOP("4-char short name (ABCD)"),
+        TR_NOOP("Full node name when known"),
     };
     const lv_color_t rowTextColor = (s_cfg.uiMode == UI_MODE_LIGHT)
                                         ? lv_color_hex(0x13233D) : lv_color_hex(0xD9E8FF);
@@ -16141,7 +16479,7 @@ static void openChatNameModal() {
         lv_obj_t *name = lv_label_create(row);
         lv_obj_set_style_text_font(name, &lv_font_montserrat_12, 0);
         lv_obj_set_style_text_color(name, rowTextColor, 0);
-        lv_label_set_text(name, kNameLabel[i]);
+        lv_label_set_text(name, TR(kNameLabel[i]));
 
         if (kModalRowDescriptions) {
             lv_obj_t *desc = lv_label_create(row);
@@ -16152,7 +16490,7 @@ static void openChatNameModal() {
 #else
             lv_obj_set_style_text_opa(desc, LV_OPA_70, 0);
 #endif
-            lv_label_set_text(desc, kNameDesc[i]);
+            lv_label_set_text(desc, TR(kNameDesc[i]));
         }
     }
 
@@ -16194,8 +16532,8 @@ static void applyFontSizeSelection(int size) {
         refreshDmModal(true);
         refreshLiveView(true);
     }
-    snprintf(s_cfgStatus, sizeof(s_cfgStatus), "Font Size: %s%s",
-             fontSizeName((uint8_t)size), changed ? "" : " (unchanged)");
+    snprintf(s_cfgStatus, sizeof(s_cfgStatus), TR("Font Size: %s%s"),
+             fontSizeName((uint8_t)size), changed ? "" : TR(" (unchanged)"));
     closeFontSizeModal();
     refreshCfgModal();
 }
@@ -16269,7 +16607,7 @@ static void openFontSizeModal() {
     lv_obj_set_style_text_color(title, lv_color_hex(0xD9E8FF), 0);
 #endif
     lv_obj_set_style_text_align(title, LV_TEXT_ALIGN_CENTER, 0);
-    lv_label_set_text(title, "Font Size");
+    lv_label_set_text(title, TR("Font Size"));
 
     lv_obj_t *hint = lv_label_create(s_fontSizeModal);
     lv_obj_set_width(hint, lv_pct(100));
@@ -16281,16 +16619,16 @@ static void openFontSizeModal() {
 #endif
     lv_obj_set_style_text_align(hint, LV_TEXT_ALIGN_CENTER, 0);
 #if UI_TOUCH_ONLY_PROFILE
-    lv_label_set_text(hint, "Tap a size to apply");
+    lv_label_set_text(hint, TR("Tap a size to apply"));
 #else
     // Kept short so it fits the narrowed modal without wrapping to three lines.
-    lv_label_set_text_fmt(hint, "Move  Enter=OK  %s=Cancel", modalCloseKeyLabel());
+    lv_label_set_text_fmt(hint, TR("Move  Enter=OK  %s=Cancel"), modalCloseKeyLabel());
 #endif
 
     // "X-Large" rather than the full name fontSizeName() reports: the grid cells
     // are ~half the modal width and the spelled-out form wraps to two lines on
     // the narrowest board.
-    static const char *kSizeLabel[FONT_SIZE_MAX + 1] = { "Small", "Medium", "Large", "X-Large" };
+    static const char *kSizeLabel[FONT_SIZE_MAX + 1] = { TR_NOOP("Small"), TR_NOOP("Medium"), TR_NOOP("Large"), TR_NOOP("X-Large") };
 #if defined(DEVICE_TDECK_PRO)
     const lv_color_t rowTextColor = lv_color_make(0, 0, 0);
 #else
@@ -16331,7 +16669,7 @@ static void openFontSizeModal() {
         lv_obj_set_style_text_font(name, &lv_font_montserrat_12, 0);
         lv_obj_set_style_text_color(name, rowTextColor, 0);
         lv_obj_set_style_text_align(name, LV_TEXT_ALIGN_CENTER, 0);
-        lv_label_set_text(name, kSizeLabel[i]);
+        lv_label_set_text(name, TR(kSizeLabel[i]));
         lv_obj_center(name);
     }
 
@@ -16386,7 +16724,7 @@ static const lv_font_t *kChanModalTitleFont = &lv_font_montserrat_12;
 static const lv_font_t *kChanModalRowFont   = &lv_font_montserrat_10;
 // A half-width cell here is ~112px. "Encryption" plus its value does not fit,
 // and an ellipsised field name is worse than a short one.
-#define CHAN_EDIT_LABELS { "Name", "Enc", "Save", "Loc", "Key", "Hops" }
+#define CHAN_EDIT_LABELS { TR_NOOP("Name"), TR_NOOP("Enc"), TR_NOOP("Save"), TR_NOOP("Loc"), TR_NOOP("Key"), TR_NOOP("Hops") }
 #elif defined(DEVICE_TLORA_PAGER_TFT)
 static constexpr int  kChanModalCols  = 2;
 static constexpr int  kChanModalMaxW  = 448;
@@ -16395,7 +16733,7 @@ static constexpr int  kChanModalGap   = 5;
 static constexpr int  kChanModalRowH  = 28;
 static const lv_font_t *kChanModalTitleFont = &lv_font_montserrat_16;
 static const lv_font_t *kChanModalRowFont   = &lv_font_montserrat_12;
-#define CHAN_EDIT_LABELS { "Name", "Encryption", "Save", "Location", "Key", "Hops" }
+#define CHAN_EDIT_LABELS { TR_NOOP("Name"), TR_NOOP("Encryption"), TR_NOOP("Save"), TR_NOOP("Location"), TR_NOOP("Key"), TR_NOOP("Hops") }
 #else
 // 320x240 boards (T-Deck, Heltec V4, Mesh Deck). At 300px wide a 49% cell is
 // ~138px, which holds "0  LongFast" at montserrat_12 with room to spare.
@@ -16408,7 +16746,7 @@ static const lv_font_t *kChanModalTitleFont = &lv_font_montserrat_16;
 static const lv_font_t *kChanModalRowFont   = &lv_font_montserrat_12;
 // ~138px cells at montserrat_12: "Location" plus "Off" fits, "Encryption" plus
 // "AES-256" is the tightest pairing and ellipsises its value, not its name.
-#define CHAN_EDIT_LABELS { "Name", "Encryption", "Save", "Location", "Key", "Hops" }
+#define CHAN_EDIT_LABELS { TR_NOOP("Name"), TR_NOOP("Encryption"), TR_NOOP("Save"), TR_NOOP("Location"), TR_NOOP("Key"), TR_NOOP("Hops") }
 #endif
 static constexpr int kChanModalRowsPerCol =
     (MESH_CHANNELS + kChanModalCols - 1) / kChanModalCols;
@@ -16757,12 +17095,12 @@ struct DiscoveryDurationOption {
     const char *label;
 };
 static const DiscoveryDurationOption kDiscoveryDurations[] = {
-    {    30000UL, "30 sec" },
-    {    60000UL, "1 min"  },
-    {   120000UL, "2 min"  },
-    {   300000UL, "5 min"  },
-    {   600000UL, "10 min" },
-    {   900000UL, "15 min" },
+    {    30000UL, TR_NOOP("30 sec") },
+    {    60000UL, TR_NOOP("1 min")  },
+    {   120000UL, TR_NOOP("2 min")  },
+    {   300000UL, TR_NOOP("5 min")  },
+    {   600000UL, TR_NOOP("10 min") },
+    {   900000UL, TR_NOOP("15 min") },
     // The long end, for leaving a board somewhere and coming back to it. A
     // sweep at these lengths is cheap -- the one broadcast has already gone out
     // and the rest is listening -- so the cost is only the screen staying on.
@@ -16777,10 +17115,10 @@ static const DiscoveryDurationOption kDiscoveryDurations[] = {
     //
     // 6 h is 21,600,000 ms, comfortably inside the uint32_t these are held in
     // and inside the ~49-day wrap of the millis() subtraction that times them.
-    {  1800000UL, "30 min" },
-    {  3600000UL, "1 hour" },
-    {  7200000UL, "2 hours"},
-    { 21600000UL, "6 hours"},
+    {  1800000UL, TR_NOOP("30 min") },
+    {  3600000UL, TR_NOOP("1 hour") },
+    {  7200000UL, TR_NOOP("2 hours")},
+    { 21600000UL, TR_NOOP("6 hours")},
 };
 static constexpr int kDiscoveryDurationCount =
     (int)(sizeof(kDiscoveryDurations) / sizeof(kDiscoveryDurations[0]));
@@ -17065,16 +17403,16 @@ static ChanEncType chanEncTypeOf(const uint8_t *key, uint8_t keyLen) {
 // any length, and silently relabelling it as AES-128 would be a lie.
 static void chanEncLabel(const uint8_t *key, uint8_t keyLen, char *out, size_t outLen) {
     if (keyLen == 0 || (keyLen == 1 && key[0] == 0x00)) {
-        snprintf(out, outLen, "None");
+        snprintf(out, outLen, TR("None"));
     } else if (keyLen == 1) {
-        if (key[0] == 0x01) snprintf(out, outLen, "Default");
-        else                snprintf(out, outLen, "Default +%u", (unsigned)key[0]);
+        if (key[0] == 0x01) snprintf(out, outLen, TR("Default"));
+        else                snprintf(out, outLen, TR("Default +%u"), (unsigned)key[0]);
     } else if (keyLen == 16) {
         snprintf(out, outLen, "AES-128");
     } else if (keyLen == 32) {
         snprintf(out, outLen, "AES-256");
     } else {
-        snprintf(out, outLen, "Custom (%u B)", (unsigned)keyLen);
+        snprintf(out, outLen, TR("Custom (%u B)"), (unsigned)keyLen);
     }
 }
 
@@ -17121,7 +17459,7 @@ static void chanEditCycleEncType(int delta) {
 static void chanSlotLabel(int slot, char *out, size_t outLen) {
     const char *nm = channelName(slot);
     if (nm && nm[0]) snprintf(out, outLen, "%s", nm);
-    else             snprintf(out, outLen, "Channel %d", slot);
+    else             snprintf(out, outLen, TR("Channel %d"), slot);
 }
 
 // Same label with the slot index in front. A named slot otherwise gives no clue
@@ -17130,7 +17468,7 @@ static void chanSlotLabel(int slot, char *out, size_t outLen) {
 static void chanCfgRowLabel(int slot, char *out, size_t outLen) {
     const char *nm = channelName(slot);
     if (nm && nm[0]) snprintf(out, outLen, "%d  %s", slot, nm);
-    else             snprintf(out, outLen, "Channel %d", slot);
+    else             snprintf(out, outLen, TR("Channel %d"), slot);
 }
 
 static void chanEditSave() {
@@ -17160,7 +17498,7 @@ static void chanEditSave() {
 
     char label[24];
     chanSlotLabel(s_chanEditSlot, label, sizeof(label));
-    snprintf(s_cfgStatus, sizeof(s_cfgStatus), "Saved: %s", label);
+    snprintf(s_cfgStatus, sizeof(s_cfgStatus), TR("Saved: %s"), label);
 }
 
 static void onChanCfgRowPressed(lv_event_t *e) {
@@ -17262,7 +17600,7 @@ static void openChanCfgModal() {
     lv_obj_set_style_text_font(title, kChanModalTitleFont, 0);
     lv_obj_set_style_text_color(title, lv_color_hex(0xD9E8FF), 0);
     lv_obj_set_style_text_align(title, LV_TEXT_ALIGN_CENTER, 0);
-    lv_label_set_text(title, "Channels");
+    lv_label_set_text(title, TR("Channels"));
 #if UI_TOUCH_ONLY_PROFILE
     // The corner X this modal has always had, now the shared one. It is a child
     // of the modal like every other: the FLOATING flag keeps it pinned to the
@@ -17277,9 +17615,9 @@ static void openChanCfgModal() {
     lv_obj_set_style_text_color(hint, lv_color_hex(0xA7C7FF), 0);
     lv_obj_set_style_text_align(hint, LV_TEXT_ALIGN_CENTER, 0);
 #if UI_TOUCH_ONLY_PROFILE
-    lv_label_set_text(hint, "Tap a channel to edit");
+    lv_label_set_text(hint, TR("Tap a channel to edit"));
 #else
-    lv_label_set_text_fmt(hint, "Move  Enter=Edit  %s=Back", modalCloseKeyLabel());
+    lv_label_set_text_fmt(hint, TR("Move  Enter=Edit  %s=Back"), modalCloseKeyLabel());
 #endif
 
     const lv_color_t rowTextColor = (s_cfg.uiMode == UI_MODE_LIGHT)
@@ -17384,14 +17722,14 @@ static void refreshChanEditRows() {
                 lv_label_set_text(val, encText);
                 break;
             case CHAN_EDIT_LOCATION:
-                lv_label_set_text(val, s_chanEditShareLoc ? "On" : "Off");
+                lv_label_set_text(val, s_chanEditShareLoc ? TR("On") : TR("Off"));
                 break;
             case CHAN_EDIT_HOPS:
                 // "Default" names where the number comes from when unset, and
                 // shows it, because "this channel follows the device" is only
                 // useful if you can see what the device is set to.
                 if (!chanHopLimitSet(s_chanEditHopPlus1)) {
-                    lv_label_set_text_fmt(val, "Default (%u)", (unsigned)s_cfg.loraHopLimit);
+                    lv_label_set_text_fmt(val, TR("Default (%u)"), (unsigned)s_cfg.loraHopLimit);
                 } else {
                     lv_label_set_text_fmt(val, "%u", (unsigned)chanHopLimitGet(s_chanEditHopPlus1));
                 }
@@ -17526,9 +17864,9 @@ static void openChanEditModal(int slot) {
 #if UI_TOUCH_ONLY_PROFILE
     // Cancel/Save is on the buttons below now, so this only has to explain the
     // one gesture the buttons do not.
-    lv_label_set_text(hint, "Tap a field to change it");
+    lv_label_set_text(hint, TR("Tap a field to change it"));
 #else
-    lv_label_set_text_fmt(hint, "Move  Enter=Change  %s=Cancel", modalCloseKeyLabel());
+    lv_label_set_text_fmt(hint, TR("Move  Enter=Change  %s=Cancel"), modalCloseKeyLabel());
 #endif
 
     static const char *kRowLabel[CHAN_EDIT_ROW_COUNT] = CHAN_EDIT_LABELS;
@@ -17578,7 +17916,7 @@ static void openChanEditModal(int slot) {
         lv_obj_t *label = lv_label_create(row);
         lv_obj_set_style_text_font(label, kChanModalRowFont, 0);
         lv_obj_set_style_text_color(label, rowTextColor, 0);
-        lv_label_set_text(label, kRowLabel[i]);
+        lv_label_set_text(label, TR(kRowLabel[i]));
 
         // Key is a plain button into the text editor: its base64 runs to 44
         // characters, which no half-width cell can show, and a truncated key
@@ -17687,7 +18025,7 @@ static void commitChanTextModal() {
         // would leave the channel silently unable to talk to anybody, with the
         // modal reporting success.
         if (len <= 0) {
-            if (s_chanTextStatus) lv_label_set_text(s_chanTextStatus, "Invalid base64 key");
+            if (s_chanTextStatus) lv_label_set_text(s_chanTextStatus, TR("Invalid base64 key"));
             return;
         }
         memset(s_chanEditKey, 0, sizeof(s_chanEditKey));
@@ -17757,7 +18095,7 @@ static void openChanTextModal(int field) {
     lv_obj_set_style_text_font(title, &lv_font_montserrat_14, 0);
     lv_obj_set_style_text_color(title, lv_color_hex(0xD9E8FF), 0);
     lv_obj_set_style_text_align(title, LV_TEXT_ALIGN_CENTER, 0);
-    lv_label_set_text(title, editingName ? "Channel Name" : "Channel Key");
+    lv_label_set_text(title, editingName ? TR("Channel Name") : TR("Channel Key"));
 
     s_chanTextInput = lv_textarea_create(s_chanTextModal);
     if (!s_chanTextInput) {
@@ -17776,7 +18114,7 @@ static void openChanTextModal(int field) {
     lv_textarea_set_one_line(s_chanTextInput, true);
     lv_textarea_set_max_length(s_chanTextInput, editingName ? (uint32_t)kChanNameMax : 48);
     lv_textarea_set_placeholder_text(s_chanTextInput,
-                                     editingName ? "Leave blank to clear" : "base64 key");
+                                     editingName ? TR("Leave blank to clear") : TR("base64 key"));
 
     if (editingName) {
         lv_textarea_set_text(s_chanTextInput, s_chanEditName);
@@ -17792,15 +18130,15 @@ static void openChanTextModal(int field) {
     lv_obj_set_style_text_color(s_chanTextStatus, lv_color_hex(0xA7C7FF), 0);
     lv_obj_set_style_text_align(s_chanTextStatus, LV_TEXT_ALIGN_LEFT, 0);
 #if UI_TOUCH_ONLY_PROFILE
-    lv_label_set_text(s_chanTextStatus, "Type, then tap OK");
+    lv_label_set_text(s_chanTextStatus, TR("Type, then tap OK"));
 #else
     // Backspace erases here on every board (and backs out of an empty field), so
     // where Esc is the close key both have to be named.
     if (kModalCloseUsesEscape) {
-        lv_label_set_text_fmt(s_chanTextStatus, "Enter=OK  Bksp=Erase  %s=Back",
+        lv_label_set_text_fmt(s_chanTextStatus, TR("Enter=OK  Bksp=Erase  %s=Back"),
                               modalCloseKeyLabel());
     } else {
-        lv_label_set_text_fmt(s_chanTextStatus, "Enter=OK  %s=Erase/Back",
+        lv_label_set_text_fmt(s_chanTextStatus, TR("Enter=OK  %s=Erase/Back"),
                               modalCloseKeyLabel());
     }
 #endif
@@ -17856,7 +18194,7 @@ static void openChanTextModal(int field) {
     lv_obj_add_event_cb(cancelBtn, onChanTextCancelPressed, LV_EVENT_CLICKED, nullptr);
     lv_obj_t *cancelLbl = lv_label_create(cancelBtn);
     lv_obj_set_style_text_font(cancelLbl, &lv_font_montserrat_10, 0);
-    lv_label_set_text(cancelLbl, "Cancel");
+    lv_label_set_text(cancelLbl, TR("Cancel"));
     lv_obj_center(cancelLbl);
 
     lv_obj_t *okBtn = lv_btn_create(btnRow);
@@ -17865,7 +18203,7 @@ static void openChanTextModal(int field) {
     lv_obj_add_event_cb(okBtn, onChanTextOkPressed, LV_EVENT_CLICKED, nullptr);
     lv_obj_t *okLbl = lv_label_create(okBtn);
     lv_obj_set_style_text_font(okLbl, &lv_font_montserrat_10, 0);
-    lv_label_set_text(okLbl, "OK");
+    lv_label_set_text(okLbl, TR("OK"));
     lv_obj_center(okLbl);
 
     s_chanTextKeyboard = lv_keyboard_create(s_chanTextModal);
@@ -17984,11 +18322,11 @@ static void timeCfgSave() {
     if (manual) {
         if (applyManualClock(s_timeCfgYear, s_timeCfgMonth, s_timeCfgDay,
                              s_timeCfgHour, s_timeCfgMinute)) {
-            snprintf(s_cfgStatus, sizeof(s_cfgStatus), "Clock set: %04d-%02d-%02d %02d:%02d",
+            snprintf(s_cfgStatus, sizeof(s_cfgStatus), TR("Clock set: %04d-%02d-%02d %02d:%02d"),
                      s_timeCfgYear, s_timeCfgMonth, s_timeCfgDay,
                      s_timeCfgHour, s_timeCfgMinute);
         } else {
-            snprintf(s_cfgStatus, sizeof(s_cfgStatus), "Invalid date/time");
+            snprintf(s_cfgStatus, sizeof(s_cfgStatus), "%s", TR("Invalid date/time"));
             return;   // stay open so the bad field can be corrected
         }
     } else {
@@ -17996,7 +18334,7 @@ static void timeCfgSave() {
         // rather than wait out the six-hour re-arm window.
         s_ntpConfigured = false;
         s_gpsClockSyncMs = 0;
-        snprintf(s_cfgStatus, sizeof(s_cfgStatus), "Time source: Internet / GPS");
+        snprintf(s_cfgStatus, sizeof(s_cfgStatus), "%s", TR("Time source: Internet / GPS"));
     }
     closeTimeCfgModal();
     refreshCfgModal();
@@ -18062,7 +18400,7 @@ static void refreshTimeCfgRows() {
         if (!val) continue;
         switch (i) {
             case TIME_CFG_SOURCE:
-                lv_label_set_text(val, timeCfgIsManual() ? "Manual" : "Internet / GPS");
+                lv_label_set_text(val, timeCfgIsManual() ? TR("Manual") : TR("Internet / GPS"));
                 break;
             case TIME_CFG_YEAR:   lv_label_set_text_fmt(val, "%04d", s_timeCfgYear);   break;
             case TIME_CFG_MONTH:  lv_label_set_text_fmt(val, "%02d", s_timeCfgMonth);  break;
@@ -18080,7 +18418,7 @@ static void refreshTimeCfgRows() {
                               ? "Tap a field to step it"
                               : "Tap the source to change it");
 #else
-        lv_label_set_text_fmt(s_timeCfgHint, "L/R=Change   Enter=Save   %s=Back",
+        lv_label_set_text_fmt(s_timeCfgHint, TR("L/R=Change   Enter=Save   %s=Back"),
                               modalCloseKeyLabel());
 #endif
     }
@@ -18148,7 +18486,7 @@ static void openTimeCfgModal() {
     lv_obj_set_style_text_font(title, kChanModalTitleFont, 0);
     lv_obj_set_style_text_color(title, lv_color_hex(0xD9E8FF), 0);
     lv_obj_set_style_text_align(title, LV_TEXT_ALIGN_CENTER, 0);
-    lv_label_set_text(title, "Time and Date");
+    lv_label_set_text(title, TR("Time and Date"));
 
     s_timeCfgHint = lv_label_create(s_timeCfgModal);
     lv_obj_set_width(s_timeCfgHint, lv_pct(100));
@@ -18158,7 +18496,7 @@ static void openTimeCfgModal() {
     lv_label_set_text(s_timeCfgHint, "");
 
     static const char *kTimeRowLabel[TIME_CFG_ROW_COUNT] = {
-        "Source", "Year", "Month", "Day", "Hour", "Minute"
+        TR_NOOP("Source"), TR_NOOP("Year"), TR_NOOP("Month"), TR_NOOP("Day"), TR_NOOP("Hour"), TR_NOOP("Minute")
     };
     const lv_color_t rowTextColor = (s_cfg.uiMode == UI_MODE_LIGHT)
                                         ? lv_color_hex(0x13233D) : lv_color_hex(0xD9E8FF);
@@ -18191,7 +18529,7 @@ static void openTimeCfgModal() {
         lv_label_set_long_mode(label, LV_LABEL_LONG_DOT);
         lv_obj_set_style_text_font(label, kChanModalRowFont, 0);
         lv_obj_set_style_text_color(label, rowTextColor, 0);
-        lv_label_set_text(label, kTimeRowLabel[i]);
+        lv_label_set_text(label, TR(kTimeRowLabel[i]));
 
         lv_obj_t *val = lv_label_create(cell);
         s_timeCfgValues[i] = val;
@@ -18297,7 +18635,7 @@ static void applyAlertSoundSelection(int mode) {
     if ((uint8_t)mode != s_alertSoundOriginal) {
         persistMessageAlertSetting();
     }
-    snprintf(s_cfgStatus, sizeof(s_cfgStatus), "Notification sound: %s",
+    snprintf(s_cfgStatus, sizeof(s_cfgStatus), TR("Notification sound: %s"),
              msgAlertSoundName((uint8_t)mode));
     closeAlertSoundModal();
     refreshCfgModal();
@@ -18367,7 +18705,7 @@ static void openAlertSoundModal() {
     lv_obj_set_style_text_font(title, &lv_font_montserrat_16, 0);
     lv_obj_set_style_text_color(title, lv_color_hex(0xD9E8FF), 0);
     lv_obj_set_style_text_align(title, LV_TEXT_ALIGN_CENTER, 0);
-    lv_label_set_text(title, "Notification Sound");
+    lv_label_set_text(title, TR("Notification Sound"));
 
     lv_obj_t *hint = lv_label_create(s_alertSoundModal);
     lv_obj_set_width(hint, lv_pct(100));
@@ -18378,10 +18716,10 @@ static void openAlertSoundModal() {
     // Just the preview gesture now: the Apply button below says what commits,
     // so the hint no longer has to carry the whole discoverability burden.
     // Tapping the selected row again still applies, for muscle memory.
-    lv_label_set_text(hint, "Tap to preview");
+    lv_label_set_text(hint, TR("Tap to preview"));
 #else
     // Kept short so it fits the narrowed modal without wrapping to three lines.
-    lv_label_set_text_fmt(hint, "Move=Preview  Enter=OK  %s=Cancel",
+    lv_label_set_text_fmt(hint, TR("Move=Preview  Enter=OK  %s=Cancel"),
                           modalCloseKeyLabel());
 #endif
 
@@ -18433,7 +18771,7 @@ static void openAlertSoundModal() {
         s_alertSoundModal,
         [](lv_event_t *e) { LV_UNUSED(e); cancelAlertSoundModal(); },
         [](lv_event_t *e) { LV_UNUSED(e); applyAlertSoundSelection(s_alertSoundSelection); },
-        "Apply");
+        TR_NOOP("Apply"));
 #endif
 
     refreshAlertSoundSelection();
@@ -18482,8 +18820,8 @@ static void applyNotifyLedColorSelection(int color) {
 
     snprintf(s_cfgStatus,
              sizeof(s_cfgStatus),
-             "%s: %s",
-             s_notifyLedColorTargetDm ? "Direct Message LED" : "Channel Message LED",
+             TR("%s: %s"),
+             s_notifyLedColorTargetDm ? TR("Direct Message LED") : TR("Channel Message LED"),
              notifyLedColorName(chosen));
     closeNotifyLedColorModal();
     refreshCfgModal();
@@ -18558,14 +18896,14 @@ static void openNotifyLedColorModal(bool forDm) {
     lv_obj_set_style_text_font(title, &lv_font_montserrat_16, 0);
     lv_obj_set_style_text_color(title, lv_color_hex(0xD9E8FF), 0);
     lv_obj_set_style_text_align(title, LV_TEXT_ALIGN_CENTER, 0);
-    lv_label_set_text(title, forDm ? "Direct Message LED" : "Channel Message LED");
+    lv_label_set_text(title, forDm ? TR("Direct Message LED") : TR("Channel Message LED"));
 
     lv_obj_t *hint = lv_label_create(s_notifyLedColorModal);
     lv_obj_set_width(hint, lv_pct(100));
     lv_obj_set_style_text_font(hint, &lv_font_montserrat_10, 0);
     lv_obj_set_style_text_color(hint, lv_color_hex(0xA7C7FF), 0);
     lv_obj_set_style_text_align(hint, LV_TEXT_ALIGN_CENTER, 0);
-    lv_label_set_text_fmt(hint, "Move=Preview  Enter=OK  %s=Cancel",
+    lv_label_set_text_fmt(hint, TR("Move=Preview  Enter=OK  %s=Cancel"),
                           modalCloseKeyLabel());
 
     lv_obj_t *grid = lv_obj_create(s_notifyLedColorModal);
@@ -18609,7 +18947,7 @@ static void openNotifyLedColorModal(bool forDm) {
             lv_obj_t *off = lv_label_create(row);
             lv_obj_set_style_text_font(off, &lv_font_montserrat_12, 0);
             lv_obj_set_style_text_color(off, lv_color_hex(0xE8F1FF), 0);
-            lv_label_set_text(off, "OFF");
+            lv_label_set_text(off, TR("OFF"));
             lv_obj_center(off);
         } else {
             lv_obj_set_style_bg_color(row, tftColorToLv(notifyLedColorPreview565(color)), 0);
@@ -18665,7 +19003,7 @@ static void openCfgColorPickerModal() {
     lv_obj_set_style_text_font(title, &lv_font_montserrat_16, 0);
     lv_obj_set_style_text_color(title, lv_color_hex(0xD9E8FF), 0);
     lv_obj_set_style_text_align(title, LV_TEXT_ALIGN_CENTER, 0);
-    lv_label_set_text(title, "My Message Color");
+    lv_label_set_text(title, TR("My Message Color"));
 
     // Cardputer has no hint row: the line and its 6 px of padding are the space
     // the swatch grid needs to fit between the title and the bottom edge.
@@ -18777,7 +19115,7 @@ static void refreshCfgWifiScanModal(bool runScan) {
         s_cfgScannedWifiCount = 0;
         s_cfgWifiScanSelection = 0;
         if (s_cfgWifiScanStatus) {
-            lv_label_set_text(s_cfgWifiScanStatus, "Scanning WiFi networks...");
+            lv_label_set_text(s_cfgWifiScanStatus, TR("Scanning WiFi networks..."));
         }
         lv_timer_handler();
 
@@ -18837,7 +19175,7 @@ static void refreshCfgWifiScanModal(bool runScan) {
             }
             if (s_cfgWifiScanStatus) {
                 char status[64];
-                snprintf(status, sizeof(status), "Found %d network(s)", s_cfgScannedWifiCount);
+                snprintf(status, sizeof(status), TR("Found %d network(s)"), s_cfgScannedWifiCount);
                 lv_label_set_text(s_cfgWifiScanStatus, status);
             }
         } else if (s_cfgWifiScanStatus) {
@@ -18846,8 +19184,8 @@ static void refreshCfgWifiScanModal(bool runScan) {
             // networks found" is what made a transient radio state look like
             // there was nothing out there.
             lv_label_set_text(s_cfgWifiScanStatus,
-                              (found < 0) ? "Scan failed - Rescan to try again"
-                                          : "No networks found");
+                              (found < 0) ? TR("Scan failed - Rescan to try again")
+                                          : TR("No networks found"));
         }
         WiFi.scanDelete();
     }
@@ -18861,7 +19199,7 @@ static void refreshCfgWifiScanModal(bool runScan) {
                  "%s  %ld dBm%s",
                  entry.ssid,
                  (long)entry.rssi,
-                 entry.secure ? "  lock" : "  open");
+                 entry.secure ? TR("  lock") : TR("  open"));
 
         lv_obj_t *row = lv_label_create(s_cfgWifiScanList);
         lv_obj_set_width(row, lv_pct(100));
@@ -18951,7 +19289,7 @@ static void cfgWifiConnectFromPassModal() {
     if (!pass) pass = "";
 
     if (s_cfgWifiPassStatus) {
-        lv_label_set_text_fmt(s_cfgWifiPassStatus, "Connecting to %s...", s_cfgWifiPassTargetSsid);
+        lv_label_set_text_fmt(s_cfgWifiPassStatus, TR("Connecting to %s..."), s_cfgWifiPassTargetSsid);
         lv_timer_handler();
     }
 
@@ -18979,7 +19317,7 @@ static void cfgWifiConnectFromPassModal() {
     if (connected) {
         s_wifiStaKickMs = 0;
 
-        snprintf(s_cfgStatus, sizeof(s_cfgStatus), "WiFi connected: %s", s_cfgWifiPassTargetSsid);
+        snprintf(s_cfgStatus, sizeof(s_cfgStatus), TR("WiFi connected: %s"), s_cfgWifiPassTargetSsid);
         if (s_cfgWifiPickerOnboardingMode) {
             // Onboarding keeps this a runtime override on purpose: the scratch
             // copied below is what onboardingFinalize() folds into s_cfg once
@@ -19036,7 +19374,7 @@ static void cfgWifiConnectFromPassModal() {
 
     if (s_cfgWifiScanStatus) {
         lv_label_set_text_fmt(s_cfgWifiScanStatus,
-                              "Connection failed: %s",
+                              TR("Connection failed: %s"),
                               s_cfgWifiPassTargetSsid);
     }
     closeCfgWifiPassModal();
@@ -19108,7 +19446,7 @@ static void openCfgWifiPassModal(int scanIdx) {
     lv_obj_set_style_text_font(title, &lv_font_montserrat_14, 0);
     lv_obj_set_style_text_color(title, lv_color_hex(0xD9E8FF), 0);
     lv_obj_set_style_text_align(title, LV_TEXT_ALIGN_CENTER, 0);
-    lv_label_set_text_fmt(title, "Connect: %s", s_cfgWifiPassTargetSsid);
+    lv_label_set_text_fmt(title, TR("Connect: %s"), s_cfgWifiPassTargetSsid);
 
     s_cfgWifiPassInput = lv_textarea_create(s_cfgWifiPassModal);
     if (!s_cfgWifiPassInput) {
@@ -19128,7 +19466,7 @@ static void openCfgWifiPassModal(int scanIdx) {
     lv_textarea_set_max_length(s_cfgWifiPassInput, 63);
     lv_textarea_set_password_mode(s_cfgWifiPassInput, false);
     lv_textarea_set_placeholder_text(s_cfgWifiPassInput,
-                                     entry.secure ? "WiFi password" : "Open network (leave blank)");
+                                     entry.secure ? TR("WiFi password") : TR("Open network (leave blank)"));
 
     s_cfgWifiPassStatus = lv_label_create(s_cfgWifiPassModal);
     lv_obj_set_width(s_cfgWifiPassStatus, lv_pct(100));
@@ -19136,9 +19474,9 @@ static void openCfgWifiPassModal(int scanIdx) {
     lv_obj_set_style_text_color(s_cfgWifiPassStatus, lv_color_hex(0xA7C7FF), 0);
     lv_obj_set_style_text_align(s_cfgWifiPassStatus, LV_TEXT_ALIGN_LEFT, 0);
 #if UI_TOUCH_ONLY_PROFILE
-    lv_label_set_text(s_cfgWifiPassStatus, "Enter password, then tap Connect");
+    lv_label_set_text(s_cfgWifiPassStatus, TR("Enter password, then tap Connect"));
 #else
-    lv_label_set_text(s_cfgWifiPassStatus, "Enter=Connect  Backspace=Back");
+    lv_label_set_text(s_cfgWifiPassStatus, TR("Enter=Connect  Backspace=Back"));
 #endif
 
 #if UI_TOUCH_ONLY_PROFILE
@@ -19159,7 +19497,7 @@ static void openCfgWifiPassModal(int scanIdx) {
     lv_obj_add_event_cb(cancelBtn, onCfgWifiPassCancelPressed, LV_EVENT_CLICKED, nullptr);
     lv_obj_t *cancelLbl = lv_label_create(cancelBtn);
     lv_obj_set_style_text_font(cancelLbl, &lv_font_montserrat_10, 0);
-    lv_label_set_text(cancelLbl, "Cancel");
+    lv_label_set_text(cancelLbl, TR("Cancel"));
     lv_obj_center(cancelLbl);
 
     lv_obj_t *connectBtn = lv_btn_create(btnRow);
@@ -19168,7 +19506,7 @@ static void openCfgWifiPassModal(int scanIdx) {
     lv_obj_add_event_cb(connectBtn, onCfgWifiPassConnectPressed, LV_EVENT_CLICKED, nullptr);
     lv_obj_t *connectLbl = lv_label_create(connectBtn);
     lv_obj_set_style_text_font(connectLbl, &lv_font_montserrat_10, 0);
-    lv_label_set_text(connectLbl, "Connect");
+    lv_label_set_text(connectLbl, TR("Connect"));
     lv_obj_center(connectLbl);
 
     s_cfgWifiPassKeyboard = lv_keyboard_create(s_cfgWifiPassModal);
@@ -19221,7 +19559,7 @@ static void refreshCfgBleKbdModal() {
             // here. Worth showing for the whole attempt rather than only when
             // the peer asks: by the time it asks, the user is already looking
             // at the keyboard.
-            snprintf(line, sizeof(line), "%s\nType %06u then Enter on the keyboard",
+            snprintf(line, sizeof(line), TR("%s\nType %06u then Enter on the keyboard"),
                      status, (unsigned)passkey);
         } else {
             snprintf(line, sizeof(line), "%s", status);
@@ -19243,10 +19581,10 @@ static void refreshCfgBleKbdModal() {
         lv_label_set_long_mode(row, LV_LABEL_LONG_WRAP);
         lv_label_set_text(row,
                           bleKeyboardScanning()
-                              ? "Looking for keyboards..."
-                              : "No keyboards found yet.\n\nPut the keyboard into pairing "
+                              ? TR("Looking for keyboards...")
+                              : TR("No keyboards found yet.\n\nPut the keyboard into pairing "
                                 "mode, then press Scan.\n\nOnly Bluetooth LE keyboards can "
-                                "pair - this hardware has no Bluetooth Classic radio.");
+                                "pair - this hardware has no Bluetooth Classic radio."));
         return;
     }
 
@@ -19384,7 +19722,7 @@ static void openCfgBleKbdModal() {
     lv_obj_set_style_text_font(title, &lv_font_montserrat_16, 0);
     lv_obj_set_style_text_color(title, lv_color_hex(0xD9E8FF), 0);
     lv_obj_set_style_text_align(title, LV_TEXT_ALIGN_CENTER, 0);
-    lv_label_set_text(title, "Bluetooth Keyboard");
+    lv_label_set_text(title, TR("Bluetooth Keyboard"));
 
 #if UI_TOUCH_ONLY_PROFILE
     reserveHeltecCloseXRow(title);
@@ -19432,9 +19770,9 @@ static void openCfgBleKbdModal() {
 
     struct BleKbdButton { const char *label; lv_event_cb_t cb; };
     const BleKbdButton kButtons[] = {
-        { "Scan",   onCfgBleKbdScanPressed   },
-        { "Pair",   onCfgBleKbdPairPressed   },
-        { "Forget", onCfgBleKbdForgetPressed },
+        { TR_NOOP("Scan"),   onCfgBleKbdScanPressed   },
+        { TR_NOOP("Pair"),   onCfgBleKbdPairPressed   },
+        { TR_NOOP("Forget"), onCfgBleKbdForgetPressed },
     };
     for (const BleKbdButton &b : kButtons) {
         lv_obj_t *btn = lv_btn_create(btnRow);
@@ -19444,7 +19782,7 @@ static void openCfgBleKbdModal() {
         lv_obj_add_event_cb(btn, b.cb, LV_EVENT_CLICKED, nullptr);
         lv_obj_t *lbl = lv_label_create(btn);
         lv_obj_set_style_text_font(lbl, &lv_font_montserrat_10, 0);
-        lv_label_set_text(lbl, b.label);
+        lv_label_set_text(lbl, TR(b.label));
         lv_obj_center(lbl);
     }
 
@@ -19496,7 +19834,7 @@ static void openCfgWifiScanModal() {
     lv_obj_set_style_text_font(title, &lv_font_montserrat_16, 0);
     lv_obj_set_style_text_color(title, lv_color_hex(0xD9E8FF), 0);
     lv_obj_set_style_text_align(title, LV_TEXT_ALIGN_CENTER, 0);
-    lv_label_set_text(title, "Scan Networks");
+    lv_label_set_text(title, TR("Scan Networks"));
 
     s_cfgWifiScanStatus = lv_label_create(s_cfgWifiScanModal);
     lv_obj_set_width(s_cfgWifiScanStatus, lv_pct(100));
@@ -19545,7 +19883,7 @@ static void openCfgWifiScanModal() {
     lv_obj_add_event_cb(cancelBtn, onCfgWifiScanCancelPressed, LV_EVENT_CLICKED, nullptr);
     lv_obj_t *cancelLbl = lv_label_create(cancelBtn);
     lv_obj_set_style_text_font(cancelLbl, &lv_font_montserrat_10, 0);
-    lv_label_set_text(cancelLbl, "Cancel");
+    lv_label_set_text(cancelLbl, TR("Cancel"));
     lv_obj_center(cancelLbl);
 
     lv_obj_t *rescanBtn = lv_btn_create(btnRow);
@@ -19554,7 +19892,7 @@ static void openCfgWifiScanModal() {
     lv_obj_add_event_cb(rescanBtn, onCfgWifiScanRescanPressed, LV_EVENT_CLICKED, nullptr);
     lv_obj_t *rescanLbl = lv_label_create(rescanBtn);
     lv_obj_set_style_text_font(rescanLbl, &lv_font_montserrat_10, 0);
-    lv_label_set_text(rescanLbl, "Rescan");
+    lv_label_set_text(rescanLbl, TR("Rescan"));
     lv_obj_center(rescanLbl);
 
     lv_obj_t *connectBtn = lv_btn_create(btnRow);
@@ -19563,7 +19901,7 @@ static void openCfgWifiScanModal() {
     lv_obj_add_event_cb(connectBtn, onCfgWifiScanConnectPressed, LV_EVENT_CLICKED, nullptr);
     lv_obj_t *connectLbl = lv_label_create(connectBtn);
     lv_obj_set_style_text_font(connectLbl, &lv_font_montserrat_10, 0);
-    lv_label_set_text(connectLbl, "Connect");
+    lv_label_set_text(connectLbl, TR("Connect"));
     lv_obj_center(connectLbl);
 #endif
 
@@ -19613,7 +19951,7 @@ static void openCfgWifiPickerModal(bool forOnboarding) {
     lv_obj_set_style_text_font(title, &lv_font_montserrat_16, 0);
     lv_obj_set_style_text_color(title, lv_color_hex(0xD9E8FF), 0);
     lv_obj_set_style_text_align(title, LV_TEXT_ALIGN_CENTER, 0);
-    lv_label_set_text(title, "Choose WiFi");
+    lv_label_set_text(title, TR("Choose WiFi"));
 
     s_cfgWifiHint = lv_label_create(s_cfgWifiModal);
     lv_obj_set_width(s_cfgWifiHint, lv_pct(100));
@@ -19662,7 +20000,7 @@ static void openCfgWifiPickerModal(bool forOnboarding) {
     lv_obj_add_event_cb(cancelBtn, onCfgWifiCancelPressed, LV_EVENT_CLICKED, nullptr);
     lv_obj_t *cancelLbl = lv_label_create(cancelBtn);
     lv_obj_set_style_text_font(cancelLbl, &lv_font_montserrat_10, 0);
-    lv_label_set_text(cancelLbl, "Cancel");
+    lv_label_set_text(cancelLbl, TR("Cancel"));
     lv_obj_center(cancelLbl);
 
     lv_obj_t *newBtn = lv_btn_create(btnRow);
@@ -19671,7 +20009,7 @@ static void openCfgWifiPickerModal(bool forOnboarding) {
     lv_obj_add_event_cb(newBtn, onCfgWifiOpenScanPressed, LV_EVENT_CLICKED, nullptr);
     lv_obj_t *newLbl = lv_label_create(newBtn);
     lv_obj_set_style_text_font(newLbl, &lv_font_montserrat_10, 0);
-    lv_label_set_text(newLbl, "New");
+    lv_label_set_text(newLbl, TR("New"));
     lv_obj_center(newLbl);
 #endif
 
@@ -19736,7 +20074,7 @@ static void cfgPresetCommit(int idx) {
     // look like the picker had misunderstood.
     if (s_cfg.loraUsePreset && s_cfg.modemPreset == preset) {
         closeCfgPresetModal();
-        snprintf(s_cfgStatus, sizeof(s_cfgStatus), "Preset already %s.", name);
+        snprintf(s_cfgStatus, sizeof(s_cfgStatus), TR("Preset already %s."), name);
         refreshCfgModal();
         return;
     }
@@ -19753,7 +20091,7 @@ static void cfgPresetCommit(int idx) {
     applyPresetParams(s_cfg);
     persistConfigToPrefs();
 
-    snprintf(s_cfgStatus, sizeof(s_cfgStatus), "Preset: %s - rebooting...", name);
+    snprintf(s_cfgStatus, sizeof(s_cfgStatus), TR("Preset: %s - rebooting..."), name);
     refreshCfgModal();
     // Paint the status before going, exactly as the MQTT toggle does: a device
     // that reboots with no explanation reads as a crash.
@@ -19774,7 +20112,7 @@ static void cfgPresetAsk(int idx) {
         return;
     }
     snprintf(s_cfgConfirmText, sizeof(s_cfgConfirmText),
-             "Switch to %s and reboot?", kPresets[preset].name);
+             TR("Switch to %s and reboot?"), kPresets[preset].name);
     openCfgConfirmModal(-1, s_cfgConfirmText,
                         [](int i) { cfgPresetCommit(i); }, idx);
 }
@@ -19870,7 +20208,7 @@ static void openCfgPresetModal() {
     lv_obj_set_style_text_font(title, &lv_font_montserrat_14, 0);
     lv_obj_set_style_text_color(title, titleColor, 0);
     lv_obj_set_style_text_align(title, LV_TEXT_ALIGN_CENTER, 0);
-    lv_label_set_text(title, "Modem preset");
+    lv_label_set_text(title, TR("Modem preset"));
 
 #if UI_TOUCH_ONLY_PROFILE
     // A corner X, because the backdrop tap is a gesture you have to already
@@ -19890,8 +20228,8 @@ static void openCfgPresetModal() {
     lv_obj_set_style_text_color(warn, hintColor, 0);
     lv_obj_set_style_text_align(warn, LV_TEXT_ALIGN_CENTER, 0);
     lv_label_set_long_mode(warn, LV_LABEL_LONG_WRAP);
-    lv_label_set_text(warn, "Asks first, then reboots. Only nodes on the same "
-                            "preset can hear each other.");
+    lv_label_set_text(warn, TR("Asks first, then reboots. Only nodes on the same "
+                            "preset can hear each other."));
 
     lv_obj_t *list = lv_obj_create(s_cfgPresetModal);
     lv_obj_remove_style_all(list);
@@ -19938,7 +20276,7 @@ static void openCfgPresetModal() {
         // Marked in the text as well as by the highlight: the highlight also
         // means "where the selection is", and those part company the moment
         // anyone presses Down.
-        if (current) lv_label_set_text_fmt(name, "%s  (current)", p.name);
+        if (current) lv_label_set_text_fmt(name, TR("%s  (current)"), p.name);
         else         lv_label_set_text(name, p.name);
 
         if (kModalRowDescriptions) {
@@ -19952,7 +20290,7 @@ static void openCfgPresetModal() {
 #endif
             // The on-air channel name is the part that has to match the rest of
             // the mesh, so it leads.
-            lv_label_set_text_fmt(desc, "%s  SF%u  %.0f kHz",
+            lv_label_set_text_fmt(desc, TR("%s  SF%u  %.0f kHz"),
                                   p.channelName, (unsigned)p.sf, (double)p.bw);
         }
     }
@@ -19966,9 +20304,9 @@ static void openCfgPresetModal() {
     // Just what a tap does now: the corner X above says how to leave, so this
     // no longer has to carry that too. Tapping the backdrop still works for
     // anyone who already reaches for it.
-    lv_label_set_text(hint, "Tap a preset to apply.");
+    lv_label_set_text(hint, TR("Tap a preset to apply."));
 #else
-    lv_label_set_text_fmt(hint, "Move  Enter=Apply  %s=Cancel", modalCloseKeyLabel());
+    lv_label_set_text_fmt(hint, TR("Move  Enter=Apply  %s=Cancel"), modalCloseKeyLabel());
 #endif
 
     refreshCfgPresetSelection();
@@ -20022,7 +20360,7 @@ static void cfgOrientCommit(int idx) {
     // where we already are would read as the picker having misunderstood.
     if (s_cfg.uiOrientation == want) {
         closeCfgOrientModal();
-        snprintf(s_cfgStatus, sizeof(s_cfgStatus), "Already %s.", uiOrientName(want));
+        snprintf(s_cfgStatus, sizeof(s_cfgStatus), TR("Already %s."), uiOrientName(want));
         refreshCfgModal();
         return;
     }
@@ -20034,7 +20372,7 @@ static void cfgOrientCommit(int idx) {
     // down. persistConfigToPrefs() writes the standalone uiOrient key that
     // loadBootOrientation() reads on the way up.
     persistConfigToPrefs();
-    snprintf(s_cfgStatus, sizeof(s_cfgStatus), "%s - rebooting...", uiOrientName(want));
+    snprintf(s_cfgStatus, sizeof(s_cfgStatus), TR("%s - rebooting..."), uiOrientName(want));
     refreshCfgModal();
     lv_timer_handler();
     delay(900);
@@ -20050,7 +20388,7 @@ static void cfgOrientAsk(int idx) {
         return;
     }
     snprintf(s_cfgConfirmText, sizeof(s_cfgConfirmText),
-             "Switch to %s and reboot?", uiOrientName((uint8_t)idx));
+             TR("Switch to %s and reboot?"), uiOrientName((uint8_t)idx));
     openCfgConfirmModal(-1, s_cfgConfirmText,
                         [](int i) { cfgOrientCommit(i); }, idx);
 }
@@ -20130,7 +20468,7 @@ static void openCfgOrientModal() {
     lv_obj_set_style_text_font(title, &lv_font_montserrat_14, 0);
     lv_obj_set_style_text_color(title, titleColor, 0);
     lv_obj_set_style_text_align(title, LV_TEXT_ALIGN_CENTER, 0);
-    lv_label_set_text(title, "Screen orientation");
+    lv_label_set_text(title, TR("Screen orientation"));
 
 #if UI_TOUCH_ONLY_PROFILE
     // Same corner X as the preset picker, and for the same reason: every row
@@ -20148,7 +20486,7 @@ static void openCfgOrientModal() {
     lv_label_set_long_mode(warn, LV_LABEL_LONG_WRAP);
     // The panel rotation is fixed when the display comes up, which is the whole
     // reason this cannot just take effect.
-    lv_label_set_text(warn, "Asks first, then reboots.");
+    lv_label_set_text(warn, TR("Asks first, then reboots."));
 
     lv_obj_t *list = lv_obj_create(s_cfgOrientModal);
     lv_obj_remove_style_all(list);
@@ -20163,7 +20501,7 @@ static void openCfgOrientModal() {
     // Shapes rather than angles: "240x320" is checkable against what is in your
     // hand, where "rotation 3" is only meaningful next to the source.
     static const char *kOrientDesc[UI_ORIENT_COUNT] = {
-        "Wide", "Tall", "Tall, turned 180",
+        TR("Wide"), TR("Tall"), TR("Tall, turned 180"),
     };
 
     for (int i = 0; i < (int)UI_ORIENT_COUNT; i++) {
@@ -20192,7 +20530,7 @@ static void openCfgOrientModal() {
         // Marked in the text as well as by the highlight: the highlight also
         // means "where the selection is", and those part company the moment
         // anyone presses Down.
-        if (current) lv_label_set_text_fmt(name, "%s  (current)", uiOrientName((uint8_t)i));
+        if (current) lv_label_set_text_fmt(name, TR("%s  (current)"), uiOrientName((uint8_t)i));
         else         lv_label_set_text(name, uiOrientName((uint8_t)i));
 
         if (kModalRowDescriptions) {
@@ -20214,14 +20552,153 @@ static void openCfgOrientModal() {
     lv_obj_set_style_text_color(hint, hintColor, 0);
     lv_obj_set_style_text_align(hint, LV_TEXT_ALIGN_CENTER, 0);
 #if UI_TOUCH_ONLY_PROFILE
-    lv_label_set_text(hint, "Tap one to apply.");
+    lv_label_set_text(hint, TR("Tap one to apply."));
 #else
-    lv_label_set_text_fmt(hint, "Move  Enter=Apply  %s=Cancel", modalCloseKeyLabel());
+    lv_label_set_text_fmt(hint, TR("Move  Enter=Apply  %s=Cancel"), modalCloseKeyLabel());
 #endif
 
     refreshCfgOrientSelection();
 }
 #endif  // HAS_RUNTIME_ORIENTATION
+
+// ── UI language picker (issue #99) ───────────────────────────────────────────
+// Config -> Language. A dropdown of every built-in language, each in its own
+// name ("Español", "Français"), with Cancel/Save; Save stores the choice and
+// reboots, because every label already on screen was built in the old one and
+// a rebuild of every screen is exactly what a reboot is. Keyboard boards move
+// the dropdown with Up/Down, save with Enter and cancel with the close key.
+static lv_obj_t *s_cfgLangBackdrop = nullptr;
+static lv_obj_t *s_cfgLangModal = nullptr;
+static lv_obj_t *s_cfgLangDropdown = nullptr;
+
+static void closeCfgLangModal() {
+    if (lvObjValid(s_cfgLangBackdrop)) {
+        lv_obj_del(s_cfgLangBackdrop);
+    } else if (lvObjValid(s_cfgLangModal)) {
+        lv_obj_del(s_cfgLangModal);
+    }
+    s_cfgLangBackdrop = nullptr;
+    s_cfgLangModal = nullptr;
+    s_cfgLangDropdown = nullptr;
+}
+
+static void cfgLangCancel() {
+    closeCfgLangModal();
+    refreshCfgModal();
+}
+
+static void cfgLangSave() {
+    const uint8_t want = lvObjValid(s_cfgLangDropdown)
+                             ? (uint8_t)lv_dropdown_get_selected(s_cfgLangDropdown)
+                             : s_cfg.uiLanguage;
+    closeCfgLangModal();
+    if (want >= LANG_COUNT || want == s_cfg.uiLanguage) {
+        snprintf(s_cfgStatus, sizeof(s_cfgStatus), TR("Already %s."),
+                 kUiLangNames[s_cfg.uiLanguage < LANG_COUNT ? s_cfg.uiLanguage : LANG_EN]);
+        refreshCfgModal();
+        return;
+    }
+    s_cfg.uiLanguage = want;
+    persistConfigToPrefs();
+    // Said in the language being left: it is the one still on screen.
+    snprintf(s_cfgStatus, sizeof(s_cfgStatus), TR("%s - rebooting..."), kUiLangNames[want]);
+    refreshCfgModal();
+    lv_timer_handler();
+    delay(900);
+    flushPersistentState();   // transcripts too, before we go
+    ESP.restart();
+}
+
+static void stepCfgLang(int delta) {
+    if (!lvObjValid(s_cfgLangDropdown) || delta == 0) return;
+    int next = (int)lv_dropdown_get_selected(s_cfgLangDropdown) + delta;
+    if (next < 0) next = 0;
+    if (next > (int)LANG_COUNT - 1) next = (int)LANG_COUNT - 1;
+    lv_dropdown_set_selected(s_cfgLangDropdown, (uint32_t)next);
+}
+
+static void onCfgLangBackdropPressed(lv_event_t *e) {
+    if (lv_event_get_target_obj(e) != s_cfgLangBackdrop) return;
+    cfgLangCancel();
+}
+
+static void openCfgLangModal() {
+    if (!s_rootScreen || s_cfgLangModal || s_cfgLangBackdrop) return;
+
+    const int w = lv_disp_get_hor_res(NULL);
+    const int h = lv_disp_get_ver_res(NULL);
+    int modalW = w - 24;
+    if (modalW < 170) modalW = w - 8;
+    if (modalW > 260) modalW = 260;
+
+    s_cfgLangBackdrop = lv_obj_create(s_rootScreen);
+    lv_obj_set_size(s_cfgLangBackdrop, w, h);
+    lv_obj_align(s_cfgLangBackdrop, LV_ALIGN_CENTER, 0, 0);
+    lv_obj_clear_flag(s_cfgLangBackdrop, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_add_flag(s_cfgLangBackdrop, LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_set_style_bg_color(s_cfgLangBackdrop, lv_color_hex(0x000000), 0);
+    lv_obj_set_style_bg_opa(s_cfgLangBackdrop, LV_OPA_40, 0);
+    lv_obj_set_style_border_width(s_cfgLangBackdrop, 0, 0);
+    lv_obj_set_style_pad_all(s_cfgLangBackdrop, 0, 0);
+    lv_obj_add_event_cb(s_cfgLangBackdrop, onCfgLangBackdropPressed, LV_EVENT_CLICKED, nullptr);
+
+    s_cfgLangModal = lv_obj_create(s_cfgLangBackdrop);
+    lv_obj_set_size(s_cfgLangModal, modalW, LV_SIZE_CONTENT);
+    lv_obj_align(s_cfgLangModal, LV_ALIGN_CENTER, 0, 0);
+    lv_obj_clear_flag(s_cfgLangModal, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_add_flag(s_cfgLangModal, LV_OBJ_FLAG_CLICKABLE);
+#if defined(DEVICE_TDECK_PRO)
+    lv_obj_set_style_bg_color(s_cfgLangModal, lv_color_make(255, 255, 255), 0);
+    lv_obj_set_style_border_color(s_cfgLangModal, lv_color_make(0, 0, 0), 0);
+#else
+    lv_obj_set_style_bg_color(s_cfgLangModal, lv_color_hex(0x0E285B), 0);
+    lv_obj_set_style_border_color(s_cfgLangModal, lv_color_hex(0x5C86C6), 0);
+#endif
+    lv_obj_set_style_bg_opa(s_cfgLangModal, LV_OPA_COVER, 0);
+    lv_obj_set_style_border_width(s_cfgLangModal, 1, 0);
+    lv_obj_set_style_pad_all(s_cfgLangModal, 8, 0);
+    lv_obj_set_style_pad_row(s_cfgLangModal, 8, 0);
+    lv_obj_set_flex_flow(s_cfgLangModal, LV_FLEX_FLOW_COLUMN);
+    lv_obj_set_flex_align(s_cfgLangModal, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_CENTER,
+                          LV_FLEX_ALIGN_CENTER);
+    lv_obj_move_foreground(s_cfgLangBackdrop);
+
+    lv_obj_t *title = lv_label_create(s_cfgLangModal);
+    lv_obj_set_width(title, lv_pct(100));
+    lv_obj_set_style_text_font(title, &lv_font_montserrat_16, 0);
+    lv_obj_set_style_text_color(title, lv_color_hex(0xD9E8FF), 0);
+    lv_obj_set_style_text_align(title, LV_TEXT_ALIGN_CENTER, 0);
+    lv_label_set_text(title, TR("Language"));
+
+    // Options in each language's own name, so the list is readable whatever
+    // language the device is currently in.
+    char options[160] = "";
+    for (int i = 0; i < (int)LANG_COUNT; i++) {
+        if (i) strlcat(options, "\n", sizeof(options));
+        strlcat(options, kUiLangNames[i], sizeof(options));
+    }
+    s_cfgLangDropdown = lv_dropdown_create(s_cfgLangModal);
+    lv_obj_set_width(s_cfgLangDropdown, lv_pct(100));
+    lv_dropdown_set_options(s_cfgLangDropdown, options);
+    lv_dropdown_set_selected(s_cfgLangDropdown,
+                             s_cfg.uiLanguage < LANG_COUNT ? s_cfg.uiLanguage : LANG_EN);
+    lv_obj_set_style_text_font(s_cfgLangDropdown, &lv_font_montserrat_14, 0);
+
+#if UI_TOUCH_ONLY_PROFILE
+    appendHeltecCancelSaveRow(
+        s_cfgLangModal,
+        [](lv_event_t *e) { LV_UNUSED(e); cfgLangCancel(); },
+        [](lv_event_t *e) { LV_UNUSED(e); cfgLangSave(); });
+#else
+    lv_obj_t *hint = lv_label_create(s_cfgLangModal);
+    lv_obj_set_width(hint, lv_pct(100));
+    lv_obj_set_style_text_font(hint, &lv_font_montserrat_10, 0);
+    lv_obj_set_style_text_color(hint, lv_color_hex(0xA7C7FF), 0);
+    lv_obj_set_style_text_align(hint, LV_TEXT_ALIGN_CENTER, 0);
+    lv_label_set_long_mode(hint, LV_LABEL_LONG_WRAP);
+    lv_label_set_text_fmt(hint, TR("Up/Down=Change  Enter=Save  %s=Cancel"), modalCloseKeyLabel());
+#endif
+}
 
 static void closeCfgNodeNameModal() {
     if (lvObjValid(s_cfgNodeNameBackdrop)) {
@@ -20288,7 +20765,7 @@ static void cfgNodeNameSave() {
     shortName.trim();
 
     if (longName.length() == 0) {
-        cfgNodeNameSetStatus("Long name cannot be empty");
+        cfgNodeNameSetStatus(TR("Long name cannot be empty"));
         cfgNodeNameSetFocus(0);
         return;
     }
@@ -20317,8 +20794,8 @@ static void cfgNodeNameSave() {
                       s_cfg.nodeLong, s_cfg.nodeShort);
     }
 
-    snprintf(s_cfgStatus, sizeof(s_cfgStatus), "Node Name: %s (%s)%s",
-             s_cfg.nodeLong, s_cfg.nodeShort, changed ? "" : " (unchanged)");
+    snprintf(s_cfgStatus, sizeof(s_cfgStatus), TR("Node Name: %s (%s)%s"),
+             s_cfg.nodeLong, s_cfg.nodeShort, changed ? "" : TR(" (unchanged)"));
     closeCfgNodeNameModal();
     refreshCfgModal();
 }
@@ -20420,7 +20897,7 @@ static void openCfgNodeNameModal() {
     lv_obj_set_style_text_font(title, &lv_font_montserrat_14, 0);
     lv_obj_set_style_text_color(title, titleColor, 0);
     lv_obj_set_style_text_align(title, LV_TEXT_ALIGN_CENTER, 0);
-    lv_label_set_text(title, "Node Name");
+    lv_label_set_text(title, TR("Node Name"));
 
     // Side by side rather than stacked: it keeps the whole editor inside one
     // screen on the 135-line panels, and the two fields are read together
@@ -20474,12 +20951,13 @@ static void openCfgNodeNameModal() {
         lv_textarea_set_cursor_pos(ta, LV_TEXTAREA_CURSOR_LAST);
         lv_obj_add_event_cb(ta, onCfgNodeNameFieldPressed, LV_EVENT_CLICKED,
                             (void *)(intptr_t)which);
+        accentAttach(ta);
         return ta;
     };
 
-    s_cfgNodeNameLongInput  = makeField("Long name", 3, sizeof(s_cfg.nodeLong) - 1,
+    s_cfgNodeNameLongInput  = makeField(TR("Long name"), 3, sizeof(s_cfg.nodeLong) - 1,
                                         s_cfg.nodeLong, 0);
-    s_cfgNodeNameShortInput = makeField("Short", 1, sizeof(s_cfg.nodeShort) - 1,
+    s_cfgNodeNameShortInput = makeField(TR("Short"), 1, sizeof(s_cfg.nodeShort) - 1,
                                         s_cfg.nodeShort, 1);
     if (!s_cfgNodeNameLongInput || !s_cfgNodeNameShortInput) {
         logLvglMemDiag("node name modal aborted (low LVGL mem)");
@@ -20493,9 +20971,9 @@ static void openCfgNodeNameModal() {
     lv_obj_set_style_text_color(s_cfgNodeNameStatus, captionColor, 0);
     lv_obj_set_style_text_align(s_cfgNodeNameStatus, LV_TEXT_ALIGN_LEFT, 0);
 #if UI_TOUCH_ONLY_PROFILE
-    lv_label_set_text(s_cfgNodeNameStatus, "Tap a field to edit, then Save");
+    lv_label_set_text(s_cfgNodeNameStatus, TR("Tap a field to edit, then Save"));
 #else
-    lv_label_set_text_fmt(s_cfgNodeNameStatus, "Enter=Save  Tab=Field  %s=Erase/Back",
+    lv_label_set_text_fmt(s_cfgNodeNameStatus, TR("Enter=Save  Tab=Field  %s=Erase/Back"),
                           modalCloseKeyLabel());
 #endif
 
@@ -20518,7 +20996,7 @@ static void openCfgNodeNameModal() {
     lv_obj_add_event_cb(closeBtn, onCfgNodeNameClosePressed, LV_EVENT_CLICKED, nullptr);
     lv_obj_t *closeLbl = lv_label_create(closeBtn);
     lv_obj_set_style_text_font(closeLbl, &lv_font_montserrat_10, 0);
-    lv_label_set_text(closeLbl, "Close");
+    lv_label_set_text(closeLbl, TR("Close"));
     lv_obj_center(closeLbl);
 
     lv_obj_t *saveBtn = lv_btn_create(btnRow);
@@ -20527,7 +21005,7 @@ static void openCfgNodeNameModal() {
     lv_obj_add_event_cb(saveBtn, onCfgNodeNameSavePressed, LV_EVENT_CLICKED, nullptr);
     lv_obj_t *saveLbl = lv_label_create(saveBtn);
     lv_obj_set_style_text_font(saveLbl, &lv_font_montserrat_10, 0);
-    lv_label_set_text(saveLbl, "Save");
+    lv_label_set_text(saveLbl, TR("Save"));
     lv_obj_center(saveLbl);
 
     s_cfgNodeNameKeyboard = lv_keyboard_create(s_cfgNodeNameModal);
@@ -20562,6 +21040,7 @@ static void closeCfgModal() {
     closeCfgWifiPickerModal();
     closeCfgNodeNameModal();
     closeCfgPresetModal();
+    closeCfgLangModal();
 #if HAS_RUNTIME_ORIENTATION
     closeCfgOrientModal();
 #endif
@@ -20613,7 +21092,7 @@ static void openCfgActionMessageModal(const char *msg, const char *titleText) {
         displayMsg++;
     }
     if (!displayMsg || !displayMsg[0]) {
-        displayMsg = "No result details available.";
+        displayMsg = TR("No result details available.");
     }
 
     Serial.printf("[lvgl-cfg] popup: %s\n", displayMsg);
@@ -20682,7 +21161,7 @@ static void openCfgActionMessageModal(const char *msg, const char *titleText) {
     lv_obj_set_style_text_font(title, &lv_font_montserrat_12, 0);
     lv_obj_set_style_text_color(title, titleTextColor, 0);
     lv_obj_set_style_text_align(title, LV_TEXT_ALIGN_CENTER, 0);
-    lv_label_set_text(title, (titleText && titleText[0]) ? titleText : "Action Result");
+    lv_label_set_text(title, (titleText && titleText[0]) ? titleText : TR("Action Result"));
 
     lv_obj_t *bodyPanel = lv_obj_create(s_cfgActionMsgModal);
     lv_obj_set_width(bodyPanel, contentW);
@@ -20725,7 +21204,7 @@ static void openCfgActionMessageModal(const char *msg, const char *titleText) {
     lv_obj_set_style_text_font(hint, &lv_font_montserrat_10, 0);
     lv_obj_set_style_text_color(hint, hintTextColor, 0);
     lv_obj_set_style_text_align(hint, LV_TEXT_ALIGN_CENTER, 0);
-    lv_label_set_text_fmt(hint, "%s = Close", modalCloseKeyLabel());
+    lv_label_set_text_fmt(hint, TR("%s = Close"), modalCloseKeyLabel());
 #endif
 
     lv_obj_move_foreground(s_cfgActionMsgBackdrop);
@@ -20803,7 +21282,7 @@ static void openNodeInfoModal() {
     lv_obj_set_width(title, lv_pct(100));
     lv_obj_set_style_text_font(title, &lv_font_montserrat_12, 0);
     lv_obj_set_style_text_color(title, lv_color_hex(0xD9E8FF), 0);
-    lv_label_set_text(title, "Device Info");
+    lv_label_set_text(title, TR("Device Info"));
 
 #if UI_TOUCH_ONLY_PROFILE
     // The title no longer has to share its row with a Close button: the X
@@ -20851,7 +21330,7 @@ static void openNodeInfoModal() {
 
 #if HAS_ENV_SENSOR_TELEMETRY
     if (envCol) {
-        infoAddRow(envCol, bodyFont, 0xA7C7FF, "Environment");
+        infoAddRow(envCol, bodyFont, 0xA7C7FF, TR("Environment"));
         char line[48];
         for (uint8_t i = 0; i < envCount; i++) {
             EnvSensorInfo si;
@@ -20859,20 +21338,20 @@ static void openNodeInfoModal() {
                 // Detected but not answering right now. Naming it is more use
                 // than dropping the row: it says the part is there and the read
                 // failed, which is a different problem from having no sensor.
-                infoAddRow(envCol, bodyFont, 0xD9E8FF, "sensor: read failed");
+                infoAddRow(envCol, bodyFont, 0xD9E8FF, TR("sensor: read failed"));
                 continue;
             }
             infoAddRow(envCol, bodyFont, 0xD9E8FF, si.name ? si.name : "sensor");
             if (si.hasTemperature) {
-                snprintf(line, sizeof(line), "  Temp   %.1f C", si.temperatureC);
+                snprintf(line, sizeof(line), TR("  Temp   %.1f C"), si.temperatureC);
                 infoAddRow(envCol, bodyFont, 0xD9E8FF, line);
             }
             if (si.hasHumidity) {
-                snprintf(line, sizeof(line), "  Humid  %.1f %%", si.humidityPct);
+                snprintf(line, sizeof(line), TR("  Humid  %.1f %%"), si.humidityPct);
                 infoAddRow(envCol, bodyFont, 0xD9E8FF, line);
             }
             if (si.hasPressure) {
-                snprintf(line, sizeof(line), "  Press  %.1f hPa", si.pressureHpa);
+                snprintf(line, sizeof(line), TR("  Press  %.1f hPa"), si.pressureHpa);
                 infoAddRow(envCol, bodyFont, 0xD9E8FF, line);
             }
         }
@@ -20890,10 +21369,10 @@ static void openNodeInfoModal() {
     lv_obj_set_style_pad_top(hint, 3, 0);
 #if defined(DEVICE_TDECK) || defined(DEVICE_TDECK_PRO)
     // T-Deck keyboards have no dedicated Up/Down keys; J/K drive scroll.
-    lv_label_set_text_fmt(hint, "J/K = Scroll   %s = Close", modalCloseKeyLabel());
+    lv_label_set_text_fmt(hint, TR("J/K = Scroll   %s = Close"), modalCloseKeyLabel());
 #else
     lv_label_set_text_fmt(hint,
-                          "Up/Down/J/K = Scroll   %s = Close",
+                          TR("Up/Down/J/K = Scroll   %s = Close"),
                           modalCloseKeyLabel());
 #endif
 #endif   // !UI_TOUCH_ONLY_PROFILE
@@ -20921,12 +21400,12 @@ static void buildSysStatsColumns(char *cpuOut, char *memOut, char *stoOut, size_
     const uint8_t battPct = batteryReadPercent();
 
     snprintf(cpuOut, sz,
-             "%s x%u\n"
+             TR("%s x%u\n"
              "Clock: %u MHz\n"
              "Revision: %u\n"
              "Uptime: %luh %02lum %02lus\n"
              "Loop rate: %lu /s\n"
-             "Battery: %u%% %.3fV",
+             "Battery: %u%% %.3fV"),
              ESP.getChipModel(), (unsigned)ESP.getChipCores(),
              (unsigned)ESP.getCpuFreqMHz(),
              (unsigned)ESP.getChipRevision(),
@@ -20937,11 +21416,11 @@ static void buildSysStatsColumns(char *cpuOut, char *memOut, char *stoOut, size_
              (unsigned)battPct, (double)battV);
 
     snprintf(memOut, sz,
-             "Used: %lu KB (%lu%%)\n"
+             TR("Used: %lu KB (%lu%%)\n"
              "Total: %lu KB\n"
              "Free: %lu KB\n"
              "Min free: %lu KB\n"
-             "Max block: %lu KB",
+             "Max block: %lu KB"),
              (unsigned long)(heapUsed / 1024UL), (unsigned long)heapPct,
              (unsigned long)(heapTotal / 1024UL),
              (unsigned long)(heapFree / 1024UL),
@@ -20950,11 +21429,11 @@ static void buildSysStatsColumns(char *cpuOut, char *memOut, char *stoOut, size_
 
     if (psramTotal > 0) {
         snprintf(stoOut, sz,
-                 "PSRAM free: %lu KB\n"
+                 TR("PSRAM free: %lu KB\n"
                  "PSRAM total: %lu KB\n"
                  "Flash: %lu KB\n"
                  "Sketch: %lu KB\n"
-                 "App free: %lu KB",
+                 "App free: %lu KB"),
                  (unsigned long)(psramFree / 1024UL),
                  (unsigned long)(psramTotal / 1024UL),
                  (unsigned long)(ESP.getFlashChipSize() / 1024UL),
@@ -20962,10 +21441,10 @@ static void buildSysStatsColumns(char *cpuOut, char *memOut, char *stoOut, size_
                  (unsigned long)(ESP.getFreeSketchSpace() / 1024UL));
     } else {
         snprintf(stoOut, sz,
-                 "PSRAM: none\n"
+                 TR("PSRAM: none\n"
                  "Flash: %lu KB\n"
                  "Sketch: %lu KB\n"
-                 "App free: %lu KB",
+                 "App free: %lu KB"),
                  (unsigned long)(ESP.getFlashChipSize() / 1024UL),
                  (unsigned long)(ESP.getSketchSize() / 1024UL),
                  (unsigned long)(ESP.getFreeSketchSpace() / 1024UL));
@@ -21091,7 +21570,7 @@ static void openSysStatsModal() {
     lv_obj_set_style_text_color(title, lv_color_hex(0x6BF0DC), 0);
 #endif
     lv_obj_set_style_text_align(title, LV_TEXT_ALIGN_CENTER, 0);
-    lv_label_set_text(title, "System Stats");
+    lv_label_set_text(title, TR("System Stats"));
 
     if (wide) {
         // A flex-row band that grows to fill the space between title and hint,
@@ -21153,7 +21632,7 @@ static void openSysStatsModal() {
     lv_obj_set_style_text_color(hint, lv_color_hex(0x7FD8CC), 0);
 #endif
     lv_obj_set_style_text_align(hint, LV_TEXT_ALIGN_CENTER, 0);
-    lv_label_set_text_fmt(hint, "Any key / %s = Close", modalCloseKeyLabel());
+    lv_label_set_text_fmt(hint, TR("Any key / %s = Close"), modalCloseKeyLabel());
 #endif
 
     s_sysStatsOpenedMs = millis();
@@ -22172,18 +22651,18 @@ static LiveTrafficClass classifyLiveTraffic(const DisplayLine &dl) {
 // just above.
 static const char *liveFilterName(uint8_t f) {
     switch (f) {
-        case LIVE_FILTER_TEXT:  return "Text";
+        case LIVE_FILTER_TEXT:  return TR("Text");
         // "DMs" rather than "Direct messages": this name has to fit a grid cell
         // on a 240px panel and the header chip beside it.
-        case LIVE_FILTER_DM:    return "DMs";
-        case LIVE_FILTER_POS:   return "Position";
-        case LIVE_FILTER_TLM:   return "Telemetry";
-        case LIVE_FILTER_NODE:  return "Node info";
-        case LIVE_FILTER_ACK:   return "ACKs";
-        case LIVE_FILTER_ENC:   return "Encrypted";
-        case LIVE_FILTER_ERROR: return "Errors";
-        case LIVE_FILTER_OTHER: return "Other";
-        default:                return "All";
+        case LIVE_FILTER_DM:    return TR("DMs");
+        case LIVE_FILTER_POS:   return TR("Position");
+        case LIVE_FILTER_TLM:   return TR("Telemetry");
+        case LIVE_FILTER_NODE:  return TR("Node info");
+        case LIVE_FILTER_ACK:   return TR("ACKs");
+        case LIVE_FILTER_ENC:   return TR("Encrypted");
+        case LIVE_FILTER_ERROR: return TR("Errors");
+        case LIVE_FILTER_OTHER: return TR("Other");
+        default:                return TR("All");
     }
 }
 
@@ -22818,7 +23297,7 @@ static void openNodesFilterDialog() {
     lv_obj_set_width(title, lv_pct(100));
     lv_obj_set_style_text_font(title, &lv_font_montserrat_12, 0);
     lv_obj_set_style_text_color(title, lv_color_hex(0xD9E8FF), 0);
-    lv_label_set_text(title, "Filter Nodes");
+    lv_label_set_text(title, TR("Filter Nodes"));
 
     s_nodesFilterInput = lv_textarea_create(s_nodesFilterDialog);
     if (!s_nodesFilterInput) {
@@ -22838,7 +23317,7 @@ static void openNodesFilterDialog() {
     lv_obj_set_style_pad_right(s_nodesFilterInput, 3, 0);
     lv_textarea_set_one_line(s_nodesFilterInput, true);
     lv_textarea_set_max_length(s_nodesFilterInput, kNodesFilterMax);
-    lv_textarea_set_placeholder_text(s_nodesFilterInput, "Type to filter nodes");
+    lv_textarea_set_placeholder_text(s_nodesFilterInput, TR("Type to filter nodes"));
     if (s_nodesFilterOpen && s_nodesFilterLen > 0) {
         lv_textarea_set_text(s_nodesFilterInput, s_nodesFilter);
     } else {
@@ -24023,12 +24502,12 @@ static void refreshNodesMap(const NodeEntry *node) {
             lv_obj_clear_flag(s_nodesMapCoords, LV_OBJ_FLAG_HIDDEN);
             lv_obj_align(s_nodesMapCoords, LV_ALIGN_CENTER, 0, 2);
             if (!kStateMapsEnabled) {
-                lv_label_set_text(s_nodesMapCoords, "State map disabled");
+                lv_label_set_text(s_nodesMapCoords, TR("State map disabled"));
             } else {
                 lv_label_set_text(s_nodesMapCoords,
                                   (!s_stateMapBootstrapTried || s_stateMapBootstrapInProgress)
-                                      ? "Preparing state maps..."
-                                      : "State map unavailable");
+                                      ? TR("Preparing state maps...")
+                                      : TR("State map unavailable"));
             }
         } else {
             lv_obj_add_flag(s_nodesMapCoords, LV_OBJ_FLAG_HIDDEN);
@@ -24044,13 +24523,13 @@ static void refreshNodesMap(const NodeEntry *node) {
     }
 
     if (!kStateMapsEnabled) {
-        lv_label_set_text(s_nodesMapTitle, "Map (off)");
+        lv_label_set_text(s_nodesMapTitle, TR("Map (off)"));
     } else {
         if (visibleTiles > 0) {
             lv_label_set_text(s_nodesMapTitle,
-                              s_nodesMapLastRenderUsedDetail ? "Detail Map" : "State Map");
+                              s_nodesMapLastRenderUsedDetail ? TR("Detail Map") : TR("State Map"));
         } else {
-            lv_label_set_text(s_nodesMapTitle, "Map (loading)");
+            lv_label_set_text(s_nodesMapTitle, TR("Map (loading)"));
         }
     }
 }
@@ -24314,7 +24793,7 @@ static void nodeLocateRequestLiveTiles(uint32_t delayMs, bool clearCanvas) {
     s_nodeLocateTileJobCount = 0;
     s_nodeLocateTileJobNext = 0;
     if (clearCanvas) nodeLocateClearLiveCanvas();
-    if (!s_nodeLocateHasPixels) nodeLocateSetStatus("Loading map...");
+    if (!s_nodeLocateHasPixels) nodeLocateSetStatus(TR("Loading map..."));
     nodeLocateUpdateLiveMarker();
 }
 
@@ -24755,7 +25234,7 @@ static void serviceNodeLocateLiveMap(uint32_t nowMs) {
         && (int32_t)(nowMs - s_nodeLocateRefreshAtMs) >= 0) {
         if (!nodeLocateTileBufferReady()) {
             s_nodeLocateRefreshPending = false;
-            nodeLocateSetStatus("Map memory unavailable");
+            nodeLocateSetStatus(TR("Map memory unavailable"));
             return;
         }
         nodeLocateBuildVisibleTileJobs();
@@ -24770,8 +25249,8 @@ static void serviceNodeLocateLiveMap(uint32_t nowMs) {
                && s_nodeLocateTileJobNext >= s_nodeLocateTileJobCount
                && !s_nodeLocateHasPixels) {
         nodeLocateSetStatus(nodesPanelCanDownloadTiles()
-                                ? "Map unavailable"
-                                : "Waiting for Wi-Fi...");
+                                ? TR("Map unavailable")
+                                : TR("Waiting for Wi-Fi..."));
     }
 }
 
@@ -24945,7 +25424,7 @@ static void openNodeLocateModal(uint32_t nodeId) {
     lv_obj_set_style_text_align(title, LV_TEXT_ALIGN_CENTER, 0);
     lv_label_set_long_mode(title, LV_LABEL_LONG_DOT);
     char titleBuf[56];
-    snprintf(titleBuf, sizeof(titleBuf), "Locate: %s", who);
+    snprintf(titleBuf, sizeof(titleBuf), TR("Locate: %s"), who);
     setLabelTextEmojiSafe(title, titleBuf);
 
     // The map area. Its own container so the renderer can position the image and
@@ -25014,7 +25493,7 @@ static void openNodeLocateModal(uint32_t nodeId) {
     lv_obj_set_style_pad_all(s_nodeLocateStatusLabel, 3, 0);
     lv_obj_set_style_radius(s_nodeLocateStatusLabel, 3, 0);
     lv_label_set_text(s_nodeLocateStatusLabel,
-                      s_nodeLocateCanvasBuf ? "Loading map..." : "Map memory unavailable");
+                      s_nodeLocateCanvasBuf ? TR("Loading map...") : TR("Map memory unavailable"));
     lv_obj_center(s_nodeLocateStatusLabel);
 
     lv_obj_t *attribution = lv_label_create(s_nodeLocateTileLayer);
@@ -25024,7 +25503,7 @@ static void openNodeLocateModal(uint32_t nodeId) {
     lv_obj_set_style_bg_opa(attribution, chipOpa, 0);
     lv_obj_set_style_pad_left(attribution, 2, 0);
     lv_obj_set_style_pad_right(attribution, 2, 0);
-    lv_label_set_text(attribution, "(c) OpenStreetMap");
+    lv_label_set_text(attribution, TR("(c) OpenStreetMap"));
     lv_obj_align(attribution, LV_ALIGN_BOTTOM_LEFT, 2, -2);
 
     // A map pin rather than a dot: a round head over a short stem, tip down.
@@ -25318,24 +25797,24 @@ static void nodeLosRenderResult() {
                             (int)Y((double)a.terrainM[a.worstIdx]) - 3);
     }
 
-    const char *vstr = (a.verdict == LOS_BLOCKED)  ? "NO LINE OF SIGHT"
-                     : (a.verdict == LOS_MARGINAL) ? "MARGINAL (Fresnel)"
-                                                   : "LINE OF SIGHT";
+    const char *vstr = (a.verdict == LOS_BLOCKED)  ? TR("NO LINE OF SIGHT")
+                     : (a.verdict == LOS_MARGINAL) ? TR("MARGINAL (Fresnel)")
+                                                   : TR("LINE OF SIGHT");
     char detail[64];
     if (a.verdict == LOS_BLOCKED) {
-        snprintf(detail, sizeof(detail), "Blocked @ %.1f km, %dm over sight",
+        snprintf(detail, sizeof(detail), TR("Blocked @ %.1f km, %dm over sight"),
                  a.worstD1M / 1000.0, (int)(-a.minClearM + 0.5));
     } else if (a.verdict == LOS_MARGINAL) {
-        snprintf(detail, sizeof(detail), "Grazes terrain - F1=%dm",
+        snprintf(detail, sizeof(detail), TR("Grazes terrain - F1=%dm"),
                  (int)(a.worstF1M + 0.5));
     } else {
-        snprintf(detail, sizeof(detail), "Clear by %dm at tightest",
+        snprintf(detail, sizeof(detail), TR("Clear by %dm at tightest"),
                  (int)(a.minClearM + 0.5));
     }
 
     char body[160];
     snprintf(body, sizeof(body),
-             "%s\n%.1f km - brg %03d %s\n%s\nyou %dm - peer %dm - %.0f MHz",
+             TR("%s\n%.1f km - brg %03d %s\n%s\nyou %dm - peer %dm - %.0f MHz"),
              vstr, a.distanceKm, (int)(a.bearingDeg + 0.5), a.compass, detail,
              (int)kLosAntennaSelfM, (int)kLosAntennaPeerM, a.freqMhz);
     lv_label_set_text(s_nodeLosVerdict, body);
@@ -25367,20 +25846,20 @@ static void nodeLosPoll(lv_timer_t *t) {
     char httpBuf[72];
     switch (st) {
         case LOS_ERR_NO_SERVER:
-            msg = "No elevation server set.\nWeb Config -> Elevation Server (LOS)";
+            msg = TR("No elevation server set.\nWeb Config -> Elevation Server (LOS)");
             break;
         case LOS_ERR_NO_WIFI:
-            msg = "Wi-Fi needed to fetch the\nterrain profile for this path.";
+            msg = TR("Wi-Fi needed to fetch the\nterrain profile for this path.");
             break;
         case LOS_ERR_BADREPLY:
-            msg = "Server answered, but not with\nelevation data. Check the proxy\npoints at the elevation service.";
+            msg = TR("Server answered, but not with\nelevation data. Check the proxy\npoints at the elevation service.");
             break;
         case LOS_ERR_DATA:
-            msg = "Elevation data too sparse\nfor this path.";
+            msg = TR("Elevation data too sparse\nfor this path.");
             break;
         default:
             snprintf(httpBuf, sizeof(httpBuf),
-                     "Elevation fetch failed (%d).\nCheck the server URL - it must be http://",
+                     TR("Elevation fetch failed (%d).\nCheck the server URL - it must be http://"),
                      losHttpCode());
             msg = httpBuf;
             break;
@@ -25480,7 +25959,7 @@ static void openNodeLosModal(uint32_t nodeId) {
     lv_obj_set_style_text_color(s_nodeLosStatus, bodyColor, 0);
     lv_obj_set_style_text_align(s_nodeLosStatus, LV_TEXT_ALIGN_CENTER, 0);
     lv_label_set_long_mode(s_nodeLosStatus, LV_LABEL_LONG_WRAP);
-    lv_label_set_text(s_nodeLosStatus, "Analyzing terrain...");
+    lv_label_set_text(s_nodeLosStatus, TR("Analyzing terrain..."));
 
     s_nodeLosVerdict = lv_label_create(s_nodeLosModal);
     lv_obj_set_width(s_nodeLosVerdict, lv_pct(100));
@@ -25499,7 +25978,7 @@ static void openNodeLosModal(uint32_t nodeId) {
         // The peer's position is not the missing half — say which one is, or the
         // operator checks the wrong node.
         lv_label_set_text(s_nodeLosStatus,
-                          "This node has no position yet.\nNeeds a GPS fix or a set location.");
+                          TR("This node has no position yet.\nNeeds a GPS fix or a set location."));
         return;
     }
 
@@ -25600,21 +26079,21 @@ static void refreshNodesHint() {
     // Enter to focus the info panel. Naming the way out matters more here than
     // on the keyboard builds — it is the nav button, not a key, and this screen
     // is closed by tapping the Nodes button that is already lit underneath it.
-    lv_label_set_text(s_nodesHintLabel, "Tap a node for actions   Nodes below = Back");
+    lv_label_set_text(s_nodesHintLabel, TR("Tap a node for actions   Nodes below = Back"));
 #else
 #if defined(DEVICE_TDECK)
     const char *navKeys = "J/K";
 #else
-    const char *navKeys = "Up/Down";
+    const char *navKeys = TR("Up/Down");
 #endif
     if (s_nodesInfoFocused) {
         // The keys mean something else in here, so say so rather than leaving
         // the list's legend up over a panel it no longer drives.
-        lv_label_set_text_fmt(s_nodesHintLabel, "%s=Scroll  A=Actions  %s=List",
+        lv_label_set_text_fmt(s_nodesHintLabel, TR("%s=Scroll  A=Actions  %s=List"),
                               navKeys, modalCloseKeyLabel());
     } else if (s_nodesFilterEditing) {
         lv_label_set_text_fmt(s_nodesHintLabel,
-                              "Type=Filter  Enter=Done  Bksp=Edit/Exit  %s=Back",
+                              TR("Type=Filter  Enter=Done  Bksp=Edit/Exit  %s=Back"),
                               modalCloseKeyLabel());
     } else if (s_nodesFilterOpen) {
         // Committed: the list is still filtered, but the shortcuts are live
@@ -25623,11 +26102,11 @@ static void refreshNodesHint() {
         // editing state says it, since on most boards Backspace is also the
         // close key and only reaches Back once the filter is unwound.
         lv_label_set_text_fmt(s_nodesHintLabel,
-                              "Enter=Info  A=Actions  Bksp=Edit/Exit  %s=Back",
+                              TR("Enter=Info  A=Actions  Bksp=Edit/Exit  %s=Back"),
                               modalCloseKeyLabel());
     } else {
         lv_label_set_text_fmt(s_nodesHintLabel,
-                              "Enter=Info  A=Actions  Space=Filter  %s=Back",
+                              TR("Enter=Info  A=Actions  Space=Filter  %s=Back"),
                               modalCloseKeyLabel());
     }
 #endif   // !UI_TOUCH_ONLY_PROFILE
@@ -25666,10 +26145,10 @@ static void refreshNodesListRows() {
         if (s_nodesFilterOpen) {
             // Brackets appear as soon as the filter is armed (even empty) so the
             // user has a visual cue that filtering is on; text fills in as typed.
-            snprintf(titleText, sizeof(titleText), "NODES [%s] (%d%s)",
+            snprintf(titleText, sizeof(titleText), TR("NODES [%s] (%d%s)"),
                      s_nodesFilter, nodeCount, more);
         } else {
-            snprintf(titleText, sizeof(titleText), "NODES (%d%s)", nodeCount, more);
+            snprintf(titleText, sizeof(titleText), TR("NODES (%d%s)"), nodeCount, more);
         }
         lv_label_set_text(s_nodesTitleLabel, titleText);
     }
@@ -25688,10 +26167,10 @@ static void refreshNodesListRows() {
         lv_obj_set_style_text_color(empty, lv_color_hex(0xD9E8FF), 0);
         if (s_nodesFilterOpen && s_nodesFilterLen > 0) {
             char noMatch[64];
-            snprintf(noMatch, sizeof(noMatch), "No matches for: %s", s_nodesFilter);
+            snprintf(noMatch, sizeof(noMatch), TR("No matches for: %s"), s_nodesFilter);
             lv_label_set_text(empty, noMatch);
         } else {
-            lv_label_set_text(empty, "No nodes seen");
+            lv_label_set_text(empty, TR("No nodes seen"));
         }
         return;
     }
@@ -25939,44 +26418,44 @@ static void refreshNodesDetails() {
             snprintf(out, outLen, "%04d-%02d-%02d %s",
                      tmv.tm_year + 1900, tmv.tm_mon + 1, tmv.tm_mday, clock);
         };
-        char when[32] = "unknown date";
+        char when[48]; snprintf(when, sizeof(when), "%s", TR("unknown date"));
         archivedStamp(selectedArchived->archivedEpoch, when, sizeof(when));
-        char heardWhen[32] = "unknown";
+        char heardWhen[48]; snprintf(heardWhen, sizeof(heardWhen), "%s", TR("unknown"));
         archivedStamp(selectedArchived->lastHeardEpoch, heardWhen, sizeof(heardWhen));
 
         const NodeEntry *full = nodesArchivedDetail(selectedArchived->nodeId);
 
         char pos[80];
         if (full && full->hasPosition && (full->latI != 0 || full->lonI != 0)) {
-            snprintf(pos, sizeof(pos), "Lat: %.5f\nLon: %.5f\nAlt: %ld m",
+            snprintf(pos, sizeof(pos), TR("Lat: %.5f\nLon: %.5f\nAlt: %ld m"),
                      (double)((float)full->latI / 10000000.0f),
                      (double)((float)full->lonI / 10000000.0f),
                      (long)full->alt);
         } else {
-            snprintf(pos, sizeof(pos), "No position recorded");
+            snprintf(pos, sizeof(pos), TR("No position recorded"));
         }
 
         char body[420];
         snprintf(body, sizeof(body),
-                 "ARCHIVED %s\n\n"
+                 TR("ARCHIVED %s\n\n"
                  "%s\nShort: %s\nID: !%08lX\n\n"
                  "Last heard: %s\n%s\n\n"
                  "%s"
                  "Not on the live list. Restore it to message,\n"
-                 "favorite or trace it.",
+                 "favorite or trace it."),
                  when,
-                 selectedArchived->longName[0] ? selectedArchived->longName : "(no name)",
+                 selectedArchived->longName[0] ? selectedArchived->longName : TR("(no name)"),
                  selectedArchived->shortName[0] ? selectedArchived->shortName : "n/a",
                  (unsigned long)selectedArchived->nodeId,
                  heardWhen,
                  pos,
-                 (full && full->hasPubKey) ? "Public key preserved\n\n" : "");
+                 (full && full->hasPubKey) ? TR("Public key preserved\n\n") : "");
         setLabelTextEmojiSafe(s_nodesDetail, body);
         return;
     }
     if (!selectedNode) {
         lv_obj_clear_flag(s_nodesDetail, LV_OBJ_FLAG_HIDDEN);
-        lv_label_set_text(s_nodesDetail, "No nodes seen yet.");
+        lv_label_set_text(s_nodesDetail, TR("No nodes seen yet."));
         nodesShowSections(false);
         return;
     }
@@ -26006,7 +26485,7 @@ static void refreshNodesDetails() {
     char heard[24];
     if (n.lastHeardMs > 0) {
         uint32_t ageMs = millis() - n.lastHeardMs;
-        snprintf(heard, sizeof(heard), "%lus ago", (unsigned long)(ageMs / 1000UL));
+        snprintf(heard, sizeof(heard), TR("%lus ago"), (unsigned long)(ageMs / 1000UL));
     } else {
         snprintf(heard, sizeof(heard), "n/a");
     }
@@ -26020,12 +26499,12 @@ static void refreshNodesDetails() {
     {
         char pos[96];
         if (n.hasPosition && (n.latI != 0 || n.lonI != 0)) {
-            snprintf(pos, sizeof(pos), "Lat: %.5f\nLon: %.5f\nAlt: %ld m",
+            snprintf(pos, sizeof(pos), TR("Lat: %.5f\nLon: %.5f\nAlt: %ld m"),
                      (double)((float)n.latI / 10000000.0f),
                      (double)((float)n.lonI / 10000000.0f),
                      (long)n.alt);
         } else {
-            snprintf(pos, sizeof(pos), "No position data");
+            snprintf(pos, sizeof(pos), TR("No position data"));
         }
 
         char telem[220];
@@ -26033,7 +26512,7 @@ static void refreshNodesDetails() {
             telem[0] = '\0';
             if (n.hasDeviceTelemetry) {
                 snprintf(telem + strlen(telem), sizeof(telem) - strlen(telem),
-                         "Battery: %.0f%%\nVoltage: %.2f V\nChUtil: %.1f%%\nAirTx: %.1f%%",
+                         TR("Battery: %.0f%%\nVoltage: %.2f V\nChUtil: %.1f%%\nAirTx: %.1f%%"),
                          (double)n.battPct, (double)n.voltage,
                          (double)n.chUtil, (double)n.airUtil);
             }
@@ -26043,25 +26522,25 @@ static void refreshNodesDetails() {
                 }
                 if (s_cfg.displayUnits != 0) {
                     snprintf(telem + strlen(telem), sizeof(telem) - strlen(telem),
-                             "Temp: %.1f F\nHumidity: %.1f%%\nPressure: %.2f inHg",
+                             TR("Temp: %.1f F\nHumidity: %.1f%%\nPressure: %.2f inHg"),
                              (double)(n.temperatureC * (9.0f / 5.0f) + 32.0f),
                              (double)n.humidityPct,
                              (double)(n.pressureHpa * 0.0295299831f));
                 } else {
                     snprintf(telem + strlen(telem), sizeof(telem) - strlen(telem),
-                             "Temp: %.1f C\nHumidity: %.1f%%\nPressure: %.1f hPa",
+                             TR("Temp: %.1f C\nHumidity: %.1f%%\nPressure: %.1f hPa"),
                              (double)n.temperatureC, (double)n.humidityPct,
                              (double)n.pressureHpa);
                 }
             }
-            if (!telem[0]) snprintf(telem, sizeof(telem), "No telemetry data");
+            if (!telem[0]) snprintf(telem, sizeof(telem), TR("No telemetry data"));
         } else {
-            snprintf(telem, sizeof(telem), "No telemetry data");
+            snprintf(telem, sizeof(telem), TR("No telemetry data"));
         }
 
         char buf[512];
         snprintf(buf, sizeof(buf),
-                 "Name: %s\n"
+                 TR("Name: %s\n"
                  "Short: %s\n"
                  "ID: !%08X\n"
                  "Last heard: %s\n"
@@ -26071,7 +26550,7 @@ static void refreshNodesDetails() {
                  "\n"
                  "Position:\n%s\n"
                  "\n"
-                 "Telemetry:\n%s",
+                 "Telemetry:\n%s"),
                  name, shortName, n.nodeId, heard,
                  (double)n.snr, (unsigned)n.hops, n.chanIdx, pos, telem);
         setLabelTextEmojiSafe(s_nodesDetail, buf);
@@ -26080,7 +26559,7 @@ static void refreshNodesDetails() {
 #else
     // ── Identity ──
     snprintf(vals, sizeof(vals), "%s\n%s\n!%08X", name, shortName, n.nodeId);
-    nodesSetSection(NODES_SEC_IDENTITY, "Name\nShort\nID", vals);
+    nodesSetSection(NODES_SEC_IDENTITY, TR("Name\nShort\nID"), vals);
 
     // ── Link ──
     // Hops is only meaningful when a packet carried hop_start; without it "0
@@ -26099,10 +26578,10 @@ static void refreshNodesDetails() {
     // the ordinary case and should not read as a failed check.
     const char *signedStr;
     if (n.xeddsaVerified)   signedStr = "yes";
-    else if (n.hasPubKey)   signedStr = "not seen";
-    else                    signedStr = "no key";
+    else if (n.hasPubKey)   signedStr = TR("not seen");
+    else                    signedStr = TR("no key");
     snprintf(vals, sizeof(vals), "%s\n%s\n%s\n%s\n%s", heard, snr, hops, chan, signedStr);
-    nodesSetSection(NODES_SEC_LINK, "Last heard\nSNR\nHops\nChannel\nSigned", vals);
+    nodesSetSection(NODES_SEC_LINK, TR("Last heard\nSNR\nHops\nChannel\nSigned"), vals);
 
     // ── Position ──
     // Every field is emitted even when unknown, here and below: a section that
@@ -26116,7 +26595,7 @@ static void refreshNodesDetails() {
     } else {
         snprintf(vals, sizeof(vals), "n/a\nn/a\nn/a");
     }
-    nodesSetSection(NODES_SEC_POSITION, "Lat\nLon\nAlt", vals);
+    nodesSetSection(NODES_SEC_POSITION, TR("Lat\nLon\nAlt"), vals);
 
     // ── Telemetry ──
     const bool useImperial = (s_cfg.displayUnits != 0);
@@ -26149,7 +26628,7 @@ static void refreshNodesDetails() {
     snprintf(vals, sizeof(vals), "%s\n%s\n%s\n%s\n%s\n%s\n%s",
              batt, volt, chu, airtx, temp, hum, press);
     nodesSetSection(NODES_SEC_TELEMETRY,
-                    "Battery\nVoltage\nChUtil\nAirTx\nTemp\nHumidity\nPressure", vals);
+                    TR("Battery\nVoltage\nChUtil\nAirTx\nTemp\nHumidity\nPressure"), vals);
 #endif  // NODES_LAYOUT_WIDE
 
     if (s_nodesInfoPanel) {
@@ -26455,7 +26934,7 @@ static void tracerouteProgressRenderRoutesPayload(const uint8_t *payload, size_t
     }
 
     if (!text[0]) {
-        strncpy(text, "No hop path in reply", sizeof(text) - 1);
+        strncpy(text, TR("No hop path in reply"), sizeof(text) - 1);
         text[sizeof(text) - 1] = '\0';
     }
 
@@ -26534,7 +27013,7 @@ static void openTracerouteProgressModal(uint32_t nodeId, uint32_t packetId) {
     lv_obj_set_style_text_font(title, &lv_font_montserrat_12, 0);
     lv_obj_set_style_text_color(title, lv_color_hex(0xD9E8FF), 0);
     lv_obj_set_style_text_align(title, LV_TEXT_ALIGN_CENTER, 0);
-    lv_label_set_text(title, "Traceroute");
+    lv_label_set_text(title, TR("Traceroute"));
 
     lv_obj_t *target = lv_label_create(s_tracerouteModal);
     lv_obj_set_width(target, lv_pct(100));
@@ -26551,7 +27030,7 @@ static void openTracerouteProgressModal(uint32_t nodeId, uint32_t packetId) {
     lv_obj_set_width(s_tracerouteStatusLabel, lv_pct(100));
     lv_obj_set_style_text_font(s_tracerouteStatusLabel, &lv_font_montserrat_10, 0);
     lv_obj_set_style_text_align(s_tracerouteStatusLabel, LV_TEXT_ALIGN_CENTER, 0);
-    tracerouteProgressSetStatus("Sending request...", lv_color_hex(0xE8F1FF));
+    tracerouteProgressSetStatus(TR("Sending request..."), lv_color_hex(0xE8F1FF));
 
     s_tracerouteResultsBox = lv_obj_create(s_tracerouteModal);
     lv_obj_set_width(s_tracerouteResultsBox, lv_pct(100));
@@ -26591,7 +27070,7 @@ static void openTracerouteProgressModal(uint32_t nodeId, uint32_t packetId) {
                        [](lv_event_t *ev) { LV_UNUSED(ev); closeTracerouteProgressModal(); },
                        /*size=*/22);
 #elif defined(DEVICE_CARDPUTER_LORA_HAT)
-    lv_label_set_text(hint, "Bksp=Close");
+    lv_label_set_text(hint, TR("Bksp=Close"));
 #else
     char hintText[24];
     snprintf(hintText, sizeof(hintText), "%s=Close", modalCloseKeyLabel());
@@ -26606,11 +27085,11 @@ static void tracerouteProgressSetTxResult(bool ok) {
         s_tracerouteAwaitingRouting = false;
         s_tracerouteAwaitingReply = false;
         s_tracerouteResolved = true;
-        tracerouteProgressSetStatus("Send failed", lv_color_hex(0xFF8080));
+        tracerouteProgressSetStatus(TR("Send failed"), lv_color_hex(0xFF8080));
         return;
     }
 
-    tracerouteProgressSetStatus("Sent. Waiting for route ACK...", lv_color_hex(0xE8F1FF));
+    tracerouteProgressSetStatus(TR("Sent. Waiting for route ACK..."), lv_color_hex(0xE8F1FF));
 }
 
 static void tracerouteProgressOnRouting(uint32_t fromNode, uint32_t requestId, uint32_t errorReason,
@@ -26630,7 +27109,7 @@ static void tracerouteProgressOnRouting(uint32_t fromNode, uint32_t requestId, u
             s_tracerouteAwaitingReply = false;
             s_tracerouteResolved = true;
             char status[72];
-            snprintf(status, sizeof(status), "Reply from %s", who);
+            snprintf(status, sizeof(status), TR("Reply from %s"), who);
             tracerouteProgressSetStatus(status, lv_color_hex(0xB8FFB8));
             tracerouteProgressRenderRoutesPayload(routeReplyPayload, routeReplyLen, viaMqtt);
             return;
@@ -26639,7 +27118,7 @@ static void tracerouteProgressOnRouting(uint32_t fromNode, uint32_t requestId, u
         s_tracerouteAwaitingRouting = false;
         s_tracerouteAwaitingReply = true;
         char status[72];
-        snprintf(status, sizeof(status), "ACK from %s. Waiting for reply...", who);
+        snprintf(status, sizeof(status), TR("ACK from %s. Waiting for reply..."), who);
         tracerouteProgressSetStatus(status, lv_color_hex(0xE8F1FF));
         return;
     }
@@ -26650,9 +27129,9 @@ static void tracerouteProgressOnRouting(uint32_t fromNode, uint32_t requestId, u
     const char *errName = routingErrorName(errorReason);
     char status[80];
     if (errName) {
-        snprintf(status, sizeof(status), "NAK %s(%lu)", errName, (unsigned long)errorReason);
+        snprintf(status, sizeof(status), TR("NAK %s(%lu)"), errName, (unsigned long)errorReason);
     } else {
-        snprintf(status, sizeof(status), "NAK err=%lu", (unsigned long)errorReason);
+        snprintf(status, sizeof(status), TR("NAK err=%lu"), (unsigned long)errorReason);
     }
     tracerouteProgressSetStatus(status, lv_color_hex(0xFF8080));
 }
@@ -26669,7 +27148,7 @@ static void tracerouteProgressOnResponse(const MeshPacket &pkt) {
     liveNodeLabel(pkt.hdr.from, who, sizeof(who), false);
     uint32_t elapsedMs = (s_tracerouteStartedMs != 0) ? (millis() - s_tracerouteStartedMs) : 0;
     char status[72];
-    snprintf(status, sizeof(status), "Reply from %s (%lus)", who, (unsigned long)(elapsedMs / 1000UL));
+    snprintf(status, sizeof(status), TR("Reply from %s (%lus)"), who, (unsigned long)(elapsedMs / 1000UL));
     tracerouteProgressSetStatus(status, lv_color_hex(0xB8FFB8));
     tracerouteProgressRenderRoutes(pkt);
 }
@@ -26703,9 +27182,9 @@ static void serviceTracerouteTimeout() {
     const unsigned long secs = (unsigned long)(elapsedMs / 1000UL);
     char status[64];
     if (ackedButSilent) {
-        snprintf(status, sizeof(status), "ACKed, no reply (%lus)", secs);
+        snprintf(status, sizeof(status), TR("ACKed, no reply (%lus)"), secs);
     } else {
-        snprintf(status, sizeof(status), "No reply (%lus)", secs);
+        snprintf(status, sizeof(status), TR("No reply (%lus)"), secs);
     }
     tracerouteProgressSetStatus(status, lv_color_hex(0xFFC080));
 }
@@ -27163,7 +27642,7 @@ static void openNodesActionMenuFor(uint32_t nodeId, bool msgMode, uint32_t packe
         // about that message; opened from the Nodes screen there is no message
         // to react to and the title stays as it was.
         snprintf(titleBuf, sizeof(titleBuf), "%s: %s",
-                 s_nodesActionMsgMode ? "Message Actions" : "Node Actions", who);
+                 s_nodesActionMsgMode ? TR("Message Actions") : TR("Node Actions"), who);
         setLabelTextEmojiSafe(title, titleBuf);
     }
 
@@ -27208,42 +27687,42 @@ static void openNodesActionMenuFor(uint32_t nodeId, bool msgMode, uint32_t packe
 #endif
     #if UI_TOUCH_ONLY_PROFILE
         const char *kActionLabels[kNodesActionCount] = {
-        "Traceroute",
-        "Send DM",
-        selectedIsFavorite ? "Unfavorite" : "Favorite",
-        "Request Node",
-        "Request Position",
-        selectedIsIgnored ? "Unignore" : "Ignore",
+        TR_NOOP("Traceroute"),
+        TR_NOOP("Send DM"),
+        selectedIsFavorite ? TR_NOOP("Unfavorite") : TR_NOOP("Favorite"),
+        TR_NOOP("Request Node"),
+        TR_NOOP("Request Position"),
+        selectedIsIgnored ? TR_NOOP("Unignore") : TR_NOOP("Ignore"),
     #if HAS_NODE_LOCATE
-        "Locate",
+        TR_NOOP("Locate"),
     #endif
     #if HAS_NODE_LOS
-        "LOS",
+        TR_NOOP("LOS"),
     #endif
-        "Share",
-        "Delete",
+        TR_NOOP("Share"),
+        TR_NOOP("Delete"),
     #if HAS_ADMIN_TERMINAL
-        "Admin",
+        TR_NOOP("Admin"),
     #endif
         };
     #else
         const char *kActionLabels[kNodesActionCount] = {
-        "(T)raceroute",
-        "Sen(d) DM",
-        selectedIsFavorite ? "Un(f)avorite" : "(F)avorite",
-        "Re(q)uest Node",
-        "Request (P)osition",
-        selectedIsIgnored ? "Uni(g)nore" : "I(g)nore",
+        TR_NOOP("(T)raceroute"),
+        TR_NOOP("Sen(d) DM"),
+        selectedIsFavorite ? TR_NOOP("Un(f)avorite") : TR_NOOP("(F)avorite"),
+        TR_NOOP("Re(q)uest Node"),
+        TR_NOOP("Request (P)osition"),
+        selectedIsIgnored ? TR_NOOP("Uni(g)nore") : TR_NOOP("I(g)nore"),
 #if HAS_NODE_LOCATE
-        "(L)ocate",
+        TR_NOOP("(L)ocate"),
 #endif
 #if HAS_NODE_LOS
-        "LO(S)",
+        TR_NOOP("LO(S)"),
 #endif
-        "S(h)are",
-        "Del(e)te",
+        TR_NOOP("S(h)are"),
+        TR_NOOP("Del(e)te"),
 #if HAS_ADMIN_TERMINAL
-        "(A)dmin",
+        TR_NOOP("(A)dmin"),
 #endif
     };
     #endif
@@ -27327,15 +27806,15 @@ static void openNodesActionMenuFor(uint32_t nodeId, bool msgMode, uint32_t packe
         const char *labelText;
         if (s_nodesActionMsgMode && i == kMsgActionReplyIdx) {
 #if UI_TOUCH_ONLY_PROFILE
-            labelText = "Reply";
+            labelText = TR_NOOP("Reply");
 #else
-            labelText = "(R)eply";
+            labelText = TR_NOOP("(R)eply");
 #endif
         } else if (s_nodesActionMsgMode && i == kMsgActionInfoIdx) {
 #if UI_TOUCH_ONLY_PROFILE
-            labelText = "Message Info";
+            labelText = TR_NOOP("Message Info");
 #else
-            labelText = "Message (I)nfo";
+            labelText = TR_NOOP("Message (I)nfo");
 #endif
         } else {
             // Message mode's node rows are not a straight offset — the map skips
@@ -27369,7 +27848,7 @@ static void openNodesActionMenuFor(uint32_t nodeId, bool msgMode, uint32_t packe
         lv_obj_set_style_text_color(lbl, rowTextColor, 0);
         lv_obj_set_style_text_align(lbl, LV_TEXT_ALIGN_CENTER, 0);
         lv_label_set_long_mode(lbl, LV_LABEL_LONG_CLIP);
-        lv_label_set_text(lbl, labelText);
+        lv_label_set_text(lbl, TR(labelText));
         lv_obj_center(lbl);
     }
 
@@ -27440,7 +27919,7 @@ static void refreshChannelActionsModal() {
 #if UI_TOUCH_ONLY_PROFILE
     lv_label_set_text(s_channelActionsMuteLabel, muted ? "Unmute" : "Mute");
 #else
-    lv_label_set_text(s_channelActionsMuteLabel, muted ? "Un(m)ute" : "(M)ute");
+    lv_label_set_text(s_channelActionsMuteLabel, muted ? TR("Un(m)ute") : TR("(M)ute"));
 #endif
 
 #if defined(DEVICE_TDECK_PRO)
@@ -27464,13 +27943,13 @@ static void refreshChannelActionsModal() {
     // no room for a fifth child.
     const bool share = (s_channelActionsChanIdx >= 0 && s_channelActionsChanIdx < MESH_CHANNELS)
                        && CHANNEL_KEYS[s_channelActionsChanIdx].shareLocation;
-    const char *shareState = !share            ? "Off"
-                             : s_cfg.shareLocation ? "On"
-                                                   : "On (global off)";
+    const char *shareState = !share            ? TR("Off")
+                             : s_cfg.shareLocation ? TR("On")
+                                                   : TR("On (global off)");
 #if UI_TOUCH_ONLY_PROFILE
-    lv_label_set_text_fmt(s_channelActionsShareLabel, "Location: %s", shareState);
+    lv_label_set_text_fmt(s_channelActionsShareLabel, TR("Location: %s"), shareState);
 #else
-    lv_label_set_text_fmt(s_channelActionsShareLabel, "(L)ocation: %s", shareState);
+    lv_label_set_text_fmt(s_channelActionsShareLabel, TR("(L)ocation: %s"), shareState);
 #endif
     // Sharing is the state worth spotting at a glance, so it takes the
     // emphasised tint — but only when it is actually in effect: sharing the
@@ -27577,8 +28056,8 @@ static void openChannelActionsModal() {
     lv_obj_set_style_text_color(title, lv_color_hex(0xD9E8FF), 0);
     lv_obj_set_style_text_align(title, LV_TEXT_ALIGN_CENTER, 0);
     lv_label_set_long_mode(title, LV_LABEL_LONG_DOT);
-    lv_label_set_text_fmt(title, "Channel Actions\n%s",
-                          (chName && chName[0]) ? chName : "(unnamed)");
+    lv_label_set_text_fmt(title, TR("Channel Actions\n%s"),
+                          (chName && chName[0]) ? chName : TR("(unnamed)"));
 
     lv_obj_t *btn = lv_btn_create(s_channelActionsModal);
 #if defined(DEVICE_TDECK_PRO)
@@ -27633,7 +28112,7 @@ static void openChannelActionsModal() {
     lv_obj_set_style_text_font(hint, &lv_font_montserrat_10, 0);
     lv_obj_set_style_text_color(hint, lv_color_hex(0xA7C7FF), 0);
     lv_obj_set_style_text_align(hint, LV_TEXT_ALIGN_CENTER, 0);
-    lv_label_set_text_fmt(hint, "%s = Close", modalCloseKeyLabel());
+    lv_label_set_text_fmt(hint, TR("%s = Close"), modalCloseKeyLabel());
 #endif
 
     refreshChannelActionsModal();
@@ -27771,16 +28250,16 @@ static void refreshLiveView(bool force) {
         // Naming the filter matters here: an empty screen under a filter looks
         // exactly like a dead radio, and the difference is one word.
         if (s_liveClearFlashUntilMs != 0) {
-            lv_label_set_text(empty, "Live feed cleared");
+            lv_label_set_text(empty, TR("Live feed cleared"));
         } else if (s_liveFilter == LIVE_FILTER_ALL) {
-            lv_label_set_text(empty, "No live traffic yet");
+            lv_label_set_text(empty, TR("No live traffic yet"));
         } else {
-            lv_label_set_text_fmt(empty, "No %s traffic yet\n(filter is on - %s)",
+            lv_label_set_text_fmt(empty, TR("No %s traffic yet\n(filter is on - %s)"),
                                   liveFilterName(s_liveFilter),
 #if UI_TOUCH_ONLY_PROFILE
-                                  "tap Filter to change"
+                                  TR("tap Filter to change")
 #else
-                                  "press F to change"
+                                  TR("press F to change")
 #endif
                                   );
         }
@@ -27916,7 +28395,7 @@ static void openLiveModal() {
 #else
     lv_obj_set_style_text_color(title, lv_color_hex(0xD9E8FF), 0);
 #endif
-    lv_label_set_text(title, "LIVE");
+    lv_label_set_text(title, TR("LIVE"));
     lv_obj_center(title);
 
 #if UI_TOUCH_ONLY_PROFILE
@@ -27950,7 +28429,7 @@ static void openLiveModal() {
     #else
         lv_obj_set_style_text_color(lbl, lv_color_hex(0xD9E8FF), 0);
     #endif
-        lv_label_set_text(lbl, text);
+        lv_label_set_text(lbl, TR(text));
         lv_obj_center(lbl);
         return btn;
     };
@@ -27961,7 +28440,7 @@ static void openLiveModal() {
     // Size it before right-aligning so its long active-filter label stays
     // anchored to the far edge instead of growing back toward the center.
     lv_obj_t *filterBtn =
-        makeLiveHeaderBtn(header, "Filter", 92, LV_ALIGN_RIGHT_MID,
+        makeLiveHeaderBtn(header, TR_NOOP("Filter"), 92, LV_ALIGN_RIGHT_MID,
                           [](lv_event_t *e) { LV_UNUSED(e); openLiveFilterModal(); });
     s_liveFilterHeaderLabel = lv_obj_get_child(filterBtn, 0);
 #else
@@ -28019,9 +28498,9 @@ static void openLiveModal() {
     // No Back tooltip here. Esc leaves every modal on this build, and carrying
     // it made the legend 239 px wide against 230 px of content — it wrapped to
     // a second line and took 11 px off the feed. The rest fits on one line.
-    lv_label_set_text(hint, "C = Clear   F = Filter");
+    lv_label_set_text(hint, TR("C = Clear   F = Filter"));
 #else
-    lv_label_set_text_fmt(hint, "%s = Back   C = Clear   F = Filter",
+    lv_label_set_text_fmt(hint, TR("%s = Back   C = Clear   F = Filter"),
                           modalCloseKeyLabel());
 #endif
 #endif
@@ -28090,7 +28569,7 @@ static void liveToolsAnnounceNow() {
         const uint32_t leftMs = s_toolAnnounceNextMs - now;
         char msg[64];
         // Rounded up: a press with 200 ms left should not be answered with "0s".
-        snprintf(msg, sizeof(msg), "Just announced. Try again in %us.",
+        snprintf(msg, sizeof(msg), TR("Just announced. Try again in %us."),
                  (unsigned)((leftMs + 999) / 1000));
         openCfgActionMessageModal(msg);
         return;
@@ -28102,7 +28581,7 @@ static void liveToolsAnnounceNow() {
     // for a radio that is not ready yet, and a user who cannot see that should
     // not be able to stack up queued announcements by pressing again.
     s_toolAnnounceNextMs = now + kToolAnnounceCooldownMs;
-    openCfgActionMessageModal("NODEINFO + telemetry queued.");
+    openCfgActionMessageModal(TR("NODEINFO + telemetry queued."));
 }
 
 // Opening a tool drops Tools rather than stacking it underneath, so backing out
@@ -28215,22 +28694,22 @@ static void openLiveToolsModal() {
     lv_obj_set_style_text_font(title, kChanModalTitleFont, 0);
     lv_obj_set_style_text_color(title, lv_color_hex(0xD9E8FF), 0);
     lv_obj_set_style_text_align(title, LV_TEXT_ALIGN_CENTER, 0);
-    lv_label_set_text(title, "Tools");
+    lv_label_set_text(title, TR("Tools"));
 
 #if UI_TOUCH_ONLY_PROFILE
     static const char *kToolLabels[LIVE_TOOL_COUNT] = {
-        "Live", "SNR/RSSI", "ChUtil",
+        TR_NOOP("Live"), TR_NOOP("SNR/RSSI"), TR_NOOP("ChUtil"),
 #if FEATURE_DISCOVERY
-        "Discovery",
+        TR_NOOP("Discovery"),
 #endif
-        "Beacons",
+        TR_NOOP("Beacons"),
 #if HAS_WEATHER
-        "Weather",
+        TR_NOOP("Weather"),
 #endif
 #if FEATURE_MQTT_MONITOR
-        "MQTT",
+        TR_NOOP("MQTT"),
 #endif
-        "Announce",
+        TR_NOOP("Announce"),
     };
 #else
     lv_obj_t *hint = lv_label_create(s_liveToolsModal);
@@ -28238,21 +28717,21 @@ static void openLiveToolsModal() {
     lv_obj_set_style_text_font(hint, &lv_font_montserrat_10, 0);
     lv_obj_set_style_text_color(hint, lv_color_hex(0xA7C7FF), 0);
     lv_obj_set_style_text_align(hint, LV_TEXT_ALIGN_CENTER, 0);
-    lv_label_set_text_fmt(hint, "Move  Enter=Open  %s=Back", modalCloseKeyLabel());
+    lv_label_set_text_fmt(hint, TR("Move  Enter=Open  %s=Back"), modalCloseKeyLabel());
 
     static const char *kToolLabels[LIVE_TOOL_COUNT] = {
-        "(L)ive", "(S)NR/RSSI", "Ch(U)til",
+        TR_NOOP("(L)ive"), TR_NOOP("(S)NR/RSSI"), TR_NOOP("Ch(U)til"),
 #if FEATURE_DISCOVERY
-        "(D)iscovery",
+        TR_NOOP("(D)iscovery"),
 #endif
-        "(B)eacons",
+        TR_NOOP("(B)eacons"),
 #if HAS_WEATHER
-        "(W)eather",
+        TR_NOOP("(W)eather"),
 #endif
 #if FEATURE_MQTT_MONITOR
-        "(M)QTT",
+        TR_NOOP("(M)QTT"),
 #endif
-        "(A)nnounce",
+        TR_NOOP("(A)nnounce"),
     };
 #endif
 
@@ -28311,11 +28790,11 @@ static void openLiveToolsModal() {
         lv_label_set_long_mode(lbl, LV_LABEL_LONG_CLIP);
 #if FEATURE_MQTT_MONITOR
         if (!enabled && i == LIVE_TOOL_MQTT) {
-            lv_label_set_text_fmt(lbl, "%s - WiFi off", kToolLabels[i]);
+            lv_label_set_text_fmt(lbl, TR("%s - WiFi off"), kToolLabels[i]);
         } else
 #endif
         {
-            lv_label_set_text(lbl, kToolLabels[i]);
+            lv_label_set_text(lbl, TR(kToolLabels[i]));
         }
         lv_obj_center(lbl);
     }
@@ -28360,7 +28839,7 @@ static void refreshLiveFilterHeader() {
         s_liveFilterHeaderLabel = nullptr;
         return;
     }
-    lv_label_set_text_fmt(s_liveFilterHeaderLabel, "Filter: %s", liveFilterName(s_liveFilter));
+    lv_label_set_text_fmt(s_liveFilterHeaderLabel, TR("Filter: %s"), liveFilterName(s_liveFilter));
 }
 
 static void liveFilterApply(int filter) {
@@ -28434,7 +28913,7 @@ static void openLiveFilterModal() {
     lv_obj_set_style_text_font(title, kChanModalTitleFont, 0);
     lv_obj_set_style_text_color(title, lv_color_hex(0xD9E8FF), 0);
     lv_obj_set_style_text_align(title, LV_TEXT_ALIGN_CENTER, 0);
-    lv_label_set_text(title, "Live Filter");
+    lv_label_set_text(title, TR("Live Filter"));
 
 #if !UI_TOUCH_ONLY_PROFILE
     lv_obj_t *hint = lv_label_create(s_liveFilterModal);
@@ -28442,7 +28921,7 @@ static void openLiveFilterModal() {
     lv_obj_set_style_text_font(hint, &lv_font_montserrat_10, 0);
     lv_obj_set_style_text_color(hint, lv_color_hex(0xA7C7FF), 0);
     lv_obj_set_style_text_align(hint, LV_TEXT_ALIGN_CENTER, 0);
-    lv_label_set_text_fmt(hint, "Move  Enter=Apply  %s=Back", modalCloseKeyLabel());
+    lv_label_set_text_fmt(hint, TR("Move  Enter=Apply  %s=Back"), modalCloseKeyLabel());
 #endif
 
     const lv_color_t rowTextColor = (s_cfg.uiMode == UI_MODE_LIGHT)
@@ -28695,8 +29174,8 @@ static void refreshChUtilChart(bool force) {
         float airAvg = (s_airUtilHist.count > 0) ? (airSum / s_airUtilHist.count) : 0.0f;
 
         snprintf(text, sizeof(text),
-                 "ChUtil  cur %s  avg %.1f%%  max %.1f%%   n=%d\n"
-                 "AirTx   cur %s  avg %.1f%%  max %.1f%%   n=%d",
+                 TR("ChUtil  cur %s  avg %.1f%%  max %.1f%%   n=%d\n"
+                 "AirTx   cur %s  avg %.1f%%  max %.1f%%   n=%d"),
                  chCur, (double)chAvg, (double)chMax, s_chUtilHist.count,
                  airCur, (double)airAvg, (double)airMax, s_airUtilHist.count);
         lv_label_set_text(s_chUtilStatsLabel, text);
@@ -28740,7 +29219,7 @@ static void openChUtilChartModal() {
     lv_obj_t *title = lv_label_create(header);
     lv_obj_set_style_text_font(title, &lv_font_montserrat_12, 0);
     lv_obj_set_style_text_color(title, lv_color_hex(0xD9E8FF), 0);
-    lv_label_set_text(title, "CHANNEL UTILIZATION (%)");
+    lv_label_set_text(title, TR("CHANNEL UTILIZATION (%)"));
 #if defined(DEVICE_HELTEC_V4_EXPANSION)
     // Centred, the title collides with the corner X on the narrower panel.
     if (uiPortrait()) lv_obj_align(title, LV_ALIGN_LEFT_MID, 2, 0);
@@ -28809,7 +29288,7 @@ static void openChUtilChartModal() {
     lv_label_set_long_mode(s_chUtilStatsLabel, LV_LABEL_LONG_WRAP);
     lv_obj_set_style_text_font(s_chUtilStatsLabel, &lv_font_montserrat_10, 0);
     lv_obj_set_style_text_color(s_chUtilStatsLabel, lv_color_hex(0xD9E8FF), 0);
-    lv_label_set_text(s_chUtilStatsLabel, "ChUtil  cur --  avg --  max --   n=0\nAirTx   cur --  avg --  max --   n=0");
+    lv_label_set_text(s_chUtilStatsLabel, TR("ChUtil  cur --  avg --  max --   n=0\nAirTx   cur --  avg --  max --   n=0"));
 
 #if !UI_TOUCH_ONLY_PROFILE
     lv_obj_t *hint = lv_label_create(s_chUtilChartModal);
@@ -28817,9 +29296,9 @@ static void openChUtilChartModal() {
     lv_obj_set_style_text_font(hint, &lv_font_montserrat_10, 0);
     lv_obj_set_style_text_color(hint, lv_color_hex(0xA7C7FF), 0);
 #if defined(DEVICE_TDECK_PRO)
-    lv_label_set_text(hint, "Bksp=Back  solid=ChUtil  dash=AirTx");
+    lv_label_set_text(hint, TR("Bksp=Back  solid=ChUtil  dash=AirTx"));
 #else
-    lv_label_set_text_fmt(hint, "%s = Back   teal=ChUtil  orange=AirTx", modalCloseKeyLabel());
+    lv_label_set_text_fmt(hint, TR("%s = Back   teal=ChUtil  orange=AirTx"), modalCloseKeyLabel());
 #endif
 #endif
 
@@ -28893,8 +29372,8 @@ static void refreshSnrRssiChart(bool force) {
         if (s_rssiHist.count == 0) rssiMin = rssiMax = 0.0f;
 
         snprintf(text, sizeof(text),
-                 "SNR   cur %s  avg %.1fdB  min %.1f  max %.1f   n=%d\n"
-                 "RSSI  cur %s  avg %.0fdBm min %.0f  max %.0f   n=%d",
+                 TR("SNR   cur %s  avg %.1fdB  min %.1f  max %.1f   n=%d\n"
+                 "RSSI  cur %s  avg %.0fdBm min %.0f  max %.0f   n=%d"),
                  snrCur, (double)snrAvg, (double)snrMin, (double)snrMax, s_snrHist.count,
                  rssiCur, (double)rssiAvg, (double)rssiMin, (double)rssiMax, s_rssiHist.count);
         lv_label_set_text(s_snrStatsLabel, text);
@@ -28938,7 +29417,7 @@ static void openSnrRssiChartModal() {
     lv_obj_t *title = lv_label_create(header);
     lv_obj_set_style_text_font(title, &lv_font_montserrat_12, 0);
     lv_obj_set_style_text_color(title, lv_color_hex(0xD9E8FF), 0);
-    lv_label_set_text(title, "SNR (dB)  /  RSSI (dBm)");
+    lv_label_set_text(title, TR("SNR (dB)  /  RSSI (dBm)"));
 #if defined(DEVICE_HELTEC_V4_EXPANSION)
     // Centred, the title collides with the corner X on the narrower panel.
     if (uiPortrait()) lv_obj_align(title, LV_ALIGN_LEFT_MID, 2, 0);
@@ -29016,8 +29495,8 @@ static void openSnrRssiChartModal() {
     lv_obj_set_style_text_font(s_snrStatsLabel, &lv_font_montserrat_10, 0);
     lv_obj_set_style_text_color(s_snrStatsLabel, lv_color_hex(0xD9E8FF), 0);
     lv_label_set_text(s_snrStatsLabel,
-                      "SNR   cur --  avg --  min --  max --   n=0\n"
-                      "RSSI  cur --  avg --  min --  max --   n=0");
+                      TR("SNR   cur --  avg --  min --  max --   n=0\n"
+                      "RSSI  cur --  avg --  min --  max --   n=0"));
 
 #if !UI_TOUCH_ONLY_PROFILE
     lv_obj_t *hint = lv_label_create(s_snrChartModal);
@@ -29025,9 +29504,9 @@ static void openSnrRssiChartModal() {
     lv_obj_set_style_text_font(hint, &lv_font_montserrat_10, 0);
     lv_obj_set_style_text_color(hint, lv_color_hex(0xA7C7FF), 0);
 #if defined(DEVICE_TDECK_PRO)
-    lv_label_set_text(hint, "Bksp=Back  solid=SNR  dash=RSSI");
+    lv_label_set_text(hint, TR("Bksp=Back  solid=SNR  dash=RSSI"));
 #else
-    lv_label_set_text_fmt(hint, "%s = Back   green=SNR  pink=RSSI", modalCloseKeyLabel());
+    lv_label_set_text_fmt(hint, TR("%s = Back   green=SNR  pink=RSSI"), modalCloseKeyLabel());
 #endif
 #endif
 
@@ -29268,7 +29747,7 @@ static void homeTickerBuildText(char *out, size_t cap) {
     if (n <= 0) {
         // Said, not left blank. An empty strip reads as something failing to
         // draw; this reads as an answer, and it is the answer most of the time.
-        utf8util::copyTruncate(out, cap, "No new messages");
+        utf8util::copyTruncate(out, cap, TR("No new messages"));
         return;
     }
 
@@ -29706,7 +30185,7 @@ static void refreshGlanceCharts(GlanceCarousel &c, bool force) {
             if (s_chUtilHist.hasLast) snprintf(ch, sizeof(ch), "%.0f%%", (double)s_chUtilHist.lastVal);
             if (s_airUtilHist.hasLast) snprintf(air, sizeof(air), "%.0f%%", (double)s_airUtilHist.lastVal);
             char text[40];
-            snprintf(text, sizeof(text), "ch %s   air %s", ch, air);
+            snprintf(text, sizeof(text), TR("ch %s   air %s"), ch, air);
             lv_label_set_text(c.chUtilValue, text);
         }
     }
@@ -29724,7 +30203,7 @@ static void refreshGlanceCharts(GlanceCarousel &c, bool force) {
             if (s_snrHist.hasLast) snprintf(snr, sizeof(snr), "%.1f", (double)s_snrHist.lastVal);
             if (s_rssiHist.hasLast) snprintf(rssi, sizeof(rssi), "%.0f", (double)s_rssiHist.lastVal);
             char text[40];
-            snprintf(text, sizeof(text), "snr %s   rssi %s", snr, rssi);
+            snprintf(text, sizeof(text), TR("snr %s   rssi %s"), snr, rssi);
             lv_label_set_text(c.snrValue, text);
         }
     }
@@ -29887,7 +30366,7 @@ static void refreshGlanceNodeList(GlanceCarousel &c, int listIdx) {
         if (i >= n) {
             // Said once, on the first empty row, rather than left blank: an
             // empty page reads as something that failed to load.
-            lv_label_set_text(row, (i == 0) ? "Nothing heard yet" : "");
+            lv_label_set_text(row, (i == 0) ? TR("Nothing heard yet") : "");
             if (lvObjValid(ageObj)) lv_label_set_text(ageObj, "");
             continue;
         }
@@ -29908,7 +30387,7 @@ static void glanceBuildChartPage(GlanceCarousel &c, lv_obj_t *host) {
                                    GLANCE_PAGE_CHARTS);
     if (!page) return;
 
-    buildGlanceChartCard(c, page, "CHANNEL UTIL", &c.chUtilChart, &c.chUtilValue);
+    buildGlanceChartCard(c, page, TR("CHANNEL UTIL"), &c.chUtilChart, &c.chUtilValue);
     // Same colours the Tools modal uses for the same two series, so the legend
     // someone learned there still reads here.
     c.chUtilSeries = lv_chart_add_series(c.chUtilChart, homeDashSeriesColor(0x4FD1C5),
@@ -29951,8 +30430,8 @@ static void glanceBuildNodePages(GlanceCarousel &c, lv_obj_t *host, int cardH) {
     if (uiPortrait()) {
         lv_obj_t *page = buildHomeDashPage(host, false);
         const int halfH = (cardH - 4) / 2;
-        buildGlanceNodeCard(c, page, 0, "RECENTLY HEARD", false, halfH);
-        buildGlanceNodeCard(c, page, 1, "LONGEST SILENT", false, halfH);
+        buildGlanceNodeCard(c, page, 0, TR("RECENTLY HEARD"), false, halfH);
+        buildGlanceNodeCard(c, page, 1, TR("LONGEST SILENT"), false, halfH);
         glanceAddPage(c, page, GLANCE_PAGE_BOTH_LISTS);
         return;
     }
@@ -29967,16 +30446,16 @@ static void glanceBuildNodePages(GlanceCarousel &c, lv_obj_t *host, int cardH) {
 #endif
     if (bothOnOnePage) {
         lv_obj_t *page = buildHomeDashPage(host, true);
-        buildGlanceNodeCard(c, page, 0, "RECENTLY HEARD", true, cardH);
-        buildGlanceNodeCard(c, page, 1, "LONGEST SILENT", true, cardH);
+        buildGlanceNodeCard(c, page, 0, TR("RECENTLY HEARD"), true, cardH);
+        buildGlanceNodeCard(c, page, 1, TR("LONGEST SILENT"), true, cardH);
         glanceAddPage(c, page, GLANCE_PAGE_BOTH_LISTS);
     } else {
         lv_obj_t *recent = buildHomeDashPage(host, false);
-        buildGlanceNodeCard(c, recent, 0, "RECENTLY HEARD", false, cardH);
+        buildGlanceNodeCard(c, recent, 0, TR("RECENTLY HEARD"), false, cardH);
         glanceAddPage(c, recent, GLANCE_PAGE_RECENT);
 
         lv_obj_t *oldest = buildHomeDashPage(host, false);
-        buildGlanceNodeCard(c, oldest, 1, "LONGEST SILENT", false, cardH);
+        buildGlanceNodeCard(c, oldest, 1, TR("LONGEST SILENT"), false, cardH);
         glanceAddPage(c, oldest, GLANCE_PAGE_OLDEST);
     }
 }
@@ -30573,10 +31052,10 @@ static void beaconsFormatHeard(const BeaconOffer &o, char *out, size_t outLen) {
         char gap[16];
         beaconsFormatSpan((uint32_t)(o.rxMs - o.firstMs) / (uint32_t)(o.hits - 1),
                           gap, sizeof(gap));
-        snprintf(out, outLen, "Heard %s ago   %u seen, ~%s apart",
+        snprintf(out, outLen, TR("Heard %s ago   %u seen, ~%s apart"),
                  age, (unsigned)o.hits, gap);
     } else {
-        snprintf(out, outLen, "Heard %s ago   1 seen", age);
+        snprintf(out, outLen, TR("Heard %s ago   1 seen"), age);
     }
 }
 
@@ -30620,15 +31099,15 @@ static void beaconsBuildList() {
         // this text: nothing to hear, versus not listening.
         beaconsMakeLabel(s_beaconsList, kBeaconsBodyFont, kBeaconsBodyColor,
                          s_cfg.meshBeaconListen
-                             ? "No beacons heard yet.\n\n"
+                             ? TR("No beacons heard yet.\n\n"
                                "A beacon is only audible while its sender has retuned onto "
                                "this channel, preset and region, and it repeats on that "
                                "node's own schedule - minutes to hours apart. This list "
-                               "keeps what it hears until you clear it."
-                             : "Mesh Beacons is off.\n\n"
+                               "keeps what it hears until you clear it.")
+                             : TR("Mesh Beacons is off.\n\n"
                                "Turn it on in Config (or under Modules in web config) to "
                                "decode beacons from other meshes. Receive-only: nothing is "
-                               "transmitted, and an offer is never applied to your radio.");
+                               "transmitted, and an offer is never applied to your radio."));
         return;
     }
 
@@ -30685,7 +31164,7 @@ static void beaconsBuildList() {
         if (o.region[0]) {
             n += snprintf(offer + n, sizeof(offer) - n, "%s%s", n ? " / " : "", o.region);
         }
-        snprintf(line, sizeof(line), "Offers: %s", offer[0] ? offer : "(nothing)");
+        snprintf(line, sizeof(line), TR("Offers: %s"), offer[0] ? offer : TR("(nothing)"));
         beaconsMakeLabel(card, kBeaconsBodyFont, kBeaconsBodyColor, line);
 
         // How it reached us. The id is here rather than in the title so a known
@@ -30693,7 +31172,7 @@ static void beaconsBuildList() {
         char hops[16];
         if (o.hasHops) snprintf(hops, sizeof(hops), "%u hop%s",
                                 (unsigned)o.hops, (o.hops == 1) ? "" : "s");
-        else           snprintf(hops, sizeof(hops), "? hops");
+        else           snprintf(hops, sizeof(hops), TR("? hops"));
         snprintf(line, sizeof(line), "!%08lx   %.1f dB   %.0f dBm   %s",
                  (unsigned long)o.sender, o.snr, o.rssi, hops);
         beaconsMakeLabel(card, kBeaconsBodyFont, kBeaconsDimColor, line);
@@ -30724,9 +31203,9 @@ static void refreshBeaconsModal(bool force) {
         if (s_beaconsStatusLabel) {
             char status[64];
             if (!s_cfg.meshBeaconListen) {
-                snprintf(status, sizeof(status), "Listening: off");
+                snprintf(status, sizeof(status), TR("Listening: off"));
             } else {
-                snprintf(status, sizeof(status), "Listening   %d sender%s heard",
+                snprintf(status, sizeof(status), TR("Listening   %d sender%s heard"),
                          s_beaconOfferCount, (s_beaconOfferCount == 1) ? "" : "s");
             }
             lv_label_set_text(s_beaconsStatusLabel, status);
@@ -30873,8 +31352,8 @@ static void weatherRenderReading() {
         // a dash outside that range would come back as a missing-glyph box —
         // the same trap the lock screen's message rows fell into.
         char t[64];
-        if (r.place[0]) snprintf(t, sizeof(t), "Weather - %s", r.place);
-        else            snprintf(t, sizeof(t), "Weather");
+        if (r.place[0]) snprintf(t, sizeof(t), TR("Weather - %s"), r.place);
+        else            snprintf(t, sizeof(t), TR("Weather"));
         lv_label_set_text(s_weatherTitle, t);
     }
 
@@ -30888,18 +31367,18 @@ static void weatherRenderReading() {
         // one outright would have been the other way to find the pixels, and
         // this keeps all of them.
         snprintf(body, sizeof(body),
-                 "Feels %d%s   Hum %d%%\n"
+                 TR("Feels %d%s   Hum %d%%\n"
                  "Wind %d %s %s\n"
-                 "Gusting %d %s",
+                 "Gusting %d %s"),
                  r.feels, r.tempUnit, r.humidityPct,
                  r.wind, r.windUnit, weatherCompass(r.dirDeg),
                  r.gust, r.windUnit);
     } else {
         snprintf(body, sizeof(body),
-                 "Feels like   %d%s\n"
+                 TR("Feels like   %d%s\n"
                  "Humidity     %d%%\n"
                  "Wind         %d %s from %s\n"
-                 "Gusting      %d %s",
+                 "Gusting      %d %s"),
                  r.feels, r.tempUnit,
                  r.humidityPct,
                  r.wind, r.windUnit, weatherCompass(r.dirDeg),
@@ -30914,11 +31393,11 @@ static void weatherRenderReading() {
     char status[96];
     const bool stale = (weatherState() != WEATHER_OK);
     if (ageS < 60) {
-        snprintf(status, sizeof(status), "%s%.2f, %.2f (rounded)",
-                 stale ? "Stale - " : "", r.lat, r.lon);
+        snprintf(status, sizeof(status), TR("%s%.2f, %.2f (rounded)"),
+                 stale ? TR("Stale - ") : "", r.lat, r.lon);
     } else {
-        snprintf(status, sizeof(status), "%s%lu min ago - %.2f, %.2f (rounded)",
-                 stale ? "Stale - " : "", (unsigned long)(ageS / 60UL), r.lat, r.lon);
+        snprintf(status, sizeof(status), TR("%s%lu min ago - %.2f, %.2f (rounded)"),
+                 stale ? TR("Stale - ") : "", (unsigned long)(ageS / 60UL), r.lat, r.lon);
     }
     lv_label_set_text(s_weatherStatus, status);
 }
@@ -30945,16 +31424,16 @@ static void weatherPoll(lv_timer_t *t) {
     char msg[112];
     switch (st) {
         case WEATHER_ERR_NO_SERVER:
-            snprintf(msg, sizeof(msg), "No weather server set.\nWeb Config -> Weather Server");
+            snprintf(msg, sizeof(msg), TR("No weather server set.\nWeb Config -> Weather Server"));
             break;
         case WEATHER_ERR_NO_WIFI:
-            snprintf(msg, sizeof(msg), "Wi-Fi needed to fetch conditions.");
+            snprintf(msg, sizeof(msg), TR("Wi-Fi needed to fetch conditions."));
             break;
         case WEATHER_ERR_NO_POSITION:
-            snprintf(msg, sizeof(msg), "No position yet.\nNeeds a GPS fix or a set location.");
+            snprintf(msg, sizeof(msg), TR("No position yet.\nNeeds a GPS fix or a set location."));
             break;
         case WEATHER_ERR_BADREPLY:
-            snprintf(msg, sizeof(msg), "Server answered, but not with\nweather data. Check the proxy.");
+            snprintf(msg, sizeof(msg), TR("Server answered, but not with\nweather data. Check the proxy."));
             break;
         default: {
             const int code = weatherHttpCode();
@@ -30962,14 +31441,14 @@ static void weatherPoll(lv_timer_t *t) {
             // at the address in Web Config or at DNS on the network, neither of
             // which "could not reach" would send anyone to look at.
             if (code > 0) {
-                snprintf(msg, sizeof(msg), "Weather server error (HTTP %d).", code);
+                snprintf(msg, sizeof(msg), TR("Weather server error (HTTP %d)."), code);
             } else if (code == WX_ERR_DNS || code == WX_ERR_DNS_HOLD) {
                 snprintf(msg, sizeof(msg),
-                         "Can't resolve the weather server.\nCheck the address and DNS.");
+                         TR("Can't resolve the weather server.\nCheck the address and DNS."));
             } else if (code == WX_ERR_NO_WIFI) {
-                snprintf(msg, sizeof(msg), "Wi-Fi needed to fetch conditions.");
+                snprintf(msg, sizeof(msg), TR("Wi-Fi needed to fetch conditions."));
             } else {
-                snprintf(msg, sizeof(msg), "Could not reach the weather server.");
+                snprintf(msg, sizeof(msg), TR("Could not reach the weather server."));
             }
             break;
         }
@@ -30977,7 +31456,7 @@ static void weatherPoll(lv_timer_t *t) {
     if (haveStale) {
         // Keep the age on screen next to the reason the refresh failed.
         char both[192];
-        snprintf(both, sizeof(both), "%s\n%lu min old",
+        snprintf(both, sizeof(both), TR("%s\n%lu min old"),
                  msg, (unsigned long)(weatherAgeMs() / 60000UL));
         lv_label_set_text(s_weatherStatus, both);
     } else {
@@ -31050,7 +31529,7 @@ static void openWeatherModal() {
     lv_obj_set_style_text_color(title, ink.title, 0);
     lv_obj_set_style_text_align(title, LV_TEXT_ALIGN_CENTER, 0);
     lv_label_set_long_mode(title, LV_LABEL_LONG_DOT);
-    lv_label_set_text(title, "Weather");
+    lv_label_set_text(title, TR("Weather"));
 
 #if UI_TOUCH_ONLY_PROFILE
     reserveHeltecCloseXRow(title);
@@ -31119,7 +31598,7 @@ static void openWeatherModal() {
     lv_obj_set_style_text_font(hint, &lv_font_montserrat_10, 0);
     lv_obj_set_style_text_color(hint, ink.muted, 0);
     lv_obj_set_style_text_align(hint, LV_TEXT_ALIGN_CENTER, 0);
-    lv_label_set_text_fmt(hint, "R=Refresh  %s=Back", modalCloseKeyLabel());
+    lv_label_set_text_fmt(hint, TR("R=Refresh  %s=Back"), modalCloseKeyLabel());
 #endif
 
     // Last child, so its spacer reserves the bottom of the column and nothing
@@ -31151,12 +31630,12 @@ static void weatherRefresh() {
     double lat = 0, lon = 0;
     if (!nodeLosSelfPosition(lat, lon)) {
         lv_label_set_text(s_weatherStatus,
-                          "No position yet.\nNeeds a GPS fix or a set location.");
+                          TR("No position yet.\nNeeds a GPS fix or a set location."));
         return;
     }
 
     weatherReset();
-    lv_label_set_text(s_weatherStatus, "Fetching...");
+    lv_label_set_text(s_weatherStatus, TR("Fetching..."));
     if (!weatherRequest(s_cfg.weatherServer, lat, lon,
                         s_cfg.displayUnits != 0)) {
         weatherPoll(nullptr);    // publishes whatever refusal reason was set
@@ -31212,7 +31691,7 @@ static void openBeaconsModal() {
     lv_obj_t *title = lv_label_create(header);
     lv_obj_set_style_text_font(title, &lv_font_montserrat_12, 0);
     lv_obj_set_style_text_color(title, lv_color_hex(0xD9E8FF), 0);
-    lv_label_set_text(title, "Beacons");
+    lv_label_set_text(title, TR("Beacons"));
 #if UI_TOUCH_ONLY_PROFILE
     lv_obj_align(title, LV_ALIGN_LEFT_MID, 2, 0);
 
@@ -31234,7 +31713,7 @@ static void openBeaconsModal() {
         lv_obj_t *lbl = lv_label_create(btn);
         lv_obj_set_style_text_font(lbl, &lv_font_montserrat_10, 0);
         lv_obj_set_style_text_color(lbl, lv_color_hex(0xE8F1FF), 0);
-        lv_label_set_text(lbl, text);
+        lv_label_set_text(lbl, TR(text));
         lv_obj_center(lbl);
     };
     // Close is the corner X, at the right end of the bar; the actions queue up
@@ -31244,7 +31723,7 @@ static void openBeaconsModal() {
             /*size=*/20)) {
         lv_obj_align(beaconsClose, LV_ALIGN_RIGHT_MID, 0, 0);
     }
-    makeBeaconsBtn(header, "Clear", -24,
+    makeBeaconsBtn(header, TR_NOOP("Clear"), -24,
                    [](lv_event_t *e) { LV_UNUSED(e); beaconsClear(); });
 #else
     lv_obj_center(title);
@@ -31285,7 +31764,7 @@ static void openBeaconsModal() {
     lv_obj_set_width(hint, lv_pct(100));
     lv_obj_set_style_text_font(hint, &lv_font_montserrat_10, 0);
     lv_obj_set_style_text_color(hint, lv_color_hex(0xA7C7FF), 0);
-    lv_label_set_text_fmt(hint, "C = Clear   %s = Back", modalCloseKeyLabel());
+    lv_label_set_text_fmt(hint, TR("C = Clear   %s = Back"), modalCloseKeyLabel());
 #endif
 
     refreshBeaconsModal(true);
@@ -31413,14 +31892,14 @@ struct MqttScanDurationOption {
     const char *label;
 };
 static const MqttScanDurationOption kMqttScanDurations[] = {
-    {    60000UL, "1 min"   },
-    {   300000UL, "5 min"   },
-    {   600000UL, "10 min"  },
-    {   900000UL, "15 min"  },
-    {  1800000UL, "30 min"  },
-    {  3600000UL, "1 hour"  },
-    {  7200000UL, "2 hours" },
-    { 21600000UL, "6 hours" },
+    {    60000UL, TR_NOOP("1 min")   },
+    {   300000UL, TR_NOOP("5 min")   },
+    {   600000UL, TR_NOOP("10 min")  },
+    {   900000UL, TR_NOOP("15 min")  },
+    {  1800000UL, TR_NOOP("30 min")  },
+    {  3600000UL, TR_NOOP("1 hour")  },
+    {  7200000UL, TR_NOOP("2 hours") },
+    { 21600000UL, TR_NOOP("6 hours") },
 };
 static constexpr int kMqttScanDurationCount =
     (int)(sizeof(kMqttScanDurations) / sizeof(kMqttScanDurations[0]));
@@ -31464,7 +31943,7 @@ static void mqttScanJsonEscape(const char *in, char *out, size_t outLen) {
 // A fresh /camillia/mqtt-<stamp>.json that does not exist yet.
 static bool mqttScanPickSavePath(char *path, size_t pathLen, char *msg, size_t msgLen) {
     if (!storageBegin()) {
-        snprintf(msg, msgLen, "No %s - not saving", storageName());
+        snprintf(msg, msgLen, TR("No %s - not saving"), storageName());
         return false;
     }
     storageFs().mkdir("/camillia");
@@ -31484,7 +31963,7 @@ static bool mqttScanPickSavePath(char *path, size_t pathLen, char *msg, size_t m
         snprintf(path, pathLen, "/camillia/mqtt-%s-%d.json", stamp, attempt);
     }
     if (storageFs().exists(path)) {
-        snprintf(msg, msgLen, "Save failed - too many this second");
+        snprintf(msg, msgLen, TR("Save failed - too many this second"));
         return false;
     }
     return true;
@@ -31494,12 +31973,12 @@ static bool mqttScanPickSavePath(char *path, size_t pathLen, char *msg, size_t m
 // the final write, so a file cut off by a reboot reads as unfinished.
 static bool mqttScanWriteJson(const char *path, bool done, char *msg, size_t msgLen) {
     if (!storageBegin()) {
-        snprintf(msg, msgLen, "No %s - not saved", storageName());
+        snprintf(msg, msgLen, TR("No %s - not saved"), storageName());
         return false;
     }
     File f = storageFs().open(path, FILE_WRITE);
     if (!f) {
-        snprintf(msg, msgLen, "Save failed - cannot write %s", storageName());
+        snprintf(msg, msgLen, TR("Save failed - cannot write %s"), storageName());
         return false;
     }
 
@@ -31551,7 +32030,7 @@ static bool mqttScanWriteJson(const char *path, bool done, char *msg, size_t msg
 
     Serial.printf("[mqtt-mon] saved %s (%u bytes)\n", path, (unsigned)bytes);
     const char *name = strrchr(path, '/');
-    snprintf(msg, msgLen, "Saved %s", name ? name + 1 : path);
+    snprintf(msg, msgLen, TR("Saved %s"), name ? name + 1 : path);
     return true;
 }
 
@@ -31599,14 +32078,14 @@ static void mqttScanFinish(const char *why) {
     if (!mqttScanRunning()) return;
     s_mqttScanStartedMs = 0;
     char msg[72];
-    snprintf(msg, sizeof(msg), "Scan %s", why);
+    snprintf(msg, sizeof(msg), TR("Scan %s"), why);
 #if HAS_FILE_STORAGE
     if (s_mqttScanSaveActive) {
         s_mqttScanSaveActive = false;
         char saveMsg[72];
         if (mqttScanWriteJson(s_mqttScanSavePath, true, saveMsg, sizeof(saveMsg))) {
             const char *name = strrchr(s_mqttScanSavePath, '/');
-            snprintf(msg, sizeof(msg), "Scan %s - saved %s", why,
+            snprintf(msg, sizeof(msg), TR("Scan %s - saved %s"), why,
                      name ? name + 1 : s_mqttScanSavePath);
         } else {
             snprintf(msg, sizeof(msg), "%s", saveMsg);
@@ -31632,7 +32111,7 @@ static void mqttMonitorReset();   // below; a scan starts from a clean count
 
 static const char *mqttScanDurationLabelFor(int idx) {
     if (idx < 0 || idx >= kMqttScanDurationCount) idx = 0;
-    return kMqttScanDurations[idx].label;
+    return TR(kMqttScanDurations[idx].label);
 }
 
 static void mqttScanDurationApply(int idx) {
@@ -31654,19 +32133,19 @@ static void openMqttScanModal() {
         if (kMqttScanDurations[i].ms == s_mqttScanWindowMs) { startIdx = i; break; }
     }
 #if HAS_FILE_STORAGE
-    static const char *const kSaveWhileLabel = "Save while scanning";
+    static const char *const kSaveWhileLabel = TR_NOOP("Save while scanning");
     bool *const saveWhileValue = &s_mqttScanSaveWhileRunning;
 #else
     static const char *const kSaveWhileLabel = nullptr;
     bool *const saveWhileValue = nullptr;
 #endif
     static const CfgSliderPicker kScanSpec = {
-        "MQTT Scan Settings",
+        TR_NOOP("MQTT Scan Settings"),
         kMqttScanDurationCount,
         mqttScanDurationLabelFor,
         mqttScanDurationApply,
-        "1 min",
-        "6 hours",
+        TR_NOOP("1 min"),
+        TR_NOOP("6 hours"),
         kSaveWhileLabel,
         saveWhileValue,
     };
@@ -31696,12 +32175,12 @@ static void closeMqttMonitorModal() {
 // nullptr once the broker session is up, which is the only case with no problem
 // to report.
 static const char *mqttMonitorBlockedReason() {
-    if (!mqttMonitorActive())                return "Not counting - out of memory";
-    if (!s_cfg.wifiEnabled)                  return "WiFi is off";
-    if (!s_cfg.mqttEnabled)                  return "MQTT bridge is off";
-    if (!wifiHasActiveCreds())               return "No WiFi network configured";
-    if (WiFi.status() != WL_CONNECTED)       return "WiFi not connected";
-    if (!mqttBridgeConnected())              return "Connecting to broker...";
+    if (!mqttMonitorActive())                return TR("Not counting - out of memory");
+    if (!s_cfg.wifiEnabled)                  return TR("WiFi is off");
+    if (!s_cfg.mqttEnabled)                  return TR("MQTT bridge is off");
+    if (!wifiHasActiveCreds())               return TR("No WiFi network configured");
+    if (WiFi.status() != WL_CONNECTED)       return TR("WiFi not connected");
+    if (!mqttBridgeConnected())              return TR("Connecting to broker...");
     return nullptr;
 }
 
@@ -31726,18 +32205,18 @@ static void mqttMonitorBuildList() {
             // The table is ~2 KB. If that could not be found there is no
             // counting happening at all, which is worth saying plainly.
             snprintf(empty, sizeof(empty),
-                     "Not enough free heap to hold the topic table.\n\n"
-                     "Close a few screens (or reboot) and try again.");
+                     TR("Not enough free heap to hold the topic table.\n\n"
+                     "Close a few screens (or reboot) and try again."));
         } else if (const char *why = mqttMonitorBlockedReason()) {
             snprintf(empty, sizeof(empty),
-                     "%s.\n\nNothing can arrive until the bridge has a broker "
+                     TR("%s.\n\nNothing can arrive until the bridge has a broker "
                      "session. Fix it in Config (or web config) and this list "
-                     "fills in on its own.", why);
+                     "fills in on its own."), why);
         } else {
             snprintf(empty, sizeof(empty),
-                     "Watching %s/2/e/#\n\nNo messages yet. Channels appear here "
+                     TR("Watching %s/2/e/#\n\nNo messages yet. Channels appear here "
                      "as they are published, newest at the bottom, with the "
-                     "number of messages seen on each.",
+                     "number of messages seen on each."),
                      s_cfg.mqttRoot);
         }
         beaconsMakeLabel(s_mqttMonList, kBeaconsBodyFont, kBeaconsBodyColor, empty);
@@ -31870,10 +32349,10 @@ static void refreshMqttMonitorModal(bool force) {
                 mqttMonitorFormatCount(other, otherText, sizeof(otherText));
                 // The table is full, so say so rather than letting the list read
                 // as the whole picture.
-                snprintf(status, sizeof(status), "%d chans  %s msgs  %s%s  (+%s off-list)",
+                snprintf(status, sizeof(status), TR("%d chans  %s msgs  %s%s  (+%s off-list)"),
                          mqttMonitorTopicCount(), total, span, saving, otherText);
             } else {
-                snprintf(status, sizeof(status), "%d chans  %s msgs  %s%s",
+                snprintf(status, sizeof(status), TR("%d chans  %s msgs  %s%s"),
                          mqttMonitorTopicCount(), total, span, saving);
             }
         }
@@ -31988,7 +32467,7 @@ static void openMqttMonitorModal() {
         lv_obj_t *lbl = lv_label_create(btn);
         lv_obj_set_style_text_font(lbl, &lv_font_montserrat_10, 0);
         lv_obj_set_style_text_color(lbl, lv_color_hex(0xE8F1FF), 0);
-        lv_label_set_text(lbl, text);
+        lv_label_set_text(lbl, TR(text));
         lv_obj_center(lbl);
     };
     if (lv_obj_t *mqttMonClose = appendHeltecCloseX(
@@ -31996,11 +32475,11 @@ static void openMqttMonitorModal() {
             /*size=*/20)) {
         lv_obj_align(mqttMonClose, LV_ALIGN_RIGHT_MID, 0, 0);
     }
-    makeMqttMonBtn(header, "Reset", -24,
+    makeMqttMonBtn(header, TR_NOOP("Reset"), -24,
                    [](lv_event_t *e) { LV_UNUSED(e); mqttMonitorReset(); });
-    makeMqttMonBtn(header, "Send", -72,
+    makeMqttMonBtn(header, TR_NOOP("Send"), -72,
                    [](lv_event_t *e) { LV_UNUSED(e); openMqttSendModal(); });
-    makeMqttMonBtn(header, "Scan", -120,
+    makeMqttMonBtn(header, TR_NOOP("Scan"), -120,
                    [](lv_event_t *e) { LV_UNUSED(e); openMqttScanModal(); });
 #else
     lv_obj_set_width(title, lv_pct(100));
@@ -32048,7 +32527,7 @@ static void openMqttMonitorModal() {
     lv_obj_set_width(hint, lv_pct(100));
     lv_obj_set_style_text_font(hint, &lv_font_montserrat_10, 0);
     lv_obj_set_style_text_color(hint, lv_color_hex(0xA7C7FF), 0);
-    lv_label_set_text_fmt(hint, "W = Scan   S = Send   C = Reset   %s = Back",
+    lv_label_set_text_fmt(hint, TR("W = Scan   S = Send   C = Reset   %s = Back"),
                           modalCloseKeyLabel());
 #endif
 
@@ -32119,14 +32598,14 @@ static void mqttSendConfirmed() {
     const uint32_t waitS = mqttSendCooldownLeftS();
     if (waitS > 0) {
         char msg[48];
-        snprintf(msg, sizeof(msg), "Wait %lus before sending again", (unsigned long)waitS);
+        snprintf(msg, sizeof(msg), TR("Wait %lus before sending again"), (unsigned long)waitS);
         mqttMonNotice(msg);
         return;
     }
 
     if (s_myNodeId == 0) deriveNodeId();
     if (s_myNodeId == 0) {
-        mqttMonNotice("Cannot send: no node id");
+        mqttMonNotice(TR("Cannot send: no node id"));
         return;
     }
 
@@ -32142,9 +32621,9 @@ static void mqttSendConfirmed() {
         s_mqttSendLastMs = millis();
         if (s_mqttSendLastMs == 0) s_mqttSendLastMs = 1;
         const char *nm = channelName(chan);
-        snprintf(msg, sizeof(msg), "Sent to %s", (nm && nm[0]) ? nm : "channel");
+        snprintf(msg, sizeof(msg), TR("Sent to %s"), (nm && nm[0]) ? nm : TR("channel"));
     } else {
-        snprintf(msg, sizeof(msg), "Send failed");
+        snprintf(msg, sizeof(msg), TR("Send failed"));
     }
     mqttMonNotice(msg);
     refreshMqttMonitorModal(true);
@@ -32194,7 +32673,7 @@ static void openMqttConfirmModal(int chan) {
     lv_obj_set_style_text_font(title, kChanModalTitleFont, 0);
     lv_obj_set_style_text_color(title, lv_color_hex(0xD9E8FF), 0);
     lv_obj_set_style_text_align(title, LV_TEXT_ALIGN_CENTER, 0);
-    lv_label_set_text(title, "Send to channel?");
+    lv_label_set_text(title, TR("Send to channel?"));
 
     // The message itself, verbatim. Showing what will be transmitted — rather
     // than a description of it — is the whole point of a confirmation step.
@@ -32203,7 +32682,7 @@ static void openMqttConfirmModal(int chan) {
 
     const char *nm = channelName(chan);
     char line[64];
-    snprintf(line, sizeof(line), "Channel %d  %s", chan, (nm && nm[0]) ? nm : "(unnamed)");
+    snprintf(line, sizeof(line), TR("Channel %d  %s"), chan, (nm && nm[0]) ? nm : TR("(unnamed)"));
     lv_obj_t *chanLbl = lv_label_create(s_mqttConfirmModal);
     lv_obj_set_width(chanLbl, lv_pct(100));
     lv_obj_set_style_text_font(chanLbl, &lv_font_montserrat_10, 0);
@@ -32250,12 +32729,12 @@ static void openMqttConfirmModal(int chan) {
         lv_obj_t *lbl = lv_label_create(btn);
         lv_obj_set_style_text_font(lbl, &lv_font_montserrat_12, 0);
         lv_obj_set_style_text_color(lbl, lv_color_hex(0xE8F1FF), 0);
-        lv_label_set_text(lbl, text);
+        lv_label_set_text(lbl, TR(text));
         lv_obj_center(lbl);
     };
-    makeConfirmBtn(btnRow, "Cancel", 0x8FB5E6,
+    makeConfirmBtn(btnRow, TR_NOOP("Cancel"), 0x8FB5E6,
                    [](lv_event_t *e) { LV_UNUSED(e); closeMqttConfirmModal(); });
-    makeConfirmBtn(btnRow, "Send", 0xFFC98A,
+    makeConfirmBtn(btnRow, TR_NOOP("Send"), 0xFFC98A,
                    [](lv_event_t *e) { LV_UNUSED(e); mqttSendConfirmed(); });
 #else
     lv_obj_t *hint = lv_label_create(s_mqttConfirmModal);
@@ -32263,7 +32742,7 @@ static void openMqttConfirmModal(int chan) {
     lv_obj_set_style_text_font(hint, &lv_font_montserrat_10, 0);
     lv_obj_set_style_text_color(hint, lv_color_hex(0xA7C7FF), 0);
     lv_obj_set_style_text_align(hint, LV_TEXT_ALIGN_CENTER, 0);
-    lv_label_set_text_fmt(hint, "Enter=Send   %s=Cancel", modalCloseKeyLabel());
+    lv_label_set_text_fmt(hint, TR("Enter=Send   %s=Cancel"), modalCloseKeyLabel());
 #endif
 }
 
@@ -32291,13 +32770,13 @@ static void openMqttSendModal() {
     const uint32_t waitS = mqttSendCooldownLeftS();
     if (waitS > 0) {
         char msg[48];
-        snprintf(msg, sizeof(msg), "Wait %lus before sending again", (unsigned long)waitS);
+        snprintf(msg, sizeof(msg), TR("Wait %lus before sending again"), (unsigned long)waitS);
         mqttMonNotice(msg);
         refreshMqttMonitorModal(true);
         return;
     }
     if (mqttMonitorTopicCount() <= 0) {
-        mqttMonNotice("Nothing recorded yet - nothing to send");
+        mqttMonNotice(TR("Nothing recorded yet - nothing to send"));
         refreshMqttMonitorModal(true);
         return;
     }
@@ -32345,7 +32824,7 @@ static void openMqttSendModal() {
     lv_obj_set_style_text_font(title, kChanModalTitleFont, 0);
     lv_obj_set_style_text_color(title, lv_color_hex(0xD9E8FF), 0);
     lv_obj_set_style_text_align(title, LV_TEXT_ALIGN_CENTER, 0);
-    lv_label_set_text(title, "Send top 5 to");
+    lv_label_set_text(title, TR("Send top 5 to"));
 
     lv_obj_t *hint = lv_label_create(s_mqttSendModal);
     lv_obj_set_width(hint, lv_pct(100));
@@ -32353,9 +32832,9 @@ static void openMqttSendModal() {
     lv_obj_set_style_text_color(hint, lv_color_hex(0xA7C7FF), 0);
     lv_obj_set_style_text_align(hint, LV_TEXT_ALIGN_CENTER, 0);
 #if UI_TOUCH_ONLY_PROFILE
-    lv_label_set_text(hint, "Tap a channel");
+    lv_label_set_text(hint, TR("Tap a channel"));
 #else
-    lv_label_set_text_fmt(hint, "Move  Enter=Pick  %s=Back", modalCloseKeyLabel());
+    lv_label_set_text_fmt(hint, TR("Move  Enter=Pick  %s=Back"), modalCloseKeyLabel());
 #endif
 
     const lv_color_t rowTextColor = (s_cfg.uiMode == UI_MODE_LIGHT)
@@ -32674,7 +33153,7 @@ static void discoveryBuildDistance(lv_obj_t *col) {
         discoverySectionFinish(s, nullptr);
     }
 
-    DiscoverySection unknown = { col, "DISTANCE UNKNOWN", 0 };
+    DiscoverySection unknown = { col, TR("DISTANCE UNKNOWN"), 0 };
     for (int i = 0; i < total; i++) {
         const NodeEntry *e = Nodes.at(i);
         if (!e || e->nodeId == 0 || e->nodeId == s_myNodeId) continue;
@@ -32695,7 +33174,7 @@ static void discoveryBuildDistance(lv_obj_t *col) {
 // report and have never sent us anything. Deduplicated against a small seen
 // list — a node named by three reporters is still one node.
 static void discoveryBuildHeardAbout(lv_obj_t *col) {
-    DiscoverySection s = { col, "HEARD ABOUT", 0 };
+    DiscoverySection s = { col, TR("HEARD ABOUT"), 0 };
     constexpr int kMaxHeardAbout = 24;
     uint32_t seen[kMaxHeardAbout];
     int seenCount = 0;
@@ -32728,7 +33207,7 @@ static void discoveryBuildHeardAbout(lv_obj_t *col) {
             // Pager and half a T-Deck, and a wrapped row costs more than the
             // quarter-dB does. It is the reporter's reading of that link, not
             // ours, so the precision was never worth much here anyway.
-            discoverySectionRow(s, "  %s via %s (%.0f dB)\n",
+            discoverySectionRow(s, TR("  %s via %s (%.0f dB)\n"),
                                 label, via, (float)rep->snrQ4[j] / 4.0f);
         }
     }
@@ -32741,7 +33220,7 @@ static void discoveryBuildHeardAbout(lv_obj_t *col) {
 static void discoveryBuildViaMqtt(lv_obj_t *col) {
     if (!s_cfg.mqttEnabled) return;       // nothing bridged, nothing to say
     if (s_presetScanResultFromMs != 0) return;   // not on the scanned preset
-    DiscoverySection s = { col, "VIA MQTT", 0 };
+    DiscoverySection s = { col, TR("VIA MQTT"), 0 };
     const int total = Nodes.count();
     char label[kDiscoveryNameMax];
     for (int i = 0; i < total; i++) {
@@ -32775,10 +33254,10 @@ static void discoveryBuildColumns() {
             if (!e || e->nodeId == 0 || e->nodeId == s_myNodeId) continue;
             if (discoveryHeardFrom(*e)) onPreset++;
         }
-        snprintf(summary, sizeof(summary), "%s: %d node(s) heard",
+        snprintf(summary, sizeof(summary), TR("%s: %d node(s) heard"),
                  discoveryPresetLabel(s_presetScanResultPreset), onPreset);
     } else {
-        snprintf(summary, sizeof(summary), "%d node(s), %d report(s)",
+        snprintf(summary, sizeof(summary), TR("%d node(s), %d report(s)"),
                  Nodes.count(), discoveryUsableReportCount());
     }
     discoveryMakeLabel(s_discoveryColBoxes[kDiscoveryColDirect], summary, false);
@@ -32806,7 +33285,7 @@ static void discoverySetStatus(const char *text) {
 // This used to be SD-only, on the grounds that snapshots accumulate one per
 // press and "a small internal partition is the wrong place to let that happen
 // unattended". The premise does not hold: the internal-flash boards carry a
-// 9.5 MB littlefs partition (partitions_16mb_fs.csv), which is thousands of
+// 3.3 MB littlefs partition (partitions_16mb_fs.csv), which is thousands of
 // snapshots, and the restriction was costing more than it saved — see the Save
 // button in openDiscoveryModal() for the board it locked out of its own SD card.
 
@@ -32853,7 +33332,7 @@ static void discoveryJsonNode(File &f, bool &first, const NodeEntry *e,
 // rewriting it. Fills msg on failure.
 static bool discoveryPickSavePath(char *path, size_t pathLen, char *msg, size_t msgLen) {
     if (!storageBegin()) {
-        snprintf(msg, msgLen, "No %s - not saved", storageName());
+        snprintf(msg, msgLen, TR("No %s - not saved"), storageName());
         return false;
     }
     storageFs().mkdir("/camillia");
@@ -32876,7 +33355,7 @@ static bool discoveryPickSavePath(char *path, size_t pathLen, char *msg, size_t 
         snprintf(path, pathLen, "/camillia/discovery-%s-%d.json", stamp, attempt);
     }
     if (storageFs().exists(path)) {
-        snprintf(msg, msgLen, "Save failed - too many this second");
+        snprintf(msg, msgLen, TR("Save failed - too many this second"));
         return false;
     }
     return true;
@@ -32886,14 +33365,14 @@ static bool discoveryPickSavePath(char *path, size_t pathLen, char *msg, size_t 
 // with what to put on the status line either way.
 static bool discoveryWriteJson(const char *path, char *msg, size_t msgLen) {
     if (!storageBegin()) {
-        snprintf(msg, msgLen, "No %s - not saved", storageName());
+        snprintf(msg, msgLen, TR("No %s - not saved"), storageName());
         return false;
     }
     const time_t nowEpoch = time(nullptr);
 
     File f = storageFs().open(path, FILE_WRITE);
     if (!f) {
-        snprintf(msg, msgLen, "Save failed - cannot write %s", storageName());
+        snprintf(msg, msgLen, TR("Save failed - cannot write %s"), storageName());
         return false;
     }
 
@@ -33008,7 +33487,7 @@ static bool discoveryWriteJson(const char *path, char *msg, size_t msgLen) {
     // Name only: the full path does not fit the status line, and it is always
     // the same directory.
     const char *name = strrchr(path, '/');
-    snprintf(msg, msgLen, "Saved %s", name ? name + 1 : path);
+    snprintf(msg, msgLen, TR("Saved %s"), name ? name + 1 : path);
     return true;
 }
 
@@ -33051,7 +33530,7 @@ static void discoveryClear(bool keepScanView = false) {
     if (s_discoveryClearedMs == 0) s_discoveryClearedMs = 1;   // 0 means "never cleared"
 
     char msg[72];
-    snprintf(msg, sizeof(msg), "Cleared (%d report(s)) - rebuilding from traffic",
+    snprintf(msg, sizeof(msg), TR("Cleared (%d report(s)) - rebuilding from traffic"),
              droppedReports);
     discoverySetStatus(msg);
 }
@@ -33066,11 +33545,11 @@ static void discoveryClear(bool keepScanView = false) {
 // it. Returns false with the reason in msg.
 static bool discoverySweepAllowed(char *msg, size_t msgLen) {
     if (s_discoverySweepStartedMs != 0) {
-        snprintf(msg, msgLen, "Sweep already running");
+        snprintf(msg, msgLen, TR("Sweep already running"));
         return false;
     }
     if (!Radio.isReady() || s_myNodeId == 0) {
-        snprintf(msg, msgLen, "Radio not ready");
+        snprintf(msg, msgLen, TR("Radio not ready"));
         return false;
     }
     // Two separate rules, and the refusal names whichever is actually binding
@@ -33092,7 +33571,7 @@ static bool discoverySweepAllowed(char *msg, size_t msgLen) {
         }
     }
     if (waitMs > 0) {
-        snprintf(msg, msgLen, "Wait %lus between sweeps",
+        snprintf(msg, msgLen, TR("Wait %lus between sweeps"),
                  (unsigned long)((waitMs + 999UL) / 1000UL));
         return false;
     }
@@ -33101,7 +33580,7 @@ static bool discoverySweepAllowed(char *msg, size_t msgLen) {
     // how often *this* node asks a mesh to answer — so it is applied either way.
     const float chUtil = Radio.channelUtilPercent();
     if (chUtil >= kDiscoverySweepMaxChUtil) {
-        snprintf(msg, msgLen, "Channel busy (%.0f%%) - not sweeping", chUtil);
+        snprintf(msg, msgLen, TR("Channel busy (%.0f%%) - not sweeping"), chUtil);
         return false;
     }
 
@@ -33112,7 +33591,7 @@ static bool discoverySweepAllowed(char *msg, size_t msgLen) {
     // there. Checked before sending so the message can name the remaining time.
     const uint32_t cooldownMs = Channels.nodeInfoBroadcastCooldownMs();
     if (cooldownMs > 0) {
-        snprintf(msg, msgLen, "Radio busy - retry in %lus",
+        snprintf(msg, msgLen, TR("Radio busy - retry in %lus"),
                  (unsigned long)((cooldownMs + 999UL) / 1000UL));
         return false;
     }
@@ -33134,7 +33613,7 @@ static void discoveryStartSweep() {
                                                 s_cfg.nodeShort,
                                                 kDiscoverySweepHopLimit);
     if (!ok) {
-        discoverySetStatus("Sweep send failed");
+        discoverySetStatus(TR("Sweep send failed"));
         return;
     }
 
@@ -33147,7 +33626,7 @@ static void discoveryStartSweep() {
     s_discoverySweepStartedMs = now;
     s_discoveryLastSweepMs = now;
     s_discoverySweepBaseNodes = Nodes.count();
-    discoverySetStatus("Sweeping...");
+    discoverySetStatus(TR("Sweeping..."));
 }
 
 // ── Preset scan ──────────────────────────────────────────────────────────────
@@ -33280,14 +33759,14 @@ static bool discoveryRunInFlight() {
 // refresh path must not word it differently.
 static void discoverySetHintText() {
     if (!lvObjValid(s_discoveryHintLabel)) return;
-    const char *cWord = discoveryRunInFlight() ? "Cancel" : "Clear";
+    const char *cWord = discoveryRunInFlight() ? TR("Cancel") : TR("Clear");
 #if HAS_FILE_STORAGE
     lv_label_set_text_fmt(s_discoveryHintLabel,
-                          "W = Sweep   P = Preset   C = %s   S = Save   %s = Back",
+                          TR("W = Sweep   P = Preset   C = %s   S = Save   %s = Back"),
                           cWord, modalCloseKeyLabel());
 #else
     lv_label_set_text_fmt(s_discoveryHintLabel,
-                          "W = Sweep   P = Preset   C = %s   %s = Back",
+                          TR("W = Sweep   P = Preset   C = %s   %s = Back"),
                           cWord, modalCloseKeyLabel());
 #endif
 }
@@ -33303,7 +33782,7 @@ static void discoveryCancelRun() {
         // Takes the sweep window and the retune with it; see the abort path
         // there. That function says nothing to the user, so the status is ours.
         discoveryEndPresetScan(/*aborted=*/true);
-        discoverySetStatus("Scan cancelled");
+        discoverySetStatus(TR("Scan cancelled"));
         return;
     }
     if (s_discoverySweepStartedMs == 0) return;
@@ -33317,7 +33796,7 @@ static void discoveryCancelRun() {
     uint32_t now = millis();
     if (now == 0) now = 1;
     s_discoverySweepEndedMs = now;
-    discoverySetStatus("Sweep cancelled");
+    discoverySetStatus(TR("Sweep cancelled"));
 }
 
 // Retunes to `preset`, sweeps it, and leaves serviceDiscoverySweep() to bring
@@ -33325,11 +33804,11 @@ static void discoveryCancelRun() {
 static void discoveryStartPresetScan(uint8_t preset) {
     if (preset >= PRESET_COUNT) return;
     if (s_presetScanActive) {
-        discoverySetStatus("Preset scan already running");
+        discoverySetStatus(TR("Preset scan already running"));
         return;
     }
     if (preset == discoveryCurrentPreset()) {
-        discoverySetStatus("Already on that preset");
+        discoverySetStatus(TR("Already on that preset"));
         return;
     }
     char why[72];
@@ -33358,7 +33837,7 @@ static void discoveryStartPresetScan(uint8_t preset) {
                                      s_cfg.nodeShort,
                                      kDiscoverySweepHopLimit)) {
         discoveryEndPresetScan(/*aborted=*/true);
-        discoverySetStatus("Scan send failed");
+        discoverySetStatus(TR("Scan send failed"));
         return;
     }
 
@@ -33376,7 +33855,7 @@ static void discoveryStartPresetScan(uint8_t preset) {
     s_discoverySweepBaseNodes = Nodes.count();
 
     char msg[72];
-    snprintf(msg, sizeof(msg), "Scanning %s...", discoveryPresetLabel(preset));
+    snprintf(msg, sizeof(msg), TR("Scanning %s..."), discoveryPresetLabel(preset));
     discoverySetStatus(msg);
     Serial.printf("[discovery] preset scan started: %s (%.1f kHz SF%u CR4/%u)\n",
                   discoveryPresetLabel(preset), (double)kPresets[preset].bw,
@@ -33454,7 +33933,7 @@ static void discoveryLiveSaveService() {
         } else if (s_discoveryStatus[0]) {
             // Keep the run's own summary and say where it went.
             char line[sizeof(s_discoveryStatus)];
-            snprintf(line, sizeof(line), "%s - saved", s_discoveryStatus);
+            snprintf(line, sizeof(line), TR("%s - saved"), s_discoveryStatus);
             discoverySetStatus(line);
         }
         refreshDiscoveryModal(true);
@@ -33521,14 +34000,14 @@ static void serviceDiscoverySweepWindow() {
         // those four are on another mesh entirely.
         const uint8_t scanned = s_presetScanPreset;
         discoveryEndPresetScan(/*aborted=*/false);
-        snprintf(msg, sizeof(msg), "%s: %d on preset (%lus)",
+        snprintf(msg, sizeof(msg), TR("%s: %d on preset (%lus)"),
                  discoveryPresetLabel(scanned), found,
                  (unsigned long)(elapsedMs / 1000UL));
     } else {
         uint32_t endedMs = millis();
         if (endedMs == 0) endedMs = 1;
         s_discoverySweepEndedMs = endedMs;
-        snprintf(msg, sizeof(msg), "Sweep done: %d new (%lus)",
+        snprintf(msg, sizeof(msg), TR("Sweep done: %d new (%lus)"),
                  found, (unsigned long)(elapsedMs / 1000UL));
     }
     discoverySetStatus(msg);
@@ -33567,14 +34046,14 @@ static void refreshDiscoveryModal(bool force) {
         if (s_presetScanActive) {
             discoveryFormatDuration(total, sizeof(total),
                                     s_discoveryPresetScanWindowMs / 1000UL);
-            snprintf(msg, sizeof(msg), "Scanning %s %s/%s",
+            snprintf(msg, sizeof(msg), TR("Scanning %s %s/%s"),
                      discoveryPresetLabel(s_presetScanPreset), sofar, total);
         } else {
             // Counts up to the chosen window, so a six-hour sweep does not look
             // like a one-minute sweep that has badly overrun.
             discoveryFormatDuration(total, sizeof(total),
                                     s_discoverySweepWindowMs / 1000UL);
-            snprintf(msg, sizeof(msg), "Sweeping... %s/%s", sofar, total);
+            snprintf(msg, sizeof(msg), TR("Sweeping... %s/%s"), sofar, total);
         }
 #if HAS_FILE_STORAGE
         // Saving as it goes: name the file on the same line, so there is no
@@ -33583,12 +34062,12 @@ static void refreshDiscoveryModal(bool force) {
             const char *name = strrchr(s_discoveryLiveSavePath, '/');
             name = name ? name + 1 : s_discoveryLiveSavePath;
             const size_t used = strlen(msg);
-            snprintf(msg + used, sizeof(msg) - used, " - saving to %s", name);
+            snprintf(msg + used, sizeof(msg) - used, TR(" - saving to %s"), name);
         }
 #endif
         discoverySetStatus(msg);
     } else if (!s_discoveryStatus[0]) {
-        discoverySetStatus("Ready");
+        discoverySetStatus(TR("Ready"));
     }
 
     // The button and the key hint both describe what C does, so they are
@@ -33604,7 +34083,7 @@ static void refreshDiscoveryModal(bool force) {
         if (cancels != s_discoveryActionsShowCancel) {
             s_discoveryActionsShowCancel = cancels;
             if (lvObjValid(s_discoveryClearLabel)) {
-                lv_label_set_text(s_discoveryClearLabel, cancels ? "Cancel" : "Clear");
+                lv_label_set_text(s_discoveryClearLabel, cancels ? TR("Cancel") : TR("Clear"));
             }
 #if !UI_TOUCH_ONLY_PROFILE
             discoverySetHintText();
@@ -33653,7 +34132,7 @@ static void refreshDiscoveryPresetSelection() {
 // results are called final.
 static const char *discoveryDurationLabelFor(int idx) {
     if (idx < 0 || idx >= kDiscoveryDurationCount) idx = 0;
-    return kDiscoveryDurations[idx].label;
+    return TR(kDiscoveryDurations[idx].label);
 }
 
 static void discoveryDurationApply(int idx) {
@@ -33705,19 +34184,19 @@ static void openDiscoveryDurationModal(uint8_t preset) {
     // is now one of two settings on it. The checkbox is offered only where there
     // is storage to save to.
 #if HAS_FILE_STORAGE
-    static const char *const kSaveWhileLabel = "Save while discovering";
+    static const char *const kSaveWhileLabel = TR_NOOP("Save while discovering");
     bool *const saveWhileValue = &s_discoverySaveWhileRunning;
 #else
     static const char *const kSaveWhileLabel = nullptr;
     bool *const saveWhileValue = nullptr;
 #endif
     static const CfgSliderPicker kRunSpec = {
-        "Sweep/Scan Settings",
+        TR_NOOP("Sweep/Scan Settings"),
         kDiscoveryDurationCount,
         discoveryDurationLabelFor,
         discoveryDurationApply,
-        "30 sec",
-        "6 hours",
+        TR_NOOP("30 sec"),
+        TR_NOOP("6 hours"),
         kSaveWhileLabel,
         saveWhileValue,
     };
@@ -33745,7 +34224,7 @@ static void openDiscoveryPresetModal() {
     if (!s_rootScreen || !s_discoveryModal) return;
     if (s_presetPickModal || s_presetPickBackdrop) return;
     if (s_presetScanActive) {
-        discoverySetStatus("Preset scan already running");
+        discoverySetStatus(TR("Preset scan already running"));
         refreshDiscoveryModal(true);
         return;
     }
@@ -33818,7 +34297,7 @@ static void openDiscoveryPresetModal() {
     lv_obj_set_style_text_font(title, &lv_font_montserrat_14, 0);
     lv_obj_set_style_text_color(title, titleColor, 0);
     lv_obj_set_style_text_align(title, LV_TEXT_ALIGN_CENTER, 0);
-    lv_label_set_text(title, "Scan a preset");
+    lv_label_set_text(title, TR("Scan a preset"));
 
     // The cost, before the user commits rather than after. A node parked on
     // another preset hears nothing sent to it on its own — no messages, no ACKs,
@@ -33829,9 +34308,9 @@ static void openDiscoveryPresetModal() {
     lv_obj_set_style_text_color(warn, hintColor, 0);
     lv_obj_set_style_text_align(warn, LV_TEXT_ALIGN_CENTER, 0);
     lv_label_set_long_mode(warn, LV_LABEL_LONG_WRAP);
-    lv_label_set_text(warn, "5 min on that preset. This node hears nothing on its own "
+    lv_label_set_text(warn, TR("5 min on that preset. This node hears nothing on its own "
                             "while it runs, and finds only meshes sharing your primary "
-                            "channel key.");
+                            "channel key."));
 
     lv_obj_t *list = lv_obj_create(s_presetPickModal);
     lv_obj_remove_style_all(list);
@@ -33883,7 +34362,7 @@ static void openDiscoveryPresetModal() {
 #else
             lv_obj_set_style_text_opa(desc, LV_OPA_70, 0);
 #endif
-            lv_label_set_text_fmt(desc, "%s  SF%u  %.0f kHz",
+            lv_label_set_text_fmt(desc, TR("%s  SF%u  %.0f kHz"),
                                   p.channelName, (unsigned)p.sf, (double)p.bw);
         }
     }
@@ -33923,12 +34402,12 @@ static void openDiscoveryPresetModal() {
 #else
         lv_obj_set_style_text_color(lbl, lv_color_hex(0xFFFFFF), 0);
 #endif
-        lv_label_set_text(lbl, text);
+        lv_label_set_text(lbl, TR(text));
         lv_obj_center(lbl);
     };
-    makePickBtn(btnRow, "Cancel", 0x6B3030,
+    makePickBtn(btnRow, TR_NOOP("Cancel"), 0x6B3030,
                 [](lv_event_t *e) { LV_UNUSED(e); closeDiscoveryPresetModal(); });
-    makePickBtn(btnRow, "Scan", 0x2F6B30,
+    makePickBtn(btnRow, TR_NOOP("Scan"), 0x2F6B30,
                 [](lv_event_t *e) { LV_UNUSED(e); discoveryPresetPickCommit(); });
 
     lv_obj_t *hint = lv_label_create(s_presetPickModal);
@@ -33937,9 +34416,9 @@ static void openDiscoveryPresetModal() {
     lv_obj_set_style_text_color(hint, hintColor, 0);
     lv_obj_set_style_text_align(hint, LV_TEXT_ALIGN_CENTER, 0);
 #if UI_TOUCH_ONLY_PROFILE
-    lv_label_set_text(hint, "Tap a preset, then Scan");
+    lv_label_set_text(hint, TR("Tap a preset, then Scan"));
 #else
-    lv_label_set_text_fmt(hint, "Move  Enter=Scan  %s=Cancel", modalCloseKeyLabel());
+    lv_label_set_text_fmt(hint, TR("Move  Enter=Scan  %s=Cancel"), modalCloseKeyLabel());
 #endif
 
     refreshDiscoveryPresetSelection();
@@ -34013,7 +34492,7 @@ static void openDiscoveryModal() {
 #else
     lv_obj_set_style_text_color(title, lv_color_hex(0xD9E8FF), 0);
 #endif
-    lv_label_set_text(title, "Discovery");
+    lv_label_set_text(title, TR("Discovery"));
 #if UI_TOUCH_ONLY_PROFILE
     lv_obj_align(title, LV_ALIGN_LEFT_MID, 2, 0);
     if (lv_obj_t *discoveryClose = appendHeltecCloseX(
@@ -34058,18 +34537,18 @@ static void openDiscoveryModal() {
         lv_obj_t *lbl = lv_label_create(btn);
         lv_obj_set_style_text_font(lbl, &lv_font_montserrat_10, 0);
         lv_obj_set_style_text_color(lbl, lv_color_hex(0xE8F1FF), 0);
-        lv_label_set_text(lbl, text);
+        lv_label_set_text(lbl, TR(text));
         lv_obj_center(lbl);
         return lbl;
     };
-    makeDiscoveryBtn(actionRow, "Sweep", [](lv_event_t *e) {
+    makeDiscoveryBtn(actionRow, TR_NOOP("Sweep"), [](lv_event_t *e) {
         LV_UNUSED(e);
         // Asks how long first; the sweep starts from discoveryDurationApply().
         openDiscoveryDurationModal(kDiscoveryNoPresetPending);
     });
     // The keyboard boards reach this with P; on a touch-only build a button is
     // the only way in.
-    makeDiscoveryBtn(actionRow, "Preset", [](lv_event_t *e) {
+    makeDiscoveryBtn(actionRow, TR_NOOP("Preset"), [](lv_event_t *e) {
         LV_UNUSED(e);
         openDiscoveryPresetModal();
     });
@@ -34080,7 +34559,7 @@ static void openDiscoveryModal() {
     // refresh tick does not think nothing has changed and skip both labels.
     s_discoveryActionsShowCancel = discoveryRunInFlight();
     s_discoveryClearLabel = makeDiscoveryBtn(
-        actionRow, s_discoveryActionsShowCancel ? "Cancel" : "Clear", [](lv_event_t *e) {
+        actionRow, s_discoveryActionsShowCancel ? TR_NOOP("Cancel") : TR_NOOP("Clear"), [](lv_event_t *e) {
             LV_UNUSED(e);
             // The same two meanings as the C key, for the same reason -- see the
             // note there. This is the only way in on a build with no keyboard.
@@ -34276,7 +34755,7 @@ static void dmDeleteConfirmAccept() {
         // the public key, which are expensive to reacquire from the mesh.
         NodeEntry rec = {};
         if (!nodeArchiveLoadFull(nodeId, rec)) {
-            openCfgActionMessageModal("Restore failed: the archived record could not be read.");
+            openCfgActionMessageModal(TR("Restore failed: the archived record could not be read."));
             return;
         }
         // May evict — and that eviction is archived by the same path any other
@@ -34284,8 +34763,8 @@ static void dmDeleteConfirmAccept() {
         NodeEntry *live = Nodes.upsert(nodeId);
         if (!live) {
             openCfgActionMessageModal(
-                "Restore failed: every slot is favorited, so there is no room. "
-                "Unfavorite a node and try again.");
+                TR("Restore failed: every slot is favorited, so there is no room. "
+                "Unfavorite a node and try again."));
             return;
         }
         *live = rec;
@@ -34345,7 +34824,7 @@ static void dmDeleteConfirmAccept() {
     if (nodeId == 0) return;
 
     if (DMs.deleteConversation(nodeId)) {
-        dmDeleteSetFlash("Conversation deleted");
+        dmDeleteSetFlash(TR("Conversation deleted"));
         s_dmSelection = 0;
         s_dmMsgPanelFocused = false;
         s_dmRenderedConvCount = -1;
@@ -34353,7 +34832,7 @@ static void dmDeleteConfirmAccept() {
         s_dmRenderedMsgCount = -1;
         s_dmRenderedUnreadTotal = -1;
     } else {
-        dmDeleteSetFlash("Delete failed");
+        dmDeleteSetFlash(TR("Delete failed"));
     }
     refreshDmModal(true);
 }
@@ -34394,43 +34873,43 @@ static void openDestructiveConfirm(DestructiveConfirmAction action, uint32_t nod
     char titleText[40];
     char bodyText[112];
     if (action == DESTRUCTIVE_CONFIRM_LIVE_CLEAR) {
-        snprintf(titleText, sizeof(titleText), "Clear entire live feed?");
+        snprintf(titleText, sizeof(titleText), TR("Clear entire live feed?"));
         if (s_liveFilter == LIVE_FILTER_ALL) {
-            snprintf(bodyText, sizeof(bodyText), "All live traffic will be erased");
+            snprintf(bodyText, sizeof(bodyText), TR("All live traffic will be erased"));
         } else {
             snprintf(bodyText, sizeof(bodyText),
-                     "All live traffic will be erased, including lines hidden by the filter");
+                     TR("All live traffic will be erased, including lines hidden by the filter"));
         }
     } else if (action == DESTRUCTIVE_CONFIRM_NODE_RESTORE) {
         // Named from the archive index, not nodesActionTitleLabel(): the node is
         // by definition not in the table, so that helper would only have the
         // hex id to offer and the prompt would not say who this is.
         const ArchivedNode *a = currentNodesArchivedSelection();
-        const char *who = "This node";
+        const char *who = TR("This node");
         if (a && a->nodeId == nodeId) {
             if (a->longName[0])       who = a->longName;
             else if (a->shortName[0]) who = a->shortName;
         }
-        snprintf(titleText, sizeof(titleText), "Restore node?");
+        snprintf(titleText, sizeof(titleText), TR("Restore node?"));
         // The eviction is the part worth warning about: putting one node back
         // into a full table takes another one out.
         snprintf(bodyText, sizeof(bodyText),
-                 "%s returns to the live list.\nIf it is full, the oldest "
-                 "non-favorite is archived to make room.", who);
+                 TR("%s returns to the live list.\nIf it is full, the oldest "
+                 "non-favorite is archived to make room."), who);
     } else if (action == DESTRUCTIVE_CONFIRM_NODE_DELETE) {
         char who[48];
         nodesActionTitleLabel(nodeId, who, sizeof(who));
-        snprintf(titleText, sizeof(titleText), "Delete node?");
+        snprintf(titleText, sizeof(titleText), TR("Delete node?"));
         // Says what it is not, because the row next to it is Ignore and the two
         // read alike: this forgets a record, and the node reappears the next
         // time it is heard.
         snprintf(bodyText, sizeof(bodyText),
-                 "%s will be removed from the node list.", who);
+                 TR("%s will be removed from the node list."), who);
     } else {
         char who[48];
         nodesActionTitleLabel(nodeId, who, sizeof(who));
-        snprintf(titleText, sizeof(titleText), "Delete conversation?");
-        snprintf(bodyText, sizeof(bodyText), "%s\nMessage history will be erased", who);
+        snprintf(titleText, sizeof(titleText), TR("Delete conversation?"));
+        snprintf(bodyText, sizeof(bodyText), TR("%s\nMessage history will be erased"), who);
     }
 
     const int w = lv_disp_get_hor_res(NULL);
@@ -34528,13 +35007,13 @@ static void openDestructiveConfirm(DestructiveConfirmAction action, uint32_t nod
     #else
         lv_obj_set_style_text_color(lbl, lv_color_hex(0xFFFFFF), 0);
     #endif
-        lv_label_set_text(lbl, text);
+        lv_label_set_text(lbl, TR(text));
         lv_obj_center(lbl);
         return btn;
     };
 #if UI_TOUCH_ONLY_PROFILE
     makeDmDelBtn(btnRow, "No", noBtnBg, onDmDelNoPressed);
-    makeDmDelBtn(btnRow, "Yes", yesBtnBg, onDmDelYesPressed);
+    makeDmDelBtn(btnRow, TR_NOOP("Yes"), yesBtnBg, onDmDelYesPressed);
 #else
     makeDmDelBtn(btnRow, "(N)o", noBtnBg, onDmDelNoPressed);
     makeDmDelBtn(btnRow, "(Y)es", yesBtnBg, onDmDelYesPressed);
@@ -34898,10 +35377,10 @@ static void refreshDmNodePicker(bool force) {
         lv_obj_set_style_text_color(s_dmNodePickerTitle, dmPickerTextColor, 0);
         if (s_dmNodeFilterOpen) {
             char title[64];
-            snprintf(title, sizeof(title), "New DM: Select Node [%s]", s_dmNodeFilter);
+            snprintf(title, sizeof(title), TR("New DM: Select Node [%s]"), s_dmNodeFilter);
             lv_label_set_text(s_dmNodePickerTitle, title);
         } else {
-            lv_label_set_text(s_dmNodePickerTitle, "New DM: Select Node");
+            lv_label_set_text(s_dmNodePickerTitle, TR("New DM: Select Node"));
         }
     }
 
@@ -34910,17 +35389,17 @@ static void refreshDmNodePicker(bool force) {
 #if UI_TOUCH_ONLY_PROFILE
         // Nothing here changes with the filter — there is no keyboard to open
         // one — so the line says the one thing that is always true.
-        lv_label_set_text(s_dmNodePickerHint, "Tap a node to start a DM");
+        lv_label_set_text(s_dmNodePickerHint, TR("Tap a node to start a DM"));
 #elif defined(DEVICE_CARDPUTER_LORA_HAT)
         lv_label_set_text(s_dmNodePickerHint,
                           s_dmNodeFilterOpen
-                              ? "Type = Filter   Bksp = Edit Filter   Enter = Open DM   Esc = Back"
-                              : "Type = Filter   Enter = Open DM   Esc = Back");
+                              ? TR("Type = Filter   Bksp = Edit Filter   Enter = Open DM   Esc = Back")
+                              : TR("Type = Filter   Enter = Open DM   Esc = Back"));
 #else
         lv_label_set_text(s_dmNodePickerHint,
                           s_dmNodeFilterOpen
-                              ? "Type = Filter   Bksp = Edit/Close Filter   Enter = Open DM"
-                              : "Type = Filter   Enter = Open DM   Bksp = Back");
+                              ? TR("Type = Filter   Bksp = Edit/Close Filter   Enter = Open DM")
+                              : TR("Type = Filter   Enter = Open DM   Bksp = Back"));
 #endif
     }
 
@@ -34936,10 +35415,10 @@ static void refreshDmNodePicker(bool force) {
         lv_obj_set_style_text_color(empty, dmPickerTextColor, 0);
         if (s_dmNodeFilterOpen && s_dmNodeFilterLen > 0) {
             char noMatch[64];
-            snprintf(noMatch, sizeof(noMatch), "No matches for: %s", s_dmNodeFilter);
+            snprintf(noMatch, sizeof(noMatch), TR("No matches for: %s"), s_dmNodeFilter);
             lv_label_set_text(empty, noMatch);
         } else {
-            lv_label_set_text(empty, "No known nodes yet");
+            lv_label_set_text(empty, TR("No known nodes yet"));
         }
         return;
     }
@@ -35077,7 +35556,7 @@ static void openDmNodePicker() {
         title,
         (s_cfg.uiMode == UI_MODE_LIGHT) ? lv_color_hex(0x1B243D) : lv_color_hex(0xD9E8FF),
         0);
-    lv_label_set_text(title, "New DM: Select Node");
+    lv_label_set_text(title, TR("New DM: Select Node"));
 
     s_dmNodePickerList = lv_obj_create(s_dmNodePickerModal);
     lv_obj_set_width(s_dmNodePickerList, lv_pct(100));
@@ -35106,14 +35585,14 @@ static void openDmNodePicker() {
         (s_cfg.uiMode == UI_MODE_LIGHT) ? lv_color_hex(0x334E75) : lv_color_hex(0xA7C7FF),
         0);
 #if defined(DEVICE_CARDPUTER_LORA_HAT)
-    lv_label_set_text(hint, "Type = Filter   Enter = Open DM   Esc = Back");
+    lv_label_set_text(hint, TR("Type = Filter   Enter = Open DM   Esc = Back"));
 #elif UI_TOUCH_ONLY_PROFILE
-    lv_label_set_text(hint, "Tap a node to start a DM");
+    lv_label_set_text(hint, TR("Tap a node to start a DM"));
     reserveHeltecCloseXRow(title);
     appendHeltecCloseX(s_dmNodePickerModal,
                        [](lv_event_t *ev) { LV_UNUSED(ev); closeDmNodePicker(); });
 #else
-    lv_label_set_text(hint, "Type = Filter   Enter = Open DM   Bksp = Back");
+    lv_label_set_text(hint, TR("Type = Filter   Enter = Open DM   Bksp = Back"));
 #endif
 
     refreshDmNodePicker(true);
@@ -35330,7 +35809,7 @@ static void refreshDmModal(bool force) {
         lv_obj_set_style_text_color(lbl, dmPanelTextColor, 0);
         lv_obj_set_style_text_align(lbl, LV_TEXT_ALIGN_LEFT, 0);
         lv_label_set_long_mode(lbl, LV_LABEL_LONG_DOT);
-        lv_label_set_text(lbl, "New DM");
+        lv_label_set_text(lbl, TR("New DM"));
         lv_obj_align(lbl, LV_ALIGN_LEFT_MID, 0, 0);
     }
 
@@ -35422,7 +35901,7 @@ static void refreshDmModal(bool force) {
         // keybinding in the space messages occupy — and named the wrong key on
         // builds where Esc closes modals (kModalCloseUsesEscape), which is
         // every Cardputer.
-        lv_label_set_text(empty, "Select a conversation");
+        lv_label_set_text(empty, TR("Select a conversation"));
     } else {
         const DmLine *renderRows[MAX_DM_LINES] = {};
         int rowCount = 0;
@@ -35558,7 +36037,7 @@ static void refreshDmModal(bool force) {
             lv_obj_set_width(empty, lv_pct(100));
             lv_obj_set_style_text_font(empty, dmMsgFont, 0);
             lv_obj_set_style_text_color(empty, dmPanelTextColor, 0);
-            lv_label_set_text(empty, "No messages yet");
+            lv_label_set_text(empty, TR("No messages yet"));
         }
     }
 
@@ -35574,18 +36053,18 @@ static void refreshDmModal(bool force) {
 #if defined(DEVICE_CARDPUTER_LORA_HAT)
             lv_label_set_text(s_dmHintLabel, "");   // no static legend here
 #elif defined(DEVICE_TDECK)
-            lv_label_set_text_fmt(s_dmHintLabel,
-                                  "J/K = Select   Space = Compose   Enter = Focus   D = Delete");
+            lv_label_set_text(s_dmHintLabel,
+                                  TR("J/K = Select   Space = Compose   Enter = Focus   D = Delete"));
 #elif defined(DEVICE_TLORA_PAGER_TFT)
-            lv_label_set_text_fmt(s_dmHintLabel,
-                                  "Up/Down = Select   Space = Compose   Enter = Focus   D = Delete");
+            lv_label_set_text(s_dmHintLabel,
+                                  TR("Up/Down = Select   Space = Compose   Enter = Focus   D = Delete"));
 #elif UI_TOUCH_ONLY_PROFILE
             lv_label_set_text_fmt(s_dmHintLabel,
-                                  "Tap = Open   Long-press 3s = Delete"
-                                  "   DM below = Back");
+                                  TR("Tap = Open   Long-press 3s = Delete"
+                                  "   DM below = Back"));
 #else
             lv_label_set_text_fmt(s_dmHintLabel,
-                                  "Up/Down = Select   Space = Compose   Enter = Focus   %s = Delete   %s = Back",
+                                  TR("Up/Down = Select   Space = Compose   Enter = Focus   %s = Delete   %s = Back"),
                                   dmDeleteTriggerLabel(),
                                   modalCloseKeyLabel());
 #endif
@@ -35630,8 +36109,16 @@ static void openDmModal() {
     int modalH = lv_disp_get_ver_res(NULL);
     // s_dmModal has border=1 + pad_all=4, so usable content width is modalW - 2*1 - 2*4.
     int contentW = modalW - 10;
-    int leftW = max(96, (contentW * 38) / 100);
-    int rightW = contentW - leftW - 3;
+    // Conversations over messages, both full width, instead of side by side:
+    // the P4 held upright is 284 px wide -- too narrow to split -- and has the
+    // height to stack into, the same way its Nodes screen does.
+#if defined(DEVICE_TDISPLAY_P4)
+    const bool dmStacked = uiPortrait();
+#else
+    const bool dmStacked = false;
+#endif
+    int leftW = dmStacked ? contentW : max(96, (contentW * 38) / 100);
+    int rightW = dmStacked ? contentW : (contentW - leftW - 3);
 
     s_dmModal = lv_obj_create(s_rootScreen);
     lv_obj_set_size(s_dmModal, modalW, modalH);
@@ -35662,7 +36149,7 @@ static void openDmModal() {
         title,
         (s_cfg.uiMode == UI_MODE_LIGHT) ? lv_color_hex(0x1B243D) : lv_color_hex(0xD9E8FF),
         0);
-    lv_label_set_text(title, "DIRECT MESSAGES");
+    lv_label_set_text(title, TR("DIRECT MESSAGES"));
     lv_obj_center(title);
 
     lv_obj_t *content = lv_obj_create(s_dmModal);
@@ -35672,14 +36159,20 @@ static void openDmModal() {
     lv_obj_set_style_bg_opa(content, LV_OPA_TRANSP, 0);
     lv_obj_set_style_border_width(content, 0, 0);
     lv_obj_set_style_pad_all(content, 0, 0);
-    lv_obj_set_style_pad_column(content, 3, 0);
-    lv_obj_set_flex_flow(content, LV_FLEX_FLOW_ROW);
+    if (dmStacked) {
+        lv_obj_set_style_pad_row(content, 3, 0);
+        lv_obj_set_flex_flow(content, LV_FLEX_FLOW_COLUMN);
+    } else {
+        lv_obj_set_style_pad_column(content, 3, 0);
+        lv_obj_set_flex_flow(content, LV_FLEX_FLOW_ROW);
+    }
     lv_obj_set_flex_align(content, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_START);
 
     lv_obj_t *leftPanel = lv_obj_create(content);
     s_dmConvPanel = leftPanel;
     lv_obj_set_width(leftPanel, leftW);
-    lv_obj_set_height(leftPanel, lv_pct(100));
+    // Stacked: the conversation list takes the top 40%, the messages the rest.
+    lv_obj_set_height(leftPanel, dmStacked ? lv_pct(40) : lv_pct(100));
     lv_obj_clear_flag(leftPanel, LV_OBJ_FLAG_SCROLLABLE);
     lv_obj_set_style_bg_color(leftPanel, lv_color_hex(0x0F2A5C), 0);
     lv_obj_set_style_bg_opa(leftPanel, LV_OPA_40, 0);
@@ -35697,7 +36190,7 @@ static void openDmModal() {
         leftTitle,
         (s_cfg.uiMode == UI_MODE_LIGHT) ? lv_color_hex(0x1B243D) : lv_color_hex(0xD9E8FF),
         0);
-    lv_label_set_text(leftTitle, "Conversations");
+    lv_label_set_text(leftTitle, TR("Conversations"));
 
     s_dmConvList = lv_obj_create(leftPanel);
     lv_obj_set_width(s_dmConvList, lv_pct(100));
@@ -35720,7 +36213,11 @@ static void openDmModal() {
     lv_obj_t *rightPanel = lv_obj_create(content);
     s_dmMsgPanel = rightPanel;
     lv_obj_set_width(rightPanel, rightW);
-    lv_obj_set_height(rightPanel, lv_pct(100));
+    if (dmStacked) {
+        lv_obj_set_flex_grow(rightPanel, 1);
+    } else {
+        lv_obj_set_height(rightPanel, lv_pct(100));
+    }
     lv_obj_clear_flag(rightPanel, LV_OBJ_FLAG_SCROLLABLE);
     lv_obj_set_style_bg_color(rightPanel, lv_color_hex(0x0F2A5C), 0);
     lv_obj_set_style_bg_opa(rightPanel, LV_OPA_40, 0);
@@ -35738,7 +36235,7 @@ static void openDmModal() {
         rightTitle,
         (s_cfg.uiMode == UI_MODE_LIGHT) ? lv_color_hex(0x1B243D) : lv_color_hex(0xD9E8FF),
         0);
-    lv_label_set_text(rightTitle, "Messages");
+    lv_label_set_text(rightTitle, TR("Messages"));
 
     s_dmMsgList = lv_obj_create(rightPanel);
     lv_obj_set_width(s_dmMsgList, lv_pct(100));
@@ -35780,7 +36277,7 @@ static void openDmModal() {
     lv_obj_t *dmNewMsgLbl = lv_label_create(dmNewMsgBtn);
     lv_obj_set_style_text_font(dmNewMsgLbl, &lv_font_montserrat_10, 0);
     lv_obj_set_style_text_color(dmNewMsgLbl, lv_color_hex(0xE8F1FF), 0);
-    lv_label_set_text(dmNewMsgLbl, "New Message");
+    lv_label_set_text(dmNewMsgLbl, TR("New Message"));
     lv_obj_center(dmNewMsgLbl);
 #endif
 
@@ -35801,18 +36298,18 @@ static void openDmModal() {
     lv_label_set_text(hint, "");
     lv_obj_add_flag(hint, LV_OBJ_FLAG_HIDDEN);
 #elif defined(DEVICE_TDECK)
-    lv_label_set_text_fmt(hint,
-                          "J/K = Select   Space = Compose   Enter = Focus   D = Delete");
+    lv_label_set_text(hint,
+                          TR("J/K = Select   Space = Compose   Enter = Focus   D = Delete"));
 #elif defined(DEVICE_TLORA_PAGER_TFT)
-    lv_label_set_text_fmt(hint,
-                          "Up/Down = Select   Space = Compose   Enter = Focus   D = Delete");
+    lv_label_set_text(hint,
+                          TR("Up/Down = Select   Space = Compose   Enter = Focus   D = Delete"));
 #elif UI_TOUCH_ONLY_PROFILE
     lv_label_set_text_fmt(hint,
-                          "Tap = Open   Long-press 3s = Delete"
-                          "   DM below = Back");
+                          TR("Tap = Open   Long-press 3s = Delete"
+                          "   DM below = Back"));
 #else
     lv_label_set_text_fmt(hint,
-                          "Up/Down = Select   Space = Compose   Enter = Focus   %s = Delete   %s = Back",
+                          TR("Up/Down = Select   Space = Compose   Enter = Focus   %s = Delete   %s = Back"),
                           dmDeleteTriggerLabel(),
                           modalCloseKeyLabel());
 #endif
@@ -35897,27 +36394,35 @@ static void openNodesModal() {
     const lv_font_t *nodesDetailFont = emojiFont(&lv_font_montserrat_10);
 #endif
 
-#if NODES_LAYOUT_WIDE
+    // List over details, both full width, rather than side by side: the T-Deck
+    // Pro's portrait paper, and the T-Display P4 held upright, where 284 px is
+    // too narrow to split and there is height to stack into.
 #if defined(DEVICE_TDECK_PRO)
-    // Portrait paper: stack the list over details so both use the full width.
+    const bool nodesStacked = true;
+#elif defined(DEVICE_TDISPLAY_P4)
+    const bool nodesStacked = uiPortrait();
+#else
+    const bool nodesStacked = false;
+#endif
+#if NODES_LAYOUT_WIDE
     int listW = contentW;
     int detailW = contentW;
-#else
-    // The list is on the left now and carries long names, so it gets a real
-    // share of the width instead of the ~22-24% strip it had when it only ever
-    // showed a four-character short name. The detail panel keeps the remainder
-    // and has a floor of its own: below that its two columns stop being a table.
-    const int kNodesDetailMinW = 110;
-    int listW = (contentW * 45) / 100;
-    if (contentW - listW - contentGap < kNodesDetailMinW) {
-        listW = contentW - contentGap - kNodesDetailMinW;
+    if (!nodesStacked) {
+        // The list is on the left now and carries long names, so it gets a real
+        // share of the width instead of the ~22-24% strip it had when it only ever
+        // showed a four-character short name. The detail panel keeps the remainder
+        // and has a floor of its own: below that its two columns stop being a table.
+        const int kNodesDetailMinW = 110;
+        listW = (contentW * 45) / 100;
+        if (contentW - listW - contentGap < kNodesDetailMinW) {
+            listW = contentW - contentGap - kNodesDetailMinW;
+        }
+        // Pathologically narrow panel: give the list something rather than a
+        // negative width, and let the detail panel scroll for the rest.
+        if (listW < 60) listW = 60;
+        detailW = contentW - listW - contentGap;
+        if (detailW < 60) detailW = 60;
     }
-    // Pathologically narrow panel: give the list something rather than a
-    // negative width, and let the detail panel scroll for the rest.
-    if (listW < 60) listW = 60;
-    int detailW = contentW - listW - contentGap;
-    if (detailW < 60) detailW = 60;
-#endif
 #else
     // Cardputer: unchanged from before the wide layout — a narrow list of short
     // names on the right, details taking the rest on the left.
@@ -35957,7 +36462,7 @@ static void openNodesModal() {
     s_nodesTitleLabel = title;
     lv_obj_set_style_text_font(title, &lv_font_montserrat_12, 0);
     lv_obj_set_style_text_color(title, lv_color_hex(0xD9E8FF), 0);
-    lv_label_set_text(title, "NODES");
+    lv_label_set_text(title, TR("NODES"));
     lv_obj_center(title);
 
 #if UI_TOUCH_ONLY_PROFILE
@@ -35979,7 +36484,7 @@ static void openNodesModal() {
     lv_obj_t *filterLabel = lv_label_create(s_nodesFilterBtn);
     lv_obj_set_style_text_font(filterLabel, &lv_font_montserrat_10, 0);
     lv_obj_set_style_text_color(filterLabel, lv_color_hex(0xD9E8FF), 0);
-    lv_label_set_text(filterLabel, "Filter");
+    lv_label_set_text(filterLabel, TR("Filter"));
     lv_obj_center(filterLabel);
 #endif
 
@@ -35990,13 +36495,13 @@ static void openNodesModal() {
     lv_obj_set_style_bg_opa(content, LV_OPA_TRANSP, 0);
     lv_obj_set_style_border_width(content, 0, 0);
     lv_obj_set_style_pad_all(content, 0, 0);
-#if defined(DEVICE_TDECK_PRO)
-    lv_obj_set_style_pad_row(content, contentGap, 0);
-    lv_obj_set_flex_flow(content, LV_FLEX_FLOW_COLUMN);
-#else
-    lv_obj_set_style_pad_column(content, contentGap, 0);
-    lv_obj_set_flex_flow(content, LV_FLEX_FLOW_ROW);
-#endif
+    if (nodesStacked) {
+        lv_obj_set_style_pad_row(content, contentGap, 0);
+        lv_obj_set_flex_flow(content, LV_FLEX_FLOW_COLUMN);
+    } else {
+        lv_obj_set_style_pad_column(content, contentGap, 0);
+        lv_obj_set_flex_flow(content, LV_FLEX_FLOW_ROW);
+    }
     lv_obj_set_flex_align(content, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_START);
 
 #if NODES_LAYOUT_WIDE
@@ -36010,7 +36515,9 @@ static void openNodesModal() {
 #if defined(DEVICE_TDECK_PRO)
     lv_obj_set_height(listPanel, 92);
 #else
-    lv_obj_set_height(listPanel, lv_pct(100));
+    // Stacked (P4 portrait): the list takes the top 45% and the details grow
+    // into the rest; side by side it runs the full height.
+    lv_obj_set_height(listPanel, nodesStacked ? lv_pct(45) : lv_pct(100));
 #endif
     lv_obj_clear_flag(listPanel, LV_OBJ_FLAG_SCROLLABLE);
     lv_obj_set_style_bg_color(listPanel, lv_color_hex(0x0F2A5C), 0);
@@ -36046,11 +36553,11 @@ static void openNodesModal() {
     lv_obj_t *infoPanel = lv_obj_create(content);
     s_nodesInfoPanel = infoPanel;
     lv_obj_set_width(infoPanel, detailW);
-#if defined(DEVICE_TDECK_PRO)
-    lv_obj_set_flex_grow(infoPanel, 1);
-#else
-    lv_obj_set_height(infoPanel, lv_pct(100));
-#endif
+    if (nodesStacked) {
+        lv_obj_set_flex_grow(infoPanel, 1);
+    } else {
+        lv_obj_set_height(infoPanel, lv_pct(100));
+    }
     lv_obj_add_flag(infoPanel, LV_OBJ_FLAG_SCROLLABLE);
     setupVScroll(infoPanel);
     lv_obj_set_scrollbar_mode(infoPanel, LV_SCROLLBAR_MODE_AUTO);
@@ -36093,12 +36600,12 @@ static void openNodesModal() {
     int nodesKeyColW;
     {
         lv_point_t keySz;
-        lv_text_get_size(&keySz, "Last heard", nodesDetailFont, 0, 0,
+        lv_text_get_size(&keySz, TR("Last heard"), nodesDetailFont, 0, 0,
                          LV_COORD_MAX, LV_TEXT_FLAG_NONE);
         nodesKeyColW = keySz.x + 6;   // + the gutter to the values
     }
     static const char *kNodesSectionTitles[NODES_SEC_COUNT] = {
-        "Identity", "Link", "Position", "Telemetry"
+        TR("Identity"), TR("Link"), TR("Position"), TR("Telemetry")
     };
     for (int i = 0; i < NODES_SEC_COUNT; i++) {
         lv_obj_t *box = lv_obj_create(infoPanel);
@@ -36337,7 +36844,7 @@ static void openReleaseNotesModal() {
     lv_obj_set_style_text_font(title, &lv_font_montserrat_12, 0);
     lv_obj_set_style_text_color(title, lv_color_hex(0xD9E8FF), 0);
     lv_obj_set_style_text_align(title, LV_TEXT_ALIGN_CENTER, 0);
-    lv_label_set_text_fmt(title, "Release Notes  %s", APP_VERSION);
+    lv_label_set_text_fmt(title, TR("Release Notes  %s"), APP_VERSION);
 
     // Takes the space the title and the footer below don't, so the notes scroll
     // inside a frame rather than carrying the header off the top with them.
@@ -36360,7 +36867,7 @@ static void openReleaseNotesModal() {
         lv_label_set_text(body, RELEASE_NOTES_TEXT);
     } else {
         // A dev build, or a release whose summary generation failed.
-        lv_label_set_text(body, "No release notes in this build.");
+        lv_label_set_text(body, TR("No release notes in this build."));
     }
 
 #if UI_TOUCH_ONLY_PROFILE
@@ -36377,11 +36884,21 @@ static void openReleaseNotesModal() {
     lv_obj_set_style_text_align(hint, LV_TEXT_ALIGN_CENTER, 0);
 #if defined(DEVICE_TDECK)
     // No dedicated Up/Down keys here; J/K and the trackball drive scroll.
-    lv_label_set_text(hint, "J/K = Scroll   Bksp = Close");
+    lv_label_set_text(hint, TR("J/K = Scroll   Bksp = Close"));
 #else
-    lv_label_set_text(hint, "Up/Down/J/K = Scroll   Bksp = Close");
+    lv_label_set_text(hint, TR("Up/Down/J/K = Scroll   Bksp = Close"));
 #endif
 #endif
+}
+
+// The Help screen's transport-icon key, shared by every board's layout. The
+// icons go in as arguments so the translated text keeps them.
+static const char *legendTransportText() {
+    static char buf[160];
+    snprintf(buf, sizeof(buf),
+             TR("Transport Symbols:\n%s Radio Transmission\n%s MQTT Transmission"),
+             LV_SYMBOL_RADIO_TINY, LV_SYMBOL_GLOBE_TINY);
+    return buf;
 }
 
 static void openLegendModal() {
@@ -36484,7 +37001,7 @@ static void openLegendModal() {
     lv_obj_set_width(title, lv_pct(100));
     lv_obj_set_style_text_font(title, &lv_font_montserrat_12, 0);
     lv_obj_set_style_text_color(title, lv_color_hex(0xD9E8FF), 0);
-    lv_label_set_text(title, "Help");
+    lv_label_set_text(title, TR("Help"));
 
 #if UI_TOUCH_ONLY_PROFILE
     lv_obj_t *body = lv_label_create(s_legendModal);
@@ -36492,25 +37009,23 @@ static void openLegendModal() {
     lv_obj_set_style_text_font(body, legendBodyFont, 0);
     lv_obj_set_style_text_color(body, lv_color_hex(0xD9E8FF), 0);
     lv_label_set_long_mode(body, LV_LABEL_LONG_WRAP);
+    // One TR() key per paragraph: a single literal cannot span the #if, so
+    // the pieces are translated separately and joined here.
     lv_label_set_text_fmt(
         body,
-        "Touch Navigation:\n"
+        "%s\n%s\n\n%s",
+        TR("Touch Navigation:"),
 #if HAS_HOME_DASHBOARD
-        "Bottom buttons: Home, Chats, DM, Nodes, Tools, Config, Help.\n"
-        "Home is the dashboard; Chats is the messages, and its icon\n"
-        "blinks when a channel has something unread.\n"
+        TR("Bottom buttons: Home, Chats, DM, Nodes, Tools, Config, Help.\n"
+           "Home is the dashboard; Chats is the messages, and its icon\n"
+           "blinks when a channel has something unread."),
 #else
         // Unreachable today — both touch-only boards get FEATURE_LOCK_SCREEN and
         // so HAS_HOME_DASHBOARD — but it named the cells as they were two
         // changes ago: Live left the bar for Tools, and Chats joined it.
-        "Bottom buttons: Chats, DM, Nodes, Tools, Config, Help.\n"
+        TR("Bottom buttons: Chats, DM, Nodes, Tools, Config, Help."),
 #endif
-        "\n"
-        "Transport Symbols:\n"
-        "%s Radio Transmission\n"
-        "%s MQTT Transmission",
-        LV_SYMBOL_RADIO_TINY,
-        LV_SYMBOL_GLOBE_TINY);
+        legendTransportText());
 #elif defined(DEVICE_TLORA_PAGER_TFT) || defined(DEVICE_TDECK)
     lv_obj_t *bodyRow = lv_obj_create(s_legendModal);
     lv_obj_set_width(bodyRow, lv_pct(100));
@@ -36531,28 +37046,28 @@ static void openLegendModal() {
     lv_label_set_text(
         leftCol,
 #if HAS_HOME_DASHBOARD
-        "(H) Home dashboard\n"
-        "(C) Chat (again: channels)\n"
-        "(F) Configuration\n"
-        "(D) Direct Messages\n"
-        "(N) Nodes\n"
-        "(L) Tools (Live, charts)\n"
-        "(A) Channel Actions\n"
-        "(P) Help (this screen)\n"
-        "(E) Emoji\n"
-        "(Space) Compose/Reply\n"
-        "(Enter) Focus Messages");
+        TR("(H) Home dashboard\n"
+           "(C) Chat (again: channels)\n"
+           "(F) Configuration\n"
+           "(D) Direct Messages\n"
+           "(N) Nodes\n"
+           "(L) Tools (Live, charts)\n"
+           "(A) Channel Actions\n"
+           "(P) Help (this screen)\n"
+           "(E) Emoji\n"
+           "(Space) Compose/Reply\n"
+           "(Enter) Focus Messages"));
 #else
-        "(D) Direct Messages\n"
-        "(C) Configuration\n"
-        "(N) Nodes\n"
-        "(L) Tools (Live, charts)\n"
-        "(A) Channel Actions\n"
-        "(H) Channel selector\n"
-        "(P) Help (this screen)\n"
-        "(E) Emoji\n"
-        "(Space) Compose/Reply\n"
-        "(Enter) Focus Messages");
+        TR("(D) Direct Messages\n"
+           "(C) Configuration\n"
+           "(N) Nodes\n"
+           "(L) Tools (Live, charts)\n"
+           "(A) Channel Actions\n"
+           "(H) Channel selector\n"
+           "(P) Help (this screen)\n"
+           "(E) Emoji\n"
+           "(Space) Compose/Reply\n"
+           "(Enter) Focus Messages"));
 #endif
 
     lv_obj_t *rightCol = lv_obj_create(bodyRow);
@@ -36571,13 +37086,7 @@ static void openLegendModal() {
     lv_obj_set_style_text_font(rightMain, legendBodyFont, 0);
     lv_obj_set_style_text_color(rightMain, lv_color_hex(0xD9E8FF), 0);
     lv_label_set_long_mode(rightMain, LV_LABEL_LONG_WRAP);
-    lv_label_set_text_fmt(
-        rightMain,
-        "Transport Symbols:\n"
-        "%s Radio Transmission\n"
-        "%s MQTT Transmission",
-        LV_SYMBOL_RADIO_TINY,
-        LV_SYMBOL_GLOBE_TINY);
+    lv_label_set_text(rightMain, legendTransportText());
 
 #if defined(DEVICE_TDECK)
     lv_obj_t *rightNote = lv_label_create(rightCol);
@@ -36586,7 +37095,7 @@ static void openLegendModal() {
     lv_obj_set_style_text_font(rightNote, &lv_font_montserrat_12, 0);
     lv_obj_set_style_text_color(rightNote, lv_color_hex(0xE8F1FF), 0);
     lv_label_set_long_mode(rightNote, LV_LABEL_LONG_WRAP);
-    lv_label_set_text(rightNote, "\nT-Deck trackball: hold click 2s to sleep");
+    lv_label_set_text(rightNote, TR("\nT-Deck trackball: hold click 2s to sleep"));
 #endif
 #else
     lv_obj_t *body = lv_label_create(s_legendModal);
@@ -36596,36 +37105,32 @@ static void openLegendModal() {
     lv_label_set_long_mode(body, LV_LABEL_LONG_WRAP);
     lv_label_set_text_fmt(
         body,
+        "%s\n\n%s",
 #if HAS_HOME_DASHBOARD
-        "(H) Home dashboard\n"
-        "(C) Chat (again: channels)\n"
-        "(F) Configuration\n"
-        "(D) Direct Messages\n"
-        "(N) Nodes\n"
-        "(L) Tools (Live, charts)\n"
-        "(A) Channel Actions\n"
-        "(P) Help (this screen)\n"
-        "(E) Emoji\n"
-        "(Space) Compose/Reply\n"
-        "(Enter) Focus Messages\n"
+        TR("(H) Home dashboard\n"
+           "(C) Chat (again: channels)\n"
+           "(F) Configuration\n"
+           "(D) Direct Messages\n"
+           "(N) Nodes\n"
+           "(L) Tools (Live, charts)\n"
+           "(A) Channel Actions\n"
+           "(P) Help (this screen)\n"
+           "(E) Emoji\n"
+           "(Space) Compose/Reply\n"
+           "(Enter) Focus Messages"),
 #else
-        "(D) Direct Messages\n"
-        "(C) Configuration\n"
-        "(N) Nodes\n"
-        "(L) Tools (Live, charts)\n"
-        "(A) Channel Actions\n"
-        "(H) Channel selector\n"
-        "(P) Help (this screen)\n"
-        "(E) Emoji\n"
-        "(Space) Compose/Reply\n"
-        "(Enter) Focus Messages\n"
+        TR("(D) Direct Messages\n"
+           "(C) Configuration\n"
+           "(N) Nodes\n"
+           "(L) Tools (Live, charts)\n"
+           "(A) Channel Actions\n"
+           "(H) Channel selector\n"
+           "(P) Help (this screen)\n"
+           "(E) Emoji\n"
+           "(Space) Compose/Reply\n"
+           "(Enter) Focus Messages"),
 #endif
-        "\n"
-        "Transport Symbols:\n"
-        "%s Radio Transmission\n"
-        "%s MQTT Transmission",
-        LV_SYMBOL_RADIO_TINY,
-        LV_SYMBOL_GLOBE_TINY);
+        legendTransportText());
 #endif
 
 #if UI_TOUCH_ONLY_PROFILE
@@ -36640,7 +37145,7 @@ static void openLegendModal() {
     // kModalCloseUsesEscape, so isModalCloseKey() there accepts Esc and nothing
     // else — this line was naming a key that does not close anything on the one
     // board whose users most need the reminder.
-    lv_label_set_text_fmt(hint, "%s to close Help", modalCloseKeyLabel());
+    lv_label_set_text_fmt(hint, TR("%s to close Help"), modalCloseKeyLabel());
 #endif
 
     // Last, so the bar's layout spacer is the final child of the flex column and
@@ -36736,7 +37241,7 @@ static void openCfgModal() {
     lv_obj_set_style_text_font(title, &lv_font_montserrat_12, 0);
 #endif
     lv_obj_set_style_text_color(title, lv_color_hex(0xD9E8FF), 0);
-    lv_label_set_text(title, "Configuration");
+    lv_label_set_text(title, TR("Configuration"));
 
     s_cfgHeaderStatus = lv_label_create(header);
 #if UI_TOUCH_ONLY_PROFILE
@@ -36756,7 +37261,7 @@ static void openCfgModal() {
     lv_obj_set_style_text_align(s_cfgHeaderStatus, LV_TEXT_ALIGN_RIGHT, 0);
     lv_obj_set_style_text_color(s_cfgHeaderStatus, lv_color_hex(0x79DDB8), 0);
     lv_label_set_long_mode(s_cfgHeaderStatus, LV_LABEL_LONG_DOT);
-    lv_label_set_text(s_cfgHeaderStatus, "Ready");
+    lv_label_set_text(s_cfgHeaderStatus, TR("Ready"));
 
 #if UI_TOUCH_ONLY_PROFILE
     lv_obj_t *infoBtn = lv_btn_create(header);
@@ -36773,7 +37278,7 @@ static void openCfgModal() {
     lv_obj_t *infoLbl = lv_label_create(infoBtn);
     lv_obj_set_style_text_font(infoLbl, &lv_font_montserrat_10, 0);
     lv_obj_set_style_text_color(infoLbl, lv_color_hex(0xD9E8FF), 0);
-    lv_label_set_text(infoLbl, "Info");
+    lv_label_set_text(infoLbl, TR("Info"));
     lv_obj_center(infoLbl);
 #endif
 
@@ -36864,7 +37369,7 @@ static void openCfgModal() {
     lv_obj_set_style_text_font(hint, &lv_font_montserrat_10, 0);
 #endif
     lv_obj_set_style_text_color(hint, lv_color_hex(0xA7C7FF), 0);
-    lv_label_set_text(hint, "To close hit backspace.  (I)nformation");
+    lv_label_set_text(hint, TR("To close hit backspace.  (I)nformation"));
 #endif
 
 #if HAS_NAV_BAR_TOGGLE
@@ -36884,18 +37389,18 @@ static void activateCfgSelection() {
     if (s_cfgActionCount <= 0 || s_cfgSelection < 0 || s_cfgSelection >= s_cfgActionCount) return;
     const int actionId = s_cfgActions[s_cfgSelection];
     if (cfgActionDisabled(actionId)) {
-        const char *disabledMessage = "Enable WiFi first";
+        const char *disabledMessage = TR("Enable WiFi first");
         if (actionId == CFG_ACTION_WEBCFG && s_cfg.mqttEnabled) {
-            disabledMessage = "Web Config locked while MQTT is on";
+            disabledMessage = TR("Web Config locked while MQTT is on");
         }
 #if HAS_VNC_HOST
         else if (actionId == CFG_ACTION_VNC_HOST && !vncNetworkConnected()) {
-            disabledMessage = "Connect to WiFi before enabling VNC";
+            disabledMessage = TR("Connect to WiFi before enabling VNC");
         }
 #endif
 #if HAS_BLE_KEYBOARD
         else if (actionId == CFG_ACTION_BLE_KBD_PAIR) {
-            disabledMessage = "Turn BT Keyboard on first";
+            disabledMessage = TR("Turn BT Keyboard on first");
         }
 #endif
         snprintf(s_cfgStatus, sizeof(s_cfgStatus), "%s", disabledMessage);
@@ -37036,7 +37541,7 @@ static void openSdScanProgressModal(const char *title) {
     lv_obj_set_style_text_font(s_sdScanStatus, &lv_font_montserrat_10, 0);
     lv_obj_set_style_text_color(s_sdScanStatus, bodyColor, 0);
     lv_label_set_long_mode(s_sdScanStatus, LV_LABEL_LONG_WRAP);
-    lv_label_set_text(s_sdScanStatus, "Counting files on the card...");
+    lv_label_set_text(s_sdScanStatus, TR("Counting files on the card..."));
 
     s_sdScanBar = lv_bar_create(s_sdScanModal);
     lv_obj_set_width(s_sdScanBar, contentW);
@@ -37059,7 +37564,7 @@ static void openSdScanProgressModal(const char *title) {
     lv_obj_set_style_text_font(hint, &lv_font_montserrat_10, 0);
     lv_obj_set_style_text_color(hint, dimColor, 0);
     lv_obj_set_style_text_align(hint, LV_TEXT_ALIGN_CENTER, 0);
-    lv_label_set_text(hint, "Back = Cancel");
+    lv_label_set_text(hint, TR("Back = Cancel"));
 
     lv_obj_move_foreground(s_sdScanBackdrop);
     s_sdScanLastPaintMs = 0;   // so the first callback paints rather than waiting
@@ -37093,18 +37598,18 @@ static bool sdScanProgress(uint16_t done, uint16_t total, uint16_t found,
     if (total == 0) {
         // Counting pass: there is no denominator yet, so the bar stays empty and
         // the running count is the thing that shows it is alive.
-        snprintf(buf, sizeof(buf), "Counting files... %u found", (unsigned)done);
+        snprintf(buf, sizeof(buf), TR("Counting files... %u found"), (unsigned)done);
         lv_bar_set_value(s_sdScanBar, 0, LV_ANIM_OFF);
     } else {
         const uint32_t pct = (uint32_t)done * 100UL / (total ? total : 1);
-        snprintf(buf, sizeof(buf), "Checking %u of %u   %u%%",
+        snprintf(buf, sizeof(buf), TR("Checking %u of %u   %u%%"),
                  (unsigned)done, (unsigned)total, (unsigned)pct);
         lv_bar_set_value(s_sdScanBar, (int32_t)pct, LV_ANIM_OFF);
     }
     lv_label_set_text(s_sdScanStatus, buf);
 
     if (found) {
-        snprintf(buf, sizeof(buf), "%s   -   %u match%s so far",
+        snprintf(buf, sizeof(buf), TR("%s   -   %u match%s so far"),
                  (where && where[0]) ? where : "/", (unsigned)found,
                  (found == 1) ? "" : "es");
     } else {
@@ -37123,12 +37628,12 @@ static bool sdScanProgress(uint16_t done, uint16_t total, uint16_t found,
 static void cfgSdExportCommit(int) {
     const bool ok = cfgExport(s_cfg);
     openCfgActionMessageModal(
-        ok ? "Configuration exported to /camillia/config.yaml.\n\nThe card is "
+        ok ? TR("Configuration exported to /camillia/config.yaml.\n\nThe card is "
              "formatted and holds nothing else. Chat history, the node database "
-             "and any map tiles were on the old filesystem and are gone."
-           : "Export FAILED. The card formatted, but the configuration could not "
-             "be written back to it - try Export from the Config screen.",
-        "SD Card Format");
+             "and any map tiles were on the old filesystem and are gone.")
+           : TR("Export FAILED. The card formatted, but the configuration could not "
+             "be written back to it - try Export from the Config screen."),
+        TR("SD Card Format"));
 }
 
 // Yes on the format confirmation. Everything below this line is the point of no
@@ -37138,11 +37643,11 @@ static void cfgSdFormatCommit(int) {
     // remount after it is a second bus conversation. There is no progress to
     // report from inside f_mkfs -- it does not call back -- so this is a
     // "working" panel rather than a bar that would have to lie.
-    openSdScanProgressModal("Formatting SD Card");
+    openSdScanProgressModal(TR("Formatting SD Card"));
     if (s_sdScanStatus) {
-        lv_label_set_text(s_sdScanStatus, "Writing a new filesystem...");
+        lv_label_set_text(s_sdScanStatus, TR("Writing a new filesystem..."));
     }
-    if (s_sdScanDetail) lv_label_set_text(s_sdScanDetail, "Do not remove the card");
+    if (s_sdScanDetail) lv_label_set_text(s_sdScanDetail, TR("Do not remove the card"));
     lv_timer_handler();
 
     const bool formatted = storageFormatCard();
@@ -37159,24 +37664,24 @@ static void cfgSdFormatCommit(int) {
     if (!formatted) {
         openCfgActionMessageModal(
             remounted
-                ? "Format FAILED. The card was left as it was and is still "
-                  "mounted.\n\nFormatting it on a PC is the reliable way out."
-                : "Format FAILED, and the card could not be remounted.\n\nReboot "
-                  "the device, or format the card on a PC.",
-            "SD Card Format");
+                ? TR("Format FAILED. The card was left as it was and is still "
+                  "mounted.\n\nFormatting it on a PC is the reliable way out.")
+                : TR("Format FAILED, and the card could not be remounted.\n\nReboot "
+                  "the device, or format the card on a PC."),
+            TR("SD Card Format"));
         return;
     }
     if (!remounted) {
         openCfgActionMessageModal(
-            "The card was formatted but could not be remounted. Reboot the "
-            "device and it should come up clean.",
-            "SD Card Format");
+            TR("The card was formatted but could not be remounted. Reboot the "
+            "device and it should come up clean."),
+            TR("SD Card Format"));
         return;
     }
 
     openCfgConfirmModal(-1,
-                        "Card formatted.\n\nWrite your configuration back to it "
-                        "as /camillia/config.yaml?",
+                        TR("Card formatted.\n\nWrite your configuration back to it "
+                        "as /camillia/config.yaml?"),
                         cfgSdExportCommit, 0);
 }
 
@@ -37186,17 +37691,17 @@ static void cfgSdFormatCommit(int) {
 // erase their message history without being told that is what they are doing.
 static void cfgSdFormatAsk(int) {
     openCfgConfirmModal(-1,
-                        "Format the SD card?\n\nThis erases EVERYTHING on it - "
+                        TR("Format the SD card?\n\nThis erases EVERYTHING on it - "
                         "chat and DM history, the node database, map tiles and "
                         "your saved configuration - not just the files the scan "
-                        "matched.\n\nIt cannot be undone.",
+                        "matched.\n\nIt cannot be undone."),
                         cfgSdFormatCommit, 0);
 }
 
 // Yes on the dialog below. Re-walks the card and deletes what it recognises —
 // it is handed no list, so nothing a dialog got wrong can widen what goes.
 static void cfgSdRepairCommit(int) {
-    openSdScanProgressModal("Removing Files");
+    openSdScanProgressModal(TR("Removing Files"));
     uint16_t failed = 0;
     const uint16_t removed = storageRepairCard(&failed, sdScanProgress,
                                                s_sdScanLastTotal);
@@ -37207,26 +37712,26 @@ static void cfgSdRepairCommit(int) {
         // Stopping a delete does not put anything back, so this reports what
         // actually happened rather than treating cancel as "nothing happened".
         snprintf(msg, sizeof(msg),
-                 "Cancelled after removing %u file%s. The rest were left alone - "
-                 "run the scan again to see what is still there.",
+                 TR("Cancelled after removing %u file%s. The rest were left alone - "
+                 "run the scan again to see what is still there."),
                  (unsigned)removed, (removed == 1) ? "" : "s");
     } else if (failed) {
         snprintf(msg, sizeof(msg),
-                 "Removed %u file%s. %u could not be deleted - the card may be "
-                 "write-protected.\n\nRe-run the scan to check.",
+                 TR("Removed %u file%s. %u could not be deleted - the card may be "
+                 "write-protected.\n\nRe-run the scan to check."),
                  (unsigned)removed, (removed == 1) ? "" : "s", (unsigned)failed);
     } else if (removed) {
         snprintf(msg, sizeof(msg),
-                 "Removed %u file%s.\n\nThis card looked clean afterwards, but the "
+                 TR("Removed %u file%s.\n\nThis card looked clean afterwards, but the "
                  "scan reads names and headers, not contents - it cannot promise "
-                 "the card is clean. Reformatting is the only answer that can.",
+                 "the card is clean. Reformatting is the only answer that can."),
                  (unsigned)removed, (removed == 1) ? "" : "s");
     } else {
         snprintf(msg, sizeof(msg), "%s",
-                 "Nothing was removed. The files may have gone already, or the "
-                 "card may be write-protected.");
+                 TR("Nothing was removed. The files may have gone already, or the "
+                 "card may be write-protected."));
     }
-    openCfgActionMessageModal(msg, "SD Card Scan");
+    openCfgActionMessageModal(msg, TR("SD Card Scan"));
 }
 
 // Runs the scan and reports. Scanning changes nothing, so it needs no
@@ -37238,7 +37743,7 @@ static void cfgSdScanRun() {
     // the mount happens in config_io.cpp and that flag is never set, so asking
     // it reported "no card" on a device with a card in it.
     if (!sdBegin()) {
-        openCfgActionMessageModal("No SD card is mounted.", "SD Card Scan");
+        openCfgActionMessageModal(TR("No SD card is mounted."), TR("SD Card Scan"));
         return;
     }
 
@@ -37247,7 +37752,7 @@ static void cfgSdScanRun() {
     // The count above them is the honest total either way.
     StorageCardSuspect found[6];
     uint16_t scanned = 0;
-    openSdScanProgressModal("Scanning SD Card");
+    openSdScanProgressModal(TR("Scanning SD Card"));
     const uint16_t hits =
         storageScanCard(found, (uint8_t)(sizeof(found) / sizeof(found[0])), &scanned,
                         sdScanProgress);
@@ -37261,18 +37766,18 @@ static void cfgSdScanRun() {
     // thing that must not appear is "nothing found" -- the scan did not finish,
     // so it found nothing only in the sense that it stopped looking.
     if (s_sdScanCancelled) {
-        snprintf(s_cfgStatus, sizeof(s_cfgStatus), "SD scan cancelled");
+        snprintf(s_cfgStatus, sizeof(s_cfgStatus), "%s", TR("SD scan cancelled"));
         return;
     }
 
     if (hits == 0) {
-        char msg[224];
+        char msg[360];
         snprintf(msg, sizeof(msg),
-                 "Examined %u file%s. Nothing matching Windows malware was "
+                 TR("Examined %u file%s. Nothing matching Windows malware was "
                  "found.\n\nThis reads names and file headers, not contents, so "
-                 "it is a good sign rather than a guarantee.",
+                 "it is a good sign rather than a guarantee."),
                  (unsigned)scanned, (scanned == 1) ? "" : "s");
-        openCfgActionMessageModal(msg, "SD Card Scan");
+        openCfgActionMessageModal(msg, TR("SD Card Scan"));
         return;
     }
 
@@ -37280,7 +37785,7 @@ static void cfgSdScanRun() {
         (uint8_t)((hits < (sizeof(found) / sizeof(found[0]))) ? hits
                                                              : sizeof(found) / sizeof(found[0]));
     int len = snprintf(s_sdScanConfirmText, sizeof(s_sdScanConfirmText),
-                       "Found %u file%s matching Windows malware:\n",
+                       TR("Found %u file%s matching Windows malware:\n"),
                        (unsigned)hits, (hits == 1) ? "" : "s");
     for (uint8_t i = 0; i < listed && len > 0 && (size_t)len < sizeof(s_sdScanConfirmText); i++) {
         len += snprintf(s_sdScanConfirmText + len, sizeof(s_sdScanConfirmText) - (size_t)len,
@@ -37288,12 +37793,12 @@ static void cfgSdScanRun() {
     }
     if (hits > listed && len > 0 && (size_t)len < sizeof(s_sdScanConfirmText)) {
         len += snprintf(s_sdScanConfirmText + len, sizeof(s_sdScanConfirmText) - (size_t)len,
-                        "\n+%u more", (unsigned)(hits - listed));
+                        TR("\n+%u more"), (unsigned)(hits - listed));
     }
     if (len > 0 && (size_t)len < sizeof(s_sdScanConfirmText)) {
         snprintf(s_sdScanConfirmText + len, sizeof(s_sdScanConfirmText) - (size_t)len, "%s",
-                 "\n\nDelete them? Nothing else on the card is touched.\n\n"
-                 "Format erases the whole card instead - the only certain fix.");
+                 TR("\n\nDelete them? Nothing else on the card is touched.\n\n"
+                 "Format erases the whole card instead - the only certain fix."));
     }
 
     openCfgConfirmModal(-1, s_sdScanConfirmText, cfgSdRepairCommit, 0,
@@ -37317,7 +37822,7 @@ static void performCfgAction(int actionId) {
                     webCfgEnd();   // tears the radio down; re-associate STA now
                 }
                 s_wifiStaKickMs = 0;   // reconnect station immediately for the IP
-                snprintf(s_cfgStatus, sizeof(s_cfgStatus), "Web Config disabled");
+                snprintf(s_cfgStatus, sizeof(s_cfgStatus), "%s", TR("Web Config disabled"));
             } else {
                 Serial.println("[web] CFG action: enable web config");
 #if HAS_BLE_KEYBOARD
@@ -37338,21 +37843,21 @@ static void performCfgAction(int actionId) {
 #endif
                 if (ok) {
                     if (webCfgIsLite()) {
-                        snprintf(s_cfgStatus, sizeof(s_cfgStatus), "Web Lite: %s", webCfgIP());
+                        snprintf(s_cfgStatus, sizeof(s_cfgStatus), TR("Web Lite: %s"), webCfgIP());
                     } else {
-                        snprintf(s_cfgStatus, sizeof(s_cfgStatus), "Web: %s", webCfgIP());
+                        snprintf(s_cfgStatus, sizeof(s_cfgStatus), TR("Web: %s"), webCfgIP());
                     }
                     // On boards without the RAM for both, chat memory was just
                     // handed to Wi-Fi. Messages are dropped, not queued, so make
                     // that a dialog rather than a status line the user may miss.
                     if (webCfgChatPaused()) {
-                        char warn[192];
+                        char warn[320];
                         snprintf(warn, sizeof(warn),
-                                 "Web config: %s\n\n"
+                                 TR("Web config: %s\n\n"
                                  "Chat is PAUSED while web config runs - this "
                                  "device needs that memory for Wi-Fi. Messages "
                                  "sent to you now are not received or stored.\n\n"
-                                 "Turn web config off to resume messaging.",
+                                 "Turn web config off to resume messaging."),
                                  webCfgIP());
                         openCfgActionMessageModal(warn);
                     }
@@ -37363,13 +37868,13 @@ static void performCfgAction(int actionId) {
                     // none of those build the keyboard in -- but the order is
                     // the one that would be right if they ever could.
                     else if (stoppedBleKbd) {
-                        openCfgActionMessageModal(kWebBleKbdExclusiveNotice);
+                        openCfgActionMessageModal(TR(kWebBleKbdExclusiveNotice));
                     }
 #endif
                 } else {
                     s_webCfgEnabled = false;
                     persistWebCfgEnabled();
-                    snprintf(s_cfgStatus, sizeof(s_cfgStatus), "Web Config start failed");
+                    snprintf(s_cfgStatus, sizeof(s_cfgStatus), "%s", TR("Web Config start failed"));
                 }
             }
         } break;
@@ -37380,11 +37885,11 @@ static void performCfgAction(int actionId) {
             if (s_vncEnabled) {
                 Serial.println("[vnc] CFG action: disable host");
                 (void)applyVncEnabled(false);
-                snprintf(s_cfgStatus, sizeof(s_cfgStatus), "VNC Host off");
+                snprintf(s_cfgStatus, sizeof(s_cfgStatus), "%s", TR("VNC Host off"));
             } else {
                 if (!vncNetworkConnected()) {
                     snprintf(s_cfgStatus, sizeof(s_cfgStatus),
-                             "Connect to WiFi before enabling VNC");
+                             "%s", TR("Connect to WiFi before enabling VNC"));
                     openCfgActionMessageModal(s_cfgStatus);
                     break;
                 }
@@ -37393,17 +37898,17 @@ static void performCfgAction(int actionId) {
                 Serial.println("[vnc] CFG action: enable host");
                 if (!applyVncEnabled(true)) {
                     snprintf(s_cfgStatus, sizeof(s_cfgStatus),
-                             "VNC Host failed to allocate PSRAM");
+                             "%s", TR("VNC Host failed to allocate PSRAM"));
                     openCfgActionMessageModal(s_cfgStatus);
                     break;
                 }
                 if (webCfgRunning() && !webCfgIsLite()) {
                     snprintf(s_cfgStatus, sizeof(s_cfgStatus),
-                             "VNC Host on\nOpen http://%s/ and select the Remote tab",
+                             TR("VNC Host on\nOpen http://%s/ and select the Remote tab"),
                              vncIp);
                 } else {
                     snprintf(s_cfgStatus, sizeof(s_cfgStatus),
-                             "VNC Host on\nhttp://%s:%u/",
+                             TR("VNC Host on\nhttp://%s:%u/"),
                              vncIp, (unsigned)vncHostPort());
                 }
                 openCfgActionMessageModal(s_cfgStatus);
@@ -37418,7 +37923,7 @@ static void performCfgAction(int actionId) {
                 bleKeyboardSetEnabled(false);
                 s_cfg.bleKbdEnabled = false;
                 markConfigDirty();
-                snprintf(s_cfgStatus, sizeof(s_cfgStatus), "BT Keyboard off");
+                snprintf(s_cfgStatus, sizeof(s_cfgStatus), "%s", TR("BT Keyboard off"));
                 break;
             }
             // Web config goes first, before the stack comes up and never after:
@@ -37431,7 +37936,7 @@ static void performCfgAction(int actionId) {
                 // not there; the row would otherwise read On forever.
                 s_cfg.bleKbdEnabled = false;
                 snprintf(s_cfgStatus, sizeof(s_cfgStatus),
-                         "BT Keyboard failed to start (low memory)");
+                         "%s", TR("BT Keyboard failed to start (low memory)"));
                 openCfgActionMessageModal(s_cfgStatus);
                 break;
             }
@@ -37439,12 +37944,12 @@ static void performCfgAction(int actionId) {
             markConfigDirty();
             if (s_cfg.bleKbdAddr[0]) {
                 snprintf(s_cfgStatus, sizeof(s_cfgStatus),
-                         "BT Keyboard on - connecting to %s", s_cfg.bleKbdName);
+                         TR("BT Keyboard on - connecting to %s"), s_cfg.bleKbdName);
             } else {
                 snprintf(s_cfgStatus, sizeof(s_cfgStatus),
-                         "BT Keyboard on - use Pair to choose one");
+                         "%s", TR("BT Keyboard on - use Pair to choose one"));
             }
-            if (stoppedWeb) openCfgActionMessageModal(kBleKbdWebExclusiveNotice);
+            if (stoppedWeb) openCfgActionMessageModal(TR(kBleKbdWebExclusiveNotice));
         } break;
 
         case CFG_ACTION_BLE_KBD_PAIR:
@@ -37459,10 +37964,10 @@ static void performCfgAction(int actionId) {
             persistConfigToPrefs();
             if (s_cfg.gpsEnabled) {
                 snprintf(s_cfgStatus, sizeof(s_cfgStatus),
-                         "GPS enabled (hardware)");
+                         "%s", TR("GPS enabled (hardware)"));
             } else {
                 snprintf(s_cfgStatus, sizeof(s_cfgStatus),
-                         "GPS disabled (using default coordinates)");
+                         "%s", TR("GPS disabled (using default coordinates)"));
             }
             refreshHeaderStatus(true);
         } break;
@@ -37473,8 +37978,8 @@ static void performCfgAction(int actionId) {
             s_cfg.shareLocation = !s_cfg.shareLocation;
             markConfigDirty();
             snprintf(s_cfgStatus, sizeof(s_cfgStatus),
-                     s_cfg.shareLocation ? "Location sharing on"
-                                         : "Location sharing off (no position sent)");
+                     s_cfg.shareLocation ? TR("Location sharing on")
+                                         : TR("Location sharing off (no position sent)"));
         } break;
 
         case CFG_ACTION_POSITION_PRECISION: {
@@ -37493,7 +37998,7 @@ static void performCfgAction(int actionId) {
             sdForceRescan();
             bool ok = cfgExport(s_cfg);
             snprintf(s_cfgStatus, sizeof(s_cfgStatus),
-                     ok ? "Exported to /camillia/config.yaml" : "Export FAILED (no SD?)");
+                     ok ? TR("Exported to /camillia/config.yaml") : TR("Export FAILED (no SD?)"));
         } break;
 
         case CFG_ACTION_IMPORT: {
@@ -37511,14 +38016,14 @@ static void performCfgAction(int actionId) {
                 refreshHeaderStatus(true);
                 refreshChannelGlow(true);
                 refreshChatView(true);
-                snprintf(s_cfgStatus, sizeof(s_cfgStatus), "Imported OK - rebooting...");
+                snprintf(s_cfgStatus, sizeof(s_cfgStatus), "%s", TR("Imported OK - rebooting..."));
                 refreshCfgModal();
                 lv_timer_handler();
                 delay(1000);
                 flushPersistentState();   // settings and transcripts must land before we go
                 ESP.restart();
             } else {
-                snprintf(s_cfgStatus, sizeof(s_cfgStatus), "Import FAILED (no file?)");
+                snprintf(s_cfgStatus, sizeof(s_cfgStatus), "%s", TR("Import FAILED (no file?)"));
             }
         } break;
 
@@ -37544,8 +38049,8 @@ static void performCfgAction(int actionId) {
             // written, so the early-out in refreshHeaderStatus() would keep the
             // old string on screen until the battery moved.
             refreshHeaderStatus(true);
-            snprintf(s_cfgStatus, sizeof(s_cfgStatus), "Battery Display: %s",
-                     s_cfg.battDisplayMode == BATT_DISPLAY_VOLTAGE ? "Voltage" : "Percent");
+            snprintf(s_cfgStatus, sizeof(s_cfgStatus), TR("Battery Display: %s"),
+                     s_cfg.battDisplayMode == BATT_DISPLAY_VOLTAGE ? TR("Voltage") : TR("Percent"));
             break;
 
         case CFG_ACTION_OTA_CHANNEL:
@@ -37579,20 +38084,24 @@ static void performCfgAction(int actionId) {
                 // Unconditional, not behind s_cfgDebugLog: this is the one line
                 // that says whether a switch asked for a check and, if not, why.
                 Serial.printf("[ota-check] channel switched to %s; %s\n",
-                              chanName, why ? why : "check requested");
+                              chanName, why ? why : TR("check requested"));
                 if (why) {
                     utf8util::copyTruncate(s_otaCheckRowNote, sizeof(s_otaCheckRowNote),
-                                           " - check unavailable");
+                                           TR(" - check unavailable"));
                     snprintf(s_cfgStatus, sizeof(s_cfgStatus), "%s", why);
                     openCfgActionMessageModal(s_cfgStatus);
                 } else {
                     otaRequestCheckNow();
                     snprintf(s_cfgStatus, sizeof(s_cfgStatus),
-                             "Release Channel: %s - checking...", chanName);
+                             TR("Release Channel: %s - checking..."), chanName);
                 }
             }
             break;
 
+        case CFG_ACTION_LANGUAGE:
+            showActionPopup = false;   // the modal is the whole interaction
+            openCfgLangModal();
+            break;
 #if HAS_RUNTIME_ORIENTATION
         case CFG_ACTION_ORIENTATION:
             if (s_cfgDebugLog) Serial.println("[lvgl-cfg] exec ORIENTATION");
@@ -37613,8 +38122,8 @@ static void performCfgAction(int actionId) {
             }
             persistConfigToPrefs();
             refreshNodesDetails();
-            snprintf(s_cfgStatus, sizeof(s_cfgStatus), "Units: %s",
-                     s_cfg.displayUnits ? "Imperial" : "Metric");
+            snprintf(s_cfgStatus, sizeof(s_cfgStatus), TR("Units: %s"),
+                     s_cfg.displayUnits ? TR("Imperial") : TR("Metric"));
             break;
 
         case CFG_ACTION_CHAT_STYLE:
@@ -37646,8 +38155,8 @@ static void performCfgAction(int actionId) {
             showActionPopup = false;   // row already reads On/Off; applies live
             s_cfg.chatColorsEnabled = !s_cfg.chatColorsEnabled;
             persistConfigToPrefs();
-            snprintf(s_cfgStatus, sizeof(s_cfgStatus), "Chat Colors: %s",
-                     s_cfg.chatColorsEnabled ? "On" : "Off");
+            snprintf(s_cfgStatus, sizeof(s_cfgStatus), TR("Chat Colors: %s"),
+                     s_cfg.chatColorsEnabled ? TR("On") : TR("Off"));
             s_lastRenderedChannel = -1;
             s_lastRenderedCount = -1;
             refreshChatView(true);
@@ -37680,8 +38189,8 @@ static void performCfgAction(int actionId) {
             // config, but the call is free and makes the setting honest either
             // way: off means off now, not at the next timeout.
             if (!s_cfg.lockScreenEnabled) exitLockScreen();
-            snprintf(s_cfgStatus, sizeof(s_cfgStatus), "Lock Screen: %s",
-                     s_cfg.lockScreenEnabled ? "On" : "Off");
+            snprintf(s_cfgStatus, sizeof(s_cfgStatus), TR("Lock Screen: %s"),
+                     s_cfg.lockScreenEnabled ? TR("On") : TR("Off"));
             break;
 
         case CFG_ACTION_LOCK_SCREEN_OFF:
@@ -37697,8 +38206,8 @@ static void performCfgAction(int actionId) {
             showActionPopup = false;   // row already reads On/Off
             s_cfg.invertScroll = !s_cfg.invertScroll;
             persistConfigToPrefs();
-            snprintf(s_cfgStatus, sizeof(s_cfgStatus), "Invert Scrolling: %s",
-                     s_cfg.invertScroll ? "On" : "Off");
+            snprintf(s_cfgStatus, sizeof(s_cfgStatus), TR("Invert Scrolling: %s"),
+                     s_cfg.invertScroll ? TR("On") : TR("Off"));
             break;
 #endif
 
@@ -37708,8 +38217,8 @@ static void performCfgAction(int actionId) {
             showActionPopup = false;   // row already reads On/Off
             s_cfg.navBarEnabled = !s_cfg.navBarEnabled;
             persistConfigToPrefs();
-            snprintf(s_cfgStatus, sizeof(s_cfgStatus), "Nav Bar: %s",
-                     s_cfg.navBarEnabled ? "On" : "Off");
+            snprintf(s_cfgStatus, sizeof(s_cfgStatus), TR("Nav Bar: %s"),
+                     s_cfg.navBarEnabled ? TR("On") : TR("Off"));
             // The bar is built into the screens, not painted over them, and the
             // chat screen gives up a different amount of height for it — so
             // this is a rebuild, not a restyle. Deferred because we are inside
@@ -37742,8 +38251,8 @@ static void performCfgAction(int actionId) {
             }
             snprintf(s_cfgStatus,
                      sizeof(s_cfgStatus),
-                     "Neighborhood info: %s",
-                     s_cfg.neighborInfoEnabled ? "On" : "Off");
+                     TR("Neighborhood info: %s"),
+                     s_cfg.neighborInfoEnabled ? TR("On") : TR("Off"));
             break;
 
         case CFG_ACTION_MESH_BEACON:
@@ -37755,8 +38264,8 @@ static void performCfgAction(int actionId) {
             // offers on the Beacons screen after switching the feature off
             // would read as the switch not having worked.
             if (!s_cfg.meshBeaconListen) s_beaconOfferCount = 0;
-            snprintf(s_cfgStatus, sizeof(s_cfgStatus), "Mesh beacons: %s",
-                     s_cfg.meshBeaconListen ? "On (listening)" : "Off");
+            snprintf(s_cfgStatus, sizeof(s_cfgStatus), TR("Mesh beacons: %s"),
+                     s_cfg.meshBeaconListen ? TR("On (listening)") : TR("Off"));
             break;
 
         case CFG_ACTION_SNF_CLIENT:
@@ -37766,8 +38275,8 @@ static void performCfgAction(int actionId) {
             persistConfigToPrefs();
             snprintf(s_cfgStatus,
                      sizeof(s_cfgStatus),
-                     "Store&Fwd Client: %s",
-                     s_cfg.snfClientEnabled ? "On" : "Off");
+                     TR("Store&Fwd Client: %s"),
+                     s_cfg.snfClientEnabled ? TR("On") : TR("Off"));
             break;
 
         case CFG_ACTION_SNF_REQUEST: {
@@ -37776,11 +38285,11 @@ static void performCfgAction(int actionId) {
             const char *why = nullptr;
             if (snfRequestHistory(&why)) {
                 snprintf(s_cfgStatus, sizeof(s_cfgStatus),
-                         "Replay requested (last %lu min)",
+                         TR("Replay requested (last %lu min)"),
                          (unsigned long)kSnfHistoryWindowMin);
             } else {
                 snprintf(s_cfgStatus, sizeof(s_cfgStatus),
-                         "Replay not sent: %s", why ? why : "unavailable");
+                         TR("Replay not sent: %s"), why ? why : TR("unavailable"));
             }
             break;
         }
@@ -37808,7 +38317,7 @@ static void performCfgAction(int actionId) {
             }
             persistConfigToPrefs();
             snprintf(s_cfgStatus, sizeof(s_cfgStatus),
-                     "WiFi %s", s_cfg.wifiEnabled ? "on" : "off");
+                     TR("WiFi %s"), s_cfg.wifiEnabled ? TR("on") : TR("off"));
             break;
 
         case CFG_ACTION_CHOOSE_WIFI:
@@ -37824,7 +38333,7 @@ static void performCfgAction(int actionId) {
             // Reboot so the change applies cleanly; the load-time invariant also
             // enforces MQTT/web-config mutual exclusion on the way back up.
             snprintf(s_cfgStatus, sizeof(s_cfgStatus),
-                     "MQTT Bridge: %s - rebooting...", s_cfg.mqttEnabled ? "On" : "Off");
+                     TR("MQTT Bridge: %s - rebooting..."), s_cfg.mqttEnabled ? TR("On") : TR("Off"));
             refreshCfgModal();
             lv_timer_handler();
             delay(1000);
@@ -37859,8 +38368,8 @@ static void performCfgAction(int actionId) {
             s_cfg.kbBlinkEnabled = !s_cfg.kbBlinkEnabled;
             kbBlinkApplySetting();
             markConfigDirty();
-            snprintf(s_cfgStatus, sizeof(s_cfgStatus), "Keyboard blink: %s",
-                     s_cfg.kbBlinkEnabled ? "On" : "Off");
+            snprintf(s_cfgStatus, sizeof(s_cfgStatus), TR("Keyboard blink: %s"),
+                     s_cfg.kbBlinkEnabled ? TR("On") : TR("Off"));
             break;
 
         // Both counts cycle 1 -> 2 -> 3 -> 1 in place, like the other small
@@ -37872,7 +38381,7 @@ static void performCfgAction(int actionId) {
             s_cfg.kbBlinkChanFlashes =
                 cfgCoerceKbFlashes((int)s_cfg.kbBlinkChanFlashes % KB_FLASHES_MAX + 1);
             markConfigDirty();
-            snprintf(s_cfgStatus, sizeof(s_cfgStatus), "Channel blink: %u flash%s",
+            snprintf(s_cfgStatus, sizeof(s_cfgStatus), TR("Channel blink: %u flash%s"),
                      (unsigned)s_cfg.kbBlinkChanFlashes,
                      (s_cfg.kbBlinkChanFlashes == 1) ? "" : "es");
             break;
@@ -37883,7 +38392,7 @@ static void performCfgAction(int actionId) {
             s_cfg.kbBlinkDmFlashes =
                 cfgCoerceKbFlashes((int)s_cfg.kbBlinkDmFlashes % KB_FLASHES_MAX + 1);
             markConfigDirty();
-            snprintf(s_cfgStatus, sizeof(s_cfgStatus), "DM blink: %u flash%s",
+            snprintf(s_cfgStatus, sizeof(s_cfgStatus), TR("DM blink: %u flash%s"),
                      (unsigned)s_cfg.kbBlinkDmFlashes,
                      (s_cfg.kbBlinkDmFlashes == 1) ? "" : "es");
             break;
@@ -37912,7 +38421,7 @@ static void performCfgAction(int actionId) {
             showActionPopup = false;   // row already reads On/Off
             s_cfg.splashMelodyEnabled = !s_cfg.splashMelodyEnabled;
             persistSplashMelodySetting();
-            snprintf(s_cfgStatus, sizeof(s_cfgStatus), "Splash melody: %s", s_cfg.splashMelodyEnabled ? "On" : "Off");
+            snprintf(s_cfgStatus, sizeof(s_cfgStatus), TR("Splash melody: %s"), s_cfg.splashMelodyEnabled ? TR("On") : TR("Off"));
             break;
 
         case CFG_ACTION_CHANNEL_CFG:
@@ -37945,8 +38454,8 @@ static void performCfgAction(int actionId) {
             // rendering on screen until something else moved.
             refreshHeaderTime(true);
             refreshChatView(true);
-            snprintf(s_cfgStatus, sizeof(s_cfgStatus), "Clock Format: %s",
-                     (s_cfg.clockFormat == CLOCK_FORMAT_12H) ? "12-hour" : "24-hour");
+            snprintf(s_cfgStatus, sizeof(s_cfgStatus), TR("Clock Format: %s"),
+                     (s_cfg.clockFormat == CLOCK_FORMAT_12H) ? TR("12-hour") : TR("24-hour"));
             break;
 
         case CFG_ACTION_OTA_UPDATE: {
@@ -37958,7 +38467,7 @@ static void performCfgAction(int actionId) {
 #if defined(DEVICE_CARDPUTER_LORA_HAT)
             snprintf(s_cfgStatus,
                      sizeof(s_cfgStatus),
-                     "OTA disabled on Cardputer build");
+                     "%s", TR("OTA disabled on Cardputer build"));
             break;
 #endif
 
@@ -37967,7 +38476,7 @@ static void performCfgAction(int actionId) {
             if (!otaLayoutSupportsUpdate()) {
                 snprintf(s_cfgStatus,
                          sizeof(s_cfgStatus),
-                         "OTA needs the factory image (flash layout)");
+                         "%s", TR("OTA needs the factory image (flash layout)"));
                 break;
             }
 
@@ -38010,7 +38519,7 @@ static void performCfgAction(int actionId) {
 #endif
                 snprintf(s_cfgStatus,
                          sizeof(s_cfgStatus),
-                         "OTA request failed (NVS write). Retry.");
+                         "%s", TR("OTA request failed (NVS write). Retry."));
                 break;
             }
 
@@ -38034,7 +38543,7 @@ static void performCfgAction(int actionId) {
                 } else {
                     snprintf(s_cfgStatus,
                              sizeof(s_cfgStatus),
-                             "OTA worker completed. Check status.");
+                             "%s", TR("OTA worker completed. Check status."));
                 }
                 break;
             }
@@ -38043,7 +38552,7 @@ static void performCfgAction(int actionId) {
             requestSkipWebAutoStartOnce();
             snprintf(s_cfgStatus,
                      sizeof(s_cfgStatus),
-                     "Rebooting into OTA minimal mode...");
+                     "%s", TR("Rebooting into OTA minimal mode..."));
             refreshCfgModal();
             openCfgActionMessageModal(s_cfgStatus);
             delay(800);
@@ -38061,7 +38570,7 @@ static void performCfgAction(int actionId) {
             s_lastRenderedChannel = -1;
             s_lastRenderedCount = -1;
             refreshChatView(true);
-            snprintf(s_cfgStatus, sizeof(s_cfgStatus), "Chat colors reassigned");
+            snprintf(s_cfgStatus, sizeof(s_cfgStatus), "%s", TR("Chat colors reassigned"));
             break;
 
         case CFG_ACTION_CLEAR_MSGS:
@@ -38070,7 +38579,7 @@ static void performCfgAction(int actionId) {
             DMs.clearAll(true);
             clearSelectedMsgContext();
             s_lastRenderedChannel = -1;
-            snprintf(s_cfgStatus, sizeof(s_cfgStatus), "Messages cleared - rebooting...");
+            snprintf(s_cfgStatus, sizeof(s_cfgStatus), "%s", TR("Messages cleared - rebooting..."));
             refreshCfgModal();
             delay(1000);
             flushPersistentState();   // settings and transcripts must land before we go
@@ -38088,7 +38597,7 @@ static void performCfgAction(int actionId) {
             // legacy files cleaned up on a total wipe), so there is also nothing
             // to re-export here — only the all-variant below still deletes them.
             snprintf(s_cfgStatus, sizeof(s_cfgStatus),
-                     "Cleared %d nodes, kept %d favorites - rebooting...", removed, kept);
+                     TR("Cleared %d nodes, kept %d favorites - rebooting..."), removed, kept);
             refreshCfgModal();
             delay(1000);
             flushPersistentState();   // settings and transcripts must land before we go
@@ -38104,8 +38613,8 @@ static void performCfgAction(int actionId) {
             // node_db is told by the main loop, which mirrors this every pass
             // (see the nodeArchiveSetEnabled call there) -- so nothing to push
             // from here, and no SD access on a config keypress.
-            snprintf(s_cfgStatus, sizeof(s_cfgStatus), "Archive Dropped Nodes: %s",
-                     s_cfg.nodeArchiveEnabled ? "On" : "Off");
+            snprintf(s_cfgStatus, sizeof(s_cfgStatus), TR("Archive Dropped Nodes: %s"),
+                     s_cfg.nodeArchiveEnabled ? TR("On") : TR("Off"));
             break;
 
         case CFG_ACTION_SHOW_ARCHIVED:
@@ -38118,8 +38627,8 @@ static void performCfgAction(int actionId) {
             // time that screen is opened. Deliberately so -- touching the card
             // from a config keypress is the SPI contention with the radio that
             // the snapshot-time rule exists to avoid.
-            snprintf(s_cfgStatus, sizeof(s_cfgStatus), "Show Archived Nodes: %s",
-                     s_cfg.nodeArchiveShow ? "On" : "Off");
+            snprintf(s_cfgStatus, sizeof(s_cfgStatus), TR("Show Archived Nodes: %s"),
+                     s_cfg.nodeArchiveShow ? TR("On") : TR("Off"));
             break;
 
         case CFG_ACTION_CLEAR_NODES: {
@@ -38130,8 +38639,8 @@ static void performCfgAction(int actionId) {
             // to have cleared it would be a lie the user acts on.
             const bool archiveCleared = clearNodeDbOnSd();
             snprintf(s_cfgStatus, sizeof(s_cfgStatus),
-                     archiveCleared ? "Nodes and SD archive cleared - rebooting..."
-                                    : "Node DB cleared - rebooting...");
+                     archiveCleared ? TR("Nodes and SD archive cleared - rebooting...")
+                                    : TR("Node DB cleared - rebooting..."));
             refreshCfgModal();
             delay(1000);
             flushPersistentState();   // settings and transcripts must land before we go
@@ -38148,7 +38657,7 @@ static void performCfgAction(int actionId) {
             sdRmDirRecursive("/camillia/dms");
             nvs_flash_erase();
             nvs_flash_init();
-            snprintf(s_cfgStatus, sizeof(s_cfgStatus), "Factory reset - rebooting...");
+            snprintf(s_cfgStatus, sizeof(s_cfgStatus), "%s", TR("Factory reset - rebooting..."));
             refreshCfgModal();
             delay(1000);
             flushPersistentState();   // settings and transcripts must land before we go
@@ -38329,7 +38838,7 @@ static void openCfgConfirmModal(int actionId, const char *text,
     lv_obj_set_style_text_color(title, titleTextColor, 0);
     lv_obj_set_style_text_align(title, LV_TEXT_ALIGN_CENTER, 0);
     lv_label_set_text(title,
-                      actionId == CFG_ACTION_CHAT_STYLE ? "Confirm Chat Style" : "Confirm?");
+                      actionId == CFG_ACTION_CHAT_STYLE ? TR("Confirm Chat Style") : TR("Confirm?"));
 
     lv_obj_t *actionBox = lv_obj_create(s_cfgConfirmModal);
     s_cfgConfirmScroll = actionBox;
@@ -38365,7 +38874,7 @@ static void openCfgConfirmModal(int actionId, const char *text,
     if (ownText || actionId == CFG_ACTION_CHAT_STYLE) {
         lv_label_set_text(q, actionText);
     } else {
-        lv_label_set_text_fmt(q, "Action: %s", actionText);
+        lv_label_set_text_fmt(q, TR("Action: %s"), actionText);
     }
 
     lv_obj_t *btnRow = lv_obj_create(s_cfgConfirmModal);
@@ -38442,13 +38951,13 @@ static void openCfgConfirmModal(int actionId, const char *text,
         lv_obj_set_width(lbl, lv_pct(100));
         lv_obj_set_style_text_align(lbl, LV_TEXT_ALIGN_CENTER, 0);
         lv_label_set_long_mode(lbl, LV_LABEL_LONG_DOT);
-        lv_label_set_text(lbl, text);
+        lv_label_set_text(lbl, TR(text));
         lv_obj_center(lbl);
         return btn;
     };
 #if UI_TOUCH_ONLY_PROFILE
     makeConfirmBtn(btnRow, "No", noBtnBg, btnTextColor, onCfgConfirmNoPressed, btnMinW);
-    makeConfirmBtn(btnRow, "Yes", yesBtnBg, btnTextColor, onCfgConfirmYesPressed, btnMinW);
+    makeConfirmBtn(btnRow, TR_NOOP("Yes"), yesBtnBg, btnTextColor, onCfgConfirmYesPressed, btnMinW);
 #else
     makeConfirmBtn(btnRow, "(N)o", noBtnBg, btnTextColor, onCfgConfirmNoPressed, btnMinW);
     makeConfirmBtn(btnRow, "(Y)es", yesBtnBg, btnTextColor, onCfgConfirmYesPressed, btnMinW);
@@ -38547,7 +39056,7 @@ static void openOtaUpdatePrompt() {
     lv_obj_set_style_text_font(title, &lv_font_montserrat_16, 0);
     lv_obj_set_style_text_color(title, titleTextColor, 0);
     lv_obj_set_style_text_align(title, LV_TEXT_ALIGN_CENTER, 0);
-    lv_label_set_text(title, "Firmware Update");
+    lv_label_set_text(title, TR("Firmware Update"));
 
     // The version pair is the point of the dialog, so it gets its own boxed row.
     lv_obj_t *versionBox = lv_obj_create(s_otaPromptModal);
@@ -38569,7 +39078,7 @@ static void openOtaUpdatePrompt() {
     lv_obj_set_style_text_color(versions, versionTextColor, 0);
     lv_obj_set_style_text_align(versions, LV_TEXT_ALIGN_CENTER, 0);
     lv_label_set_long_mode(versions, LV_LABEL_LONG_WRAP);
-    lv_label_set_text_fmt(versions, "%s -> %s", APP_VERSION, s_otaAutoCheckTag);
+    lv_label_set_text_fmt(versions, TR("%s -> %s"), APP_VERSION, s_otaAutoCheckTag);
 
     lv_obj_t *hint = lv_label_create(s_otaPromptModal);
     lv_obj_set_width(hint, lv_pct(100));
@@ -38577,7 +39086,7 @@ static void openOtaUpdatePrompt() {
     lv_obj_set_style_text_color(hint, hintColor, 0);
     lv_obj_set_style_text_align(hint, LV_TEXT_ALIGN_CENTER, 0);
     lv_label_set_long_mode(hint, LV_LABEL_LONG_WRAP);
-    lv_label_set_text(hint, "Install now? The device reboots to update.");
+    lv_label_set_text(hint, TR("Install now? The device reboots to update."));
 
     lv_obj_t *btnRow = lv_obj_create(s_otaPromptModal);
     lv_obj_set_width(btnRow, lv_pct(100));
@@ -38618,13 +39127,13 @@ static void openOtaUpdatePrompt() {
     #else
         lv_obj_set_style_text_color(lbl, lv_color_hex(0xFFFFFF), 0);
     #endif
-        lv_label_set_text(lbl, text);
+        lv_label_set_text(lbl, TR(text));
         lv_obj_center(lbl);
         return btn;
     };
 #if UI_TOUCH_ONLY_PROFILE
     makeOtaBtn(btnRow, "No", lightUi ? 0xC76565 : 0x6B3030, onOtaPromptNoPressed);
-    makeOtaBtn(btnRow, "Yes", lightUi ? 0x429A56 : 0x2F6B30, onOtaPromptYesPressed);
+    makeOtaBtn(btnRow, TR_NOOP("Yes"), lightUi ? 0x429A56 : 0x2F6B30, onOtaPromptYesPressed);
 #else
     makeOtaBtn(btnRow, "(N)o", lightUi ? 0xC76565 : 0x6B3030, onOtaPromptNoPressed);
     makeOtaBtn(btnRow, "(Y)es", lightUi ? 0x429A56 : 0x2F6B30, onOtaPromptYesPressed);
@@ -38790,7 +39299,7 @@ static void keepLegacyMapFiles() {
 
 static void removeLegacyMapFiles() {
     if (s_legacyMapPromptStatus && lvObjValid(s_legacyMapPromptStatus)) {
-        lv_label_set_text(s_legacyMapPromptStatus, "Removing legacy maps...");
+        lv_label_set_text(s_legacyMapPromptStatus, TR("Removing legacy maps..."));
         lv_obj_clear_flag(s_legacyMapPromptStatus, LV_OBJ_FLAG_HIDDEN);
         lv_timer_handler();
     }
@@ -38801,7 +39310,7 @@ static void removeLegacyMapFiles() {
         Serial.println("[map-migration] legacy map removal incomplete");
         if (s_legacyMapPromptStatus && lvObjValid(s_legacyMapPromptStatus)) {
             lv_label_set_text(s_legacyMapPromptStatus,
-                              "Could not remove every file. Check storage and retry.");
+                              TR("Could not remove every file. Check storage and retry."));
         }
         return;
     }
@@ -38869,7 +39378,7 @@ static void openLegacyMapPrompt() {
     lv_obj_set_style_text_font(title, &lv_font_montserrat_16, 0);
     lv_obj_set_style_text_color(title, textColor, 0);
     lv_obj_set_style_text_align(title, LV_TEXT_ALIGN_CENTER, 0);
-    lv_label_set_text(title, "Old Map Files Found");
+    lv_label_set_text(title, TR("Old Map Files Found"));
 
     lv_obj_t *body = lv_label_create(s_legacyMapPromptModal);
     lv_obj_set_width(body, lv_pct(100));
@@ -38878,7 +39387,7 @@ static void openLegacyMapPrompt() {
     lv_obj_set_style_text_align(body, LV_TEXT_ALIGN_CENTER, 0);
     lv_label_set_long_mode(body, LV_LABEL_LONG_WRAP);
     lv_label_set_text(body,
-                      "These files are not used by the new tile map. Remove them to reclaim storage?");
+                      TR("These files are not used by the new tile map. Remove them to reclaim storage?"));
 
     s_legacyMapPromptStatus = lv_label_create(s_legacyMapPromptModal);
     lv_obj_set_width(s_legacyMapPromptStatus, lv_pct(100));
@@ -38927,13 +39436,13 @@ static void openLegacyMapPrompt() {
     #else
         lv_obj_set_style_text_color(label, lv_color_hex(0xFFFFFF), 0);
     #endif
-        lv_label_set_text(label, text);
+        lv_label_set_text(label, TR(text));
         lv_obj_center(label);
     };
 
 #if UI_TOUCH_ONLY_PROFILE
     makeButton(buttonRow, "Keep", lightUi ? 0x55759D : 0x31527C, onLegacyMapKeepPressed);
-    makeButton(buttonRow, "Remove", lightUi ? 0xC76565 : 0x6B3030, onLegacyMapRemovePressed);
+    makeButton(buttonRow, TR_NOOP("Remove"), lightUi ? 0xC76565 : 0x6B3030, onLegacyMapRemovePressed);
     reserveHeltecCloseXRow(title);
     appendHeltecCloseX(s_legacyMapPromptModal, onLegacyMapKeepPressed);
 #else
@@ -39217,7 +39726,7 @@ static void renderOnboardingStage() {
     lv_obj_set_style_text_font(title, onboardingTitleFont, 0);
     lv_obj_set_style_text_color(title, lv_color_hex(0xD9E8FF), 0);
     lv_obj_set_style_text_align(title, LV_TEXT_ALIGN_CENTER, 0);
-    lv_label_set_text(title, "Welcome to Camillia for Meshtastic");
+    lv_label_set_text(title, TR("Welcome to Camillia for Meshtastic"));
 #endif
 
     lv_obj_t *body = lv_label_create(s_onboardingModal);
@@ -39238,7 +39747,7 @@ static void renderOnboardingStage() {
         lv_obj_set_style_text_font(s_onboardingStatus, onboardingStatusFont, 0);
         lv_obj_set_style_text_color(s_onboardingStatus, lv_color_hex(0xA7C7FF), 0);
         lv_obj_set_style_text_align(s_onboardingStatus, LV_TEXT_ALIGN_CENTER, 0);
-        lv_label_set_text(s_onboardingStatus, "Y/Enter=Import   N/Bksp=Skip");
+        lv_label_set_text(s_onboardingStatus, TR("Y/Enter=Import   N/Bksp=Skip"));
 #else
 
         lv_obj_t *btnRow = lv_obj_create(s_onboardingModal);
@@ -39274,7 +39783,7 @@ static void renderOnboardingStage() {
             lv_obj_t *lbl = lv_label_create(btn);
             lv_obj_set_style_text_font(lbl, font, 0);
             lv_obj_set_style_text_color(lbl, lv_color_hex(0xFFFFFF), 0);
-            lv_label_set_text(lbl, text);
+            lv_label_set_text(lbl, TR(text));
             lv_obj_center(lbl);
             return btn;
         };
@@ -39282,7 +39791,7 @@ static void renderOnboardingStage() {
         makeBtn(btnRow, "No",  0x6B3030,
             [](lv_event_t *) { onboardingDeclineImport(); },
             importBtnH, importBtnMinW, importBtnFont);
-        makeBtn(btnRow, "Yes", 0x2F6B30,
+        makeBtn(btnRow, TR_NOOP("Yes"), 0x2F6B30,
             [](lv_event_t *) { onboardingAcceptImport(); },
             importBtnH, importBtnMinW, importBtnFont);
 #else
@@ -39301,8 +39810,8 @@ static void renderOnboardingStage() {
         // advances. No text entry on these stages.
         const bool isRegion = (s_onboardingStage == ONBOARD_STAGE_SELECT_REGION);
         lv_label_set_text(body,
-                          isRegion ? "Select your radio region/preset."
-                                   : "Select this node's role.");
+                          isRegion ? TR("Select your radio region/preset.")
+                                   : TR("Select this node's role."));
 
         lv_obj_t *pickRow = lv_obj_create(s_onboardingModal);
         lv_obj_set_width(pickRow, lv_pct(100));
@@ -39356,11 +39865,11 @@ static void renderOnboardingStage() {
         lv_obj_set_style_text_color(s_onboardingStatus, lv_color_hex(0xA7C7FF), 0);
         lv_obj_set_style_text_align(s_onboardingStatus, LV_TEXT_ALIGN_CENTER, 0);
         #if defined(DEVICE_CARDPUTER_LORA_HAT)
-            lv_label_set_text(s_onboardingStatus, "j/k=Change   Enter=Next   Bksp=Back");
+            lv_label_set_text(s_onboardingStatus, TR("j/k=Change   Enter=Next   Bksp=Back"));
         #elif UI_TOUCH_ONLY_PROFILE
-        lv_label_set_text(s_onboardingStatus, "Use arrows to choose, then tap Next");
+        lv_label_set_text(s_onboardingStatus, TR("Use arrows to choose, then tap Next"));
         #else
-        lv_label_set_text(s_onboardingStatus, "Wheel/j-k=Change   Enter=Next");
+        lv_label_set_text(s_onboardingStatus, TR("Wheel/j-k=Change   Enter=Next"));
         #endif
 
         #if !defined(DEVICE_CARDPUTER_LORA_HAT)
@@ -39388,13 +39897,13 @@ static void renderOnboardingStage() {
             lv_obj_t *lbl = lv_label_create(btn);
             lv_obj_set_style_text_font(lbl, onboardingButtonFont, 0);
             lv_obj_set_style_text_color(lbl, lv_color_hex(0xFFFFFF), 0);
-            lv_label_set_text(lbl, text);
+            lv_label_set_text(lbl, TR(text));
             lv_obj_center(lbl);
             return btn;
         };
-        makeBtn(btnRow, "Back", 0x3C4A66,
+        makeBtn(btnRow, TR_NOOP("Back"), 0x3C4A66,
                 [](lv_event_t *) { onboardingPickerBack(); });
-        makeBtn(btnRow, "Next", 0x2F6B30,
+        makeBtn(btnRow, TR_NOOP("Next"), 0x2F6B30,
                 [](lv_event_t *) { onboardingPickerAdvance(); });
     #endif
     } else if (s_onboardingStage == ONBOARD_STAGE_CHOOSE_WIFI) {
@@ -39402,12 +39911,12 @@ static void renderOnboardingStage() {
         if (s_onboardingWifiSsidScratch[0]) {
             snprintf(summary,
                      sizeof(summary),
-                     "Optional WiFi setup.\nSelected: %s\nChoose a different network or finish.",
+                     TR("Optional WiFi setup.\nSelected: %s\nChoose a different network or finish."),
                      s_onboardingWifiSsidScratch);
         } else {
             snprintf(summary,
                      sizeof(summary),
-                     "Optional WiFi setup.\nNo network selected.\nChoose WiFi now or finish without WiFi.");
+                     TR("Optional WiFi setup.\nNo network selected.\nChoose WiFi now or finish without WiFi."));
         }
         lv_label_set_text(body, summary);
 
@@ -39417,9 +39926,9 @@ static void renderOnboardingStage() {
         lv_obj_set_style_text_color(s_onboardingStatus, lv_color_hex(0xA7C7FF), 0);
         lv_obj_set_style_text_align(s_onboardingStatus, LV_TEXT_ALIGN_CENTER, 0);
 #if defined(DEVICE_CARDPUTER_LORA_HAT)
-        lv_label_set_text(s_onboardingStatus, "N=Choose WiFi   Enter=Finish   Bksp=Back");
+        lv_label_set_text(s_onboardingStatus, TR("N=Choose WiFi   Enter=Finish   Bksp=Back"));
 #else
-        lv_label_set_text(s_onboardingStatus, "Choose WiFi or Finish");
+        lv_label_set_text(s_onboardingStatus, TR("Choose WiFi or Finish"));
 #endif
 
 #if !defined(DEVICE_CARDPUTER_LORA_HAT)
@@ -39447,20 +39956,20 @@ static void renderOnboardingStage() {
             lv_obj_t *lbl = lv_label_create(btn);
             lv_obj_set_style_text_font(lbl, onboardingButtonFont, 0);
             lv_obj_set_style_text_color(lbl, lv_color_hex(0xFFFFFF), 0);
-            lv_label_set_text(lbl, text);
+            lv_label_set_text(lbl, TR(text));
             lv_obj_center(lbl);
             return btn;
         };
 
-        makeBtn(btnRow, "Back", 0x3C4A66,
+        makeBtn(btnRow, TR_NOOP("Back"), 0x3C4A66,
                 [](lv_event_t *) {
                     s_onboardingStage = ONBOARD_STAGE_SELECT_ROLE;
                     s_onboardingPickIndex = onboardingRoleIndex(s_onboardingRoleScratch);
                     renderOnboardingStage();
                 });
-        makeBtn(btnRow, "Choose WiFi", 0x3C4A66,
+        makeBtn(btnRow, TR_NOOP("Choose WiFi"), 0x3C4A66,
                 [](lv_event_t *) { openCfgWifiPickerModal(true); });
-        makeBtn(btnRow, "Finish", 0x2F6B30,
+        makeBtn(btnRow, TR_NOOP("Finish"), 0x2F6B30,
                 [](lv_event_t *) { onboardingFinalize(); });
 #endif
     } else {
@@ -39469,11 +39978,11 @@ static void renderOnboardingStage() {
         if (isShortStage) {
             char summary[96];
             snprintf(summary, sizeof(summary),
-                     "Long name: %s\nEnter a short name (up to 4 chars).",
+                     TR("Long name: %s\nEnter a short name (up to 4 chars)."),
                      s_onboardingLongScratch);
             lv_label_set_text(body, summary);
         } else {
-            lv_label_set_text(body, "Enter this node's long name.");
+            lv_label_set_text(body, TR("Enter this node's long name."));
         }
 
         s_onboardingInput = lv_textarea_create(s_onboardingModal);
@@ -39496,11 +40005,12 @@ static void renderOnboardingStage() {
         lv_obj_set_style_bg_opa(s_onboardingInput, LV_OPA_COVER, 0);
         lv_obj_set_style_border_width(s_onboardingInput, 1, 0);
         lv_textarea_set_one_line(s_onboardingInput, true);
+        accentAttach(s_onboardingInput);
         if (isShortStage) {
             char derived[sizeof(s_cfg.nodeShort)];
             onboardingDeriveShortFromLong(s_onboardingLongScratch, derived, sizeof(derived));
             lv_textarea_set_max_length(s_onboardingInput, sizeof(s_cfg.nodeShort) - 1);
-            lv_textarea_set_placeholder_text(s_onboardingInput, "Short name");
+            lv_textarea_set_placeholder_text(s_onboardingInput, TR("Short name"));
             lv_textarea_set_text(s_onboardingInput,
                                  s_onboardingShortScratch[0] ? s_onboardingShortScratch
                                                              : derived);
@@ -39508,7 +40018,7 @@ static void renderOnboardingStage() {
             // LVGL counts characters, not bytes, so this is a UI hint only; the
             // byte cap lands in copyTruncate when the field is committed.
             lv_textarea_set_max_length(s_onboardingInput, MESH_LONG_NAME_MAX_BYTES);
-            lv_textarea_set_placeholder_text(s_onboardingInput, "Long name");
+            lv_textarea_set_placeholder_text(s_onboardingInput, TR("Long name"));
             lv_textarea_set_text(s_onboardingInput, s_onboardingLongScratch);
         }
         lv_textarea_set_cursor_pos(s_onboardingInput, LV_TEXTAREA_CURSOR_LAST);
@@ -39520,14 +40030,14 @@ static void renderOnboardingStage() {
         lv_obj_set_style_text_align(s_onboardingStatus, LV_TEXT_ALIGN_CENTER, 0);
     #if defined(DEVICE_CARDPUTER_LORA_HAT)
         const char *statusHint = "Enter=Next";
-        if (isShortStage)      statusHint = "Enter=Next   Bksp(empty)=Back";
+        if (isShortStage)      statusHint = TR("Enter=Next   Bksp(empty)=Back");
     #elif UI_TOUCH_ONLY_PROFILE
         const char *statusHint = isShortStage
-                                     ? "Tap Next to continue, or Back"
-                                     : "Tap Next to continue";
+                                     ? TR("Tap Next to continue, or Back")
+                                     : TR("Tap Next to continue");
     #else
-        const char *statusHint = "Enter=Next";
-        if (isShortStage)      statusHint = "Enter=Next    Bksp(empty)=Back";
+        const char *statusHint = TR("Enter=Next");
+        if (isShortStage)      statusHint = TR("Enter=Next    Bksp(empty)=Back");
     #endif
         lv_label_set_text(s_onboardingStatus, statusHint);
 
@@ -39556,19 +40066,19 @@ static void renderOnboardingStage() {
             lv_obj_t *lbl = lv_label_create(btn);
             lv_obj_set_style_text_font(lbl, onboardingButtonFont, 0);
             lv_obj_set_style_text_color(lbl, lv_color_hex(0xFFFFFF), 0);
-            lv_label_set_text(lbl, text);
+            lv_label_set_text(lbl, TR(text));
             lv_obj_center(lbl);
             return btn;
         };
 
         if (isShortStage) {
-            makeBtn(btnRow, "Back", 0x3C4A66,
+            makeBtn(btnRow, TR_NOOP("Back"), 0x3C4A66,
                     [](lv_event_t *) {
                         s_onboardingStage = ONBOARD_STAGE_ENTER_LONG;
                         renderOnboardingStage();
                     });
         }
-        const char *nextLabel = "Next";
+        const char *nextLabel = TR_NOOP("Next");
         makeBtn(btnRow, nextLabel, 0x2F6B30,
                 [](lv_event_t *) { onboardingCommitName(); });
     #endif
@@ -39703,7 +40213,7 @@ static void onboardingAcceptImport() {
         s_onboardingSdConfigPresent = false;
         s_onboardingStage = ONBOARD_STAGE_ENTER_LONG;
         renderOnboardingStage();
-        onboardingSetStatus("Import failed - enter a name");
+        onboardingSetStatus(TR("Import failed - enter a name"));
         return;
     }
     persistConfigToPrefs();
@@ -39739,7 +40249,7 @@ static void onboardingCommitName() {
     switch (s_onboardingStage) {
     case ONBOARD_STAGE_ENTER_LONG:
         if (name.length() == 0) {
-            onboardingSetStatus("Long name cannot be empty");
+            onboardingSetStatus(TR("Long name cannot be empty"));
             return;
         }
         utf8util::copyTruncate(s_onboardingLongScratch, MESH_LONG_NAME_MAX_BYTES + 1,
@@ -39750,7 +40260,7 @@ static void onboardingCommitName() {
 
     case ONBOARD_STAGE_ENTER_SHORT:
         if (name.length() == 0) {
-            onboardingSetStatus("Short name cannot be empty");
+            onboardingSetStatus(TR("Short name cannot be empty"));
             return;
         }
         utf8util::copyTruncate(s_onboardingShortScratch, sizeof(s_onboardingShortScratch),
@@ -40488,6 +40998,10 @@ static void pumpKeyboardInput() {
                              || (s_onboardingModal
                                  && (s_onboardingStage == ONBOARD_STAGE_ENTER_LONG
                                      || s_onboardingStage == ONBOARD_STAGE_ENTER_SHORT));
+        // The accent box, when one is up, gets first look at the keys that
+        // step through it (Tab, the trackball/wheel, arrows) and Enter. It is
+        // only ever up over a field being typed in.
+        if (typingContext && accentHandleKey(k)) continue;
 #if HAS_HOME_DASHBOARD
         // The glance carousel, on every board at once. KEY_PREV_CHAN and
         // KEY_NEXT_CHAN are what the T-Deck trackball's horizontal, the M9 and
@@ -41353,6 +41867,24 @@ static void pumpKeyboardInput() {
             continue;
         }
 
+        // Language picker (Config -> Language): drawn over Config, so it owns
+        // the keys while it is up.
+        if (s_cfgLangModal) {
+            if (isModalCloseKey(k)) {
+                cfgLangCancel();
+                continue;
+            }
+            if (k == KEY_ENTER || k == KEY_ROLLER) {
+                cfgLangSave();
+                continue;
+            }
+            int delta = 0;
+            if (k == KEY_SCROLL_UP)      delta = invertScrollNav ? 1 : -1;
+            else if (k == KEY_SCROLL_DN) delta = invertScrollNav ? -1 : 1;
+            stepCfgLang(delta);
+            continue;
+        }
+
 #if HAS_RUNTIME_ORIENTATION
         // Same placement and shape as the preset picker below.
         if (s_cfgOrientModal) {
@@ -41920,7 +42452,7 @@ static void pumpKeyboardInput() {
             if (k == KEY_ENTER) {
                 uint32_t now = millis();
                 if ((uint32_t)(now - s_cfgLastScrollMs) < 180) {
-                    snprintf(s_cfgStatus, sizeof(s_cfgStatus), "Selection settling - press Enter again");
+                    snprintf(s_cfgStatus, sizeof(s_cfgStatus), "%s", TR("Selection settling - press Enter again"));
                     openCfgActionMessageModal(s_cfgStatus);
                     if (s_cfgDebugLog) {
                         Serial.printf("[lvgl-cfg] enter-block settle dt=%lu\n", (unsigned long)(now - s_cfgLastScrollMs));
@@ -43415,9 +43947,9 @@ static void refreshChatComposeButtonState() {
     }
 
     if (s_selectedMsgReplyPacketId != 0 && s_selectedMsgText[0]) {
-        lv_label_set_text(s_chatNewMsgLabel, "Reply");
+        lv_label_set_text(s_chatNewMsgLabel, TR("Reply"));
     } else {
-        lv_label_set_text(s_chatNewMsgLabel, "New Message");
+        lv_label_set_text(s_chatNewMsgLabel, TR("New Message"));
     }
 #endif
 }
@@ -43894,13 +44426,13 @@ static void startWebConfigAuto() {
 }
 
 static void showWebCfgChatPausedNotice() {
-    char warn[192];
+    char warn[320];
     snprintf(warn, sizeof(warn),
-             "Web config: %s\n\n"
+             TR("Web config: %s\n\n"
              "Chat is PAUSED while web config runs - this device needs that "
              "memory for Wi-Fi. Messages sent to you now are not received "
              "or stored.\n\n"
-             "Turn web config off to resume messaging.",
+             "Turn web config off to resume messaging."),
              webCfgIP());
     openCfgActionMessageModal(warn);
 }
@@ -44815,65 +45347,16 @@ static void drawBootSplash() {
     const int cardW = screenW - cardMargin * 2;
 #endif
 
-    splashDev().fillRoundRect(cardX, cardY, cardW, cardH, 12, cardBg);
-    splashDev().drawRoundRect(cardX, cardY, cardW, cardH, 12, cardEdge);
-    splashDev().drawRoundRect(cardX + 1, cardY + 1, cardW - 2, cardH - 2, 12, cardEdgeHi);
-
-    const char *version = APP_VERSION;
-
-    char nodeLine[72];
-    const char *nodeLong = s_cfg.nodeLong[0] ? s_cfg.nodeLong : "unknown node";
-    const char *nodeShort = s_cfg.nodeShort[0] ? s_cfg.nodeShort : "----";
-    snprintf(nodeLine, sizeof(nodeLine), "%s (%s)", nodeLong, nodeShort);
-
-#if !defined(DEVICE_TLORA_PAGER_TFT) && !defined(DEVICE_CARDPUTER_LORA_HAT)
-    // Native-size Roboto GFX fonts (crisp at this size, no bitmap upscaling).
-    int splashContentBottom = cardY + 40;
-    splashDev().setTextColor(titleCol, cardBg);
-
-    auto drawCentered = [&](const char *text, int y) {
-        int w = splashDev().textWidth(text);
-        splashDev().drawString(text, cardX + max(0, (cardW - w) / 2), y);
-    };
-
-    // Large brand name on top (Roboto Bold 26pt).
-    splashDev().setFont(&Roboto_Bold26pt7b);
-    splashDev().setTextSize(MY_SPLASH_TITLE_SCALE);
-    const int brandY = cardY + 12 + MY_SPLASH_TITLE_Y_OFFSET;
-    drawCentered("Camillia", brandY);
-    const int brandCap = max(8, (int)splashDev().fontHeight() - MY_SPLASH_SUBTITLE_GAP_TRIM);
-
-    // "for Meshtastic" underneath (Roboto Medium 14pt).
-    splashDev().setFont(&Roboto_Medium14pt7b);
-    splashDev().setTextSize(MY_SPLASH_SUBTITLE_SCALE);
-    const int subY = brandY + brandCap;
-    drawCentered("for Meshtastic", subY);
-    splashContentBottom = subY + splashDev().fontHeight();
-
-    // Version tucked under the subtitle in a small face. It moved here from the
-    // footer so the footer line can carry the boot progress instead — the
-    // version is a thing you glance at once, the progress is what is changing.
-    // APP_VERSION already carries its own "v" (the VERSION file reads "v4.1.1"),
-    // so this only adds the parentheses.
-    {
-        char verSmall[32];
-        snprintf(verSmall, sizeof(verSmall), "(%s)", version);
-        splashDev().setFont(&fonts::DejaVu9);
-        splashDev().setTextSize(1.0f);
-        splashDev().setTextColor(dimCol, cardBg);
-        drawCentered(verSmall, splashContentBottom + 2);
-        splashContentBottom += splashDev().fontHeight() + 2;
-        splashDev().setTextColor(titleCol, cardBg);
-    }
-#endif
-
 #if defined(DEVICE_TLORA_PAGER_TFT) || defined(DEVICE_TDECK)
     const float flowerScale = 1.15f;
 #else
     const float flowerScale = 1.0f;
 #endif
 
-    auto drawCamelliaMark = [&](int cx, int cy, float scale) {
+    // `alpha` fades the whole mark into the splash background: 255 is the
+    // mark as designed, lower is fainter. Each colour is mixed with the
+    // gradient at the height it is drawn at, since the shapes are opaque.
+    auto drawCamelliaMark = [&](int cx, int cy, float scale, uint8_t alpha = 255) {
         const uint16_t PETAL_OUTER  = 0xF9CF;
         const uint16_t PETAL_MID    = 0xFADF;
         const uint16_t PETAL_INNER  = 0xFF7D;
@@ -44883,6 +45366,13 @@ static void drawBootSplash() {
         const uint16_t STEM         = 0x64EC;
         const uint16_t LEAF_DARK    = 0x2C87;
         const uint16_t LEAF_LIGHT   = 0x3D68;
+        auto fade = [&](uint16_t c, int y) -> uint16_t {
+            if (alpha >= 255) return c;
+            const int yy = (y < 0) ? 0 : (y >= screenH ? screenH - 1 : y);
+            const uint16_t bg = blend565(bgTop, bgBottom,
+                                         (uint8_t)((255UL * yy) / max(1, screenH - 1)));
+            return blend565(bg, c, alpha);
+        };
 
         auto scaled = [&](float value, int minValue = 0) -> int {
             int result = (int)lroundf(value * scale);
@@ -44948,40 +45438,110 @@ static void drawBootSplash() {
             int px = cx + (int)lroundf((float)petalOuterOrbitX * cosf(a));
             int py = cy + (int)lroundf((float)petalOuterOrbitY * sinf(a));
             int pr = (i & 1) ? petalOuterR1 : petalOuterR0;
-            splashDev().fillCircle(px, py, pr, PETAL_OUTER);
-            splashDev().drawCircle(px, py, pr, PETAL_EDGE);
+            splashDev().fillCircle(px, py, pr, fade(PETAL_OUTER, py));
+            splashDev().drawCircle(px, py, pr, fade(PETAL_EDGE, py));
         }
 
         for (int i = 0; i < 8; i++) {
             float a = ((float)i * 2.0f * (float)M_PI / 8.0f) + 0.42f;
             int px = cx + (int)lroundf((float)petalMidOrbitX * cosf(a));
             int py = cy + (int)lroundf((float)petalMidOrbitY * sinf(a));
-            splashDev().fillCircle(px, py, petalMidR, PETAL_MID);
-            splashDev().drawCircle(px, py, petalMidR, PETAL_EDGE);
+            splashDev().fillCircle(px, py, petalMidR, fade(PETAL_MID, py));
+            splashDev().drawCircle(px, py, petalMidR, fade(PETAL_EDGE, py));
         }
 
         for (int i = 0; i < 5; i++) {
             float a = ((float)i * 2.0f * (float)M_PI / 5.0f) + 0.20f;
             int px = cx + (int)lroundf((float)petalInnerOrbitX * cosf(a));
             int py = cy + (int)lroundf((float)petalInnerOrbitY * sinf(a));
-            splashDev().fillCircle(px, py, petalInnerR, PETAL_INNER);
+            splashDev().fillCircle(px, py, petalInnerR, fade(PETAL_INNER, py));
         }
 
-        splashDev().fillCircle(cx, cy, centerR, CENTER);
-        splashDev().drawCircle(cx, cy, centerR, 0xD4C0);
+        splashDev().fillCircle(cx, cy, centerR, fade(CENTER, cy));
+        splashDev().drawCircle(cx, cy, centerR, fade(0xD4C0, cy));
         for (int i = 0; i < 10; i++) {
             float a = (float)i * 2.0f * (float)M_PI / 10.0f;
             int sx = cx + (int)lroundf((float)centerDotOrbit * cosf(a));
             int sy = cy + (int)lroundf((float)centerDotOrbit * sinf(a));
-            splashDev().fillCircle(sx, sy, centerDotR, CENTER_DOT);
+            splashDev().fillCircle(sx, sy, centerDotR, fade(CENTER_DOT, sy));
         }
 
-        splashDev().fillRoundRect(cx - stemX, cy + stemY, stemW, stemH, stemRadius, STEM);
-        splashDev().fillCircle(cx - leafOuterX, cy + leafOuterYLeft, leafOuterR, LEAF_DARK);
-        splashDev().fillCircle(cx - leafInnerX, cy + leafInnerYLeft, leafInnerR, LEAF_LIGHT);
-        splashDev().fillCircle(cx + leafOuterX, cy + leafOuterYRight, leafOuterR, LEAF_DARK);
-        splashDev().fillCircle(cx + leafInnerX, cy + leafInnerYRight, leafInnerR, LEAF_LIGHT);
+        splashDev().fillRoundRect(cx - stemX, cy + stemY, stemW, stemH, stemRadius, fade(STEM, cy + stemY + stemH / 2));
+        splashDev().fillCircle(cx - leafOuterX, cy + leafOuterYLeft, leafOuterR, fade(LEAF_DARK, cy + leafOuterYLeft));
+        splashDev().fillCircle(cx - leafInnerX, cy + leafInnerYLeft, leafInnerR, fade(LEAF_LIGHT, cy + leafInnerYLeft));
+        splashDev().fillCircle(cx + leafOuterX, cy + leafOuterYRight, leafOuterR, fade(LEAF_DARK, cy + leafOuterYRight));
+        splashDev().fillCircle(cx + leafInnerX, cy + leafInnerYRight, leafInnerR, fade(LEAF_LIGHT, cy + leafInnerYRight));
     };
+
+#if defined(DEVICE_TDISPLAY_P4)
+    // Four large, faint camellias behind the card, one centred on each corner
+    // of the screen, so each shows as a partial bloom framing the card. Drawn
+    // before the card, which covers whatever of them reaches it. Scaled to the
+    // card's height (the mark is ~68 px tall at scale 1) so they keep their
+    // proportion to it in either orientation.
+    {
+        const float ghostScale = (float)cardH * 1.1f / 68.0f;
+        const int corners[4][2] = {
+            {0, 0}, {screenW - 1, 0}, {0, screenH - 1}, {screenW - 1, screenH - 1},
+        };
+        for (const auto &c : corners) {
+            drawCamelliaMark(c[0], c[1], ghostScale, 44);
+        }
+    }
+#endif
+
+    splashDev().fillRoundRect(cardX, cardY, cardW, cardH, 12, cardBg);
+    splashDev().drawRoundRect(cardX, cardY, cardW, cardH, 12, cardEdge);
+    splashDev().drawRoundRect(cardX + 1, cardY + 1, cardW - 2, cardH - 2, 12, cardEdgeHi);
+
+    const char *version = APP_VERSION;
+
+    char nodeLine[72];
+    const char *nodeLong = s_cfg.nodeLong[0] ? s_cfg.nodeLong : "unknown node";
+    const char *nodeShort = s_cfg.nodeShort[0] ? s_cfg.nodeShort : "----";
+    snprintf(nodeLine, sizeof(nodeLine), "%s (%s)", nodeLong, nodeShort);
+
+#if !defined(DEVICE_TLORA_PAGER_TFT) && !defined(DEVICE_CARDPUTER_LORA_HAT)
+    // Native-size Roboto GFX fonts (crisp at this size, no bitmap upscaling).
+    int splashContentBottom = cardY + 40;
+    splashDev().setTextColor(titleCol, cardBg);
+
+    auto drawCentered = [&](const char *text, int y) {
+        int w = splashDev().textWidth(text);
+        splashDev().drawString(text, cardX + max(0, (cardW - w) / 2), y);
+    };
+
+    // Large brand name on top (Roboto Bold 26pt).
+    splashDev().setFont(&Roboto_Bold26pt7b);
+    splashDev().setTextSize(MY_SPLASH_TITLE_SCALE);
+    const int brandY = cardY + 12 + MY_SPLASH_TITLE_Y_OFFSET;
+    drawCentered("Camillia", brandY);
+    const int brandCap = max(8, (int)splashDev().fontHeight() - MY_SPLASH_SUBTITLE_GAP_TRIM);
+
+    // "for Meshtastic" underneath (Roboto Medium 14pt).
+    splashDev().setFont(&Roboto_Medium14pt7b);
+    splashDev().setTextSize(MY_SPLASH_SUBTITLE_SCALE);
+    const int subY = brandY + brandCap;
+    drawCentered("for Meshtastic", subY);
+    splashContentBottom = subY + splashDev().fontHeight();
+
+    // Version tucked under the subtitle in a small face. It moved here from the
+    // footer so the footer line can carry the boot progress instead — the
+    // version is a thing you glance at once, the progress is what is changing.
+    // APP_VERSION already carries its own "v" (the VERSION file reads "v4.1.1"),
+    // so this only adds the parentheses.
+    {
+        char verSmall[32];
+        snprintf(verSmall, sizeof(verSmall), "(%s)", version);
+        splashDev().setFont(&fonts::DejaVu9);
+        splashDev().setTextSize(1.0f);
+        splashDev().setTextColor(dimCol, cardBg);
+        drawCentered(verSmall, splashContentBottom + 2);
+        splashContentBottom += splashDev().fontHeight() + 2;
+        splashDev().setTextColor(titleCol, cardBg);
+    }
+#endif
+
 
 #if defined(DEVICE_CARDPUTER_LORA_HAT)
     // Cardputer splash: centered flower with version directly underneath.
@@ -45262,7 +45822,7 @@ static void refreshChannelGlow(bool force) {
 
         char text[48];
         const char *name = channelName(i);
-        if (!name || !name[0]) name = "Channel";
+        if (!name || !name[0]) name = TR("Channel");
         if (s_channelNeedsAttention[i] && !active) {
             snprintf(text, sizeof(text), "%s *", name);
         } else {
@@ -45627,7 +46187,7 @@ static void refreshChannelSelectorLabel() {
         name = channelName(s_cardputerDropdownSelection);
     }
 #endif
-    if (!name || !name[0]) name = "Channel";
+    if (!name || !name[0]) name = TR("Channel");
 #if UI_TOUCH_ONLY_PROFILE
     if (useCompactVerticalHeltecSelector()) {
         name = "";
@@ -45680,7 +46240,7 @@ static void refreshChannelSelectorLabel() {
             lv_coord_t textW = 0;
             for (int i = 0; i < MESH_CHANNELS; i++) {
                 const char *candidate = channelName(i);
-                if (!candidate || !candidate[0]) candidate = "Channel";
+                if (!candidate || !candidate[0]) candidate = TR("Channel");
 
                 lv_label_set_text(s_channelSelectorLabel, candidate);
                 lv_label_set_long_mode(s_channelSelectorLabel, LV_LABEL_LONG_CLIP);
@@ -46213,7 +46773,7 @@ static void paintStatusIcons(lv_obj_t *gpsLabel, lv_obj_t *wifiLabel,
                              const StatusIconInk &ink) {
     if (gpsLabel) {
         if (gpsEnabled) {
-            lv_label_set_text_fmt(gpsLabel, "%s %u", LV_SYMBOL_GPS, (unsigned)gpsSatCount);
+            lv_label_set_text_fmt(gpsLabel, TR("%s %u"), LV_SYMBOL_GPS, (unsigned)gpsSatCount);
         } else {
             lv_label_set_text(gpsLabel, LV_SYMBOL_GPS);
         }
@@ -46559,7 +47119,7 @@ static const MsgRxInfo *findMsgRxInfo(uint32_t from, uint32_t packetId) {
 static void nodeFriendlyName(uint32_t nodeId, char *out, size_t outLen) {
     if (!out || outLen == 0) return;
     if (nodeId == s_myNodeId && s_cfg.nodeLong[0]) {
-        snprintf(out, outLen, "%s (this node)", s_cfg.nodeLong);
+        snprintf(out, outLen, TR("%s (this node)"), s_cfg.nodeLong);
         return;
     }
     const NodeEntry *e = Nodes.find(nodeId);
@@ -46593,11 +47153,11 @@ static void describeRelayByte(uint8_t relay, char *out, size_t outLen) {
     }
     const int n = nDirect + nOther;
     if (n == 0) {
-        snprintf(out, outLen, "unknown node (id ends ..%02x)", (unsigned)relay);
+        snprintf(out, outLen, TR("unknown node (id ends ..%02x)"), (unsigned)relay);
         return;
     }
     size_t used = 0;
-    if (n > 1) used = (size_t)snprintf(out, outLen, "one of: ");
+    if (n > 1) used = (size_t)snprintf(out, outLen, TR("one of: "));
     for (int i = 0; i < n && used < outLen; i++) {
         const uint32_t id = (i < nDirect) ? direct[i] : other[i - nDirect];
         char name[48];
@@ -46623,61 +47183,61 @@ static void openMsgSenderInfoModal(uint32_t from, uint32_t packetId) {
     int n = 0;
     char name[64];
     nodeFriendlyName(from, name, sizeof(name));
-    snprintf(lines[n++], sizeof(lines[0]), "From: %s", name);
-    snprintf(lines[n++], sizeof(lines[0]), "Node id: !%08lx", (unsigned long)from);
+    snprintf(lines[n++], sizeof(lines[0]), TR("From: %s"), name);
+    snprintf(lines[n++], sizeof(lines[0]), TR("Node id: !%08lx"), (unsigned long)from);
 
     const MsgRxInfo *rx = findMsgRxInfo(from, packetId);
     if (from == s_myNodeId) {
-        snprintf(lines[n++], sizeof(lines[0]), "Sent by this node.");
+        snprintf(lines[n++], sizeof(lines[0]), TR("Sent by this node."));
     } else if (!rx) {
         snprintf(lines[n++], sizeof(lines[0]),
-                 "Delivery details not recorded: received before this boot, "
-                 "or too many messages ago.");
+                 TR("Delivery details not recorded: received before this boot, "
+                 "or too many messages ago."));
     } else {
         const bool viaMqtt = (rx->flags & 0x10) != 0;
         const int hopLimit = rx->flags & 0x07;
         const int hopStart = (rx->flags >> 5) & 0x07;
         const int hopsTaken = (hopStart >= hopLimit) ? (hopStart - hopLimit) : -1;
         char who[96];
-        snprintf(lines[n++], sizeof(lines[0]), "Received over: %s %s",
+        snprintf(lines[n++], sizeof(lines[0]), TR("Received over: %s %s"),
                  msgTransportIcon(viaMqtt), viaMqtt ? "MQTT" : "LoRa");
         if (viaMqtt) {
             uint32_t gw = 0;
             if (mqttBridgeGatewayFor(from, packetId, gw)) {
                 if (gw == from) {
                     snprintf(lines[n++], sizeof(lines[0]),
-                             "Uplinked by: the sender itself");
+                             TR("Uplinked by: the sender itself"));
                 } else {
                     nodeFriendlyName(gw, who, sizeof(who));
-                    snprintf(lines[n++], sizeof(lines[0]), "Uplinked by: %s", who);
+                    snprintf(lines[n++], sizeof(lines[0]), TR("Uplinked by: %s"), who);
                 }
             } else if (rx->relayNode != 0) {
                 // Arrived over the air with via_mqtt already set: a node on this
                 // mesh downlinked it from a broker and relayed it to us by radio.
                 describeRelayByte(rx->relayNode, who, sizeof(who));
                 snprintf(lines[n++], sizeof(lines[0]),
-                         "Relayed to us by: %s (from MQTT)", who);
+                         TR("Relayed to us by: %s (from MQTT)"), who);
             } else {
-                snprintf(lines[n++], sizeof(lines[0]), "Gateway: not known");
+                snprintf(lines[n++], sizeof(lines[0]), TR("Gateway: not known"));
             }
         } else {
             if (hopStart > 0 && hopsTaken == 0) {
                 snprintf(lines[n++], sizeof(lines[0]),
-                         "Relayed to us by: nobody, heard directly");
+                         TR("Relayed to us by: nobody, heard directly"));
             } else if (rx->relayNode == 0) {
                 // Firmware before Meshtastic 2.6 leaves relay_node unset.
                 snprintf(lines[n++], sizeof(lines[0]),
-                         "Relayed to us by: not reported by the relaying node");
+                         TR("Relayed to us by: not reported by the relaying node"));
             } else if (rx->relayNode == (uint8_t)(from & 0xFF)) {
-                snprintf(lines[n++], sizeof(lines[0]), "Relayed to us by: the sender itself");
+                snprintf(lines[n++], sizeof(lines[0]), TR("Relayed to us by: the sender itself"));
             } else {
                 describeRelayByte(rx->relayNode, who, sizeof(who));
-                snprintf(lines[n++], sizeof(lines[0]), "Relayed to us by: %s", who);
+                snprintf(lines[n++], sizeof(lines[0]), TR("Relayed to us by: %s"), who);
             }
             if (hopsTaken >= 0 && hopStart > 0) {
-                snprintf(lines[n++], sizeof(lines[0]), "Hops: %d of %d", hopsTaken, hopStart);
+                snprintf(lines[n++], sizeof(lines[0]), TR("Hops: %d of %d"), hopsTaken, hopStart);
             }
-            snprintf(lines[n++], sizeof(lines[0]), "Signal: SNR %.1f dB, RSSI %.0f dBm",
+            snprintf(lines[n++], sizeof(lines[0]), TR("Signal: SNR %.1f dB, RSSI %.0f dBm"),
                      (double)rx->snr, (double)rx->rssi);
         }
     }
@@ -46720,7 +47280,7 @@ static void openMsgSenderInfoModal(uint32_t from, uint32_t packetId) {
     lv_obj_set_width(title, lv_pct(100));
     lv_obj_set_style_text_font(title, &lv_font_montserrat_14, 0);
     lv_obj_set_style_text_color(title, ink, 0);
-    lv_label_set_text(title, "Message Info");
+    lv_label_set_text(title, TR("Message Info"));
 #if UI_TOUCH_ONLY_PROFILE
     reserveHeltecCloseXRow(title);
     appendHeltecCloseX(s_msgInfoModal,
@@ -46743,7 +47303,7 @@ static void openMsgSenderInfoModal(uint32_t from, uint32_t packetId) {
     lv_obj_set_style_text_font(hint, &lv_font_montserrat_10, 0);
     lv_obj_set_style_text_color(hint, dim, 0);
     lv_obj_set_style_pad_top(hint, 3, 0);
-    lv_label_set_text_fmt(hint, "%s = Close", modalCloseKeyLabel());
+    lv_label_set_text_fmt(hint, TR("%s = Close"), modalCloseKeyLabel());
 #else
     LV_UNUSED(dim);
 #endif
@@ -47171,10 +47731,10 @@ static void refreshAdminTranscript() {
         else if (n && n->shortName[0])  snprintf(who, sizeof(who), "%s", n->shortName);
         else snprintf(who, sizeof(who), "!%08lx", (unsigned long)s_adminSession.nodeId());
 
-        lv_label_set_text_fmt(s_adminTitle, "%s  %s%s", who,
+        lv_label_set_text_fmt(s_adminTitle, TR("%s  %s%s"), who,
                               t == AdminClient::TRANSPORT_RF ? "rf"
                                 : t == AdminClient::TRANSPORT_MQTT ? "mqtt" : "auto",
-                              s_adminSession.awaitingConfirm() ? "  CONFIRM?" : "");
+                              s_adminSession.awaitingConfirm() ? TR("  CONFIRM?") : "");
     }
 }
 
@@ -47977,21 +48537,21 @@ static bool sendStoreForwardTo(uint32_t toNodeId, uint32_t rr, uint32_t windowMi
 // "no router heard yet" and "asked a moment ago" are different problems.
 static bool snfRequestHistory(const char **why) {
     if (!s_cfg.snfClientEnabled) {
-        if (why) *why = "Store&Fwd client is off";
+        if (why) *why = TR("Store&Fwd client is off");
         return false;
     }
     if (!snfRouterKnown()) {
-        if (why) *why = "No S&F router heard yet";
+        if (why) *why = TR("No S&F router heard yet");
         return false;
     }
     if (s_snfLastRequestMs != 0 &&
         (uint32_t)(millis() - s_snfLastRequestMs) < kSnfRequestThrottleMs) {
-        if (why) *why = "Replay already requested";
+        if (why) *why = TR("Replay already requested");
         return false;
     }
     if (!sendStoreForwardTo(snfRouterId(), SNF_CLIENT_HISTORY,
                             kSnfHistoryWindowMin, snfRouterChanIdx())) {
-        if (why) *why = "Send failed";
+        if (why) *why = TR("Send failed");
         return false;
     }
     s_snfLastRequestMs = millis();
@@ -48681,11 +49241,11 @@ static bool processMeshPacket(const MeshPacket &rxPkt) {
                         const char *errName = routingErrorName(errorReason);
                         char errMsg[44];
                         if (errName) {
-                            snprintf(errMsg, sizeof(errMsg), "! NAK %s(%lu)",
+                            snprintf(errMsg, sizeof(errMsg), TR("! NAK %s(%lu)"),
                                      errName,
                                      (unsigned long)errorReason);
                         } else {
-                            snprintf(errMsg, sizeof(errMsg), "! NAK err=%lu",
+                            snprintf(errMsg, sizeof(errMsg), TR("! NAK err=%lu"),
                                      (unsigned long)errorReason);
                         }
                         DMs.addMessage(pkt.hdr.from, nullptr, "", errMsg, TFT_RED,
@@ -48865,7 +49425,7 @@ static void serviceWebManualTime() {
     int y = 0, mo = 0, d = 0, h = 0, mi = 0;
     if (!webCfgTakeManualTime(y, mo, d, h, mi)) return;
     if (applyManualClock(y, mo, d, h, mi)) {
-        snprintf(s_cfgStatus, sizeof(s_cfgStatus), "Clock set from web config");
+        snprintf(s_cfgStatus, sizeof(s_cfgStatus), "%s", TR("Clock set from web config"));
     } else {
         Serial.printf("[time] web manual clock rejected: %04d-%02d-%02d %02d:%02d\n",
                       y, mo, d, h, mi);
@@ -48893,7 +49453,7 @@ static void serviceWebSnfRequest() {
     const char *why = nullptr;
     if (snfRequestHistory(&why)) {
         char msg[64];
-        snprintf(msg, sizeof(msg), "Requested (last %lu min)",
+        snprintf(msg, sizeof(msg), TR("Requested (last %lu min)"),
                  (unsigned long)kSnfHistoryWindowMin);
         webCfgSetSnfResult(msg);
     } else {
@@ -49672,8 +50232,8 @@ static void formatChatDateLabel(uint32_t epoch, char *out, size_t len) {
     struct tm tmv;
     localtime_r(&t, &tmv);
     static const char *kMonths[12] = {
-        "January", "February", "March", "April", "May", "June",
-        "July", "August", "September", "October", "November", "December"
+        TR("January"), TR("February"), TR("March"), TR("April"), TR("May"), TR("June"),
+        TR("July"), TR("August"), TR("September"), TR("October"), TR("November"), TR("December")
     };
     int day = tmv.tm_mday;
     const char *suf = "th";
@@ -49686,6 +50246,13 @@ static void formatChatDateLabel(uint32_t epoch, char *out, size_t len) {
     }
     int monIdx = tmv.tm_mon;
     if (monIdx < 0 || monIdx > 11) monIdx = 0;
+    // English reads "September 25th 2026". Every other language puts the day
+    // first and has no ordinal suffix, and TR() cannot reorder arguments, so
+    // those get a format of their own ("25 de septiembre de 2026").
+    if (i18nGetLang() != LANG_EN) {
+        snprintf(out, len, TR("%d %s %d"), day, kMonths[monIdx], 1900 + tmv.tm_year);
+        return;
+    }
     snprintf(out, len, "%s %d%s %d",
              kMonths[monIdx], day, suf, 1900 + tmv.tm_year);
 }
@@ -50064,7 +50631,7 @@ static void chatMakeBubble(lv_obj_t *list, uint32_t sender, bool isMe,
         switch (ackState) {
             case DisplayLine::ACKED:
             case DisplayLine::ACKED_RELAY:
-                stateTag = "ME (ACK)";
+                stateTag = TR("ME (ACK)");
                 break;
             default:
                 stateTag = "ME";
@@ -50392,7 +50959,7 @@ static void refreshChatView(bool force) {
         lv_obj_t *empty = lv_label_create(s_chatList);
         lv_obj_set_style_text_font(empty, scaledChatFont(kChannelChatFont), 0);
         lv_obj_set_style_text_color(empty, lv_color_hex(0xD9E8FF), 0);
-        lv_label_set_text(empty, "No messages yet");
+        lv_label_set_text(empty, TR("No messages yet"));
     } else {
         int displayOrder[MAX_MSG_LINES] = {};
         int displayCount = 0;
@@ -50741,7 +51308,7 @@ static const char *chatShortcutHintText() {
     // its 373 px bar has) instead of the 1 px the spelled-out version had.
     return "(H)ome   (C)hat   C(f)g   (D)M   (N)odes   Too(l)s   (A)ct";
 #else
-    return "(C)FG   (D)M   (N)odes   Too(l)s   (A)ctions";
+    return TR("(C)FG   (D)M   (N)odes   Too(l)s   (A)ctions");
 #endif
 #elif defined(DEVICE_TDECK_PRO)
 #if HAS_HOME_DASHBOARD
@@ -50751,7 +51318,7 @@ static const char *chatShortcutHintText() {
     // A still works. Only visible with the bar switched off.
     return "H:Home C:Chat F:Cfg D:DM N:Node L:Tools";
 #else
-    return "C:Cfg H:Ch D:DM N:Node L:Tools A:Act";
+    return TR("C:Cfg H:Ch D:DM N:Node L:Tools A:Act");
 #endif
 #elif HAS_HOME_DASHBOARD
     // 204 px of the 218 this board has for it. The 5.1.0 wording — "con(f)ig",
@@ -50764,14 +51331,14 @@ static const char *chatShortcutHintText() {
     // Actions is the token dropped rather than another: it is the only entry
     // here that is not also a cell on the nav bar this line stands in for, A
     // still works, and the T-Deck Pro's line already drops it for that reason.
-    return "(H)ome (C)hat C(f)g (D)M (N)odes Too(l)s";
+    return TR("(H)ome (C)hat C(f)g (D)M (N)odes Too(l)s");
 #else
     // Double spaces, not triple: this is the pre-dashboard wording, and at
     // three it measured 223 px — inside the old 234 budget but over the 218
     // the corrected reserve leaves. Only built where the dashboard is compiled
     // out, which is no current board, but a line that wraps the moment it is
     // switched back on is not worth leaving behind.
-    return "(C)FG  C(h)an  (D)M  (N)odes  Too(l)s  (A)ct";
+    return TR("(C)FG  C(h)an  (D)M  (N)odes  Too(l)s  (A)ct");
 #endif
 }
 #endif   // !UI_TOUCH_ONLY_PROFILE
@@ -51380,7 +51947,7 @@ static void buildUi() {
     lv_obj_set_style_text_font(chatActLabel, chatActionFont, 0);
     lv_obj_set_style_text_color(chatActLabel, lv_color_hex(0xE8F1FF), 0);
     // "Actions" does not fit the button at portrait width.
-    lv_label_set_text(chatActLabel, uiPortrait() ? "Act" : "Actions");
+    lv_label_set_text(chatActLabel, uiPortrait() ? TR("Act") : TR("Actions"));
     lv_obj_center(chatActLabel);
 
     s_chatNewMsgBtn = lv_btn_create(chatBtnRow);
@@ -51398,7 +51965,7 @@ static void buildUi() {
     s_chatNewMsgLabel = lv_label_create(s_chatNewMsgBtn);
     lv_obj_set_style_text_font(s_chatNewMsgLabel, chatActionFont, 0);
     lv_obj_set_style_text_color(s_chatNewMsgLabel, lv_color_hex(0xE8F1FF), 0);
-    lv_label_set_text(s_chatNewMsgLabel, "New Message");
+    lv_label_set_text(s_chatNewMsgLabel, TR("New Message"));
     lv_obj_center(s_chatNewMsgLabel);
 #else
     s_chatNewMsgBtn = nullptr;
@@ -51606,7 +52173,7 @@ static void buildUi() {
         if (name[0]) {
             lv_label_set_text(lbl, name);
         } else {
-            lv_label_set_text(lbl, "Channel");
+            lv_label_set_text(lbl, TR("Channel"));
         }
         lv_obj_center(lbl);
 #else
@@ -51669,7 +52236,7 @@ static void buildUi() {
         if (name[0]) {
             lv_label_set_text(lbl, name);
         } else {
-            lv_label_set_text(lbl, "Channel");
+            lv_label_set_text(lbl, TR("Channel"));
         }
     #if defined(DEVICE_CARDPUTER_LORA_HAT) || UI_TOUCH_ONLY_PROFILE
         sizeChannelButtonToLabel(i);
@@ -52676,7 +53243,7 @@ void setup() {
     Channels.addMessage(0, "", "[TEST] LoRa disabled - MQTT only", TFT_ORANGE);
 #endif
     if (!s_radioReady) {
-        Channels.addMessage(0, "", "[radio] init failed", TFT_RED);
+        Channels.addMessage(0, "", TR("[radio] init failed"), TFT_RED);
     } else {
         // init() already applied loraPower and loraRxBoostedGain. The rest still
         // comes from compile-time defaults, so push the loaded values if any of
@@ -52714,7 +53281,7 @@ void setup() {
     openHomeDashboard();
 #endif
     if (s_otaWorkerBootNotice[0]) {
-        openCfgActionMessageModal(s_otaWorkerBootNotice, "Update");
+        openCfgActionMessageModal(TR(s_otaWorkerBootNotice), TR("Update"));
         s_otaWorkerBootNotice[0] = '\0';
     }
     s_lastActivityMs = millis();
@@ -52797,7 +53364,7 @@ void setup() {
         // off on its own and says nothing about it reads as a fault.
         Serial.println("[power] previous shutdown was low battery");
         snprintf(s_cfgStatus, sizeof(s_cfgStatus),
-                 "Device switched off last time: battery empty");
+                 "%s", TR("Device switched off last time: battery empty"));
     }
 }
 
@@ -52961,9 +53528,9 @@ static void powerHookShowMessage(const char *msg) {
 }
 
 static void powerHookTierChanged(PowerBatteryTier tier) {
-    const char *label = (tier == POWER_TIER_WARN)     ? "Battery low"
-                      : (tier == POWER_TIER_CRITICAL) ? "Battery critical - shedding load"
-                      : (tier == POWER_TIER_CUTOFF)   ? "Battery empty"
+    const char *label = (tier == POWER_TIER_WARN)     ? TR("Battery low")
+                      : (tier == POWER_TIER_CRITICAL) ? TR("Battery critical - shedding load")
+                      : (tier == POWER_TIER_CUTOFF)   ? TR("Battery empty")
                                                       : nullptr;
     if (!label) return;
     if (s_rootScreen) openCfgActionMessageModal(label);
@@ -53095,7 +53662,7 @@ static void serviceOtaAutoCheck(uint32_t nowMs) {
     auto abandonManual = [&](const char *why) {
         s_otaCheckRequested = false;
         utf8util::copyTruncate(s_otaCheckRowNote, sizeof(s_otaCheckRowNote),
-                               " - check unavailable");
+                               TR(" - check unavailable"));
         snprintf(s_cfgStatus, sizeof(s_cfgStatus), "%s", why);
         Serial.printf("[ota-check] requested check dropped: %s\n", why);
         if (s_cfgModal) {
@@ -53108,7 +53675,7 @@ static void serviceOtaAutoCheck(uint32_t nowMs) {
     if (!otaLayoutSupportsUpdate()) {
         s_otaAutoCheckDone = true;
         s_otaBootCheckForced = false;
-        if (manual) abandonManual("OTA needs the factory image (flash layout)");
+        if (manual) abandonManual(TR("OTA needs the factory image (flash layout)"));
         else Serial.println("[ota-check] skipped: flash layout cannot accept OTA updates");
         return;
     }
@@ -53117,8 +53684,8 @@ static void serviceOtaAutoCheck(uint32_t nowMs) {
         // The request was raised with WiFi up, so getting here means it dropped
         // in the settle window. Say so rather than leaving the row spinning.
         if (manual) {
-            abandonManual(s_cfg.wifiEnabled ? "Update check needs WiFi connected"
-                                            : "Update check needs WiFi on");
+            abandonManual(s_cfg.wifiEnabled ? TR("Update check needs WiFi connected")
+                                            : TR("Update check needs WiFi on"));
         }
         return;
     }
@@ -53133,7 +53700,7 @@ static void serviceOtaAutoCheck(uint32_t nowMs) {
         // leaving it pending would strand the row on "checking..." for the rest
         // of the boot with nothing ever coming back to replace it.
         if (manual && (int32_t)(nowMs - s_otaCheckDeadlineMs) >= 0) {
-            abandonManual("Update check skipped (a dialog was open)");
+            abandonManual(TR("Update check skipped (a dialog was open)"));
         }
         return;
     }
@@ -53176,9 +53743,9 @@ static void serviceOtaAutoCheck(uint32_t nowMs) {
         Serial.printf("[ota-check] failed: %s\n", check.error[0] ? check.error : "unknown");
         if (manual) {
             utf8util::copyTruncate(s_otaCheckRowNote, sizeof(s_otaCheckRowNote),
-                                   " - check failed");
-            snprintf(s_cfgStatus, sizeof(s_cfgStatus), "Update check failed: %s",
-                     check.error[0] ? check.error : "unknown error");
+                                   TR(" - check failed"));
+            snprintf(s_cfgStatus, sizeof(s_cfgStatus), TR("Update check failed: %s"),
+                     check.error[0] ? check.error : TR("unknown error"));
             // The row carries the short version; the popup carries the reason,
             // which is too long for a list row and worth reading once.
             if (s_cfgModal) {
@@ -53193,8 +53760,8 @@ static void serviceOtaAutoCheck(uint32_t nowMs) {
                       check.latestTag[0] ? check.latestTag : APP_VERSION);
         if (manual) {
             utf8util::copyTruncate(s_otaCheckRowNote, sizeof(s_otaCheckRowNote),
-                                   " - up to date");
-            snprintf(s_cfgStatus, sizeof(s_cfgStatus), "Up to date (%s)",
+                                   TR(" - up to date"));
+            snprintf(s_cfgStatus, sizeof(s_cfgStatus), TR("Up to date (%s)"),
                      check.latestTag[0] ? check.latestTag : APP_VERSION);
             if (s_cfgModal) {
                 refreshCfgModal();
@@ -53211,7 +53778,7 @@ static void serviceOtaAutoCheck(uint32_t nowMs) {
     utf8util::copyTruncate(s_cfgOtaLatestTag, sizeof(s_cfgOtaLatestTag), check.latestTag);
     s_cfgOtaInstallArmed = true;
     if (manual) {
-        snprintf(s_otaCheckRowNote, sizeof(s_otaCheckRowNote), " - %s available",
+        snprintf(s_otaCheckRowNote, sizeof(s_otaCheckRowNote), TR(" - %s available"),
                  check.latestTag);
     }
     Serial.printf("[ota-check] update available: %s -> %s\n", APP_VERSION, s_otaAutoCheckTag);
@@ -53344,7 +53911,7 @@ static void serviceOtaAutoUpdate(uint32_t nowMs) {
         // says why the next time anyone looks at it.
         char notice[sizeof(s_otaWorkerBootNotice)] = {};
         snprintf(notice, sizeof(notice),
-                 "Auto-update gave up on %s after %u failed installs",
+                 TR("Auto-update gave up on %s after %u failed installs"),
                  check.latestTag, (unsigned)kOtaAutoUpdateMaxFailures);
         setOtaWorkerBootNotice(notice);
         return;

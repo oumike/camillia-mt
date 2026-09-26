@@ -1,14 +1,19 @@
 # Name,   Type, SubType, Offset,   Size,    Flags
 # 16 MB layout with an internal filesystem, for boards with no SD card slot.
 #
-# Identical to partitions.csv through coredump so an OTA between the two
-# layouts keeps the same app slots and NVS; the only addition is the trailing
-# littlefs partition filling the rest of the 16 MB part.
+# Identical to partitions_16mb.csv -- two 6.25 MB app slots round nvs and
+# coredump, which stay at their original offsets so settings survive the move
+# -- plus the trailing littlefs partition filling the rest of the 16 MB part.
 #
-# 0x670000 + 0x990000 = 0x1000000 (16 MB exactly).
+# The slots used to be 3.2 MB with littlefs at 0x670000 (9.5 MB). Growing them
+# for the UI translations (issue #99) moved littlefs, so the first boot on this
+# layout finds no filesystem there and formats it (formatOnFail in storage.cpp):
+# message history and the node archive start empty. Settings live in nvs.
+#
+# 0xCB0000 + 0x350000 = 0x1000000 (16 MB exactly).
 otadata,  data, ota,     0x9000,   0x2000,
-app0,     app,  ota_0,   0x10000,  0x320000,
-app1,     app,  ota_1,   0x330000, 0x320000,
+app0,     app,  ota_0,   0x10000,  0x640000,
 nvs,      data, nvs,     0x650000, 0x10000,
 coredump, data, coredump,0x660000, 0x10000,
-littlefs, data, spiffs,  0x670000, 0x990000,
+app1,     app,  ota_1,   0x670000, 0x640000,
+littlefs, data, spiffs,  0xCB0000, 0x350000,

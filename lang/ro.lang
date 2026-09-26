@@ -1,0 +1,874 @@
+# Camillia language file (issue #99)
+# code: ro
+# name: Română
+#
+# One translation per line: the English exactly as it appears in the source,
+# a TAB, then the translation. Escape a newline as \n, a tab as \t, a backslash
+# as \\. Keep every %d / %s / %u ... in the same order and of the same type as the
+# English -- a line whose placeholders differ is ignored on the device and the
+# English is shown. See docs/TRANSLATING.md. Compiled in by tools/gen_lang_builtin.py.
+  %s via %s (%.0f dB)\n	  %s prin %s (%.0f dB)\n
+  CONFIRM?	  CONFIRMI?
+  Humid  %.1f %%	  Umid.  %.1f %%
+  Press  %.1f hPa	  Pres.  %.1f hPa
+  lock	  securizată
+  open	  deschisă
+ (no card)	 (fără card)
+ (not sharing location)	 (locația nu e partajată)
+ (unchanged)	 (neschimbat)
+ - %s available	 - %s disponibil
+ - check failed	 - verificare eșuată
+ - check unavailable	 - verificare indisponibilă
+ - checking...	 - se verifică...
+ - saving to %s	 - se salvează în %s
+ - up to date	 - la zi
+! TX failed	! TX eșuat
+! TX failed (node id)	! TX eșuat (id nod)
+%d chans  %s msgs  %s%s	%d canale  %s mesaje  %s%s
+%d chans  %s msgs  %s%s  (+%s off-list)	%d canale  %s mesaje  %s%s  (+%s în afara listei)
+%d node(s), %d report(s)	%d nod(uri), %d raport(e)
+%d%s  %s\nFeels %d%s, humidity %d%%\nWind %s %d %s%s%s	%d%s  %s\nSe simte %d%s, umiditate %d%%\nVânt %s %d %s%s%s
+%luh ago	acum %luh
+%lum ago	acum %lum
+%lus ago	acum %lus
+%s   -   %u match%s so far	%s   -   %u potrivire(i)%.0s până acum
+%s  (current)	%s  (actual)
+%s (this node)	%s (acest nod)
+%s - WiFi off	%s - WiFi oprit
+%s - rebooting...	%s - repornire...
+%s - saved	%s - salvat
+%s = Back   C = Clear   F = Filter	%s = Înapoi   C = Șterge   F = Filtru
+%s = Back   green=SNR  pink=RSSI	%s = Înapoi   verde=SNR  roz=RSSI
+%s = Back   teal=ChUtil  orange=AirTx	%s = Înapoi   turcoaz=ChUtil  portocaliu=AirTx
+%s = Close	%s = Închide
+%s returns to the live list.\nIf it is full, the oldest non-favorite is archived to make room.	%s revine în lista activă.\nDacă e plină, cel mai vechi nod nefavorit e arhivat pentru a face loc.
+%s to close Help	%s pentru a închide Ajutorul
+%s will be removed from the node list.	%s va fi eliminat din lista de noduri.
+%s x%u\nClock: %u MHz\nRevision: %u\nUptime: %luh %02lum %02lus\nLoop rate: %lu /s\nBattery: %u%% %.3fV	%s x%u\nCeas: %u MHz\nRevizie: %u\nPornit de: %luh %02lum %02lus\nBucle: %lu /s\nBaterie: %u%% %.3fV
+%s%.2f, %.2f (rounded)	%s%.2f, %.2f (rotunjit)
+%s%lu min ago - %.2f, %.2f (rounded)	%sacum %lu min - %.2f, %.2f (rotunjit)
+%s.\n\nNothing can arrive until the bridge has a broker session. Fix it in Config (or web config) and this list fills in on its own.	%s.\n\nNu sosește nimic până când puntea nu are o sesiune cu brokerul. Rezolvă în Config (sau configurarea web) și lista se umple singură.
+%s: %d node(s) heard	%s: %d nod(uri) auzit(e)
+%s: %d on preset (%lus)	%s: %d pe presetare (%lus)
+%s=Scroll  A=Actions  %s=List	%s=Derulare  A=Acțiuni  %s=Listă
+%s\n%.1f km - brg %03d %s\n%s\nyou %dm - peer %dm - %.0f MHz	%s\n%.1f km - direcție %03d %s\n%s\ntu %dm - celălalt %dm - %.0f MHz
+%s\n%lu min old	%s\nde acum %lu min
+%s\nIn use - will switch to the next configured WiFi network, or AP mode if none is available	%s\nÎn uz - se va trece la următoarea rețea WiFi configurată sau la modul AP dacă nu există niciuna
+%s\nMessage history will be erased	%s\nIstoricul mesajelor va fi șters
+%s\nType %06u then Enter on the keyboard	%s\nTastează %06u apoi Enter pe tastatură
+%u of %d	%u din %d
+%u sec	%u s
+(A)nnounce	(A)nunță
+(B)eacons	(B)alize
+(C)FG   (D)M   (N)odes   Too(l)s   (A)ctions	(C)FG   (D)MD   (N)oduri   Unea(l)te   (A)cțiuni
+(C)FG  C(h)an  (D)M  (N)odes  Too(l)s  (A)ct	(C)FG  Canal(H)  (D)MD  (N)oduri  Unea(l)te  (A)cț
+(D) Direct Messages\n(C) Configuration\n(N) Nodes\n(L) Tools (Live, charts)\n(A) Channel Actions\n(H) Channel selector\n(P) Help (this screen)\n(E) Emoji\n(Space) Compose/Reply\n(Enter) Focus Messages	(D) Mesaje directe\n(C) Configurare\n(N) Noduri\n(L) Unelte (Live, grafice)\n(A) Acțiuni canal\n(H) Selector canal\n(P) Ajutor (acest ecran)\n(E) Emoji\n(Space) Scrie/Răspunde\n(Enter) Focus pe mesaje
+(D)iscovery	(D)escoperire
+(F)avorite	(F)avorit
+(H) Home dashboard\n(C) Chat (again: channels)\n(F) Configuration\n(D) Direct Messages\n(N) Nodes\n(L) Tools (Live, charts)\n(A) Channel Actions\n(P) Help (this screen)\n(E) Emoji\n(Space) Compose/Reply\n(Enter) Focus Messages	(H) Panou principal\n(C) Chat (din nou: canale)\n(F) Configurare\n(D) Mesaje directe\n(N) Noduri\n(L) Unelte (Live, grafice)\n(A) Acțiuni canal\n(P) Ajutor (acest ecran)\n(E) Emoji\n(Space) Scrie/Răspunde\n(Enter) Focus pe mesaje
+(H)ome (C)hat C(f)g (D)M (N)odes Too(l)s	Acasă(H) (C)hat C(f)g (D)MD (N)oduri Unea(l)te
+(L)ive	(L)ive
+(L)ocate	(L)ocalizează
+(L)ocation: %s	(L)ocație: %s
+(M)ute	(M)ut
+(R)eply	(R)ăspunde
+(S)ender Info	Info expeditor (S)
+(W)eather	Vremea (W)
+(no name)	(fără nume)
+(not set)	(nesetat)
+(nothing)	(nimic)
+(unknown)	(necunoscut)
+(unnamed)	(fără nume)
+, gusts %d	, rafale %d
+1 hour	1 oră
+12-hour	12 ore
+15 sec	15 s
+2 hours	2 ore
+24-hour	24 ore
+30 sec	30 s
+4-char short name (ABCD)	Nume scurt de 4 caractere (ABCD)
+5 min on that preset. This node hears nothing on its own while it runs, and finds only meshes sharing your primary channel key.	5 min pe acea presetare. Cât rulează, acest nod nu aude nimic din rețeaua proprie și găsește doar rețelele care împart cheia canalului tău principal.
+5 sec	5 s
+6 hours	6 ore
+? hops	? salturi
+ACK from %s. Waiting for reply...	ACK de la %s. Se așteaptă răspunsul...
+ACKed, no reply (%lus)	ACK primit, niciun răspuns (%lus)
+AP mode cannot be removed	Modul AP nu poate fi eliminat
+AP mode selected	Mod AP ales
+AP mode selected - enable WiFi first	Mod AP ales - activează mai întâi WiFi
+AP mode: %s	Mod AP: %s
+ARCHIVED %s\n\n%s\nShort: %s\nID: !%08lX\n\nLast heard: %s\n%s\n\n%sNot on the live list. Restore it to message,\nfavorite or trace it.	ARHIVAT %s\n\n%s\nScurt: %s\nID: !%08lX\n\nUltima dată auzit: %s\n%s\n\n%sNu e în lista activă. Restaurează-l pentru a-i scrie,\na-l face favorit sau a-l urmări.
+Act	Acț.
+Action Result	Rezultat
+Action: %s	Acțiune: %s
+Actions	Acțiuni
+All	Tot
+All live traffic will be erased	Tot traficul live va fi șters
+All live traffic will be erased, including lines hidden by the filter	Tot traficul live va fi șters, inclusiv liniile ascunse de filtru
+Already %s.	Deja %s.
+Already on that preset	Deja pe această presetare
+Analyzing terrain...	Se analizează terenul...
+Announce	Anunță
+Any key / %s = Close	Orice tastă / %s = Închide
+Apply	Aplică
+Apr	apr
+April	aprilie
+Archive Dropped Nodes: %s	Arhivează nodurile eliminate: %s
+Archive Dropped Nodes: %s%s	Arhivează nodurile eliminate: %s%s
+Asks first, then reboots.	Întreabă mai întâi, apoi repornește.
+Asks first, then reboots. Only nodes on the same preset can hear each other.	Întreabă întâi, apoi repornește. Doar nodurile pe aceeași presetare se aud între ele.
+Aug	aug
+August	august
+Auto-update gave up on %s after %u failed installs	Actualizarea automată a renunțat la %s după %u instalări eșuate
+BT Keyboard failed to start (low memory)	Tastatura BT nu a pornit (memorie puțină)
+BT Keyboard off	Tastatură BT oprită
+BT Keyboard on - connecting to %s	Tastatură BT pornită - conectare la %s
+BT Keyboard on - use Pair to choose one	Tastatură BT pornită - folosește Asociere pentru a alege
+BT Keyboard turned off.\n\nWeb Config and the Bluetooth keyboard share one radio and cannot run at the same time.\n\nTurn Web Config off to use the keyboard again.	Tastatura BT a fost oprită.\n\nConfigurarea web și tastatura Bluetooth folosesc aceeași radio și nu pot rula simultan.\n\nOprește configurarea web pentru a folosi din nou tastatura.
+BT Keyboard: %s	Tastatură BT: %s
+BT Keyboard: Off	Tastatură BT: Oprită
+Back	Înapoi
+Back = Cancel	Înapoi = Anulare
+Bass	Bas
+Battery Calibration	Calibrare baterie
+Battery Calibration: %s	Calibrare baterie: %s
+Battery Calibration: Off	Calibrare baterie: Oprită
+Battery Display: %s	Afișare baterie: %s
+Battery critical - shedding load	Baterie critică - se reduce consumul
+Battery empty	Baterie descărcată
+Battery low	Baterie slabă
+Battery trim: %s	Corecție baterie: %s
+Battery: %.0f%%\nVoltage: %.2f V\nChUtil: %.1f%%\nAirTx: %.1f%%	Baterie: %.0f%%\nTensiune: %.2f V\nChUtil: %.1f%%\nAirTx: %.1f%%
+Battery\nVoltage\nChUtil\nAirTx\nTemp\nHumidity\nPressure	Baterie\nTensiune\nChUtil\nAirTx\nTemp.\nUmiditate\nPresiune
+Beacons	Balize
+Bksp=Back  solid=ChUtil  dash=AirTx	Bksp=Înapoi  plin=ChUtil  punctat=AirTx
+Bksp=Back  solid=SNR  dash=RSSI	Bksp=Înapoi  plin=SNR  punctat=RSSI
+Bksp=Close	Bksp=Închide
+Blink Flashes (Channel): %u	Clipiri (canal): %u
+Blink Flashes (DM): %u	Clipiri (MD): %u
+Blocked @ %.1f km, %dm over sight	Blocat la %.1f km, %dm peste linia vizuală
+Blue	Albastru
+Bluetooth Keyboard	Tastatură Bluetooth
+Bottom buttons: Chats, DM, Nodes, Tools, Config, Help.	Butoane jos: Chaturi, MD, Noduri, Unelte, Config, Ajutor.
+Bottom buttons: Home, Chats, DM, Nodes, Tools, Config, Help.\nHome is the dashboard; Chats is the messages, and its icon\nblinks when a channel has something unread.	Butoane jos: Acasă, Chaturi, MD, Noduri, Unelte, Config, Ajutor.\nAcasă e panoul principal; Chaturi sunt mesajele, iar pictograma\nclipește când un canal are ceva necitit.
+Brightness	Luminozitate
+Brightness: %u%%	Luminozitate: %u%%
+Brightness: %u%%  Lock: %u%%	Luminozitate: %u%%  Blocare: %u%%
+Brown	Maro
+Bubbles	Bule
+C = Clear   %s = Back	C = Șterge   %s = Înapoi
+C = Clear   F = Filter	C = Șterge   F = Filtru
+C:Cfg H:Ch D:DM N:Node L:Tools A:Act	C:Cfg H:Can D:MD N:Nod L:Unelte A:Acț
+CHANNEL UTIL	UTILIZARE CANAL
+CHANNEL UTILIZATION (%)	UTILIZARE CANAL (%)
+Can't resolve the weather server.\nCheck the address and DNS.	Serverul meteo nu poate fi găsit.\nVerifică adresa și DNS-ul.
+Cancel	Anulare
+Cancelled after removing %u file%s. The rest were left alone - run the scan again to see what is still there.	Anulat după ștergerea a %u fișier(e)%.0s. Restul au rămas neatinse - rulează din nou scanarea pentru a vedea ce a rămas.
+Cannot send: no node id	Nu se poate trimite: lipsește id-ul nodului
+Card formatted.\n\nWrite your configuration back to it as /camillia/config.yaml?	Card formatat.\n\nScrii configurația înapoi pe el ca /camillia/config.yaml?
+ChUtil  cur %s  avg %.1f%%  max %.1f%%   n=%d\nAirTx   cur %s  avg %.1f%%  max %.1f%%   n=%d	ChUtil  cur %s  med %.1f%%  max %.1f%%   n=%d\nAirTx   cur %s  med %.1f%%  max %.1f%%   n=%d
+ChUtil  cur --  avg --  max --   n=0\nAirTx   cur --  avg --  max --   n=0	ChUtil  cur --  med --  max --   n=0\nAirTx   cur --  med --  max --   n=0
+Channel	Canal
+Channel %d	Canal %d
+Channel %d  %s	Canal %d  %s
+Channel Actions\n%s	Acțiuni canal\n%s
+Channel Configuration	Configurare canal
+Channel Key	Cheie canal
+Channel Message LED	LED mesaj canal
+Channel Message LED: %s	LED mesaje canal: %s
+Channel Name	Nume canal
+Channel blink: %u flash%s	Clipire canal: %u clipiri%.0s
+Channel busy (%.0f%%) - not sweeping	Canal ocupat (%.0f%%) - fără baleiere
+Channels	Canale
+Chat Colors: %s	Culori chat: %s
+Chat Names	Nume în chat
+Chat Names: %s	Nume în chat: %s
+Chat Names: %s%s	Nume în chat: %s%s
+Chat Style	Stil chat
+Chat Style: %s	Stil chat: %s
+Chat Style: %s%s	Stil chat: %s%s
+Chat Type	Tip chat
+Chat Type: %s	Tip chat: %s
+Chat Type: %s%s	Tip chat: %s%s
+Chat colors reassigned	Culori chat realocate
+Checking %u of %u   %u%%	Se verifică %u din %u   %u%%
+Chirpy	Ciripit
+Choose WiFi	Alege WiFi
+Choose WiFi or Finish	Alege WiFi sau Termină
+Choose WiFi: %s	Alege WiFi: %s
+Choose WiFi: (none)	Alege WiFi: (niciuna)
+Classic	Clasic
+Clear	Șterge
+Clear Messages	Șterge mesajele
+Clear Nodes (All)	Șterge nodurile (toate)
+Clear Nodes (Keep Favorites)	Șterge nodurile (păstrează favoritele)
+Clear by %dm at tightest	Liber cu %dm în punctul cel mai strâmt
+Clear entire live feed?	Ștergi tot fluxul live?
+Cleared %d nodes, kept %d favorites - rebooting...	%d noduri șterse, %d favorite păstrate - repornire...
+Cleared (%d report(s)) - rebuilding from traffic	Șters (%d raport(e)) - se reconstruiește din trafic
+Clock Format: %s	Format oră: %s
+Clock set from web config	Ora setată din config web
+Clock set: %04d-%02d-%02d %02d:%02d	Oră setată: %04d-%02d-%02d %02d:%02d
+Close	Închide
+Configuration	Configurare
+Configuration exported to /camillia/config.yaml.\n\nThe card is formatted and holds nothing else. Chat history, the node database and any map tiles were on the old filesystem and are gone.	Configurația a fost exportată în /camillia/config.yaml.\n\nCardul e formatat și nu mai conține nimic altceva. Istoricul chatului, baza de noduri și dalele de hartă erau pe vechiul sistem de fișiere și s-au pierdut.
+Configured WiFi is empty	WiFi-ul configurat este gol
+Confirm Chat Style	Confirmă stilul chatului
+Confirm?	Confirmi?
+Connect	Conectare
+Connect to WiFi before enabling VNC	Conectează-te la WiFi înainte de a porni VNC
+Connect: %s	Conectare: %s
+Connecting to %s...	Conectare la %s...
+Connecting to broker...	Conectare la broker...
+Connection failed: %s	Conectare eșuată: %s
+Conversation deleted	Conversație ștearsă
+Conversations	Conversații
+Could not reach the weather server.	Serverul meteo nu a putut fi contactat.
+Could not remove every file. Check storage and retry.	Nu s-au putut șterge toate fișierele. Verifică stocarea și reîncearcă.
+Counting files on the card...	Se numără fișierele de pe card...
+Counting files... %u found	Se numără fișierele... %u găsite
+Custom	Personalizat
+Custom (%u B)	Personalizată (%u B)
+DIRECT MESSAGES	MESAJE DIRECTE
+DISTANCE UNKNOWN	DISTANȚĂ NECUNOSCUTĂ
+DM blink: %u flash%s	Clipire MD: %u clipiri%.0s
+DMs	MD
+Date unavailable	Dată indisponibilă
+Day	Zi
+Dec	dec
+December	decembrie
+Default	Implicit
+Default (%u)	Implicit (%u)
+Default +%u	Implicită +%u
+Del(e)te	Șterg(e)
+Delete	Șterge
+Delete WiFi?	Ștergi WiFi-ul?
+Delete conversation?	Ștergi conversația?
+Delete failed	Ștergere eșuată
+Delete node?	Ștergi nodul?
+Delivery details not recorded: received before this boot, or too many messages ago.	Detaliile livrării nu sunt înregistrate: primit înainte de această pornire sau acum prea multe mesaje.
+Detail Map	Hartă detaliată
+Device Info	Info dispozitiv
+Device switched off last time: battery empty	Dispozitivul s-a oprit data trecută: baterie descărcată
+Direct Message LED	LED mesaj direct
+Direct Message LED: %s	LED mesaje directe: %s
+Discovery	Descoperire
+Do not remove the card	Nu scoate cardul
+Elevation data too sparse\nfor this path.	Date de altitudine prea rare\npentru acest traseu.
+Elevation fetch failed (%d).\nCheck the server URL - it must be http://	Obținerea altitudinii a eșuat (%d).\nVerifică URL-ul serverului - trebuie să fie http://
+Enable WiFi first	Activează întâi WiFi
+Enc	Crip.
+Encrypted	Criptat
+Encryption	Criptare
+Enter password, then tap Connect	Introdu parola, apoi apasă Conectare
+Enter this node's long name.	Introdu numele lung al acestui nod.
+Enter=Connect  Backspace=Back	Enter=Conectare  Backspace=Înapoi
+Enter=Info  A=Actions  Bksp=Edit/Exit  %s=Back	Enter=Info  A=Acțiuni  Bksp=Editare/Ieșire  %s=Înapoi
+Enter=Info  A=Actions  Space=Filter  %s=Back	Enter=Info  A=Acțiuni  Space=Filtru  %s=Înapoi
+Enter=Next	Enter=Înainte
+Enter=Next    Bksp(empty)=Back	Enter=Înainte    Bksp(gol)=Înapoi
+Enter=Next   Bksp(empty)=Back	Enter=Înainte   Bksp(gol)=Înapoi
+Enter=OK  %s=Erase/Back	Enter=OK  %s=Șterge/Înapoi
+Enter=OK  Bksp=Erase  %s=Back	Enter=OK  Bksp=Șterge  %s=Înapoi
+Enter=Save  Tab=Field  %s=Erase/Back	Enter=Salvează  Tab=Câmp  %s=Șterge/Înapoi
+Enter=Send   %s=Cancel	Enter=Trimite   %s=Anulare
+Enter=Send  Bksp(empty)=Cancel	Enter=Trimite  Bksp(gol)=Anulare
+Enter=Send  Esc=Cancel  Bksp=Del	Enter=Trimite  Esc=Anulare  Bksp=Șterge
+Environment	Mediu
+Errors	Erori
+Examined %u file%s. Nothing matching Windows malware was found.\n\nThis reads names and file headers, not contents, so it is a good sign rather than a guarantee.	Au fost examinate %u fișier(e)%.0s. Nu s-a găsit nimic care să corespundă malware-ului Windows.\n\nSe citesc numele și anteturile, nu conținutul, deci e un semn bun, nu o garanție.
+Export Config	Exportă config
+Export FAILED (no SD?)	Export EȘUAT (fără SD?)
+Export FAILED. The card formatted, but the configuration could not be written back to it - try Export from the Config screen.	Export EȘUAT. Cardul a fost formatat, dar configurația nu a putut fi scrisă înapoi - încearcă Export din ecranul Config.
+Exported to /camillia/config.yaml	Exportat în /camillia/config.yaml
+Extra Large	Foarte mare
+Factory Reset	Resetare din fabrică
+Factory reset - rebooting...	Resetat din fabrică - repornire...
+Favorite	Favorit
+Feb	feb
+February	februarie
+Feels %d%s   Hum %d%%\nWind %d %s %s\nGusting %d %s	Se simte %d%s   Umid %d%%\nVânt %d %s %s\nRafale %d %s
+Feels like   %d%s\nHumidity     %d%%\nWind         %d %s from %s\nGusting      %d %s	Se simte     %d%s\nUmiditate    %d%%\nVânt         %d %s din %s\nRafale       %d %s
+Fetching...	Se preia...
+Filter	Filtru
+Filter Nodes	Filtrează nodurile
+Filter: %s	Filtru: %s
+Finish	Gata
+Firmware Update	Actualizare firmware
+Firmware Update Check	Caută actualizări firmware
+Firmware Update: Install %s	Actualizare firmware: instalează %s
+Font Size	Mărime text
+Font Size: %s	Mărime text: %s
+Font Size: %s%s	Mărime text: %s%s
+Forget	Uită
+Format FAILED, and the card could not be remounted.\n\nReboot the device, or format the card on a PC.	Formatare EȘUATĂ, iar cardul nu a putut fi remontat.\n\nRepornește dispozitivul sau formatează cardul pe un PC.
+Format FAILED. The card was left as it was and is still mounted.\n\nFormatting it on a PC is the reliable way out.	Formatare EȘUATĂ. Cardul a rămas cum era și e încă montat.\n\nFormatarea pe un PC este soluția sigură.
+Format the SD card?\n\nThis erases EVERYTHING on it - chat and DM history, the node database, map tiles and your saved configuration - not just the files the scan matched.\n\nIt cannot be undone.	Formatezi cardul SD?\n\nAsta șterge TOT de pe el - istoricul chaturilor și MD, baza de noduri, dalele de hartă și configurația salvată - nu doar fișierele găsite.\n\nNu se poate anula.
+Formatting SD Card	Se formatează cardul SD
+Found %d network(s)	%d rețea(le) găsită(e)
+Found %u file%s matching Windows malware:\n	%u fișier(e)%.0s corespund malware-ului Windows:\n
+Freq: %.3f MHz	Frecv: %.3f MHz
+Fri	vin
+From: %s	De la: %s
+Full node name when known	Numele complet al nodului, dacă e cunoscut
+GPS disabled (using default coordinates)	GPS dezactivat (coordonate implicite)
+GPS enabled (hardware)	GPS activat (hardware)
+GPS: Disabled (Default Coords)	GPS: Dezactivat (coord. implicite)
+GPS: Enabled (Hardware)	GPS: Activat (hardware)
+Gateway: not known	Gateway: necunoscut
+Grazes terrain - F1=%dm	Atinge terenul - F1=%dm
+Green	Verde
+HEARD ABOUT	AFLAȚI DE LA ALȚII
+Heard %s ago   %u seen, ~%s apart	Auzit acum %s   %u văzute, la ~%s
+Heard %s ago   1 seen	Auzit acum %s   1 văzut
+Help	Ajutor
+High	Mare
+Hops	Salturi
+Hops: %d of %d	Salturi: %d din %d
+Hour	Oră
+I(g)nore	I(g)noră
+Identity	Identitate
+Ignore	Ignoră
+Import Config	Importă config
+Import FAILED (no file?)	Import EȘUAT (lipsește fișierul?)
+Import failed - enter a name	Import eșuat - introdu un nume
+Imported OK - rebooting...	Importat cu succes - repornire...
+Install now? The device reboots to update.	Instalezi acum? Dispozitivul repornește pentru actualizare.
+Invalid base64 key	Cheie base64 invalidă
+Invalid date/time	Dată/oră invalidă
+Invert Scrolling: %s	Inversează derularea: %s
+J/K = Scroll   %s = Close	J/K = Derulare   %s = Închide
+J/K = Scroll   Bksp = Close	J/K = Derulare   Bksp = Închide
+J/K = Select   Space = Compose   Enter = Focus   D = Delete	J/K = Alege   Space = Scrie   Enter = Focus   D = Șterge
+Jan	ian
+January	ianuarie
+Jul	iul
+July	iulie
+Jun	iun
+June	iunie
+Just announced. Try again in %us.	Tocmai anunțat. Încearcă din nou peste %us.
+Key	Cheie
+Keyboard Blink: %s	Clipire tastatură: %s
+Keyboard Light	Lumină tastatură
+Keyboard Light: %s	Lumină tastatură: %s
+Keyboard blink: %s	Clipire tastatură: %s
+Keyboard light %s	Lumină tastatură %s
+Keyboard light %s - after a power cycle	Lumină tastatură %s - după o repornire
+Keyboard light off	Lumină tastatură oprită
+L/R=Change   Enter=Save   %s=Back	S/D=Schimbă   Enter=Salvează   %s=Înapoi
+LINE OF SIGHT	LINIE DE VEDERE
+LONGEST SILENT	CEL MAI MULT TIMP TĂCUȚI
+Landscape	Orizontal
+Language	Limbă
+Language: %s	Limbă: %s
+Large	Mare
+Last heard	Ultima dată
+Last heard\nSNR\nHops\nChannel\nSigned	Ultima dată\nSNR\nSalturi\nCanal\nSemnat
+Leave blank to clear	Lasă gol pentru a șterge
+Light reminds for %s	Lumina amintește timp de %s
+Light reminds until read	Lumina amintește până la citire
+Link	Legătură
+Listening   %d sender%s heard	Ascultare   %d emițător(i)%.0s auzit(i)
+Listening: off	Ascultare: oprită
+Live Filter	Filtru Live
+Live feed cleared	Flux live șters
+Loading map...	Se încarcă harta...
+Loc	Loc.
+Locate	Localizează
+Locate: %s	Localizează: %s
+Location	Locație
+Location Precision	Precizia locației
+Location Precision: %s	Precizie locație: %s
+Location rounded to %s	Locație rotunjită la %s
+Location sent exactly	Locație trimisă exact
+Location sharing off (no position sent)	Partajarea locației oprită (nu se trimite poziția)
+Location sharing on	Partajarea locației pornită
+Location: %s	Locație: %s
+Lock Screen Off	Oprire pe ecranul de blocare
+Lock Screen Off: %s	Oprire la blocare: %s
+Lock Screen: %s	Ecran de blocare: %s
+Lock screen	Ecran de blocare
+Lock screen stays on	Ecranul de blocare rămâne aprins
+Long	Lung
+Long name	Nume lung
+Long name cannot be empty	Numele lung nu poate fi gol
+Long name: %s\nEnter a short name (up to 4 chars).	Nume lung: %s\nIntrodu un nume scurt (max. 4 caractere).
+Long: %s	Lung: %s
+Looking for keyboards...	Se caută tastaturi...
+Low	Mică
+ME (ACK)	EU (ACK)
+MQTT Bridge: %s	Punte MQTT: %s
+MQTT Bridge: %s - rebooting...	Punte MQTT: %s - repornire...
+MQTT Bridge: Off (WiFi off)	Punte MQTT: Oprită (WiFi oprit)
+MQTT Scan Settings	Setări scanare MQTT
+MQTT bridge is off	Puntea MQTT e oprită
+Map (loading)	Hartă (se încarcă)
+Map (off)	Hartă (oprită)
+Map memory unavailable	Memorie pentru hartă indisponibilă
+Map unavailable	Hartă indisponibilă
+Mar	mar
+March	martie
+Match the voltage to a meter reading.\nPercent comes from the fuel gauge and does not change.	Potrivește tensiunea cu citirea unui multimetru.\nProcentul vine de la indicatorul de încărcare și nu se schimbă.
+Match the voltage to a meter reading.\nPercent follows it. 0% = uncalibrated.	Potrivește tensiunea cu citirea unui multimetru.\nProcentul o urmează. 0% = necalibrat.
+May	mai
+Medium	Mediu
+Mesh Beacons is off.\n\nTurn it on in Config (or under Modules in web config) to decode beacons from other meshes. Receive-only: nothing is transmitted, and an offer is never applied to your radio.	Balizele mesh sunt oprite.\n\nPornește-le din Config (sau la Module în configurarea web) pentru a decoda balizele altor rețele. Doar recepție: nu se transmite nimic și o ofertă nu e aplicată niciodată radioului tău.
+Mesh Beacons: %s	Balize rețea: %s
+Mesh beacons: %s	Balize rețea: %s
+Message (I)nfo	(I)nfo mesaj
+Message Actions	Acțiuni mesaj
+Message Info	Info mesaj
+Messages	Mesaje
+Messages cleared - rebooting...	Mesaje șterse - repornire...
+Minute	Minut
+Modem preset	Presetare modem
+Mon	lun
+Month	Lună
+Move  Enter=Apply  %s=Back	Mută  Enter=Aplică  %s=Înapoi
+Move  Enter=Apply  %s=Cancel	Mută  Enter=Aplică  %s=Anulare
+Move  Enter=Change  %s=Cancel	Mută  Enter=Schimbă  %s=Anulare
+Move  Enter=Edit  %s=Back	Mută  Enter=Editează  %s=Înapoi
+Move  Enter=OK  %s=Cancel	Mută  Enter=OK  %s=Anulare
+Move  Enter=Open  %s=Back	Mută  Enter=Deschide  %s=Înapoi
+Move  Enter=Pick  %s=Back	Mută  Enter=Alege  %s=Înapoi
+Move  Enter=Scan  %s=Cancel	Mută  Enter=Scanează  %s=Anulare
+Move • Enter=Add • %s=Close	Mută • Enter=Adaugă • %s=Închide
+Move • Enter=Insert • %s=Close	Mută • Enter=Inserează • %s=Închide
+Move • Enter=React • %s=Close	Mută • Enter=Reacționează • %s=Închide
+Move • Enter=Send • %s=Close	Mută • Enter=Trimite • %s=Închide
+Move=Adjust  Enter=Save  %s=Cancel	Mută=Reglează  Enter=Salvează  %s=Anulare
+Move=Adjust  Space=Toggle  Enter=Save  %s=Cancel	Mută=Reglează  Space=Bifează  Enter=Salvează  %s=Anulare
+Move=Preview  Enter=OK  %s=Cancel	Mută=Previzualizare  Enter=OK  %s=Anulare
+My Message Color	Culoarea mesajelor mele
+My Message Color: %s	Culoarea mesajelor mele: %s
+My Message Color: %s (unchanged)	Culoarea mesajelor mele: %s (neschimbată)
+My Message Color: %s - rebooting...	Culoarea mesajelor mele: %s - repornire...
+N=Choose WiFi   Enter=Finish   Bksp=Back	N=Alege WiFi   Enter=Termină   Bksp=Înapoi
+NO LINE OF SIGHT	FĂRĂ LINIE DE VEDERE
+NODEINFO + telemetry queued.	NODEINFO + telemetrie în coadă.
+NODES	NODURI
+NODES (%d%s)	NODURI (%d%s)
+NODES [%s] (%d%s)	NODURI [%s] (%d%s)
+Name	Nume
+Name: %s\nShort: %s\nID: !%08X\nLast heard: %s\nSNR: %.1f dB\nHops: %u\nChannel: %d\n\nPosition:\n%s\n\nTelemetry:\n%s	Nume: %s\nScurt: %s\nID: !%08X\nUltima dată: %s\nSNR: %.1f dB\nSalturi: %u\nCanal: %d\n\nPoziție:\n%s\n\nTelemetrie:\n%s
+Name\nShort\nID	Nume\nScurt\nID
+Nav Bar: %s	Bară de navigare: %s
+Neighborhood Info: %s	Info vecinătate: %s
+Neighborhood info: %s	Info vecinătate: %s
+Never	Niciodată
+New	Nou
+New DM	MD nou
+New DM: Select Node	MD nou: alege un nod
+New DM: Select Node [%s]	MD nou: alege nodul [%s]
+New Message	Mesaj nou
+Newest: %s %s	Cel mai nou: %s %s
+Newest: none heard yet	Cel mai nou: niciunul auzit încă
+Next	Următorul
+No %s - not saved	Fără %s - nesalvat
+No %s - not saving	Fără %s - nu se salvează
+No %s traffic yet\n(filter is on - %s)	Încă nu există trafic %s\n(filtru activ - %s)
+No S&F router heard yet	Niciun router S&F auzit încă
+No SD card is mounted.	Niciun card SD montat.
+No WiFi network configured	Nicio rețea WiFi configurată
+No beacons heard yet.\n\nA beacon is only audible while its sender has retuned onto this channel, preset and region, and it repeats on that node's own schedule - minutes to hours apart. This list keeps what it hears until you clear it.	Nicio baliză auzită încă.\n\nO baliză se aude doar cât timp emițătorul ei s-a reacordat pe acest canal, presetare și regiune, și se repetă după programul acelui nod - la minute sau ore distanță. Lista păstrează ce aude până o ștergi.
+No elevation server set.\nWeb Config -> Elevation Server (LOS)	Niciun server de altitudine setat.\nConfigurare web -> Elevation Server (LOS)
+No hop path in reply	Niciun traseu de salturi în răspuns
+No keyboards found yet.\n\nPut the keyboard into pairing mode, then press Scan.\n\nOnly Bluetooth LE keyboards can pair - this hardware has no Bluetooth Classic radio.	Nicio tastatură găsită încă.\n\nPune tastatura în modul de asociere, apoi apasă Scanează.\n\nSe pot asocia doar tastaturi Bluetooth LE - acest hardware nu are radio Bluetooth Classic.
+No known nodes yet	Încă nu există noduri cunoscute
+No live traffic yet	Încă nu există trafic live
+No matches for: %s	Niciun rezultat pentru: %s
+No messages yet	Încă nu există mesaje
+No network in that slot	Nicio rețea în acel slot
+No network selected	Nicio rețea selectată
+No networks found	Nu s-au găsit rețele
+No new messages	Niciun mesaj nou
+No nodes seen	Niciun nod văzut
+No nodes seen yet.	Încă niciun nod văzut.
+No position data	Nicio dată de poziție
+No position recorded	Nicio poziție înregistrată
+No position yet.\nNeeds a GPS fix or a set location.	Încă nu există poziție.\nNecesită semnal GPS sau o locație setată.
+No release notes in this build.	Această versiune nu are note.
+No reply (%lus)	Niciun răspuns (%lus)
+No result details available.	Nu sunt detalii disponibile.
+No telemetry data	Nicio dată de telemetrie
+No weather server set.\nWeb Config -> Weather Server	Niciun server meteo setat.\nConfigurare web -> Weather Server
+Node Actions	Acțiuni nod
+Node DB cleared - rebooting...	Baza de noduri ștearsă - repornire...
+Node ID: !%08lx	ID nod: !%08lx
+Node Name	Nume nod
+Node Name: %s (%s)	Nume nod: %s (%s)
+Node Name: %s (%s)%s	Nume nod: %s (%s)%s
+Node id: !%08lx	Id nod: !%08lx
+Node info	Info nod
+Nodes and SD archive cleared - rebooting...	Nodurile și arhiva SD șterse - repornire...
+None	Niciunul
+Not counting - out of memory	Nu se numără - memorie insuficientă
+Not enough free heap to hold the topic table.\n\nClose a few screens (or reboot) and try again.	Nu e destulă memorie liberă pentru tabelul de subiecte.\n\nÎnchide câteva ecrane (sau repornește) și încearcă din nou.
+Nothing heard yet	Nimic auzit încă
+Nothing recorded yet - nothing to send	Nimic înregistrat încă - nimic de trimis
+Nothing was removed. The files may have gone already, or the card may be write-protected.	Nu s-a șters nimic. Fișierele poate au dispărut deja sau cardul e protejat la scriere.
+Notification Light Timeout	Durată lumină notificare
+Notification Light Timeout: %s	Durată lumină notificare: %s
+Notification Sound	Sunet notificare
+Notification Sound: %s	Sunet notificare: %s
+Notification sound: %s	Sunet notificare: %s
+Nov	nov
+November	noiembrie
+OFF	OPRIT
+OTA disabled on Cardputer build	OTA dezactivat pe versiunea Cardputer
+OTA needs the factory image (flash layout)	OTA necesită imaginea din fabrică (partiții flash)
+OTA request failed (NVS write). Retry.	Cererea OTA a eșuat (scriere NVS). Reîncearcă.
+OTA worker completed. Check status.	OTA terminat. Verifică starea.
+Oct	oct
+October	octombrie
+Off	Oprit
+Offers: %s	Oferte: %s
+Old Map Files Found	Fișiere de hartă vechi găsite
+Oldest: %s %s	Cel mai vechi: %s %s
+Oldest: none heard yet	Cel mai vechi: niciunul auzit încă
+On	Pornit
+On (global off)	Pornit (global oprit)
+On (listening)	Pornit (ascultare)
+Open network (leave blank)	Rețea deschisă (lasă gol)
+Optional WiFi setup.\nNo network selected.\nChoose WiFi now or finish without WiFi.	Configurare WiFi opțională.\nNicio rețea selectată.\nAlege WiFi acum sau termină fără WiFi.
+Optional WiFi setup.\nSelected: %s\nChoose a different network or finish.	Configurare WiFi opțională.\nSelectată: %s\nAlege altă rețea sau termină.
+Orange	Portocaliu
+Orientation: %s	Orientare: %s
+Other	Altele
+Outline	Contur
+PKI key: %s	Cheie PKI: %s
+PSRAM free: %lu KB\nPSRAM total: %lu KB\nFlash: %lu KB\nSketch: %lu KB\nApp free: %lu KB	PSRAM liberă: %lu KB\nPSRAM total: %lu KB\nFlash: %lu KB\nSketch: %lu KB\nApp liber: %lu KB
+PSRAM: none\nFlash: %lu KB\nSketch: %lu KB\nApp free: %lu KB	PSRAM: deloc\nFlash: %lu KB\nSketch: %lu KB\nApp liber: %lu KB
+Pair	Asociere
+Pair BT Keyboard: %s	Asociază tastatură BT: %s
+Pair BT Keyboard: (none)	Asociază tastatură BT: (niciuna)
+Percent	Procent
+Pink	Roz
+Please re-flash from Camillia's website for language support.	Reinstalează firmware-ul de pe site-ul Camillia pentru suport de limbă.
+Portrait	Vertical
+Portrait 180	Vertical 180
+Position	Poziție
+Precise	Precisă
+Preparing state maps...	Se pregătesc hărțile de stat...
+Preset	Presetare
+Preset (%s)	Presetare (%s)
+Preset already %s.	Presetarea este deja %s.
+Preset scan already running	Scanarea presetării rulează deja
+Preset: %s	Presetare: %s
+Preset: %s - rebooting...	Presetare: %s - repornire...
+Public key preserved\n\n	Cheie publică păstrată\n\n
+Purple	Mov
+Pwr %d dBm Hops %d	Put %d dBm Salturi %d
+R=Refresh  %s=Back	R=Reîmprospătare  %s=Înapoi
+RECENTLY HEARD	AUZIȚI RECENT
+Radio busy - retry in %lus	Radio ocupat - reîncercare în %lus
+Radio not ready	Radioul nu e pregătit
+Re(q)uest Node	Cere nodul (Q)
+Ready	Gata
+Rebooting into OTA minimal mode...	Repornire în mod OTA minimal...
+Received over: %s %s	Primit prin: %s %s
+Red	Roșu
+Relayed to us by: %s	Retransmis de: %s
+Relayed to us by: %s (from MQTT)	Retransmis de: %s (din MQTT)
+Relayed to us by: nobody, heard directly	Retransmis de: nimeni, auzit direct
+Relayed to us by: not reported by the relaying node	Retransmis de: nespecificat de nodul releu
+Relayed to us by: the sender itself	Retransmis de: expeditorul însuși
+Relayed: %lu	Retransmise: %lu
+Release Channel: %s - checking...	Canal versiuni: %s - se verifică...
+Release Channel: %s%s	Canal versiuni: %s%s
+Release Notes	Note de versiune
+Release Notes  %s	Note de versiune  %s
+Remove	Elimină
+Removed %s	%s eliminată
+Removed %s - no networks left, AP mode	%s eliminată - nu mai sunt rețele, mod AP
+Removed %s - now %s	%s eliminată - acum %s
+Removed %u file%s. %u could not be deleted - the card may be write-protected.\n\nRe-run the scan to check.	Au fost șterse %u fișier(e)%.0s. %u nu au putut fi șterse - cardul poate fi protejat la scriere.\n\nRulează din nou scanarea pentru verificare.
+Removed %u file%s.\n\nThis card looked clean afterwards, but the scan reads names and headers, not contents - it cannot promise the card is clean. Reformatting is the only answer that can.	Au fost șterse %u fișier(e)%.0s.\n\nDupă aceea cardul părea curat, dar scanarea citește nume și anteturi, nu conținut - nu poate garanta că e curat. Doar reformatarea poate.
+Removing Files	Se șterg fișierele
+Removing legacy maps...	Se elimină hărțile vechi...
+Replay already requested	Reluare deja cerută
+Replay not sent: %s	Retransmitere netrimisă: %s
+Replay requested (last %lu min)	Retransmitere cerută (ultimele %lu min)
+Reply	Răspunde
+Reply from %s	Răspuns de la %s
+Reply from %s (%lus)	Răspuns de la %s (%lus)
+Request (P)osition	Cere (p)oziția
+Request Node	Cere nodul
+Request Position	Cere poziția
+Request S&F Replay (%s)	Cere retransmitere S&F (%s)
+Request S&F Replay (no router)	Cere retransmitere S&F (fără router)
+Requested (last %lu min)	Cerut (ultimele %lu min)
+Rescan	Rescanează
+Reset	Resetează
+Reset Chat Colors	Resetează culorile chat
+Reset to Default	Resetează la implicit
+Restore failed: every slot is favorited, so there is no room. Unfavorite a node and try again.	Restaurare eșuată: toate sloturile sunt favorite, nu e loc. Scoate un nod de la favorite și încearcă din nou.
+Restore failed: the archived record could not be read.	Restaurare eșuată: înregistrarea arhivată nu a putut fi citită.
+Restore node?	Restaurezi nodul?
+Role: %s%s	Rol: %s%s
+S(h)are	Partajează (H)
+SD Card Format	Formatare card SD
+SD Card Scan	Scanare card SD
+SD scan cancelled	Scanare SD anulată
+SD: %s, %s, %u fails	SD: %s, %s, %u eșecuri
+SD: no card	SD: fără card
+SNR   cur %s  avg %.1fdB  min %.1f  max %.1f   n=%d\nRSSI  cur %s  avg %.0fdBm min %.0f  max %.0f   n=%d	SNR   cur %s  med %.1fdB  min %.1f  max %.1f   n=%d\nRSSI  cur %s  med %.0fdBm min %.0f  max %.0f   n=%d
+SNR   cur --  avg --  min --  max --   n=0\nRSSI  cur --  avg --  min --  max --   n=0	SNR   cur --  med --  min --  max --   n=0\nRSSI  cur --  med --  min --  max --   n=0
+Sat	sâm
+Save	Salvează
+Save failed - cannot write %s	Salvare eșuată - nu se poate scrie pe %s
+Save failed - too many this second	Salvare eșuată - prea multe în această secundă
+Save while discovering	Salvează în timpul descoperirii
+Save while scanning	Salvează în timpul scanării
+Saved %s	Salvat %s
+Saved: %s	Salvat: %s
+Scan	Scanează
+Scan %s	Scanare %s
+Scan %s - saved %s	Scanare %s - salvat %s
+Scan Networks	Caută rețele
+Scan SD Card for Malware%s	Scanează cardul SD de malware%s
+Scan a preset	Scanează o presetare
+Scan cancelled	Scanare anulată
+Scan failed - Rescan to try again	Scanare eșuată - rescanează pentru a reîncerca
+Scan send failed	Trimiterea scanării a eșuat
+Scanning %s %s/%s	Se scanează %s %s/%s
+Scanning %s...	Se scanează %s...
+Scanning SD Card	Se scanează cardul SD
+Scanning WiFi networks...	Se caută rețele WiFi...
+Screen	Ecran
+Screen Timeout	Timp ecran
+Screen Timeout: %s	Stingere ecran: %s
+Screen off after %s on lock	Ecran stins după %s la blocare
+Screen orientation	Orientare ecran
+Screen sleeps after %s	Ecranul se stinge după %s
+Screen stays on	Ecranul rămâne aprins
+Select a conversation	Alege o conversație
+Select this node's role.	Alege rolul acestui nod.
+Select your radio region/preset.	Alege regiunea/presetarea radioului.
+Selection settling - press Enter again	Selecție în curs - apasă din nou Enter
+Sen(d) DM	Trimite MD (D)
+Send	Trimite
+Send DM	Trimite MD
+Send failed	Trimitere eșuată
+Send to channel?	Trimiți pe canal?
+Send top 5 to	Trimite primele 5 la
+Sender Info	Info expeditor
+Sending request...	Se trimite cererea...
+Sent by this node.	Trimis de acest nod.
+Sent to %s	Trimis către %s
+Sent. Waiting for route ACK...	Trimis. Se așteaptă ACK-ul rutei...
+Sep	sep
+September	septembrie
+Server answered, but not with\nelevation data. Check the proxy\npoints at the elevation service.	Serverul a răspuns, dar nu cu\ndate de altitudine. Verifică dacă proxy-ul\nindică serviciul de altitudine.
+Server answered, but not with\nweather data. Check the proxy.	Serverul a răspuns, dar nu cu\ndate meteo. Verifică proxy-ul.
+Set message colour to %s and reboot?	Setezi culoarea mesajelor la %s și repornești?
+Share	Partajează
+Share Location: %s	Partajează locația: %s
+Short	Scurt
+Short name	Nume scurt
+Short name cannot be empty	Numele scurt nu poate fi gol
+Short: %s	Scurt: %s
+Show Archived Nodes: %s	Arată nodurile arhivate: %s
+Show Archived Nodes: %s%s	Arată nodurile arhivate: %s%s
+Signal: SNR %.1f dB, RSSI %.0f dBm	Semnal: SNR %.1f dB, RSSI %.0f dBm
+Silver	Argintiu
+Sky	Bleu
+Small	Mic
+Source	Sursă
+Splash Melody: %s	Melodie de pornire: %s
+Splash melody: %s	Melodie de pornire: %s
+Stale - 	Învechit - 
+State Map	Hartă de stat
+State map disabled	Harta statelor dezactivată
+State map unavailable	Harta de stat indisponibilă
+Stay on	Rămâne pornit
+Storage: %s %s	Stocare: %s %s
+Storage: %s (not mounted)	Stocare: %s (nemontat)
+Store&Fwd Client: %s	Client Store&Fwd: %s
+Store&Fwd client is off	Clientul Store&Fwd e oprit
+Sun	dum
+Sweep	Baleiere
+Sweep already running	Baleiere deja în curs
+Sweep cancelled	Baleiere anulată
+Sweep done: %d new (%lus)	Baleiere terminată: %d noi (%lus)
+Sweep send failed	Trimiterea baleierii a eșuat
+Sweep/Scan Settings	Setări baleiere/scanare
+Sweeping...	Baleiere...
+Sweeping... %s/%s	Baleiere... %s/%s
+Switch to %s and reboot?	Treci la %s și repornești?
+Switch to theme %s and reboot?	Treci la tema %s și repornești?
+System Stats	Statistici sistem
+Tall	Înalt
+Tall, turned 180	Înalt, rotit 180
+Tap = Open   Long-press 3s = Delete   DM below = Back	Atinge = Deschide   Ține 3s = Șterge   MD jos = Înapoi
+Tap Next to continue	Atinge Înainte pentru a continua
+Tap Next to continue, or Back	Atinge Înainte pentru a continua sau Înapoi
+Tap a channel	Atinge un canal
+Tap a channel to edit	Atinge un canal pentru a-l edita
+Tap a field to change it	Atinge un câmp pentru a-l schimba
+Tap a field to edit, then Save	Atinge un câmp, editează, apoi Salvează
+Tap a node for actions   Nodes below = Back	Atinge un nod pentru acțiuni   Noduri jos = Înapoi
+Tap a node to start a DM	Atinge un nod pentru a începe un MD
+Tap a preset to apply.	Atinge o presetare pentru a o aplica.
+Tap a preset, then Scan	Atinge o presetare, apoi Scanează
+Tap a size to apply	Atinge o mărime pentru a o aplica
+Tap one to apply.	Atinge una pentru a o aplica.
+Tap to preview	Atinge pentru previzualizare
+Teal	Turcoaz închis
+Telemetry	Telemetrie
+Temp: %.1f C\nHumidity: %.1f%%\nPressure: %.1f hPa	Temp: %.1f C\nUmiditate: %.1f%%\nPresiune: %.1f hPa
+Temp: %.1f F\nHumidity: %.1f%%\nPressure: %.2f inHg	Temp: %.1f F\nUmiditate: %.1f%%\nPresiune: %.2f inHg
+The card was formatted but could not be remounted. Reboot the device and it should come up clean.	Cardul a fost formatat, dar nu a putut fi remontat. Repornește dispozitivul și ar trebui să pornească curat.
+Theme	Temă
+Theme: %s	Temă: %s
+Theme: %s (unchanged)	Temă: %s (neschimbată)
+Theme: %s - rebooting...	Temă: %s - repornire...
+These files are not used by the new tile map. Remove them to reclaim storage?	Noua hartă pe plăci nu folosește aceste fișiere. Le ștergi pentru a elibera spațiu?
+This node	Acest nod
+This node has no position yet.\nNeeds a GPS fix or a set location.	Acest nod nu are încă poziție.\nNecesită semnal GPS sau o locație setată.
+Thu	joi
+Time and Date	Dată și oră
+Time and Date: %s	Dată și oră: %s
+Time source: Internet / GPS	Sursă oră: Internet / GPS
+To close hit backspace.  (I)nformation	Backspace pentru închidere.  (I)nformații
+Tools	Unelte
+Touch Navigation:	Navigare tactilă:
+Transport Symbols:\n%s Radio Transmission\n%s MQTT Transmission	Simboluri de transport:\n%s Transmisie radio\n%s Transmisie MQTT
+Tue	mar
+Turn BT Keyboard on first	Pornește întâi tastatura BT
+Turn MQTT Bridge %s and reboot?	Pui puntea MQTT pe %s și repornești?
+Type = Filter   Bksp = Edit Filter   Enter = Open DM   Esc = Back	Tastează = Filtru   Bksp = Editează filtrul   Enter = Deschide MD   Esc = Înapoi
+Type = Filter   Bksp = Edit/Close Filter   Enter = Open DM	Tastează = Filtru   Bksp = Editează/închide filtrul   Enter = Deschide MD
+Type = Filter   Enter = Open DM   Bksp = Back	Tastează = Filtrează   Enter = Deschide MD   Bksp = Înapoi
+Type = Filter   Enter = Open DM   Esc = Back	Tastează = Filtrează   Enter = Deschide MD   Esc = Înapoi
+Type message...	Scrie un mesaj...
+Type to filter nodes	Tastează pentru a filtra nodurile
+Type, then tap OK	Tastează, apoi OK
+Type=Filter  Enter=Done  Bksp=Edit/Exit  %s=Back	Tastează=Filtrează  Enter=Gata  Bksp=Editare/Ieșire  %s=Înapoi
+Un(f)avorite	Scoate din (f)avorite
+Un(m)ute	Cu sunet (M)
+Unfavorite	Scoate din favorite
+Uni(g)nore	Nu mai i(g)nora
+Unignore	Nu mai ignora
+Units: %s	Unități: %s
+Unknown	Necunoscut
+Until read	Până la citire
+Up to date (%s)	Actualizat (%s)
+Up/Down	Sus/Jos
+Up/Down = Select   Space = Compose   Enter = Focus   %s = Delete   %s = Back	Sus/Jos = Alege   Space = Scrie   Enter = Focus   %s = Șterge   %s = Înapoi
+Up/Down = Select   Space = Compose   Enter = Focus   D = Delete	Sus/Jos = Alege   Space = Scrie   Enter = Focus   D = Șterge
+Up/Down/J/K = Scroll   %s = Close	Sus/Jos/J/K = Derulare   %s = Închide
+Up/Down/J/K = Scroll   Bksp = Close	Sus/Jos/J/K = Derulare   Bksp = Închide
+Up/Down=Change  Enter=Save  %s=Cancel	Sus/Jos=Schimbă  Enter=Salvează  %s=Anulează
+Up/Down=Select  Left/Right=Change  Enter=Save  %s=Cancel	Sus/Jos=Alege  Stânga/Dreapta=Schimbă  Enter=Salvează  %s=Anulare
+Update	Actualizare
+Update check failed: %s	Verificarea actualizării a eșuat: %s
+Update check needs WiFi connected	Verificarea actualizărilor necesită WiFi conectat
+Update check needs WiFi on	Verificarea actualizărilor necesită WiFi pornit
+Update check skipped (a dialog was open)	Verificarea actualizărilor omisă (era deschis un dialog)
+Uplinked by: %s	Urcat de: %s
+Uplinked by: the sender itself	Urcat de: expeditorul însuși
+Use arrows to choose, then tap Next	Alege cu săgețile, apoi Următorul
+Used: %lu KB (%lu%%)\nTotal: %lu KB\nFree: %lu KB\nMin free: %lu KB\nMax block: %lu KB	Folosită: %lu KB (%lu%%)\nTotal: %lu KB\nLiberă: %lu KB\nMin. liberă: %lu KB\nBloc max: %lu KB
+VIA MQTT	PRIN MQTT
+VNC Host failed to allocate PSRAM	VNC Host nu a putut aloca PSRAM
+VNC Host off	VNC Host oprit
+VNC Host on\nOpen http://%s/ and select the Remote tab	VNC Host pornit\nDeschide http://%s/ și fila Remote
+VNC Host on\nhttp://%s:%u/	VNC Host pornit\nhttp://%s:%u/
+VNC Host: Off	VNC Host: Oprit
+VNC Host: Off (WiFi off)	VNC Host: Oprit (WiFi oprit)
+VNC Host: On (browser connected)	VNC Host: Pornit (browser conectat)
+VNC Host: On (network disconnected)	VNC Host: Pornit (rețea deconectată)
+VNC Host: Unavailable (WiFi not connected)	VNC Host: Indisponibil (WiFi neconectat)
+Voltage	Tensiune
+Volume	Volum
+Volume: %u%%	Volum: %u%%
+W = Scan   S = Send   C = Reset   %s = Back	W = Scanează   S = Trimite   C = Resetează   %s = Înapoi
+W = Sweep   P = Preset   C = %s   %s = Back	W = Baleiază   P = Presetare   C = %s   %s = Înapoi
+W = Sweep   P = Preset   C = %s   S = Save   %s = Back	W = Baleiază   P = Presetare   C = %s   S = Salvează   %s = Înapoi
+Wait %lus before sending again	Așteaptă %lus înainte de a retrimite
+Wait %lus between sweeps	Așteaptă %lus între baleieri
+Waiting for Wi-Fi...	Se așteaptă Wi-Fi...
+Watching %s/2/e/#\n\nNo messages yet. Channels appear here as they are published, newest at the bottom, with the number of messages seen on each.	Se urmărește %s/2/e/#\n\nNiciun mesaj încă. Canalele apar aici pe măsură ce sunt publicate, cele mai noi jos, cu numărul de mesaje văzute pe fiecare.
+Weather	Vremea
+Weather - %s	Vremea - %s
+Weather server error (HTTP %d).	Eroare server meteo (HTTP %d).
+Web Config disabled	Config web dezactivat
+Web Config locked while MQTT is on	Configurarea web e blocată cât MQTT e pornit
+Web Config start failed	Pornirea config web a eșuat
+Web Config stopped.\n\nThe Bluetooth keyboard and Web Config share one radio and cannot run at the same time.\n\nTurn the keyboard off to use Web Config again.	Configurarea web a fost oprită.\n\nTastatura Bluetooth și configurarea web folosesc aceeași radio și nu pot rula simultan.\n\nOprește tastatura pentru a folosi din nou configurarea web.
+Web Config: Disabled	Config web: Dezactivat
+Web Config: Enabled	Config web: Activat
+Web Config: Off (MQTT on)	Config web: Oprit (MQTT pornit)
+Web Config: Off (WiFi off)	Config web: Oprit (WiFi oprit)
+Web Config: On	Configurare web: pornită
+Web Config: On (Lite)	Configurare web: pornită (Lite)
+Web Config: On (chat PAUSED)	Config web: Pornit (chat ÎN PAUZĂ)
+Web config: %s\n\nChat is PAUSED while web config runs - this device needs that memory for Wi-Fi. Messages sent to you now are not received or stored.\n\nTurn web config off to resume messaging.	Configurare web: %s\n\nChatul e ÎN PAUZĂ cât rulează configurarea web - dispozitivul are nevoie de acea memorie pentru Wi-Fi. Mesajele trimise acum nu sunt primite sau salvate.\n\nOprește configurarea web pentru a relua mesajele.
+Wed	mie
+Welcome to Camillia for Meshtastic	Bun venit în Camillia pentru Meshtastic
+Wheel/j-k=Change   Enter=Next	Rotiță/j-k=Schimbă   Enter=Următorul
+White	Alb
+Wi-Fi needed to fetch conditions.	E nevoie de Wi-Fi pentru a obține vremea.
+Wi-Fi needed to fetch the\nterrain profile for this path.	E nevoie de Wi-Fi pentru a obține\nprofilul terenului pe acest traseu.
+WiFi connected: %s	WiFi conectat: %s
+WiFi is off	WiFi e oprit
+WiFi not connected	WiFi neconectat
+WiFi password	Parolă WiFi
+WiFi selected: %s	WiFi ales: %s
+WiFi: Off	WiFi: Oprit
+WiFi: On (%s)	WiFi: Pornit (%s)
+WiFi: On (AP MODE ONLY)	WiFi: Pornit (DOAR MOD AP)
+WiFi: On (AP mode)	WiFi: Pornit (mod AP)
+WiFi: On (connecting %s)	WiFi: Pornit (conectare %s)
+Wide	Lat
+Within %s	În %s
+Writing a new filesystem...	Se scrie un sistem de fișiere nou...
+X-Large	Foarte mare
+Y/Enter=Import   N/Bksp=Skip	Y/Enter=Importă   N/Bksp=Omite
+Year	An
+Yellow	Galben
+Yes	Da
+[%s] no match	[%s] fără rezultate
+[radio] init failed	[radio] inițializare eșuată
+\n%lu min ago	\nacum %lu min
+\n%s, %lu min ago	\n%s, acum %lu min
+\n+%u more	\n+%u în plus
+\nT-Deck trackball: hold click 2s to sleep	\nTrackball T-Deck: ține apăsat 2 s pentru repaus
+\n\nDelete them? Nothing else on the card is touched.\n\nFormat erases the whole card instead - the only certain fix.	\n\nLe ștergi? Nimic altceva de pe card nu e atins.\n\nFormatarea șterge tot cardul - singura soluție sigură.
+all rates tried	toate vitezele încercate
+base64 key	cheie base64
+ch %s   air %s	can %s   aer %s
+channel	canal
+check requested	verificare cerută
+exact	exactă
+j/k or </>=Adjust  Up/Dn=Row  Enter=Save  Back=Cancel	j/k sau </>=Reglează  Sus/Jos=Rând  Enter=Salvează  Back=Anulare
+j/k=Adjust  </>=Row  Enter=Save  Backspace=Cancel	j/k=Reglează  </>=Rând  Enter=Salvează  Backspace=Anulare
+j/k=Adjust  Enter=Save  Backspace=Cancel	j/k=Reglează  Enter=Salvează  Backspace=Anulare
+j/k=Adjust  Wheel=Row  Enter=Save  Backspace=Cancel	j/k=Reglează  Rotiță=Rând  Enter=Salvează  Backspace=Anulare
+j/k=Change   Enter=Next   Bksp=Back	j/k=Schimbă   Enter=Următorul   Bksp=Înapoi
+low	mică
+missing	lipsește
+never	niciodată
+no key	fără cheie
+not seen	nevăzută
+off	oprit
+on	pornit
+one of: 	unul dintre: 
+one rate tried	o viteză încercată
+present	prezentă
+press F to change	apasă F pentru a schimba
+retry %lus	reîncercare %lus
+retry now	reîncercare acum
+sensor %.2f V    trim %s	senzor %.2f V    ajustare %s
+sensor: read failed	senzor: citire eșuată
+stay on	rămâne pornit
+tap Filter to change	atinge Filtru pentru a schimba
+unavailable	indisponibil
+unknown	necunoscut
+unknown date	dată necunoscută
+unknown error	eroare necunoscută
+unknown node (id ends ..%02x)	nod necunoscut (id-ul se termină în ..%02x)
+unset	nesetat
+until read	până la citire
+vague	aproximativă

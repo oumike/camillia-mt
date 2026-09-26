@@ -121,20 +121,54 @@
 #define LV_USE_CHART 1
 #define LV_USE_SCALE 1
 
+// Montserrat, with the accented Latin letters LVGL's built-ins leave out
+// (issue #99). The built-ins carry ASCII plus degree and bullet only, so a
+// received "España" or a node called "Íñigo" drew missing-glyph boxes. The
+// replacements are the same faces and icon symbols, cut again with Latin-1,
+// Latin Extended-A and the euro sign, under the same names -- so every
+// &lv_font_montserrat_N in the source resolves to them unchanged. They keep
+// LVGL's line metrics, so no layout moves. tools/gen_latin_fonts.sh makes them
+// into src/fonts/latin/; every env builds that directory.
+//
+// LVGL's own copies are switched off (0) so the names are not defined twice,
+// and the replacements are declared to lvgl.h below. A size nothing draws at
+// (20 outside the P4, say) costs nothing: the linker drops unreferenced fonts.
+#if !defined(I18N_ENABLED) || I18N_ENABLED
+#define LV_FONT_MONTSERRAT_10 0
+#define LV_FONT_MONTSERRAT_12 0
+#define LV_FONT_MONTSERRAT_14 0
+#define LV_FONT_MONTSERRAT_16 0
+#define LV_FONT_MONTSERRAT_18 0
+#define LV_FONT_MONTSERRAT_20 0
+#define LV_FONT_MONTSERRAT_24 0
+#define LV_FONT_MONTSERRAT_28 0
+#define LV_FONT_MONTSERRAT_32 0
+#define LV_FONT_MONTSERRAT_40 0
+#define LV_FONT_CUSTOM_DECLARE \
+    LV_FONT_DECLARE(lv_font_montserrat_10) \
+    LV_FONT_DECLARE(lv_font_montserrat_12) \
+    LV_FONT_DECLARE(lv_font_montserrat_14) \
+    LV_FONT_DECLARE(lv_font_montserrat_16) \
+    LV_FONT_DECLARE(lv_font_montserrat_18) \
+    LV_FONT_DECLARE(lv_font_montserrat_20) \
+    LV_FONT_DECLARE(lv_font_montserrat_24) \
+    LV_FONT_DECLARE(lv_font_montserrat_28) \
+    LV_FONT_DECLARE(lv_font_montserrat_32) \
+    LV_FONT_DECLARE(lv_font_montserrat_40)
+#else
+// English-only builds (I18N_ENABLED=0, see i18n.h) keep LVGL's own ASCII
+// copies: they are a fraction of the size, and nothing they draw needs accents.
 #define LV_FONT_MONTSERRAT_10 1
 #define LV_FONT_MONTSERRAT_12 1
 #define LV_FONT_MONTSERRAT_14 1
 #define LV_FONT_MONTSERRAT_16 1
 #define LV_FONT_MONTSERRAT_18 1
-#if defined(DEVICE_TDISPLAY_P4)
-// The top of the P4's chat size ladder (explicitChatFont() in main_lvgl.cpp).
-// Only that board draws at 20, so only it pays the flash for it.
 #define LV_FONT_MONTSERRAT_20 1
-#endif
 #define LV_FONT_MONTSERRAT_24 1
 #define LV_FONT_MONTSERRAT_28 1
 #define LV_FONT_MONTSERRAT_32 1
 #define LV_FONT_MONTSERRAT_40 1
+#endif
 
 #define LV_FONT_DEFAULT &lv_font_montserrat_16
 

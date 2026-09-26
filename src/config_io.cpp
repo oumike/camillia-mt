@@ -4,6 +4,7 @@
 #include "admin_peers.h"
 #include "base64_util.h"
 #include "utf8_utils.h"
+#include "i18n.h"           // UiLang codes for the YAML `language:` key
 #include "ignore_list.h"
 #include "storage.h"
 #include <Preferences.h>
@@ -564,7 +565,7 @@ static const int kNumRebroadModes = 5;
 // Ordered exact-first: the device row cycles through this array, and the first
 // step off "Precise" should be the smallest amount of lying, not the largest.
 const PositionPrecisionOption kPositionPrecisions[] = {
-    { 32, "Precise"  },
+    { 32, TR_NOOP("Precise")  },
     { 20, "~50 m"    },
     { 19, "~90 m"    },
     { 18, "~200 m"   },
@@ -593,12 +594,12 @@ const char *positionPrecisionLabel(uint8_t bits) {
 // Order is presentation only — everything looks values up rather than indices,
 // so this can be rearranged without touching what any stored setting means.
 const NotifyLightTimeoutOption kNotifyLightTimeouts[] = {
-    {    5, "5 sec"  },
-    {   30, "30 sec" },
-    {   60, "1 min"  },
-    {  300, "5 min"  },
-    { 1800, "30 min" },
-    {    0, "Never"  },
+    {    5, TR_NOOP("5 sec")  },
+    {   30, TR_NOOP("30 sec") },
+    {   60, TR_NOOP("1 min")  },
+    {  300, TR_NOOP("5 min")  },
+    { 1800, TR_NOOP("30 min") },
+    {    0, TR_NOOP("Never")  },
 };
 const int kNotifyLightTimeoutCount =
     (int)(sizeof(kNotifyLightTimeouts) / sizeof(kNotifyLightTimeouts[0]));
@@ -612,10 +613,10 @@ const int kNotifyLightTimeoutCount =
 // the answer you go to deliberately, and it is the expensive one to undo, since
 // the controller keeps the auto-light disabled until the next power cycle.
 const KbBacklightOption kKbBacklightLevels[] = {
-    {  64, "Low"    },
-    { 160, "Medium" },
-    { 255, "High"   },
-    {   0, "Off"    },
+    {  64, TR_NOOP("Low")    },
+    { 160, TR_NOOP("Medium") },
+    { 255, TR_NOOP("High")   },
+    {   0, TR_NOOP("Off")    },
 };
 const int kKbBacklightLevelCount =
     (int)(sizeof(kKbBacklightLevels) / sizeof(kKbBacklightLevels[0]));
@@ -626,7 +627,7 @@ const char *kbBacklightLevelName(uint8_t level) {
     }
     // A value from a hand-edited YAML. Named for what it is rather than snapped
     // to a label it does not have -- the row should not claim "Medium" for 200.
-    return "Custom";
+    return TR_NOOP("Custom");
 }
 
 uint8_t cfgCoerceKbBacklightLevel(int level) {
@@ -639,7 +640,7 @@ const char *notifyLightTimeoutName(uint16_t secs) {
     for (int i = 0; i < kNotifyLightTimeoutCount; i++) {
         if (kNotifyLightTimeouts[i].secs == secs) return kNotifyLightTimeouts[i].label;
     }
-    return "Never";   // the default, and what an unrecognised value coerces to
+    return TR_NOOP("Never");   // the default, and what an unrecognised value coerces to
 }
 
 uint16_t cfgCoerceNotifyLightTimeout(long secs) {
@@ -1120,6 +1121,7 @@ void cfgInitDefaults(RhinoConfig &cfg) {
     // anything writes this register -- so a fresh device behaves as it always
     // did, and only a deliberate change alters the keypad.
     cfg.kbBacklightLevel   = MY_KB_BACKLIGHT_LEVEL;
+    cfg.uiLanguage         = LANG_EN;
     cfg.timeSource         = TIME_SOURCE_AUTO;
     cfg.mqttEnabled        = MY_MQTT_ENABLED;
     strncpy(cfg.mqttServer,  MY_MQTT_SERVER, sizeof(cfg.mqttServer) - 1);
@@ -1591,6 +1593,11 @@ void cfgToYaml(const RhinoConfig &cfg, String &out) {
     out += "    orientation: ";
     out += (cfg.uiOrientation == 2 ? "PORTRAIT_180"
             : cfg.uiOrientation == 1 ? "PORTRAIT" : "LANDSCAPE");
+    out += "\n";
+    // UI language, by code ("en", "es"): readable, and stable where the stored
+    // index would not be if the list ever changed.
+    out += "    language: ";
+    out += kUiLangCodes[cfg.uiLanguage < LANG_COUNT ? cfg.uiLanguage : LANG_EN];
     out += "\n";
     snprintf(tmp, sizeof(tmp), "    splashMelodyEnabled: %s\n", cfg.splashMelodyEnabled ? "true" : "false"); out += tmp;
     snprintf(tmp, sizeof(tmp), "    volume: %u\n", (unsigned)cfg.volumePct); out += tmp;
@@ -2243,6 +2250,7 @@ bool cfgImportFromBuf(const char *buf, size_t len, RhinoConfig &cfg) {
                 else if (!strcmp(key, "flipScreen"))      cfg.flipScreen      = (!strcmp(val,"true"));
                 else if (!strcmp(key, "orientation"))     cfg.uiOrientation   =
                         !strcmp(val, "PORTRAIT_180") ? 2 : (!strcmp(val, "PORTRAIT") ? 1 : 0);
+                else if (!strcmp(key, "language"))        cfg.uiLanguage = i18nLangFromCode(val);
                 else if (!strcmp(key, "splashMelodyEnabled")) cfg.splashMelodyEnabled = (!strcmp(val,"true"));
                 else if (!strcmp(key, "volume"))          cfg.volumePct = cfgCoerceVolume(atoi(val));
                 else if (!strcmp(key, "batteryCalTrim"))  cfg.battCalTrim = cfgCoerceBattCalTrim(atoi(val));

@@ -622,10 +622,21 @@ struct RhinoConfig {
     // which matters here more than usual, since zero is the one value that turns
     // the keypad light off until the device is power-cycled.
     uint8_t  kbBacklightLevel;
-    // For whoever appends next: kbBacklightLevel is one byte at the end of a
-    // 4-aligned struct, so the stored blob carries three bytes past it that the
-    // load memcpy's straight over anything placed there.
-    uint8_t  _reservedPad15[3];
+
+    // ── UI language (issue #99) ──────────────────────────────────────────────
+    // Index into UiLang (src/i18n.h): 0 English, 1 Spanish, ... Applied at boot
+    // with i18nSetLang(); TR() does the rest.
+    //
+    // The first of the three pad bytes that used to follow kbBacklightLevel,
+    // and deliberately so -- this is the one field that wants what the pad
+    // warning describes. A blob written before this field carries zeros here,
+    // and zero is English, which is what every build before it showed. The
+    // struct size and every offset are unchanged.
+    uint8_t  uiLanguage;
+    // For whoever appends next: two pad bytes remain, and the stored blob
+    // carries whatever older builds wrote into them. Past them is the old
+    // sizeof(RhinoConfig), where a new field is safe.
+    uint8_t  _reservedPad15[2];
 };
 
 // ── Keypad auto-light levels ──────────────────────────────────────────

@@ -1,0 +1,18 @@
+# Name,   Type, SubType, Offset,   Size,    Flags
+# 16 MB layout for boards that keep their data on SD (no internal filesystem).
+#
+# Two 6.25 MB app slots. The 3.2 MB slots of partitions.csv ran out once the
+# UI translations and accented fonts went in (issue #99).
+#
+# nvs and coredump sit at exactly the offsets partitions.csv gives them, so a
+# device moved to this layout over USB keeps its settings. The slots are
+# arranged round them: app0 fills everything below nvs, app1 starts after
+# coredump. OTA cannot change a partition table, so the move itself is a
+# one-time USB flash; OTA works as before afterwards.
+#
+# 0x670000 + 0x640000 = 0xCB0000; the last 3.3 MB are left unallocated.
+otadata,  data, ota,     0x9000,   0x2000,
+app0,     app,  ota_0,   0x10000,  0x640000,
+nvs,      data, nvs,     0x650000, 0x10000,
+coredump, data, coredump,0x660000, 0x10000,
+app1,     app,  ota_1,   0x670000, 0x640000,

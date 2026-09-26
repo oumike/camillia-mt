@@ -23,6 +23,7 @@
 #include "state_maps.h"
 #include "map_tiles.h"
 #include "env_sensor.h"
+#include "i18n.h"         // the Language select: kUiLangNames / kUiLangCodes
 #include <esp_heap_caps.h>
 #include <math.h>
 #include <ctype.h>
@@ -3742,6 +3743,73 @@ static void sendConfigPage(const char *msg = "", bool lite = false) {
     sectionEnd(html, lite);
     sendChunk(html);
 
+    // ── LoRa Radio ────────────────────────────────────────────
+    section(html, lite, "LoRa Radio", false);
+    // The live frequency/BW/SF/CR readout is driven by kPresetJs. Lite skips
+    // both, so its selects carry no onchange handler to call.
+    html += lite ? "<div class='row2'><label>Region<select name='region' id='sel-rgn'>"
+                 : "<div class='row2'><label>Region<select name='region' id='sel-rgn' onchange='applyPreset()'>";
+    sendChunk(html);
+    sendFlash(kRegionOptions);
+    html += lite ? "</select></label><label>Modem Preset<select id='sel-pst' name='modem_preset'>"
+                 : "</select></label><label>Modem Preset<select id='sel-pst' name='modem_preset' onchange='applyPreset()'>";
+    sendChunk(html);
+    sendFlash(kPresetOptions);
+    html += "</select></label></div>";
+    sendChunk(html);
+    sendFlash(kCustomLoraFields);
+    // Both option lists are static constants, so the current values are applied
+    // here rather than by marking one <option> selected. This runs before
+    // kPresetJs registers its DOMContentLoaded handler, so the first
+    // applyPreset() already sees these values.
+    html += "<script>document.getElementById('sel-rgn').value='";
+    html += gCfg->region; html += "';"
+            "document.getElementById('sel-pst').value='";
+    html += gCfg->loraUsePreset
+                ? kPresets[gCfg->modemPreset < PRESET_COUNT ? gCfg->modemPreset : 0].name
+                : "Custom";
+    html += "';";
+    // A value with no matching <option> — a bandwidth this radio cannot do, or
+    // an SF/CR out of range from an imported config — would leave the select
+    // blank. Coerce to what applyPresetParams() would land on anyway. Set
+    // through a one-line helper so the four assignments still fit in tmp[96].
+    html += "function sv(i,v){document.getElementById(i).value=v;}";
+    snprintf(tmp, sizeof(tmp), "sv('sel-cbw',%u);sv('sel-csf',%u);sv('sel-ccr',%u);sv('in-cslot',%u);",
+             (unsigned)loraCoerceBwCode(gCfg->loraCustomBwKhz),
+             (unsigned)constrain((int)gCfg->loraCustomSf, LORA_SF_MIN, LORA_SF_MAX),
+             (unsigned)constrain((int)gCfg->loraCustomCr, LORA_CR_MIN, LORA_CR_MAX),
+             (unsigned)gCfg->loraCustomSlot);
+    html += tmp;
+    // Lite carries no kPresetJs, so the custom fields' onchange would throw on
+    // every edit. Stub it: with no live readout to update there is nothing for
+    // it to do, and the block it would show/hide is always visible here.
+    if (lite) html += "function applyPreset(){}";
+    html += "</script>";
+    html += "<p class='gps-hint'>Frequency and modem parameters are derived automatically "
+            "from region and preset, or from the fields above when the preset is Custom.</p>";
+    sendChunk(html);
+    if (!lite) {
+        sendFlash(kPresetJs);
+        sendFlash(kLoraReadout);
+    }
+    html += "<div class='row2'>";
+    snprintf(tmp, sizeof(tmp), "%d", gCfg->loraPower);
+    html += "<label>TX Power (dBm, 1&ndash;22)<input name='pwr' type='number' min='1' max='22' value='";
+    html += tmp; html += "'></label>";
+    snprintf(tmp, sizeof(tmp), "%d", gCfg->loraHopLimit);
+    html += "<label>Hop Limit (1&ndash;7)<input name='hop' type='number' min='1' max='7' value='";
+    html += tmp; html += "'></label></div>";
+    html += "<label style='display:flex;align-items:center;gap:.5em'>"
+            "<input type='checkbox' name='ok_to_mqtt' value='1'";
+    if (gCfg->okToMqtt) html += " checked";
+    html += "> OK to MQTT &mdash; allow MQTT-connected nodes to forward your packets upstream</label>";
+    html += "<label style='display:flex;align-items:center;gap:.5em'>"
+            "<input type='checkbox' name='ignore_mqtt' value='1'";
+    if (gCfg->ignoreMqtt) html += " checked";
+    html += "> Ignore MQTT &mdash; drop received packets that arrived via MQTT</label>";
+    sectionEnd(html, lite);
+    sendChunk(html);
+
     // ── Channels ──────────────────────────────────────────────
     section(html, lite, "Channels", false);
     html += "<p class='gps-hint'>Key: base64 (e.g. \"AQ==\" or \"MA==\"). "
@@ -3881,73 +3949,6 @@ static void sendConfigPage(const char *msg = "", bool lite = false) {
     sectionEnd(html, lite);
     sendChunk(html);
 
-    // ── LoRa Radio ────────────────────────────────────────────
-    section(html, lite, "LoRa Radio", false);
-    // The live frequency/BW/SF/CR readout is driven by kPresetJs. Lite skips
-    // both, so its selects carry no onchange handler to call.
-    html += lite ? "<div class='row2'><label>Region<select name='region' id='sel-rgn'>"
-                 : "<div class='row2'><label>Region<select name='region' id='sel-rgn' onchange='applyPreset()'>";
-    sendChunk(html);
-    sendFlash(kRegionOptions);
-    html += lite ? "</select></label><label>Modem Preset<select id='sel-pst' name='modem_preset'>"
-                 : "</select></label><label>Modem Preset<select id='sel-pst' name='modem_preset' onchange='applyPreset()'>";
-    sendChunk(html);
-    sendFlash(kPresetOptions);
-    html += "</select></label></div>";
-    sendChunk(html);
-    sendFlash(kCustomLoraFields);
-    // Both option lists are static constants, so the current values are applied
-    // here rather than by marking one <option> selected. This runs before
-    // kPresetJs registers its DOMContentLoaded handler, so the first
-    // applyPreset() already sees these values.
-    html += "<script>document.getElementById('sel-rgn').value='";
-    html += gCfg->region; html += "';"
-            "document.getElementById('sel-pst').value='";
-    html += gCfg->loraUsePreset
-                ? kPresets[gCfg->modemPreset < PRESET_COUNT ? gCfg->modemPreset : 0].name
-                : "Custom";
-    html += "';";
-    // A value with no matching <option> — a bandwidth this radio cannot do, or
-    // an SF/CR out of range from an imported config — would leave the select
-    // blank. Coerce to what applyPresetParams() would land on anyway. Set
-    // through a one-line helper so the four assignments still fit in tmp[96].
-    html += "function sv(i,v){document.getElementById(i).value=v;}";
-    snprintf(tmp, sizeof(tmp), "sv('sel-cbw',%u);sv('sel-csf',%u);sv('sel-ccr',%u);sv('in-cslot',%u);",
-             (unsigned)loraCoerceBwCode(gCfg->loraCustomBwKhz),
-             (unsigned)constrain((int)gCfg->loraCustomSf, LORA_SF_MIN, LORA_SF_MAX),
-             (unsigned)constrain((int)gCfg->loraCustomCr, LORA_CR_MIN, LORA_CR_MAX),
-             (unsigned)gCfg->loraCustomSlot);
-    html += tmp;
-    // Lite carries no kPresetJs, so the custom fields' onchange would throw on
-    // every edit. Stub it: with no live readout to update there is nothing for
-    // it to do, and the block it would show/hide is always visible here.
-    if (lite) html += "function applyPreset(){}";
-    html += "</script>";
-    html += "<p class='gps-hint'>Frequency and modem parameters are derived automatically "
-            "from region and preset, or from the fields above when the preset is Custom.</p>";
-    sendChunk(html);
-    if (!lite) {
-        sendFlash(kPresetJs);
-        sendFlash(kLoraReadout);
-    }
-    html += "<div class='row2'>";
-    snprintf(tmp, sizeof(tmp), "%d", gCfg->loraPower);
-    html += "<label>TX Power (dBm, 1&ndash;22)<input name='pwr' type='number' min='1' max='22' value='";
-    html += tmp; html += "'></label>";
-    snprintf(tmp, sizeof(tmp), "%d", gCfg->loraHopLimit);
-    html += "<label>Hop Limit (1&ndash;7)<input name='hop' type='number' min='1' max='7' value='";
-    html += tmp; html += "'></label></div>";
-    html += "<label style='display:flex;align-items:center;gap:.5em'>"
-            "<input type='checkbox' name='ok_to_mqtt' value='1'";
-    if (gCfg->okToMqtt) html += " checked";
-    html += "> OK to MQTT &mdash; allow MQTT-connected nodes to forward your packets upstream</label>";
-    html += "<label style='display:flex;align-items:center;gap:.5em'>"
-            "<input type='checkbox' name='ignore_mqtt' value='1'";
-    if (gCfg->ignoreMqtt) html += " checked";
-    html += "> Ignore MQTT &mdash; drop received packets that arrived via MQTT</label>";
-    sectionEnd(html, lite);
-    sendChunk(html);
-
     // ── MQTT ──────────────────────────────────────────────────
     section(html, lite, "MQTT", false);
     // Marker so the POST handler can apply checkbox state (unchecked boxes send
@@ -3995,6 +3996,20 @@ static void sendConfigPage(const char *msg = "", bool lite = false) {
 
     // ── Display ───────────────────────────────────────────────
     section(html, lite, "Display", false);
+    // Language of the on-device UI (issue #99). The page itself stays English.
+    // Each name is written in its own language, as the device picker shows it;
+    // the value is the index stored in RhinoConfig::uiLanguage. Changing it
+    // takes the reboot every other setting here does.
+#if I18N_ENABLED
+    html += "<label>Language<select name='ui_lang'>";
+    for (uint8_t v = 0; v < LANG_COUNT; v++) {
+        snprintf(tmp, sizeof(tmp), "<option value='%u'%s>%s</option>",
+                 (unsigned)v, (v == gCfg->uiLanguage) ? " selected" : "",
+                 kUiLangNames[v]);
+        html += tmp;
+    }
+    html += "</select></label>";
+#endif
     // Brightness: a range input in the same 10% steps as the on-device slider,
     // with the value mirrored next to it since a bare range shows no number.
     {
@@ -7554,6 +7569,12 @@ static void handlePostSave() {
     // Kept because the auto-favorite radius below is submitted in whatever units
     // the page was *rendered* in, which is not necessarily the units this same
     // POST is switching to.
+    // Absent (an older cached page) keeps the current language rather than
+    // falling back to English.
+    if (server.hasArg("ui_lang")) {
+        const long lang = server.arg("ui_lang").toInt();
+        gCfg->uiLanguage = (lang >= 0 && lang < LANG_COUNT) ? (uint8_t)lang : LANG_EN;
+    }
     const uint8_t prevUnits = gCfg->displayUnits;
     gCfg->displayUnits    = server.arg("disp_units").toInt() != 0 ? 1 : 0;
     if (server.hasArg("batt_display")) {

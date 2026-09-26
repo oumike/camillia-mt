@@ -1,0 +1,874 @@
+# Camillia language file (issue #99)
+# code: fr
+# name: Français
+#
+# One translation per line: the English exactly as it appears in the source,
+# a TAB, then the translation. Escape a newline as \n, a tab as \t, a backslash
+# as \\. Keep every %d / %s / %u ... in the same order and of the same type as the
+# English -- a line whose placeholders differ is ignored on the device and the
+# English is shown. See docs/TRANSLATING.md. Compiled in by tools/gen_lang_builtin.py.
+  CONFIRM?	  CONFIRMER ?
+  Press  %.1f hPa	  Press. %.1f hPa
+  lock	  sécurisé
+  open	  ouvert
+ (no card)	 (pas de carte)
+ (not sharing location)	 (position non partagée)
+ (unchanged)	 (inchangé)
+ - %s available	 - %s disponible
+ - check failed	 - échec de la vérification
+ - check unavailable	 - vérification indisponible
+ - checking...	 - vérification...
+ - saving to %s	 - enregistrement dans %s
+ - up to date	 - à jour
+! TX failed	! Échec TX
+! TX failed (node id)	! Échec TX (id du nœud)
+%d chans  %s msgs  %s%s	%d canaux  %s msgs  %s%s
+%d chans  %s msgs  %s%s  (+%s off-list)	%d canaux  %s msgs  %s%s  (+%s hors liste)
+%d node(s), %d report(s)	%d nœud(s), %d rapport(s)
+%d%s  %s\nFeels %d%s, humidity %d%%\nWind %s %d %s%s%s	%d%s  %s\nRessenti %d%s, humidité %d%%\nVent %s %d %s%s%s
+%luh ago	il y a %luh
+%lum ago	il y a %lum
+%lus ago	il y a %lus
+%s   -   %u match%s so far	%s   -   %u correspondance(s)%.0s pour l'instant
+%s  (current)	%s  (actuel)
+%s (this node)	%s (ce nœud)
+%s - WiFi off	%s - WiFi coupé
+%s - rebooting...	%s - redémarrage...
+%s - saved	%s - enregistré
+%s = Back   C = Clear   F = Filter	%s = Retour   C = Effacer   F = Filtre
+%s = Back   green=SNR  pink=RSSI	%s = Retour   vert=SNR  rose=RSSI
+%s = Back   teal=ChUtil  orange=AirTx	%s = Retour   turquoise=ChUtil  orange=AirTx
+%s = Close	%s = Fermer
+%s returns to the live list.\nIf it is full, the oldest non-favorite is archived to make room.	%s revient dans la liste active.\nSi elle est pleine, le plus ancien non favori est archivé pour faire de la place.
+%s to close Help	%s pour fermer l'aide
+%s will be removed from the node list.	%s sera retiré de la liste des nœuds.
+%s x%u\nClock: %u MHz\nRevision: %u\nUptime: %luh %02lum %02lus\nLoop rate: %lu /s\nBattery: %u%% %.3fV	%s x%u\nHorloge : %u MHz\nRévision : %u\nEn marche : %luh %02lum %02lus\nBoucles : %lu /s\nBatterie : %u%% %.3fV
+%s%.2f, %.2f (rounded)	%s%.2f, %.2f (arrondi)
+%s%lu min ago - %.2f, %.2f (rounded)	%sil y a %lu min - %.2f, %.2f (arrondi)
+%s, %d %s %d	%s %d %s %d
+%s.\n\nNothing can arrive until the bridge has a broker session. Fix it in Config (or web config) and this list fills in on its own.	%s.\n\nRien n'arrive tant que le pont n'a pas de session avec le broker. Corrigez-le dans Config (ou la config web) et cette liste se remplira d'elle-même.
+%s: %d node(s) heard	%s : %d nœud(s) entendu(s)
+%s: %d on preset (%lus)	%s : %d sur le préréglage (%lus)
+%s=Scroll  A=Actions  %s=List	%s=Défiler  A=Actions  %s=Liste
+%s\n%.1f km - brg %03d %s\n%s\nyou %dm - peer %dm - %.0f MHz	%s\n%.1f km - cap %03d %s\n%s\nvous %dm - pair %dm - %.0f MHz
+%s\n%lu min old	%s\nil y a %lu min
+%s\nIn use - will switch to the next configured WiFi network, or AP mode if none is available	%s\nEn cours d'utilisation : passage au prochain réseau WiFi configuré, ou au mode AP s'il n'y en a aucun
+%s\nMessage history will be erased	%s\nL'historique des messages sera effacé
+%s\nType %06u then Enter on the keyboard	%s\nTapez %06u puis Enter sur le clavier
+%u of %d	%u sur %d
+%u sec	%u s
+(A)nnounce	(A)nnoncer
+(B)eacons	(B)alises
+(C)FG   (D)M   (N)odes   Too(l)s   (A)ctions	(C)FG   (D)MP   (N)œuds   Outi(l)s   (A)ctions
+(C)FG  C(h)an  (D)M  (N)odes  Too(l)s  (A)ct	(C)FG  Canal(H)  (D)MP  (N)œuds  Outi(l)s  (A)ct
+(D) Direct Messages\n(C) Configuration\n(N) Nodes\n(L) Tools (Live, charts)\n(A) Channel Actions\n(H) Channel selector\n(P) Help (this screen)\n(E) Emoji\n(Space) Compose/Reply\n(Enter) Focus Messages	(D) Messages privés\n(C) Configuration\n(N) Nœuds\n(L) Outils (Live, graphiques)\n(A) Actions du canal\n(H) Sélecteur de canal\n(P) Aide (cet écran)\n(E) Emoji\n(Space) Écrire/Répondre\n(Enter) Aller aux messages
+(D)iscovery	(D)écouverte
+(F)avorite	(F)avori
+(H) Home dashboard\n(C) Chat (again: channels)\n(F) Configuration\n(D) Direct Messages\n(N) Nodes\n(L) Tools (Live, charts)\n(A) Channel Actions\n(P) Help (this screen)\n(E) Emoji\n(Space) Compose/Reply\n(Enter) Focus Messages	(H) Tableau d'accueil\n(C) Chat (encore : canaux)\n(F) Configuration\n(D) Messages privés\n(N) Nœuds\n(L) Outils (Live, graphiques)\n(A) Actions du canal\n(P) Aide (cet écran)\n(E) Emoji\n(Space) Écrire/Répondre\n(Enter) Aller aux messages
+(H)ome (C)hat C(f)g (D)M (N)odes Too(l)s	Accueil(H) (C)hat C(f)g (D)MP (N)œuds Outi(l)s
+(L)ive	Direct (L)
+(L)ocate	(L)ocaliser
+(L)ocation: %s	(L)ocalisation : %s
+(M)ute	Sourdine (M)
+(R)eply	(R)épondre
+(S)ender Info	Infos de l'expéditeur (S)
+(W)eather	Météo (W)
+(no name)	(sans nom)
+(not set)	(non défini)
+(nothing)	(rien)
+(unknown)	(inconnu)
+(unnamed)	(sans nom)
+, gusts %d	, rafales %d
+1 hour	1 heure
+12-hour	12 heures
+15 sec	15 s
+2 hours	2 heures
+24-hour	24 heures
+30 sec	30 s
+4-char short name (ABCD)	Nom court de 4 caractères (ABCD)
+5 min on that preset. This node hears nothing on its own while it runs, and finds only meshes sharing your primary channel key.	5 min sur ce préréglage. Pendant ce temps, ce nœud n'entend rien de son propre réseau et ne trouve que les réseaux qui partagent la clé de votre canal principal.
+5 sec	5 s
+6 hours	6 heures
+? hops	? sauts
+ACK from %s. Waiting for reply...	ACK de %s. En attente de réponse...
+ACKed, no reply (%lus)	ACK reçu, pas de réponse (%lus)
+AP mode cannot be removed	Le mode AP ne peut pas être supprimé
+AP mode selected	Mode AP choisi
+AP mode selected - enable WiFi first	Mode AP choisi - activez d'abord le WiFi
+AP mode: %s	Mode AP : %s
+ARCHIVED %s\n\n%s\nShort: %s\nID: !%08lX\n\nLast heard: %s\n%s\n\n%sNot on the live list. Restore it to message,\nfavorite or trace it.	ARCHIVÉ %s\n\n%s\nCourt : %s\nID : !%08lX\n\nDernier contact : %s\n%s\n\n%sAbsent de la liste active. Restaurez-le pour lui écrire,\nle mettre en favori ou le tracer.
+Act	Act.
+Action Result	Résultat
+Action: %s	Action : %s
+Actions	Actions
+All	Tout
+All live traffic will be erased	Tout le trafic en direct sera effacé
+All live traffic will be erased, including lines hidden by the filter	Tout le trafic en direct sera effacé, y compris les lignes masquées par le filtre
+Already %s.	Déjà %s.
+Already on that preset	Déjà sur ce préréglage
+Analyzing terrain...	Analyse du terrain...
+Announce	Annoncer
+Any key / %s = Close	Une touche / %s = Fermer
+Apply	Appliquer
+Apr	avr
+April	avril
+Archive Dropped Nodes: %s	Archiver les nœuds retirés : %s
+Archive Dropped Nodes: %s%s	Archiver les nœuds retirés : %s%s
+Asks first, then reboots.	Demande d'abord, puis redémarre.
+Asks first, then reboots. Only nodes on the same preset can hear each other.	Demande d'abord, puis redémarre. Seuls les nœuds sur le même préréglage s'entendent.
+Aug	août
+August	août
+Auto-update gave up on %s after %u failed installs	La mise à jour auto a abandonné %s après %u échecs d'installation
+BT Keyboard failed to start (low memory)	Le clavier BT n'a pas démarré (mémoire faible)
+BT Keyboard off	Clavier BT coupé
+BT Keyboard on - connecting to %s	Clavier BT actif - connexion à %s
+BT Keyboard on - use Pair to choose one	Clavier BT actif - utilisez Appairer pour en choisir un
+BT Keyboard turned off.\n\nWeb Config and the Bluetooth keyboard share one radio and cannot run at the same time.\n\nTurn Web Config off to use the keyboard again.	Clavier BT désactivé.\n\nLa config web et le clavier Bluetooth partagent une radio et ne peuvent pas fonctionner en même temps.\n\nDésactivez la config web pour réutiliser le clavier.
+BT Keyboard: %s	Clavier BT : %s
+BT Keyboard: Off	Clavier BT : Coupé
+Back	Retour
+Back = Cancel	Retour = Annuler
+Bass	Grave
+Battery Calibration	Calibrage de la batterie
+Battery Calibration: %s	Calibrage de la batterie : %s
+Battery Calibration: Off	Calibrage de la batterie : Coupé
+Battery Display: %s	Affichage batterie : %s
+Battery critical - shedding load	Batterie critique : réduction de la charge
+Battery empty	Batterie vide
+Battery low	Batterie faible
+Battery trim: %s	Correction batterie : %s
+Battery: %.0f%%\nVoltage: %.2f V\nChUtil: %.1f%%\nAirTx: %.1f%%	Batterie : %.0f%%\nTension : %.2f V\nChUtil : %.1f%%\nAirTx : %.1f%%
+Battery\nVoltage\nChUtil\nAirTx\nTemp\nHumidity\nPressure	Batterie\nTension\nChUtil\nAirTx\nTemp.\nHumidité\nPression
+Beacons	Balises
+Bksp=Back  solid=ChUtil  dash=AirTx	Bksp=Retour  plein=ChUtil  tirets=AirTx
+Bksp=Back  solid=SNR  dash=RSSI	Bksp=Retour  plein=SNR  tirets=RSSI
+Bksp=Close	Bksp=Fermer
+Blink Flashes (Channel): %u	Clignotements (canal) : %u
+Blink Flashes (DM): %u	Clignotements (MP) : %u
+Blocked @ %.1f km, %dm over sight	Bloqué à %.1f km, %dm au-dessus de la visée
+Blue	Bleu
+Bluetooth Keyboard	Clavier Bluetooth
+Bottom buttons: Chats, DM, Nodes, Tools, Config, Help.	Boutons du bas : Chats, MP, Nœuds, Outils, Config, Aide.
+Bottom buttons: Home, Chats, DM, Nodes, Tools, Config, Help.\nHome is the dashboard; Chats is the messages, and its icon\nblinks when a channel has something unread.	Boutons du bas : Accueil, Chats, MP, Nœuds, Outils, Config, Aide.\nAccueil est le tableau de bord ; Chats, ce sont les messages, et son icône\nclignote quand un canal a du non-lu.
+Brightness	Luminosité
+Brightness: %u%%	Luminosité : %u%%
+Brightness: %u%%  Lock: %u%%	Luminosité : %u%%  Verrou : %u%%
+Brown	Marron
+Bubbles	Bulles
+C = Clear   %s = Back	C = Effacer   %s = Retour
+C = Clear   F = Filter	C = Effacer   F = Filtre
+C:Cfg H:Ch D:DM N:Node L:Tools A:Act	C:Cfg H:Can D:MP N:Nœud L:Outils A:Act
+CHANNEL UTIL	UTIL. DU CANAL
+CHANNEL UTILIZATION (%)	UTILISATION DU CANAL (%)
+Can't resolve the weather server.\nCheck the address and DNS.	Impossible de résoudre le serveur météo.\nVérifiez l'adresse et le DNS.
+Cancel	Annuler
+Cancelled after removing %u file%s. The rest were left alone - run the scan again to see what is still there.	Annulé après la suppression de %u fichier(s)%.0s. Le reste n'a pas été touché - relancez l'analyse pour voir ce qui reste.
+Cannot send: no node id	Envoi impossible : pas d'id de nœud
+Card formatted.\n\nWrite your configuration back to it as /camillia/config.yaml?	Carte formatée.\n\nY réécrire votre configuration sous /camillia/config.yaml ?
+ChUtil  cur %s  avg %.1f%%  max %.1f%%   n=%d\nAirTx   cur %s  avg %.1f%%  max %.1f%%   n=%d	ChUtil  act %s  moy %.1f%%  max %.1f%%   n=%d\nAirTx   act %s  moy %.1f%%  max %.1f%%   n=%d
+ChUtil  cur --  avg --  max --   n=0\nAirTx   cur --  avg --  max --   n=0	ChUtil  act --  moy --  max --   n=0\nAirTx   act --  moy --  max --   n=0
+Channel	Canal
+Channel %d	Canal %d
+Channel %d  %s	Canal %d  %s
+Channel Actions\n%s	Actions du canal\n%s
+Channel Configuration	Configuration du canal
+Channel Key	Clé du canal
+Channel Message LED	LED message de canal
+Channel Message LED: %s	LED messages de canal : %s
+Channel Name	Nom du canal
+Channel blink: %u flash%s	Clignotement canal : %u éclairs%.0s
+Channel busy (%.0f%%) - not sweeping	Canal occupé (%.0f%%) - pas de balayage
+Channels	Canaux
+Chat Colors: %s	Couleurs du chat : %s
+Chat Names	Noms dans le chat
+Chat Names: %s	Noms dans le chat : %s
+Chat Names: %s%s	Noms dans le chat : %s%s
+Chat Style	Style du chat
+Chat Style: %s	Style du chat : %s
+Chat Style: %s%s	Style du chat : %s%s
+Chat Type	Type de chat
+Chat Type: %s	Type de chat : %s
+Chat Type: %s%s	Type de chat : %s%s
+Chat colors reassigned	Couleurs du chat réattribuées
+Checking %u of %u   %u%%	Vérification %u sur %u   %u%%
+Chirpy	Gazouillis
+Choose WiFi	Choisir le WiFi
+Choose WiFi or Finish	Choisir le WiFi ou Terminer
+Choose WiFi: %s	Choisir le WiFi : %s
+Choose WiFi: (none)	Choisir le WiFi : (aucun)
+Classic	Classique
+Clear	Effacer
+Clear Messages	Effacer les messages
+Clear Nodes (All)	Effacer les nœuds (tous)
+Clear Nodes (Keep Favorites)	Effacer les nœuds (garder les favoris)
+Clear by %dm at tightest	Dégagé de %dm au plus serré
+Clear entire live feed?	Effacer tout le flux en direct ?
+Cleared %d nodes, kept %d favorites - rebooting...	%d nœuds effacés, %d favoris gardés - redémarrage...
+Cleared (%d report(s)) - rebuilding from traffic	Effacé (%d rapport(s)) - reconstruction depuis le trafic
+Clock Format: %s	Format de l'heure : %s
+Clock set from web config	Heure réglée depuis la config web
+Clock set: %04d-%02d-%02d %02d:%02d	Heure réglée : %04d-%02d-%02d %02d:%02d
+Close	Fermer
+Configuration	Configuration
+Configuration exported to /camillia/config.yaml.\n\nThe card is formatted and holds nothing else. Chat history, the node database and any map tiles were on the old filesystem and are gone.	Configuration exportée dans /camillia/config.yaml.\n\nLa carte est formatée et ne contient rien d'autre. L'historique, la base des nœuds et les tuiles de carte étaient sur l'ancien système de fichiers et ont disparu.
+Configured WiFi is empty	Le WiFi configuré est vide
+Confirm Chat Style	Confirmer le style de chat
+Confirm?	Confirmer ?
+Connect	Connecter
+Connect to WiFi before enabling VNC	Connectez-vous au WiFi avant d'activer VNC
+Connect: %s	Connecter : %s
+Connecting to %s...	Connexion à %s...
+Connecting to broker...	Connexion au broker...
+Connection failed: %s	Échec de connexion : %s
+Conversation deleted	Conversation supprimée
+Conversations	Conversations
+Could not reach the weather server.	Impossible de joindre le serveur météo.
+Could not remove every file. Check storage and retry.	Impossible de supprimer tous les fichiers. Vérifiez le stockage et réessayez.
+Counting files on the card...	Comptage des fichiers de la carte...
+Counting files... %u found	Comptage des fichiers... %u trouvés
+Custom	Personnalisé
+Custom (%u B)	Personnalisée (%u o)
+DIRECT MESSAGES	MESSAGES PRIVÉS
+DISTANCE UNKNOWN	DISTANCE INCONNUE
+DM blink: %u flash%s	Clignotement MP : %u éclairs%.0s
+DMs	MP
+Date unavailable	Date indisponible
+Day	Jour
+Dec	déc
+December	décembre
+Default	Par défaut
+Default (%u)	Par défaut (%u)
+Default +%u	Par défaut +%u
+Del(e)te	Suppr. (E)
+Delete	Supprimer
+Delete WiFi?	Supprimer le WiFi ?
+Delete conversation?	Supprimer la conversation ?
+Delete failed	Échec de la suppression
+Delete node?	Supprimer le nœud ?
+Delivery details not recorded: received before this boot, or too many messages ago.	Détails de livraison non enregistrés : reçu avant ce démarrage, ou il y a trop de messages.
+Detail Map	Carte détaillée
+Device Info	Infos de l'appareil
+Device switched off last time: battery empty	L'appareil s'est éteint la dernière fois : batterie vide
+Direct Message LED	LED message privé
+Direct Message LED: %s	LED messages privés : %s
+Discovery	Découverte
+Do not remove the card	Ne retirez pas la carte
+Elevation data too sparse\nfor this path.	Données d'altitude trop rares\npour ce trajet.
+Elevation fetch failed (%d).\nCheck the server URL - it must be http://	Échec de récupération de l'altitude (%d).\nVérifiez l'URL du serveur - elle doit être en http://
+Enable WiFi first	Activez d'abord le WiFi
+Enc	Chiff.
+Encrypted	Chiffré
+Encryption	Chiffrement
+Enter password, then tap Connect	Saisissez le mot de passe, puis Connecter
+Enter this node's long name.	Saisissez le nom long de ce nœud.
+Enter=Connect  Backspace=Back	Enter=Connecter  Backspace=Retour
+Enter=Info  A=Actions  Bksp=Edit/Exit  %s=Back	Enter=Infos  A=Actions  Bksp=Modifier/Quitter  %s=Retour
+Enter=Info  A=Actions  Space=Filter  %s=Back	Enter=Infos  A=Actions  Space=Filtre  %s=Retour
+Enter=Next	Enter=Suivant
+Enter=Next    Bksp(empty)=Back	Enter=Suivant    Bksp(vide)=Retour
+Enter=Next   Bksp(empty)=Back	Enter=Suivant   Bksp(vide)=Retour
+Enter=OK  %s=Erase/Back	Enter=OK  %s=Effacer/Retour
+Enter=OK  Bksp=Erase  %s=Back	Enter=OK  Bksp=Effacer  %s=Retour
+Enter=Save  Tab=Field  %s=Erase/Back	Enter=Enregistrer  Tab=Champ  %s=Effacer/Retour
+Enter=Send   %s=Cancel	Enter=Envoyer   %s=Annuler
+Enter=Send  Bksp(empty)=Cancel	Enter=Envoyer  Bksp(vide)=Annuler
+Enter=Send  Esc=Cancel  Bksp=Del	Enter=Envoyer  Esc=Annuler  Bksp=Suppr
+Environment	Environnement
+Errors	Erreurs
+Examined %u file%s. Nothing matching Windows malware was found.\n\nThis reads names and file headers, not contents, so it is a good sign rather than a guarantee.	%u fichier(s)%.0s examiné(s). Aucun malware Windows détecté.\n\nL'analyse lit les noms et les en-têtes, pas le contenu : c'est un bon signe, pas une garantie.
+Export Config	Exporter la config
+Export FAILED (no SD?)	Échec de l'export (pas de SD ?)
+Export FAILED. The card formatted, but the configuration could not be written back to it - try Export from the Config screen.	Échec de l'export. La carte a été formatée, mais la configuration n'a pas pu y être réécrite - essayez Exporter depuis l'écran Config.
+Exported to /camillia/config.yaml	Exporté dans /camillia/config.yaml
+Extra Large	Très grand
+Factory Reset	Réinitialisation
+Factory reset - rebooting...	Réinitialisé - redémarrage...
+Favorite	Favori
+Feb	févr
+February	février
+Feels %d%s   Hum %d%%\nWind %d %s %s\nGusting %d %s	Ressenti %d%s   Hum %d%%\nVent %d %s %s\nRafales %d %s
+Feels like   %d%s\nHumidity     %d%%\nWind         %d %s from %s\nGusting      %d %s	Ressenti     %d%s\nHumidité     %d%%\nVent         %d %s du %s\nRafales      %d %s
+Fetching...	Récupération...
+Filter	Filtre
+Filter Nodes	Filtrer les nœuds
+Filter: %s	Filtre : %s
+Finish	Terminer
+Firmware Update	Mise à jour du firmware
+Firmware Update Check	Vérifier les mises à jour
+Firmware Update: Install %s	Mise à jour : installer %s
+Firmware: %s	Firmware : %s
+Font Size	Taille du texte
+Font Size: %s	Taille du texte : %s
+Font Size: %s%s	Taille du texte : %s%s
+Forget	Oublier
+Format FAILED, and the card could not be remounted.\n\nReboot the device, or format the card on a PC.	Échec du formatage, et la carte n'a pas pu être remontée.\n\nRedémarrez l'appareil ou formatez la carte sur un PC.
+Format FAILED. The card was left as it was and is still mounted.\n\nFormatting it on a PC is the reliable way out.	Échec du formatage. La carte est restée telle quelle et est toujours montée.\n\nLa formater sur un PC est la solution fiable.
+Format the SD card?\n\nThis erases EVERYTHING on it - chat and DM history, the node database, map tiles and your saved configuration - not just the files the scan matched.\n\nIt cannot be undone.	Formater la carte SD ?\n\nCela efface TOUT son contenu - historique des chats et MP, base des nœuds, tuiles de carte et configuration enregistrée - pas seulement les fichiers détectés.\n\nC'est irréversible.
+Formatting SD Card	Formatage de la carte SD
+Found %d network(s)	%d réseau(x) trouvé(s)
+Found %u file%s matching Windows malware:\n	%u fichier(s)%.0s correspondant à un malware Windows :\n
+Freq: %.3f MHz	Fréq : %.3f MHz
+Fri	ven
+From: %s	De : %s
+Full node name when known	Nom complet du nœud s'il est connu
+GPS disabled (using default coordinates)	GPS désactivé (coordonnées par défaut)
+GPS enabled (hardware)	GPS activé (matériel)
+GPS: Disabled (Default Coords)	GPS : Désactivé (coord. par défaut)
+GPS: Enabled (Hardware)	GPS : Activé (matériel)
+Gateway: not known	Passerelle : inconnue
+Grazes terrain - F1=%dm	Frôle le terrain - F1=%dm
+Green	Vert
+HEARD ABOUT	SIGNALÉS PAR D'AUTRES
+Heard %s ago   %u seen, ~%s apart	Entendu il y a %s   %u vus, tous les ~%s
+Heard %s ago   1 seen	Entendu il y a %s   1 vu
+Help	Aide
+High	Élevée
+Hops	Sauts
+Hops: %d of %d	Sauts : %d sur %d
+Hour	Heure
+I(g)nore	I(g)norer
+Identity	Identité
+Ignore	Ignorer
+Imperial	Impérial
+Import Config	Importer la config
+Import FAILED (no file?)	Import ÉCHOUÉ (pas de fichier ?)
+Import failed - enter a name	Échec de l'import - saisissez un nom
+Imported OK - rebooting...	Import réussi - redémarrage...
+Info	Infos
+Install now? The device reboots to update.	Installer maintenant ? L'appareil redémarre pour la mise à jour.
+Invalid base64 key	Clé base64 invalide
+Invalid date/time	Date/heure invalide
+Invert Scrolling: %s	Inverser le défilement : %s
+J/K = Scroll   %s = Close	J/K = Défiler   %s = Fermer
+J/K = Scroll   Bksp = Close	J/K = Défiler   Bksp = Fermer
+J/K = Select   Space = Compose   Enter = Focus   D = Delete	J/K = Choisir   Space = Écrire   Enter = Focus   D = Supprimer
+Jan	janv
+January	janvier
+Jul	juil
+July	juillet
+Jun	juin
+June	juin
+Just announced. Try again in %us.	Annonce déjà faite. Réessayez dans %us.
+Key	Clé
+Keyboard Blink: %s	Clignotement clavier : %s
+Keyboard Light	Éclairage clavier
+Keyboard Light: %s	Éclairage clavier : %s
+Keyboard blink: %s	Clignotement clavier : %s
+Keyboard light %s	Éclairage clavier %s
+Keyboard light %s - after a power cycle	Éclairage clavier %s - après redémarrage électrique
+Keyboard light off	Éclairage clavier coupé
+L/R=Change   Enter=Save   %s=Back	G/D=Changer   Enter=Enregistrer   %s=Retour
+LINE OF SIGHT	LIGNE DE VUE
+LIVE	DIRECT
+LONGEST SILENT	SILENCIEUX DEPUIS LONGTEMPS
+Landscape	Paysage
+Language	Langue
+Language: %s	Langue : %s
+Large	Grand
+Last heard	Dernier contact
+Last heard\nSNR\nHops\nChannel\nSigned	Dernier contact\nSNR\nSauts\nCanal\nSigné
+Lat: %.5f\nLon: %.5f\nAlt: %ld m	Lat : %.5f\nLon : %.5f\nAlt : %ld m
+Leave blank to clear	Laisser vide pour effacer
+Light reminds for %s	Le voyant rappelle pendant %s
+Light reminds until read	Le voyant rappelle jusqu'à lecture
+Lime	Citron vert
+Link	Liaison
+Listening   %d sender%s heard	À l'écoute   %d émetteur(s)%.0s entendu(s)
+Listening: off	Écoute : désactivée
+Live	Direct
+Live Filter	Filtre du direct
+Live feed cleared	Flux direct effacé
+Loading map...	Chargement de la carte...
+Loc	Pos.
+Locate	Localiser
+Locate: %s	Localiser : %s
+Location	Position
+Location Precision	Précision de la position
+Location Precision: %s	Précision de position : %s
+Location rounded to %s	Position arrondie à %s
+Location sent exactly	Position envoyée exacte
+Location sharing off (no position sent)	Partage de position désactivé (aucune position envoyée)
+Location sharing on	Partage de position activé
+Location: %s	Position : %s
+Lock Screen Off	Extinction sur verrouillage
+Lock Screen Off: %s	Extinction verrouillé : %s
+Lock Screen: %s	Écran de verrouillage : %s
+Lock screen	Écran verrouillé
+Lock screen stays on	L'écran de verrouillage reste allumé
+Long name	Nom long
+Long name cannot be empty	Le nom long ne peut pas être vide
+Long name: %s\nEnter a short name (up to 4 chars).	Nom long : %s\nSaisissez un nom court (4 caractères max).
+Long: %s	Long : %s
+Looking for keyboards...	Recherche de claviers...
+Low	Faible
+ME (ACK)	MOI (ACK)
+MQTT Bridge: %s	Pont MQTT : %s
+MQTT Bridge: %s - rebooting...	Pont MQTT : %s - redémarrage...
+MQTT Bridge: Off (WiFi off)	Pont MQTT : Coupé (WiFi coupé)
+MQTT Scan Settings	Réglages du scan MQTT
+MQTT bridge is off	Le pont MQTT est désactivé
+Manual	Manuel
+Map (loading)	Carte (chargement)
+Map (off)	Carte (coupée)
+Map memory unavailable	Mémoire de carte indisponible
+Map unavailable	Carte indisponible
+Mar	mars
+March	mars
+Match the voltage to a meter reading.\nPercent comes from the fuel gauge and does not change.	Faites correspondre la tension à un multimètre.\nLe pourcentage vient de la jauge et ne change pas.
+Match the voltage to a meter reading.\nPercent follows it. 0% = uncalibrated.	Faites correspondre la tension à un multimètre.\nLe pourcentage suit. 0% = non calibré.
+May	mai
+Medium	Moyen
+Mesh Beacons is off.\n\nTurn it on in Config (or under Modules in web config) to decode beacons from other meshes. Receive-only: nothing is transmitted, and an offer is never applied to your radio.	Balises mesh est désactivé.\n\nActivez-le dans Config (ou sous Modules dans la config web) pour décoder les balises d'autres réseaux. Réception seule : rien n'est émis et aucune offre n'est appliquée à votre radio.
+Mesh Beacons: %s	Balises du maillage : %s
+Mesh beacons: %s	Balises du maillage : %s
+Message (I)nfo	(I)nfo du message
+Message Actions	Actions du message
+Message Info	Infos du message
+Messages	Messages
+Messages cleared - rebooting...	Messages effacés - redémarrage...
+Metric	Métrique
+Modem preset	Préréglage du modem
+Mon	lun
+Month	Mois
+Move  Enter=Apply  %s=Back	Déplacer  Enter=Appliquer  %s=Retour
+Move  Enter=Apply  %s=Cancel	Déplacer  Enter=Appliquer  %s=Annuler
+Move  Enter=Change  %s=Cancel	Déplacer  Enter=Changer  %s=Annuler
+Move  Enter=Edit  %s=Back	Déplacer  Enter=Modifier  %s=Retour
+Move  Enter=OK  %s=Cancel	Déplacer  Enter=OK  %s=Annuler
+Move  Enter=Open  %s=Back	Déplacer  Enter=Ouvrir  %s=Retour
+Move  Enter=Pick  %s=Back	Déplacer  Enter=Choisir  %s=Retour
+Move  Enter=Scan  %s=Cancel	Déplacer  Enter=Scanner  %s=Annuler
+Move • Enter=Add • %s=Close	Déplacer • Enter=Ajouter • %s=Fermer
+Move • Enter=Insert • %s=Close	Déplacer • Enter=Insérer • %s=Fermer
+Move • Enter=React • %s=Close	Déplacer • Enter=Réagir • %s=Fermer
+Move • Enter=Send • %s=Close	Déplacer • Enter=Envoyer • %s=Fermer
+Move=Adjust  Enter=Save  %s=Cancel	Déplacer=Régler  Enter=Enregistrer  %s=Annuler
+Move=Adjust  Space=Toggle  Enter=Save  %s=Cancel	Déplacer=Régler  Space=Cocher  Enter=Enregistrer  %s=Annuler
+Move=Preview  Enter=OK  %s=Cancel	Déplacer=Aperçu  Enter=OK  %s=Annuler
+My Message Color	Couleur de mes messages
+My Message Color: %s	Couleur de mes messages : %s
+My Message Color: %s (unchanged)	Couleur de mes messages : %s (inchangée)
+My Message Color: %s - rebooting...	Couleur de mes messages : %s - redémarrage...
+N=Choose WiFi   Enter=Finish   Bksp=Back	N=Choisir WiFi   Enter=Terminer   Bksp=Retour
+NO LINE OF SIGHT	PAS DE LIGNE DE VUE
+NODEINFO + telemetry queued.	NODEINFO + télémétrie en file d'attente.
+NODES	NŒUDS
+NODES (%d%s)	NŒUDS (%d%s)
+NODES [%s] (%d%s)	NŒUDS [%s] (%d%s)
+Name	Nom
+Name: %s\nShort: %s\nID: !%08X\nLast heard: %s\nSNR: %.1f dB\nHops: %u\nChannel: %d\n\nPosition:\n%s\n\nTelemetry:\n%s	Nom : %s\nCourt : %s\nID : !%08X\nDernier contact : %s\nSNR : %.1f dB\nSauts : %u\nCanal : %d\n\nPosition :\n%s\n\nTélémétrie :\n%s
+Name\nShort\nID	Nom\nCourt\nID
+Nav Bar: %s	Barre de navigation : %s
+Neighborhood Info: %s	Infos de voisinage : %s
+Neighborhood info: %s	Infos de voisinage : %s
+Never	Jamais
+New	Nouveau
+New DM	Nouveau MP
+New DM: Select Node	Nouveau MP : choisir un nœud
+New DM: Select Node [%s]	Nouveau MP : choisir un nœud [%s]
+New Message	Nouveau message
+Newest: %s %s	Plus récent : %s %s
+Newest: none heard yet	Plus récent : aucun entendu
+Next	Suivant
+No %s - not saved	Pas de %s - non enregistré
+No %s - not saving	Pas de %s - pas d'enregistrement
+No %s traffic yet\n(filter is on - %s)	Pas encore de trafic %s\n(filtre actif - %s)
+No S&F router heard yet	Aucun routeur S&F entendu
+No SD card is mounted.	Aucune carte SD montée.
+No WiFi network configured	Aucun réseau WiFi configuré
+No beacons heard yet.\n\nA beacon is only audible while its sender has retuned onto this channel, preset and region, and it repeats on that node's own schedule - minutes to hours apart. This list keeps what it hears until you clear it.	Aucune balise entendue.\n\nUne balise n'est audible que lorsque son émetteur s'est réglé sur ce canal, ce préréglage et cette région, et elle se répète selon le calendrier du nœud - de quelques minutes à quelques heures. Cette liste garde ce qu'elle entend jusqu'à ce que vous l'effaciez.
+No elevation server set.\nWeb Config -> Elevation Server (LOS)	Aucun serveur d'altitude défini.\nConfig web -> Elevation Server (LOS)
+No hop path in reply	Pas de chemin de sauts dans la réponse
+No keyboards found yet.\n\nPut the keyboard into pairing mode, then press Scan.\n\nOnly Bluetooth LE keyboards can pair - this hardware has no Bluetooth Classic radio.	Aucun clavier trouvé.\n\nMettez le clavier en mode appairage, puis appuyez sur Scanner.\n\nSeuls les claviers Bluetooth LE peuvent s'appairer - ce matériel n'a pas de radio Bluetooth Classic.
+No known nodes yet	Aucun nœud connu pour l'instant
+No live traffic yet	Pas encore de trafic en direct
+No matches for: %s	Aucun résultat pour : %s
+No messages yet	Aucun message pour l'instant
+No network in that slot	Aucun réseau à cet emplacement
+No network selected	Aucun réseau sélectionné
+No networks found	Aucun réseau trouvé
+No new messages	Aucun nouveau message
+No nodes seen	Aucun nœud vu
+No nodes seen yet.	Aucun nœud vu pour l'instant.
+No position data	Aucune donnée de position
+No position recorded	Aucune position enregistrée
+No position yet.\nNeeds a GPS fix or a set location.	Pas encore de position.\nIl faut un fix GPS ou une position fixée.
+No release notes in this build.	Pas de notes de version dans ce build.
+No reply (%lus)	Pas de réponse (%lus)
+No result details available.	Aucun détail disponible.
+No telemetry data	Aucune donnée de télémétrie
+No weather server set.\nWeb Config -> Weather Server	Aucun serveur météo défini.\nConfig web -> Weather Server
+Node Actions	Actions du nœud
+Node DB cleared - rebooting...	Base des nœuds effacée - redémarrage...
+Node ID: !%08lx	ID du nœud : !%08lx
+Node Name	Nom du nœud
+Node Name: %s (%s)	Nom du nœud : %s (%s)
+Node Name: %s (%s)%s	Nom du nœud : %s (%s)%s
+Node id: !%08lx	Id du nœud : !%08lx
+Node info	Info nœud
+Nodes and SD archive cleared - rebooting...	Nœuds et archive SD effacés - redémarrage...
+None	Aucun
+Not counting - out of memory	Pas de comptage - mémoire insuffisante
+Not enough free heap to hold the topic table.\n\nClose a few screens (or reboot) and try again.	Pas assez de mémoire libre pour la table des sujets.\n\nFermez quelques écrans (ou redémarrez) et réessayez.
+Nothing heard yet	Rien entendu pour l'instant
+Nothing recorded yet - nothing to send	Rien d'enregistré - rien à envoyer
+Nothing was removed. The files may have gone already, or the card may be write-protected.	Rien n'a été supprimé. Les fichiers ont peut-être déjà disparu, ou la carte est protégée en écriture.
+Notification Light Timeout	Durée du voyant de notification
+Notification Light Timeout: %s	Durée du voyant de notification : %s
+Notification Sound	Son de notification
+Notification Sound: %s	Son de notification : %s
+Notification sound: %s	Son de notification : %s
+Nov	nov
+November	novembre
+OFF	COUPÉ
+OTA disabled on Cardputer build	OTA désactivée sur la version Cardputer
+OTA needs the factory image (flash layout)	L'OTA exige l'image d'usine (partitions flash)
+OTA request failed (NVS write). Retry.	Échec de la requête OTA (écriture NVS). Réessayez.
+OTA worker completed. Check status.	OTA terminée. Vérifiez l'état.
+Oct	oct
+October	octobre
+Off	Non
+Offers: %s	Offres : %s
+Old Map Files Found	Anciens fichiers de carte trouvés
+Oldest: %s %s	Plus ancien : %s %s
+Oldest: none heard yet	Plus ancien : aucun entendu
+On	Oui
+On (global off)	Oui (global désactivé)
+On (listening)	Oui (à l'écoute)
+Open network (leave blank)	Réseau ouvert (laisser vide)
+Optional WiFi setup.\nNo network selected.\nChoose WiFi now or finish without WiFi.	Configuration WiFi facultative.\nAucun réseau sélectionné.\nChoisissez un WiFi maintenant ou terminez sans.
+Optional WiFi setup.\nSelected: %s\nChoose a different network or finish.	Configuration WiFi facultative.\nSélectionné : %s\nChoisissez un autre réseau ou terminez.
+Orientation: %s	Orientation : %s
+Other	Autres
+Outline	Contour
+PKI key: %s	Clé PKI : %s
+PSRAM free: %lu KB\nPSRAM total: %lu KB\nFlash: %lu KB\nSketch: %lu KB\nApp free: %lu KB	PSRAM libre : %lu Ko\nPSRAM totale : %lu Ko\nFlash : %lu Ko\nSketch : %lu Ko\nApp libre : %lu Ko
+PSRAM: none\nFlash: %lu KB\nSketch: %lu KB\nApp free: %lu KB	PSRAM : aucune\nFlash : %lu Ko\nSketch : %lu Ko\nApp libre : %lu Ko
+Pair	Appairer
+Pair BT Keyboard: %s	Appairer un clavier BT : %s
+Pair BT Keyboard: (none)	Appairer un clavier BT : (aucun)
+Percent	Pourcentage
+Pink	Rose
+Please re-flash from Camillia's website for language support.	Veuillez reflasher depuis le site de Camillia pour la prise en charge des langues.
+Precise	Précise
+Preparing state maps...	Préparation des cartes d'état...
+Preset	Préréglage
+Preset (%s)	Préréglage (%s)
+Preset already %s.	Préréglage déjà %s.
+Preset scan already running	Scan de préréglage déjà en cours
+Preset: %s	Préréglage : %s
+Preset: %s - rebooting...	Préréglage : %s - redémarrage...
+Public key preserved\n\n	Clé publique conservée\n\n
+Purple	Violet
+Pwr %d dBm Hops %d	Puiss %d dBm Sauts %d
+R=Refresh  %s=Back	R=Actualiser  %s=Retour
+RECENTLY HEARD	ENTENDUS RÉCEMMENT
+Radio busy - retry in %lus	Radio occupée - nouvel essai dans %lus
+Radio not ready	Radio non prête
+Re(q)uest Node	Demander le nœud (Q)
+Ready	Prêt
+Rebooting into OTA minimal mode...	Redémarrage en mode OTA minimal...
+Received over: %s %s	Reçu via : %s %s
+Red	Rouge
+Relayed to us by: %s	Relayé par : %s
+Relayed to us by: %s (from MQTT)	Relayé par : %s (depuis MQTT)
+Relayed to us by: nobody, heard directly	Relayé par : personne, entendu directement
+Relayed to us by: not reported by the relaying node	Relayé par : non indiqué par le nœud relais
+Relayed to us by: the sender itself	Relayé par : l'émetteur lui-même
+Relayed: %lu	Relayés : %lu
+Release Channel: %s - checking...	Canal de version : %s - vérification...
+Release Channel: %s%s	Canal de version : %s%s
+Release Notes	Notes de version
+Release Notes  %s	Notes de version  %s
+Remove	Supprimer
+Removed %s	%s supprimé
+Removed %s - no networks left, AP mode	%s supprimé - plus de réseau, mode AP
+Removed %s - now %s	%s supprimé - maintenant %s
+Removed %u file%s. %u could not be deleted - the card may be write-protected.\n\nRe-run the scan to check.	%u fichier(s)%.0s supprimé(s). %u n'ont pas pu être supprimés - la carte est peut-être protégée en écriture.\n\nRelancez l'analyse pour vérifier.
+Removed %u file%s.\n\nThis card looked clean afterwards, but the scan reads names and headers, not contents - it cannot promise the card is clean. Reformatting is the only answer that can.	%u fichier(s)%.0s supprimé(s).\n\nLa carte semblait saine ensuite, mais l'analyse lit les noms et les en-têtes, pas le contenu - elle ne peut pas le garantir. Seul un formatage le peut.
+Removing Files	Suppression des fichiers
+Removing legacy maps...	Suppression des anciennes cartes...
+Replay already requested	Relecture déjà demandée
+Replay not sent: %s	Relecture non envoyée : %s
+Replay requested (last %lu min)	Relecture demandée (dernières %lu min)
+Reply	Répondre
+Reply from %s	Réponse de %s
+Reply from %s (%lus)	Réponse de %s (%lus)
+Request (P)osition	Demander la (P)osition
+Request Node	Demander le nœud
+Request Position	Demander la position
+Request S&F Replay (%s)	Demander la relecture S&F (%s)
+Request S&F Replay (no router)	Demander la relecture S&F (pas de routeur)
+Requested (last %lu min)	Demandé (dernières %lu min)
+Rescan	Rescanner
+Reset	Réinitialiser
+Reset Chat Colors	Réinitialiser les couleurs du chat
+Reset to Default	Rétablir par défaut
+Restore failed: every slot is favorited, so there is no room. Unfavorite a node and try again.	Échec de la restauration : tous les emplacements sont des favoris, il n'y a pas de place. Retirez un favori et réessayez.
+Restore failed: the archived record could not be read.	Échec de la restauration : l'enregistrement archivé est illisible.
+Restore node?	Restaurer le nœud ?
+Role: %s%s	Rôle : %s%s
+S(h)are	Partager (H)
+SD Card Format	Formatage de la carte SD
+SD Card Scan	Analyse de la carte SD
+SD scan cancelled	Scan SD annulé
+SD: %s %s @%lu kHz	SD : %s %s @%lu kHz
+SD: %s, %s, %u fails	SD : %s, %s, %u échecs
+SD: no card	SD : pas de carte
+SNR   cur %s  avg %.1fdB  min %.1f  max %.1f   n=%d\nRSSI  cur %s  avg %.0fdBm min %.0f  max %.0f   n=%d	SNR   act %s  moy %.1fdB  min %.1f  max %.1f   n=%d\nRSSI  act %s  moy %.0fdBm min %.0f  max %.0f   n=%d
+SNR   cur --  avg --  min --  max --   n=0\nRSSI  cur --  avg --  min --  max --   n=0	SNR   act --  moy --  min --  max --   n=0\nRSSI  act --  moy --  min --  max --   n=0
+Sat	sam
+Save	Enregistrer
+Save failed - cannot write %s	Échec de l'enregistrement - écriture impossible sur %s
+Save failed - too many this second	Échec de l'enregistrement - trop dans la même seconde
+Save while discovering	Enregistrer pendant la découverte
+Save while scanning	Enregistrer pendant le scan
+Saved %s	%s enregistré
+Saved: %s	Enregistré : %s
+Scan	Scanner
+Scan %s - saved %s	Scan %s - enregistré %s
+Scan Networks	Chercher des réseaux
+Scan SD Card for Malware%s	Analyser la SD (malware)%s
+Scan a preset	Scanner un préréglage
+Scan cancelled	Scan annulé
+Scan failed - Rescan to try again	Échec du scan - relancez pour réessayer
+Scan send failed	Échec d'envoi du scan
+Scanning %s %s/%s	Scan %s %s/%s
+Scanning %s...	Scan de %s...
+Scanning SD Card	Analyse de la carte SD
+Scanning WiFi networks...	Recherche des réseaux WiFi...
+Screen	Écran
+Screen Timeout	Mise en veille de l'écran
+Screen Timeout: %s	Mise en veille écran : %s
+Screen off after %s on lock	Écran éteint après %s verrouillé
+Screen orientation	Orientation de l'écran
+Screen sleeps after %s	L'écran se met en veille après %s
+Screen stays on	L'écran reste allumé
+Select a conversation	Choisissez une conversation
+Select this node's role.	Choisissez le rôle de ce nœud.
+Select your radio region/preset.	Choisissez la région/le préréglage radio.
+Selection settling - press Enter again	Sélection en cours - appuyez à nouveau sur Enter
+Sen(d) DM	Envoyer un MP (D)
+Send	Envoyer
+Send DM	Envoyer un MP
+Send failed	Échec de l'envoi
+Send to channel?	Envoyer sur le canal ?
+Send top 5 to	Envoyer les 5 premiers à
+Sender Info	Infos de l'expéditeur
+Sending request...	Envoi de la requête...
+Sent by this node.	Envoyé par ce nœud.
+Sent to %s	Envoyé à %s
+Sent. Waiting for route ACK...	Envoyé. En attente de l'ACK de route...
+Sep	sept
+September	septembre
+Server answered, but not with\nelevation data. Check the proxy\npoints at the elevation service.	Le serveur a répondu, mais sans\ndonnées d'altitude. Vérifiez que le proxy\npointe vers le service d'altitude.
+Server answered, but not with\nweather data. Check the proxy.	Le serveur a répondu, mais sans\ndonnées météo. Vérifiez le proxy.
+Set message colour to %s and reboot?	Passer la couleur des messages à %s et redémarrer ?
+Share	Partager
+Share Location: %s	Partager la position : %s
+Short	Court
+Short name	Nom court
+Short name cannot be empty	Le nom court ne peut pas être vide
+Short: %s	Court : %s
+Show Archived Nodes: %s	Afficher les nœuds archivés : %s
+Show Archived Nodes: %s%s	Afficher les nœuds archivés : %s%s
+Signal: SNR %.1f dB, RSSI %.0f dBm	Signal : SNR %.1f dB, RSSI %.0f dBm
+Silver	Argent
+Sky	Ciel
+Small	Petit
+Splash Melody: %s	Mélodie de démarrage : %s
+Splash melody: %s	Mélodie de démarrage : %s
+Stale - 	Périmé - 
+State Map	Carte d'état
+State map disabled	Carte des états désactivée
+State map unavailable	Carte d'état indisponible
+Stay on	Toujours allumé
+Storage: %s %s	Stockage : %s %s
+Storage: %s (not mounted)	Stockage : %s (non monté)
+Store&Fwd Client: %s	Client Store&Fwd : %s
+Store&Fwd client is off	Le client Store&Fwd est désactivé
+Sun	dim
+Sweep	Balayage
+Sweep already running	Balayage déjà en cours
+Sweep cancelled	Balayage annulé
+Sweep done: %d new (%lus)	Balayage terminé : %d nouveaux (%lus)
+Sweep send failed	Échec d'envoi du balayage
+Sweep/Scan Settings	Réglages balayage/scan
+Sweeping...	Balayage...
+Sweeping... %s/%s	Balayage... %s/%s
+Switch to %s and reboot?	Passer à %s et redémarrer ?
+Switch to theme %s and reboot?	Passer au thème %s et redémarrer ?
+System Stats	Statistiques système
+Tall	Haut
+Tall, turned 180	Haut, retourné à 180
+Tap = Open   Long-press 3s = Delete   DM below = Back	Toucher = Ouvrir   Appui 3s = Supprimer   MP en bas = Retour
+Tap Next to continue	Touchez Suivant pour continuer
+Tap Next to continue, or Back	Touchez Suivant pour continuer, ou Retour
+Tap a channel	Touchez un canal
+Tap a channel to edit	Touchez un canal pour le modifier
+Tap a field to change it	Touchez un champ pour le changer
+Tap a field to edit, then Save	Touchez un champ, modifiez, puis Enregistrer
+Tap a node for actions   Nodes below = Back	Touchez un nœud pour les actions   Nœuds en bas = Retour
+Tap a node to start a DM	Touchez un nœud pour démarrer un MP
+Tap a preset to apply.	Touchez un préréglage pour l'appliquer.
+Tap a preset, then Scan	Touchez un préréglage, puis Scanner
+Tap a size to apply	Touchez une taille pour l'appliquer
+Tap one to apply.	Touchez-en un pour l'appliquer.
+Tap to preview	Touchez pour prévisualiser
+Teal	Sarcelle
+Telemetry	Télémétrie
+Temp: %.1f C\nHumidity: %.1f%%\nPressure: %.1f hPa	Temp : %.1f C\nHumidité : %.1f%%\nPression : %.1f hPa
+Temp: %.1f F\nHumidity: %.1f%%\nPressure: %.2f inHg	Temp : %.1f F\nHumidité : %.1f%%\nPression : %.2f inHg
+Text	Texte
+The card was formatted but could not be remounted. Reboot the device and it should come up clean.	La carte a été formatée mais n'a pas pu être remontée. Redémarrez l'appareil et elle devrait être propre.
+Theme	Thème
+Theme: %s	Thème : %s
+Theme: %s (unchanged)	Thème : %s (inchangé)
+Theme: %s - rebooting...	Thème : %s - redémarrage...
+These files are not used by the new tile map. Remove them to reclaim storage?	La nouvelle carte en tuiles n'utilise pas ces fichiers. Les supprimer pour libérer de l'espace ?
+This node	Ce nœud
+This node has no position yet.\nNeeds a GPS fix or a set location.	Ce nœud n'a pas encore de position.\nIl faut un fix GPS ou une position fixée.
+Thu	jeu
+Time and Date	Date et heure
+Time and Date: %s	Date et heure : %s
+Time source: Internet / GPS	Source de l'heure : Internet / GPS
+To close hit backspace.  (I)nformation	Backspace pour fermer.  (I)nformations
+Tools	Outils
+Touch Navigation:	Navigation tactile :
+Transport Symbols:\n%s Radio Transmission\n%s MQTT Transmission	Symboles de transport :\n%s Transmission radio\n%s Transmission MQTT
+Tue	mar
+Turn BT Keyboard on first	Activez d'abord le clavier BT
+Turn MQTT Bridge %s and reboot?	Mettre le pont MQTT sur %s et redémarrer ?
+Type = Filter   Bksp = Edit Filter   Enter = Open DM   Esc = Back	Taper = Filtrer   Bksp = Modifier le filtre   Enter = Ouvrir MP   Esc = Retour
+Type = Filter   Bksp = Edit/Close Filter   Enter = Open DM	Taper = Filtrer   Bksp = Modifier/fermer le filtre   Enter = Ouvrir MP
+Type = Filter   Enter = Open DM   Bksp = Back	Taper = Filtrer   Enter = Ouvrir MP   Bksp = Retour
+Type = Filter   Enter = Open DM   Esc = Back	Taper = Filtrer   Enter = Ouvrir MP   Esc = Retour
+Type message...	Écrivez un message...
+Type to filter nodes	Tapez pour filtrer les nœuds
+Type, then tap OK	Tapez, puis OK
+Type=Filter  Enter=Done  Bksp=Edit/Exit  %s=Back	Taper=Filtrer  Enter=Terminé  Bksp=Modifier/Quitter  %s=Retour
+Un(f)avorite	Retirer (f)avori
+Un(m)ute	Réactiver le son (M)
+Unfavorite	Retirer des favoris
+Uni(g)nore	Ne plus i(g)norer
+Unignore	Ne plus ignorer
+Units: %s	Unités : %s
+Unknown	Inconnu
+Until read	Jusqu'à lecture
+Up to date (%s)	À jour (%s)
+Up/Down	Haut/Bas
+Up/Down = Select   Space = Compose   Enter = Focus   %s = Delete   %s = Back	Haut/Bas = Choisir   Space = Écrire   Enter = Focus   %s = Supprimer   %s = Retour
+Up/Down = Select   Space = Compose   Enter = Focus   D = Delete	Haut/Bas = Choisir   Space = Écrire   Enter = Focus   D = Supprimer
+Up/Down/J/K = Scroll   %s = Close	Haut/Bas/J/K = Défiler   %s = Fermer
+Up/Down/J/K = Scroll   Bksp = Close	Haut/Bas/J/K = Défiler   Bksp = Fermer
+Up/Down=Change  Enter=Save  %s=Cancel	Haut/Bas=Changer  Enter=Enregistrer  %s=Annuler
+Up/Down=Select  Left/Right=Change  Enter=Save  %s=Cancel	Haut/Bas=Choisir  Gauche/Droite=Changer  Enter=Enregistrer  %s=Annuler
+Update	Mise à jour
+Update check failed: %s	Échec de la vérification : %s
+Update check needs WiFi connected	La vérification des mises à jour requiert le WiFi connecté
+Update check needs WiFi on	La vérification des mises à jour requiert le WiFi activé
+Update check skipped (a dialog was open)	Vérification des mises à jour ignorée (une fenêtre était ouverte)
+Uplinked by: %s	Remonté par : %s
+Uplinked by: the sender itself	Remonté par : l'émetteur lui-même
+Use arrows to choose, then tap Next	Choisissez avec les flèches, puis Suivant
+Used: %lu KB (%lu%%)\nTotal: %lu KB\nFree: %lu KB\nMin free: %lu KB\nMax block: %lu KB	Utilisée : %lu Ko (%lu%%)\nTotale : %lu Ko\nLibre : %lu Ko\nLibre min : %lu Ko\nBloc max : %lu Ko
+VNC Host failed to allocate PSRAM	VNC Host n'a pas pu allouer la PSRAM
+VNC Host off	VNC Host coupé
+VNC Host on\nOpen http://%s/ and select the Remote tab	VNC Host actif\nOuvrez http://%s/ et l'onglet Remote
+VNC Host on\nhttp://%s:%u/	VNC Host actif\nhttp://%s:%u/
+VNC Host: Off	VNC Host : Coupé
+VNC Host: Off (WiFi off)	VNC Host : Coupé (WiFi coupé)
+VNC Host: On (browser connected)	VNC Host : Actif (navigateur connecté)
+VNC Host: On (network disconnected)	VNC Host : Actif (réseau déconnecté)
+VNC Host: Unavailable (WiFi not connected)	VNC Host : Indisponible (WiFi non connecté)
+Voltage	Tension
+Volume	Volume
+Volume: %u%%	Volume : %u%%
+W = Scan   S = Send   C = Reset   %s = Back	W = Scanner   S = Envoyer   C = Réinit.   %s = Retour
+W = Sweep   P = Preset   C = %s   %s = Back	W = Balayer   P = Préréglage   C = %s   %s = Retour
+W = Sweep   P = Preset   C = %s   S = Save   %s = Back	W = Balayer   P = Préréglage   C = %s   S = Enregistrer   %s = Retour
+Wait %lus before sending again	Attendez %lus avant de renvoyer
+Wait %lus between sweeps	Attendez %lus entre deux balayages
+Waiting for Wi-Fi...	En attente du Wi-Fi...
+Watching %s/2/e/#\n\nNo messages yet. Channels appear here as they are published, newest at the bottom, with the number of messages seen on each.	Surveillance de %s/2/e/#\n\nPas encore de messages. Les canaux apparaissent ici au fil des publications, les plus récents en bas, avec le nombre de messages vus pour chacun.
+Weather	Météo
+Weather - %s	Météo - %s
+Weather server error (HTTP %d).	Erreur du serveur météo (HTTP %d).
+Web Config disabled	Config web désactivée
+Web Config locked while MQTT is on	Config web verrouillée tant que MQTT est actif
+Web Config start failed	Échec du démarrage de la config web
+Web Config stopped.\n\nThe Bluetooth keyboard and Web Config share one radio and cannot run at the same time.\n\nTurn the keyboard off to use Web Config again.	Config web arrêtée.\n\nLe clavier Bluetooth et la config web partagent une radio et ne peuvent pas fonctionner en même temps.\n\nDésactivez le clavier pour réutiliser la config web.
+Web Config: Disabled	Config web : Désactivée
+Web Config: Enabled	Config web : Activée
+Web Config: Off (MQTT on)	Config web : Coupée (MQTT actif)
+Web Config: Off (WiFi off)	Config web : Coupée (WiFi coupé)
+Web Config: On	Config web : activée
+Web Config: On (Lite)	Config web : activée (Lite)
+Web Config: On (chat PAUSED)	Config web : Active (chat EN PAUSE)
+Web config: %s\n\nChat is PAUSED while web config runs - this device needs that memory for Wi-Fi. Messages sent to you now are not received or stored.\n\nTurn web config off to resume messaging.	Config web : %s\n\nLe chat est EN PAUSE pendant la config web - l'appareil a besoin de cette mémoire pour le Wi-Fi. Les messages envoyés maintenant ne sont ni reçus ni enregistrés.\n\nDésactivez la config web pour reprendre la messagerie.
+Wed	mer
+Welcome to Camillia for Meshtastic	Bienvenue dans Camillia pour Meshtastic
+Wheel/j-k=Change   Enter=Next	Molette/j-k=Changer   Enter=Suivant
+White	Blanc
+Wi-Fi needed to fetch conditions.	Wi-Fi requis pour obtenir la météo.
+Wi-Fi needed to fetch the\nterrain profile for this path.	Wi-Fi requis pour obtenir le\nprofil du terrain de ce trajet.
+WiFi connected: %s	WiFi connecté : %s
+WiFi is off	Le WiFi est désactivé
+WiFi not connected	WiFi non connecté
+WiFi password	Mot de passe WiFi
+WiFi selected: %s	WiFi choisi : %s
+WiFi: Off	WiFi : Coupé
+WiFi: On (%s)	WiFi : Actif (%s)
+WiFi: On (AP MODE ONLY)	WiFi : Actif (MODE AP SEUL)
+WiFi: On (AP mode)	WiFi : Actif (mode AP)
+WiFi: On (connecting %s)	WiFi : Actif (connexion %s)
+Wide	Large
+Within %s	À %s près
+Writing a new filesystem...	Écriture d'un nouveau système de fichiers...
+X-Large	Très grand
+Y/Enter=Import   N/Bksp=Skip	Y/Enter=Importer   N/Bksp=Passer
+Year	Année
+Yellow	Jaune
+Yes	Oui
+[%s] no match	[%s] aucun résultat
+[radio] init failed	[radio] échec de l'init
+\n%lu min ago	\nil y a %lu min
+\n%s, %lu min ago	\n%s, il y a %lu min
+\n+%u more	\n+%u de plus
+\nT-Deck trackball: hold click 2s to sleep	\nTrackball du T-Deck : maintenir 2 s pour la veille
+\n\nDelete them? Nothing else on the card is touched.\n\nFormat erases the whole card instead - the only certain fix.	\n\nLes supprimer ? Rien d'autre sur la carte n'est touché.\n\nLe formatage efface toute la carte - la seule solution sûre.
+all rates tried	toutes les vitesses essayées
+base64 key	clé base64
+ch %s   air %s	can %s   air %s
+channel	canal
+check requested	vérification demandée
+exact	exacte
+j/k or </>=Adjust  Up/Dn=Row  Enter=Save  Back=Cancel	j/k ou </>=Régler  Haut/Bas=Ligne  Enter=Enregistrer  Back=Annuler
+j/k=Adjust  </>=Row  Enter=Save  Backspace=Cancel	j/k=Régler  </>=Ligne  Enter=Enregistrer  Backspace=Annuler
+j/k=Adjust  Enter=Save  Backspace=Cancel	j/k=Régler  Enter=Enregistrer  Backspace=Annuler
+j/k=Adjust  Wheel=Row  Enter=Save  Backspace=Cancel	j/k=Régler  Molette=Ligne  Enter=Enregistrer  Backspace=Annuler
+j/k=Change   Enter=Next   Bksp=Back	j/k=Changer   Enter=Suivant   Bksp=Retour
+low	faible
+missing	absente
+never	jamais
+no key	pas de clé
+not seen	non vue
+off	désactivé
+on	activé
+one of: 	l'un de : 
+one rate tried	une vitesse essayée
+present	présente
+press F to change	appuyez sur F pour changer
+retry %lus	nouvel essai %lus
+retry now	nouvel essai maintenant
+sensor %.2f V    trim %s	capteur %.2f V    corr. %s
+sensor: read failed	capteur : échec de lecture
+stay on	toujours allumé
+tap Filter to change	touchez Filtre pour changer
+unavailable	indisponible
+unknown	inconnu
+unknown date	date inconnue
+unknown error	erreur inconnue
+unknown node (id ends ..%02x)	nœud inconnu (id finissant par ..%02x)
+unset	non défini
+until read	jusqu'à lecture
