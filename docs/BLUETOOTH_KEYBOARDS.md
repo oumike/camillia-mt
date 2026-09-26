@@ -1,7 +1,7 @@
 # Bluetooth Keyboards
 
 > **Status: implemented on the keyboard-less Heltec builds** (`heltec-v4`,
-> `heltec-v4-vertical`) **and `wio-tracker-l2`**. These boards use an on-screen keyboard,
+> `heltec-v4-vertical`, `heltec-r8`, `heltec-r8-vertical`) **and `wio-tracker-l2`**. These boards use an on-screen keyboard,
 > so an external one adds a second text-input path. Every other build is
 > unchanged and cannot pair a keyboard. Nothing in the
 > implementation is board-specific — the `HAS_BLE_KEYBOARD` macro in

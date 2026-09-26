@@ -351,7 +351,12 @@ DEVICE_TDISPLAY_P4"
 // board-specific — this macro plus a build_src_filter entry is the entire gate
 // — but the NimBLE stack costs 30-40 KB of internal DRAM while it is running,
 // so BLE remains an explicit per-board opt-in.
-#if defined(DEVICE_HELTEC_V4_EXPANSION) || defined(DEVICE_WIO_TRACKER_L2)
+//
+// DEVICE_HELTEC_R8 is listed even though that build also defines
+// DEVICE_HELTEC_V4_EXPANSION: the R8 is an opt-in in its own right, and
+// dropping the V4 flag from its env must not quietly take the keyboard with it.
+#if defined(DEVICE_HELTEC_V4_EXPANSION) || defined(DEVICE_HELTEC_R8) \
+    || defined(DEVICE_WIO_TRACKER_L2)
 #  define HAS_BLE_KEYBOARD 1
 #else
 #  define HAS_BLE_KEYBOARD 0
