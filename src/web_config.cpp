@@ -11,6 +11,7 @@
 #include "admin_client.h"   // the help text, which is the firmware's, not the page's
 #include "web_icon.h"
 #include "node_db.h"
+#include "wardrive_log.h"
 #include "channel_mgr.h"
 #include "dm_mgr.h"
 #include <WiFi.h>
@@ -5142,7 +5143,55 @@ static void sendConfigPage(const char *msg = "", bool lite = false) {
                 "&#11015; Export Node List (CSV)</a></p>"
                 "<p style='font-size:.82em;color:#888;margin:-.6em 0 1em'>"
                 "Downloads every node currently known to the device, plus any "
-                "previously archived nodes if an archive exists.</p>";
+                "previously archived nodes if an archive exists. The "
+                "<code>mapLat</code>/<code>mapLon</code> columns hold the node's "
+                "own position when it reports one, else where this device was "
+                "when it heard the node strongest (<code>mapSource</code> says "
+                "which).</p>";
+
+        // ── Wardrive log ────────────────────────────────────────────────────
+        {
+            const bool wdOk = wardriveLogFilePath() && wardriveLogAvailable();
+            html += "<label style='display:flex;align-items:center;gap:.5em;margin-top:.6em'>"
+                    "<input type='checkbox' name='wardrive_log' value='1'";
+            if (gCfg->wardriveLogEnabled) html += " checked";
+            if (!wdOk) html += " disabled";
+            html += " style='width:auto;margin:0'>"
+                    "<span>Wardrive log (every sighting + GPS fix)</span></label>";
+            html += "<p style='font-size:.82em;color:#888;margin:.3em 0 .6em'>";
+            if (!wardriveLogFilePath()) {
+                html += "Unavailable: this board has no file storage.";
+            } else if (!wdOk) {
+                html += "Unavailable: no storage mounted. Insert a card and reboot.";
+            } else {
+                html += "Appends one line per node per 30&nbsp;s (or per 50&nbsp;m "
+                        "moved) to <code>";
+                html += wardriveLogFilePath();
+                html += "</code>: time, RSSI/SNR, hops and your own GPS position. "
+                        "Radio only, and only with a GPS fix.";
+                char st[200];
+                snprintf(st, sizeof(st),
+                         "<br><b>This session:</b> %lu line(s), %lu node(s), "
+                         "%lu skipped without GPS fix, %lu dropped. GPS: %s",
+                         (unsigned long)wardriveLogLines(),
+                         (unsigned long)wardriveLogNodes(),
+                         (unsigned long)wardriveLogSkippedNoFix(),
+                         (unsigned long)wardriveLogDropped(),
+                         gpsHasFix() ? "fix" : "<b style='color:#c0392b'>NO FIX</b>");
+                html += st;
+            }
+            html += "</p>";
+            if (wdOk) {
+                html += "<p style='margin:.2em 0 .4em'><a href='/wardrive.csv'"
+                        " style='display:inline-block;padding:.4em 1.2em;background:#3b82f6;"
+                        "color:#fff;border-radius:3px;text-decoration:none;font-size:.95em'>"
+                        "&#11015; Download Wardrive Log (CSV)</a></p>"
+                        "<form method='POST' action='/clear-wardrive' style='margin:0 0 1em'"
+                        " onsubmit=\"return confirm('Delete the wardrive log file? Download it first if you need it.')\">"
+                        "<button type='submit' style='background:#c0392b'>"
+                        "Clear Wardrive Log</button></form>";
+            }
+        }
         sectionEnd(html, lite);
     }
 
@@ -7894,6 +7943,10 @@ static void handlePostSave() {
         gCfg->nodeArchiveEnabled = server.hasArg("node_archive");
         gCfg->nodeArchiveShow    = server.hasArg("node_archive_show");
     }
+    // Same disabled-checkbox guard as the archive above.
+    if (wardriveLogFilePath() && wardriveLogAvailable()) {
+        gCfg->wardriveLogEnabled = server.hasArg("wardrive_log");
+    }
     gCfg->autoFavoriteEnabled = server.hasArg("autofav");
     if (server.hasArg("autofav_range")) {
         // Shown in km or miles per the Units setting; stored in meters. Read in
@@ -8163,10 +8216,14 @@ static void handlePostSave() {
     RhinoConfig cfgMasked = *gCfg;
     cfgMasked.fontSize = cfgBefore.fontSize;
     cfgMasked.spellCheckEnabled = cfgBefore.spellCheckEnabled;
+    // Mirrored into wardrive_log by the main loop every pass, so toggling it
+    // needs no reboot -- and a reboot would also wipe the session counters.
+    cfgMasked.wardriveLogEnabled = cfgBefore.wardriveLogEnabled;
     const bool fontChanged  = (gCfg->fontSize != cfgBefore.fontSize);
     const bool spellChanged = (gCfg->spellCheckEnabled != cfgBefore.spellCheckEnabled);
+    const bool wardriveChanged = (gCfg->wardriveLogEnabled != cfgBefore.wardriveLogEnabled);
     const bool liveOnly = (memcmp(&cfgMasked, &cfgBefore, sizeof(RhinoConfig)) == 0)
-                          && (fontChanged || spellChanged);
+                          && (fontChanged || spellChanged || wardriveChanged);
 
     if (liveOnly) {
         redirectHomeWithFlash(fontChanged ? "Saved. Font size applied." : "Saved.");
@@ -9256,6 +9313,50 @@ static void handleGetNodesCsv() {
     server.sendContent("");   // terminate the chunked response
 }
 
+// The wardrive log, streamed from storage as-is. Flushed first so whatever the
+// main loop has not written yet is in the download too.
+static void handleGetWardriveCsv() {
+    if (!isLoggedIn()) { redirect("/login"); return; }
+    const char *path = wardriveLogFilePath();
+    wardriveLogFlush();
+    if (!path || !sdBegin() || !storageFs().exists(path)) {
+        server.send(404, "text/plain", "No wardrive log yet (needs a GPS fix and heard nodes).");
+        return;
+    }
+    File f = storageFs().open(path, FILE_READ);
+    if (!f) { server.send(500, "text/plain", "Could not open the wardrive log."); return; }
+
+    char fileName[64];
+    snprintf(fileName, sizeof(fileName), "camillia-wardrive-%s.csv",
+             (gCfg && gCfg->nodeShort[0]) ? gCfg->nodeShort : "node");
+    char cd[128];
+    snprintf(cd, sizeof(cd), "attachment; filename=\"%s\"", fileName);
+    server.sendHeader("Content-Disposition", cd);
+    server.sendHeader("Cache-Control", "no-store");
+    gSendAborted = false;
+    server.setContentLength(CONTENT_LENGTH_UNKNOWN);
+    server.send(200, "text/csv", "");
+
+    // Straight from the file in fixed blocks: the log grows for as long as a
+    // drive lasts, so it is never assembled in RAM. sendSliced() frames each
+    // block and reports an abandoned response.
+    static char buf[1024];   // static: off the WebServer task's stack
+    bool ok = true;
+    while (ok && f.available()) {
+        const int n = f.read((uint8_t *)buf, sizeof(buf));
+        if (n <= 0) break;
+        ok = sendSliced(buf, (size_t)n, "wardrive csv");
+    }
+    f.close();
+    if (ok) server.sendContent("");
+}
+
+static void handlePostClearWardrive() {
+    if (!isLoggedIn()) { redirect("/login"); return; }
+    redirectHomeWithFlash(wardriveLogClear() ? "Wardrive log cleared."
+                                             : "Could not clear the wardrive log (no storage?).");
+}
+
 // Export every stored message as CSV, streamed straight to the browser. Web
 // config only, and deliberately never written to the card: the device already
 // persists chat to keep it across reboots, and a second copy sitting in the
@@ -10067,6 +10168,8 @@ static void registerCommonRoutes() {
 #endif
     onRoute("/nodes.csv",         HTTP_GET,  handleGetNodesCsv);
     onRoute("/messages.csv",      HTTP_GET,  handleGetMessagesCsv);
+    onRoute("/wardrive.csv",      HTTP_GET,  handleGetWardriveCsv);
+    onRoute("/clear-wardrive",    HTTP_POST, handlePostClearWardrive);
     onRoute("/export",            HTTP_GET,  handleGetExport);
     onRoute("/import",            HTTP_POST, handleImportDone, handleImportUpload);
 #if HAS_UI_COLOR_OPTIONS

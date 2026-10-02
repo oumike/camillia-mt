@@ -502,6 +502,9 @@
 // nobody visits, never somewhere a device lands on its own.
 #define MY_OTA_AUTOUPDATE   OTA_AUTO_UPDATE_OFF
 #define MY_NODE_ARCHIVE_EN  0   // opt-in: archive nodes evicted from the full table to SD
+#ifndef MY_WARDRIVE_LOG_EN
+#define MY_WARDRIVE_LOG_EN  0   // opt-in: log every radio sighting + own GPS fix to /camillia/wardrive.csv
+#endif
 #define MY_AUTOFAV_ENABLED  0      // opt-in: auto-favorite nodes within range
 // Auto-favorite threshold, in meters. One round unit in whichever system the
 // display is set to, so the field reads "1.00" rather than "0.62" or "1.61"

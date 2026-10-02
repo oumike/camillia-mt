@@ -821,6 +821,43 @@ static void gpsSendNmea(const char *body) {
     _serial.flush();
 }
 
+// Best-effort: ask the receiver to track every constellation it supports
+// instead of whatever subset it powered up with. More satellites in view means
+// a faster first fix and a steadier one with a partial sky -- which is exactly
+// a T-Deck on a car dashboard or in a pocket while wardriving.
+//
+// Both dialects are sent, for the same reason the standby commands below send
+// both: a checksummed sentence the receiver does not recognise is discarded.
+//
+//   PCAS (CASIC / AT6558, L76K)  $PCAS04,7   GPS + BeiDou + GLONASS. The same
+//                                            command upstream Meshtastic sends
+//                                            to the L76K. Not 15: the Galileo
+//                                            bit is not supported by every
+//                                            AT6558 revision and a mask the
+//                                            chip rejects leaves it unchanged.
+//   PMTK (MediaTek L76-class)    $PMTK353,1,1,1,0,1  GPS+GLONASS+Galileo+BeiDou
+//
+// OFF by default. Field test on a T-Deck Plus (L76K): 2 satellites used with
+// this on, 5 with stock firmware at the same spot. Changing the constellation
+// set restarts the L76K's search, and the stream is re-confirmed after every
+// re-probe, so the earlier send-on-every-confirm kept knocking it back to a
+// cold search. Kept behind the flag for boards/antennas where it helps, and
+// sent at most once per boot when enabled.
+#ifndef MY_GPS_MULTI_GNSS
+#define MY_GPS_MULTI_GNSS 0
+#endif
+static void gpsEnableAllConstellations() {
+#if MY_GPS_MULTI_GNSS
+    static bool sent = false;
+    if (sent) return;
+    sent = true;
+    gpsSendNmea("PCAS04,7");
+    delay(20);
+    gpsSendNmea("PMTK353,1,1,1,0,1");
+    debugLogGps("[gps] requested multi-GNSS (GPS+BDS+GLONASS, best-effort)\n");
+#endif
+}
+
 static void gpsDutySleep() {
     if (_dutyAsleep || !_enabled) return;
     // Ask for a standby slightly longer than our own timer so the module's
@@ -957,6 +994,7 @@ void gpsLoop() {
             _streamConfigLocked = true;
             _everValidStreamSeen = true;
         debugLogGps("[gps] valid NMEA stream detected at baud=%lu\n", (unsigned long)_activeBaud);
+        gpsEnableAllConstellations();
     }
 
     // Boards can occasionally latch onto a noisy UART config that yields
@@ -1258,6 +1296,10 @@ uint32_t gpsSearchTimeMs() {
 
 float gpsCourse() {
     return _gps.course.isValid() ? (float)_gps.course.deg() : 0.0f;
+}
+
+float gpsHdop() {
+    return _gps.hdop.isValid() ? (float)_gps.hdop.hdop() : 99.9f;
 }
 
 float gpsSpeedKmh() {

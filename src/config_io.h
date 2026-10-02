@@ -680,6 +680,16 @@ struct RhinoConfig {
     // For whoever appends next: two pad bytes remain, carrying whatever older
     // builds wrote into them. Past them is the old sizeof(RhinoConfig).
     uint8_t  _reservedPad16[2];
+
+    // ── Wardrive log ─────────────────────────────────────────────────────────
+    // Append every radio sighting, with our GPS fix, to /camillia/wardrive.csv
+    // (src/wardrive_log.h). Off by default, like the node archive.
+    //
+    // Safe at the end: _reservedPad16 above keeps the old struct's trailing
+    // padding, so this starts at exactly the previous sizeof(RhinoConfig) and an
+    // upgrading device keeps the compiled default.
+    bool     wardriveLogEnabled;
+    uint8_t  _reservedPad17[3];
 };
 
 static constexpr uint8_t kP4AntennaExternal = 0x5A;

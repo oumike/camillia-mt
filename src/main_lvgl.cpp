@@ -27,6 +27,7 @@
 #include "mqtt_bridge.h"
 #include "i18n.h"   // TR(): UI translations (issue #99)
 #include "node_db.h"
+#include "wardrive_log.h"
 #include "dm_mgr.h"
 #include "ignore_list.h"
 #include "battery_util.h"
@@ -34658,7 +34659,7 @@ static void discoveryBuildColumns() {
 
     // Counts sit here rather than on the status line, which belongs to the
     // sweep: a refusal message must not cost the user the summary.
-    char summary[64];
+    char summary[112];
     if (s_presetScanResultFromMs != 0) {
         // Nodes.count() is the whole table, which is exactly what this line must
         // not say while the screen is scoped to one scan.
@@ -34674,6 +34675,26 @@ static void discoveryBuildColumns() {
     } else {
         snprintf(summary, sizeof(summary), TR("%d node(s), %d report(s)"),
                  Nodes.count(), discoveryUsableReportCount());
+    }
+    // Wardriving at a glance: whether sightings are being positioned right now,
+    // and how much the log has taken. A drive with no fix is the failure that
+    // otherwise only shows up at upload time.
+    {
+        const size_t used = strlen(summary);
+        if (!gpsIsEnabled()) {
+            snprintf(summary + used, sizeof(summary) - used, " | GPS off");
+        } else if (!gpsHasFix()) {
+            snprintf(summary + used, sizeof(summary) - used, " | NO GPS FIX");
+        } else {
+            snprintf(summary + used, sizeof(summary) - used, " | GPS %u sat",
+                     (unsigned)gpsSats());
+        }
+        if (wardriveLogIsEnabled()) {
+            const size_t u2 = strlen(summary);
+            snprintf(summary + u2, sizeof(summary) - u2, " | log %lu/%lu",
+                     (unsigned long)wardriveLogNodes(),
+                     (unsigned long)wardriveLogLines());
+        }
     }
     discoveryMakeLabel(s_discoveryColBoxes[kDiscoveryColDirect], summary, false);
 
@@ -35511,8 +35532,18 @@ static void refreshDiscoveryModal(bool force) {
     // That is one cheap pass over the node table, and only while the modal is
     // open -- the price of the screen being live at all.
     const uint32_t sig = discoveryResultSig();
-    if (!force && sig == s_discoveryRenderedSig) return;
+    // The summary also carries GPS fix state and the wardrive log's node count
+    // (discoveryBuildColumns()). Kept out of discoveryResultSig(), which also
+    // drives "save while discovering" rewrites that a fix flapping must not
+    // trigger. Satellite count is left out on purpose: it jitters constantly.
+    static uint32_t s_discoveryRenderedGpsSig = 0;
+    const uint32_t gpsSig = (gpsIsEnabled() ? 1u : 0u)
+                          | (gpsHasFix() ? 2u : 0u)
+                          | (wardriveLogIsEnabled() ? 4u : 0u)
+                          | (wardriveLogNodes() << 3);
+    if (!force && sig == s_discoveryRenderedSig && gpsSig == s_discoveryRenderedGpsSig) return;
     s_discoveryRenderedSig = sig;
+    s_discoveryRenderedGpsSig = gpsSig;
 
     discoveryBuildColumns();
 }
@@ -56250,6 +56281,11 @@ void loop() {
     // from config (web save, YAML import, and factory reset all land here).
     LOOP_PHASE("archive:set", nodeArchiveSetEnabled(s_cfg.nodeArchiveEnabled));
     LOOP_PHASE("archive:flush", nodeArchiveFlush());
+    // Wardrive log: same mirror-then-flush arrangement, same reason it sits
+    // ahead of the screen-sleep return -- a drive is mostly spent with the
+    // display off.
+    LOOP_PHASE("wardrive:set", wardriveLogSetEnabled(s_cfg.wardriveLogEnabled));
+    LOOP_PHASE("wardrive:flush", wardriveLogFlush());
     // Same reason, same place: web save, YAML import and factory reset all land
     // here, and every module that prints a time reads this mirror.
     LOOP_PHASE("clockfmt", liveClockSet12Hour(s_cfg.clockFormat == CLOCK_FORMAT_12H));
