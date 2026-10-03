@@ -196,6 +196,7 @@ void ChannelMgr::_pushLine(int chanIdx, Channel &ch, const char *text, uint16_t 
     dl.ack          = ack;
     dl.epoch        = epoch;
     dl.senderNodeId = senderNodeId;
+    dl.fresh        = _pushFresh;
     ch.count++;
     ch.revision++;
 
@@ -207,7 +208,7 @@ void ChannelMgr::_pushLine(int chanIdx, Channel &ch, const char *text, uint16_t 
 
 int ChannelMgr::addMessage(int chanIdx, const char *prefix, const char *text,
                             uint16_t color, uint32_t packetId, bool trackAck,
-                            uint32_t senderNodeId) {
+                            uint32_t senderNodeId, bool fresh) {
     if (chanIdx < 0 || chanIdx >= MAX_CHANNELS) return -1;
     if (!_chans[chanIdx].lines) return -1;
     int firstLine = _chans[chanIdx].count;
@@ -215,7 +216,9 @@ int ChannelMgr::addMessage(int chanIdx, const char *prefix, const char *text,
     // line shares the same date for chat date markers.
     time_t nowEpoch = time(nullptr);
     uint32_t epoch = (nowEpoch >= 1700000000) ? (uint32_t)nowEpoch : 0;
+    _pushFresh = fresh;
     _wordWrap(chanIdx, prefix, text, color, packetId, trackAck, epoch, senderNodeId);
+    _pushFresh = false;
     if (chanIdx != _active) _chans[chanIdx].unread = true;
     return firstLine;
 }
@@ -249,7 +252,7 @@ bool ChannelMgr::newestReceived(int chanIdx, uint32_t myNodeId, uint32_t &fromNo
 
 int ChannelMgr::insertMessageByEpoch(int chanIdx, const char *prefix, const char *text,
                                      uint16_t color, uint32_t packetId,
-                                     uint32_t senderNodeId, uint32_t epoch) {
+                                     uint32_t senderNodeId, uint32_t epoch, bool fresh) {
     if (chanIdx < 0 || chanIdx >= MAX_CHANNELS) return -1;
     Channel &ch = _chans[chanIdx];
     if (!ch.lines) return -1;
@@ -272,7 +275,9 @@ int ChannelMgr::insertMessageByEpoch(int chanIdx, const char *prefix, const char
         }
     }
 
+    _pushFresh = fresh;
     _wordWrap(chanIdx, prefix, text, color, packetId, false, epoch, senderNodeId);
+    _pushFresh = false;
     const int added = ch.count - before;
     if (chanIdx != _active) ch.unread = true;
     if (added <= 0 || pos >= before) return before;
@@ -700,6 +705,19 @@ void ChannelMgr::loadPersisted() {
     }
     _persistLoading = false;
 #endif
+}
+
+bool ChannelMgr::clearFresh(int chanIdx) {
+    if (chanIdx < 0 || chanIdx >= MAX_CHANNELS) return false;
+    Channel &ch = _chans[chanIdx];
+    if (!ch.lines) return false;
+    bool changed = false;
+    for (int i = max(0, ch.count - MAX_MSG_LINES); i < ch.count; i++) {
+        DisplayLine &dl = ch.lines[i % MAX_MSG_LINES];
+        if (dl.fresh) { dl.fresh = false; changed = true; }
+    }
+    if (changed) ch.revision++;   // the chat view's cache keys on this
+    return changed;
 }
 
 const DisplayLine *ChannelMgr::getLine(int chanIdx, int row) const {

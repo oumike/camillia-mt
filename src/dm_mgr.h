@@ -28,6 +28,7 @@ struct DmLine {
     uint32_t packetId;  // 0 = not a locally-sent DM line
     enum AckState : uint8_t { NONE, PENDING, ACKED, ACKED_RELAY, NAKED, TX_FAILED } ack;
     uint32_t epoch;     // wall-clock seconds when this line was added (0 = unknown)
+    bool     fresh;     // received and not yet seen: the DM view blinks it (RAM only)
 };
 
 struct DmConv {
@@ -70,7 +71,9 @@ public:
     void addMessage(uint32_t nodeId, const char *shortName,
                     const char *prefix, const char *text, uint16_t color,
                     bool markUnread = false, int chanIdx = -1,
-                    uint32_t packetId = 0);
+                    uint32_t packetId = 0, bool fresh = false);
+    // Drop the "new" mark from a conversation's lines. True when anything changed.
+    bool      clearFresh(uint32_t nodeId);
 
     // Build and transmit a unicast DM. Adds outgoing message to conversation.
     // replyId: optional Data.reply_id (message being replied to).

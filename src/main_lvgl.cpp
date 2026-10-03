@@ -2169,6 +2169,69 @@ static inline void lvObjDeleteSafe(lv_obj_t *&obj) {
     obj = nullptr;
 }
 
+// ── New-message blink ────────────────────────────────────────────────────────
+// A received message blinks -- its text fades between full and dim -- until the
+// user has had its conversation in front of them and then moved somewhere else
+// (serviceFreshMarks() clears it then). The chat and DM views register the row
+// object of each fresh message as they build it, and one timer pulses them all.
+// text_opa is inherited, so setting it on the row reaches every label inside a
+// bubble or IRC row without each style knowing about it. Paper never blinks:
+// every pulse would be a panel refresh.
+struct ChatBlinkSet {
+    lv_obj_t *objs[48];
+    int       count;
+    uint32_t  owner;   // the channel index / DM peer the rows were built for
+};
+static ChatBlinkSet s_chatBlink = {};
+static ChatBlinkSet s_dmBlink = {};
+static bool s_chatBlinkDim = false;
+static constexpr lv_opa_t kChatBlinkDimOpa = LV_OPA_40;
+static constexpr uint32_t kChatBlinkPeriodMs = 600;
+
+static void chatBlinkApply(ChatBlinkSet &set, lv_opa_t opa) {
+    for (int i = 0; i < set.count; i++) {
+        if (lvObjValid(set.objs[i])) lv_obj_set_style_text_opa(set.objs[i], opa, 0);
+    }
+}
+
+static void chatBlinkTick(lv_timer_t *) {
+    if (s_chatBlink.count == 0 && s_dmBlink.count == 0) {
+        s_chatBlinkDim = false;
+        return;
+    }
+    s_chatBlinkDim = !s_chatBlinkDim;
+    const lv_opa_t opa = s_chatBlinkDim ? kChatBlinkDimOpa : LV_OPA_COVER;
+    chatBlinkApply(s_chatBlink, opa);
+    chatBlinkApply(s_dmBlink, opa);
+}
+
+// The view is about to delete the rows it registered and build new ones for
+// `owner`.
+static inline void chatBlinkForget(ChatBlinkSet &set, uint32_t owner) {
+    set.count = 0;
+    set.owner = owner;
+}
+
+// `owner` was left: if the rows on screen are still its rows (the view may
+// already have rebuilt for the next conversation), they go back to steady.
+static void chatBlinkStop(ChatBlinkSet &set, uint32_t owner) {
+    if (set.owner != owner) return;
+    chatBlinkApply(set, LV_OPA_COVER);
+    set.count = 0;
+}
+
+static void chatBlinkTrack(ChatBlinkSet &set, lv_obj_t *row, bool fresh) {
+#if defined(DEVICE_TDECK_PRO)
+    (void)set; (void)row; (void)fresh;
+#else
+    if (!fresh || !row || set.count >= (int)(sizeof(set.objs) / sizeof(set.objs[0]))) return;
+    static lv_timer_t *timer = nullptr;
+    if (!timer) timer = lv_timer_create(chatBlinkTick, kChatBlinkPeriodMs, nullptr);
+    set.objs[set.count++] = row;
+    if (s_chatBlinkDim) lv_obj_set_style_text_opa(row, kChatBlinkDimOpa, 0);
+#endif
+}
+
 // Scrolls a list vertically by dy, clamped to the remaining scroll range so the
 // first/last item stays pinned to the edge. lv_obj_scroll_by(LV_ANIM_OFF) is
 // unbounded in LVGL 8.3 and will otherwise scroll past the content into empty
@@ -24009,6 +24072,7 @@ static void closeDmModal() {
     clearNavBarStatusIcons();
     closeDmNodePicker();
     closeDmDeleteConfirm();
+    chatBlinkForget(s_dmBlink, 0);
     lvObjDeleteSafe(s_dmModal);
     s_dmConvPanel = nullptr;
     s_dmConvList = nullptr;
@@ -37200,6 +37264,7 @@ static void refreshDmModal(bool force) {
     }
 
     lv_obj_clean(s_dmConvList);
+    chatBlinkForget(s_dmBlink, openDmPeerNodeId());
     lv_obj_clean(s_dmMsgList);
 
     const lv_font_t *dmListFont = kMainScreenFont;
@@ -37403,6 +37468,7 @@ static void refreshDmModal(bool force) {
                                dmTimeBuf, dmName, chatStripPrefix(dl->text),
                                dmAckToDisplayAck(dl->ack),
                                0, false, &lastMsgObj, nullptr, nullptr);
+                chatBlinkTrack(s_dmBlink, lastMsgObj, dl->fresh);
                 continue;
             }
 
@@ -37430,6 +37496,7 @@ static void refreshDmModal(bool force) {
                                &lastMsgObj,
                                nullptr,
                                nullptr);
+                chatBlinkTrack(s_dmBlink, lastMsgObj, dl->fresh);
                 continue;
             }
 
@@ -37442,6 +37509,7 @@ static void refreshDmModal(bool force) {
             lv_obj_t *msg = ackedLine ? lv_spangroup_create(s_dmMsgList)
                                       : lv_label_create(s_dmMsgList);
             lastMsgObj = msg;
+            chatBlinkTrack(s_dmBlink, msg, dl->fresh);
             lv_obj_set_width(msg, lv_pct(100));
             lv_obj_set_style_text_font(msg, dmMsgFont, 0);
             lv_obj_set_style_pad_left(msg, 2, 0);
@@ -49151,7 +49219,7 @@ static void appendRxText(int chanIdx, uint32_t fromNode, const char *text, uint3
     snprintf(prefix, sizeof(prefix), "%s  %s[%s] ", transportIcon, timePrefix, sender);
 #endif
 
-    Channels.addMessage(chanIdx, prefix, text, TFT_WHITE, packetId, false, fromNode);
+    Channels.addMessage(chanIdx, prefix, text, TFT_WHITE, packetId, false, fromNode, true);
     // Being the active channel is not the same as being on screen. Behind the
     // glance overlay the chat view is not visible, so the channel the firmware
     // was last on has to notify like any other -- treating it as read is what
@@ -50578,7 +50646,7 @@ static int csPostItems(int chanIdx, const csp::BatchHeader &h, const csp::Item *
         // "this arrived from the chat server" (v1 marker; to be refined).
         snprintf(prefix, sizeof(prefix), "%s  %s [%s] ", LV_SYMBOL_REFRESH, clock, sender);
 #endif
-        Channels.insertMessageByEpoch(chanIdx, prefix, text, TFT_WHITE, it.packetId, it.from, epoch);
+        Channels.insertMessageByEpoch(chanIdx, prefix, text, TFT_WHITE, it.packetId, it.from, epoch, true);
         posted++;
     }
     (void)h;
@@ -50911,7 +50979,8 @@ static bool processMeshPacket(const MeshPacket &rxPkt) {
                                    TFT_WHITE,
                                    !dmOnScreen,
                                    chanIdx,
-                                   pkt.hdr.id);  // retain sender pid for web reply/tapback targeting
+                                   pkt.hdr.id,   // retain sender pid for web reply/tapback targeting
+                                   true);        // blinks until the conversation is left
                     if (dmOnScreen) {
                         DMs.markRead(pkt.hdr.from);
                     }
@@ -52803,6 +52872,7 @@ static void refreshChatViewBubbles(const DisplayLine *const *rows, int rowCount,
                            sender, isMe, timeBuf, ircName, body,
                            rows[i]->ack, replyPacketId, isSelected,
                            lastMsgObj, selectedMsgObj, onChatMessagePressed);
+            if (lastMsgObj) chatBlinkTrack(s_chatBlink, *lastMsgObj, rows[i]->fresh);
             if (anchorHere && lastMsgObj) *anchorObj = *lastMsgObj;
             continue;
         }
@@ -52813,6 +52883,7 @@ static void refreshChatViewBubbles(const DisplayLine *const *rows, int rowCount,
                        replyPacketId, isSelected,
                        lastMsgObj, selectedMsgObj,
                        onChatMessagePressed);
+        if (lastMsgObj) chatBlinkTrack(s_chatBlink, *lastMsgObj, rows[i]->fresh);
         if (anchorHere && lastMsgObj) *anchorObj = *lastMsgObj;
     }
 }
@@ -52962,6 +53033,7 @@ static void refreshChatView(bool force) {
                                || (lv_obj_get_scroll_bottom(s_chatList) <= 6);
     const int32_t prevScrollY = channelChanged ? 0 : lv_obj_get_scroll_y(s_chatList);
 
+    chatBlinkForget(s_chatBlink, (uint32_t)s_activeChannel);
     lv_obj_clean(s_chatList);
     lv_obj_t *lastMsgObj = nullptr;
     lv_obj_t *selectedMsgObj = nullptr;
@@ -53096,6 +53168,7 @@ static void refreshChatView(bool force) {
                 lv_obj_t *msg = ackedLine ? lv_spangroup_create(s_chatList)
                                           : lv_label_create(s_chatList);
                 lastMsgObj = msg;
+                chatBlinkTrack(s_chatBlink, msg, rows[i]->fresh);
                 if (anchorHere) anchorObj = msg;
                 lv_obj_set_width(msg, lv_pct(100));
                 lv_obj_set_style_text_font(msg, scaledChatFont(kChannelChatFont), 0);
@@ -56011,6 +56084,55 @@ static void serviceOtaAutoUpdate(uint32_t nowMs) {
 #endif
 }
 
+// True when nothing full-screen sits in front of the chat panel. Every modal
+// is a child of the root screen built after the panel, so the z-order says it
+// without a list of modals to keep current (the same test the touch drawer's
+// edge swipe uses).
+static bool chatPanelInFront() {
+    if (!lvObjAlive(s_chatPanel)) return false;
+    lv_obj_t *parent = lv_obj_get_parent(s_chatPanel);
+    const int32_t from = lv_obj_get_index(s_chatPanel);
+    if (!parent || from < 0) return false;
+    const int32_t dispW = lv_disp_get_hor_res(NULL);
+    const int32_t dispH = lv_disp_get_ver_res(NULL);
+    const uint32_t n = lv_obj_get_child_count(parent);
+    for (uint32_t i = (uint32_t)from + 1; i < n; i++) {
+        lv_obj_t *o = lv_obj_get_child(parent, (int32_t)i);
+        if (!o || o == s_channelList || o == s_channelDrawerScrim) continue;
+        if (lv_obj_has_flag(o, LV_OBJ_FLAG_HIDDEN)) continue;
+        if (lv_obj_get_width(o) >= dispW * 3 / 4 && lv_obj_get_height(o) >= dispH / 2) return false;
+    }
+    return true;
+}
+
+// New messages stay marked (and blinking) until the user has had their
+// conversation in front of them and then left it: another channel, another
+// screen, or the display going to sleep. Watching what is in front each pass
+// catches every way of leaving without hooking each one.
+static void serviceFreshMarks() {
+    static int s_prevChan = -1;
+    static uint32_t s_prevPeer = 0;
+    int chan = -1;
+    uint32_t peer = 0;
+    if (!glanceOverlayHidesUi()) {
+        peer = openDmPeerNodeId();
+        if (peer == 0 && chatPanelInFront()
+            && s_activeChannel >= 0 && s_activeChannel < MESH_CHANNELS) {
+            chan = s_activeChannel;
+        }
+    }
+    if (s_prevChan >= 0 && s_prevChan != chan) {
+        Channels.clearFresh(s_prevChan);
+        chatBlinkStop(s_chatBlink, (uint32_t)s_prevChan);
+    }
+    if (s_prevPeer != 0 && s_prevPeer != peer) {
+        DMs.clearFresh(s_prevPeer);
+        chatBlinkStop(s_dmBlink, s_prevPeer);
+    }
+    s_prevChan = chan;
+    s_prevPeer = peer;
+}
+
 void loop() {
     s_cfgDebugLog = s_cfg.debugAcks || s_cfg.debugMessages || s_cfg.debugGps;
 
@@ -56216,6 +56338,7 @@ void loop() {
         }
         if (s_radioReady) LOOP_PHASE("cs", chatServerService(now));
     }
+    LOOP_PHASE("fresh", serviceFreshMarks());
     LOOP_PHASE("ann:mapreport", serviceMapReport(now));
     LOOP_PHASE("autofav", serviceAutoFavorite(now));
     LOOP_PHASE("cfgflush", serviceConfigFlush(now));

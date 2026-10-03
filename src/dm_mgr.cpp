@@ -98,6 +98,17 @@ void DmMgr::markRead(uint32_t nodeId) {
     }
 }
 
+bool DmMgr::clearFresh(uint32_t nodeId) {
+    DmConv *c = find(nodeId);
+    if (!c || !c->lines) return false;
+    bool changed = false;
+    for (int i = (c->count > MAX_DM_LINES ? c->count - MAX_DM_LINES : 0); i < c->count; i++) {
+        DmLine &l = c->lines[i % MAX_DM_LINES];
+        if (l.fresh) { l.fresh = false; changed = true; }
+    }
+    return changed;
+}
+
 bool DmMgr::deleteConversation(uint32_t nodeId) {
     int idx = -1;
     for (int i = 0; i < _count; i++) {
@@ -216,13 +227,14 @@ void DmMgr::_pushLine(DmConv &c, const char *text, uint16_t color,
     c.lines[idx].packetId = packetId;
     c.lines[idx].ack = ack;
     c.lines[idx].epoch = epoch;
+    c.lines[idx].fresh = false;
     c.count++;
 }
 
 // ── addMessage ────────────────────────────────────────────────
 void DmMgr::addMessage(uint32_t nodeId, const char *shortName,
                         const char *prefix, const char *text, uint16_t color,
-                        bool markUnread, int chanIdx, uint32_t packetId) {
+                        bool markUnread, int chanIdx, uint32_t packetId, bool fresh) {
     DmConv *c = findOrCreate(nodeId, shortName);
     if (!c) return;
 
@@ -252,6 +264,7 @@ void DmMgr::addMessage(uint32_t nodeId, const char *shortName,
     _pushLine(*c, full, color, packetId,
               packetId ? DmLine::PENDING : DmLine::NONE,
               epoch);
+    if (fresh && c->count > 0) c->lines[(c->count - 1) % MAX_DM_LINES].fresh = true;
 
     c->scrollOff = 0;  // jump to latest on new message
     // Mark rather than write; servicePersistence() does the save. The old

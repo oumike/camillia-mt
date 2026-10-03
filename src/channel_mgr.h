@@ -11,6 +11,7 @@ struct DisplayLine {
     enum AckState : uint8_t { NONE, PENDING, ACKED, ACKED_RELAY, NAKED, TX_FAILED } ack;
     uint32_t epoch;       // wall-clock seconds when this line was added (0 = unknown)
     uint32_t senderNodeId; // originating node; own node = me, 0 = local/system line
+    bool     fresh;        // received and not yet seen: the chat view blinks it (RAM only)
 };
 
 struct Channel {
@@ -54,7 +55,7 @@ public:
     // Returns the line index of the first added line.
     int addMessage(int chanIdx, const char *prefix, const char *text,
                    uint16_t color, uint32_t packetId = 0,
-                   bool trackAck = false, uint32_t senderNodeId = 0);
+                   bool trackAck = false, uint32_t senderNodeId = 0, bool fresh = false);
 
     // Chat server replays (cs_client): whether a channel already shows a message,
     // the newest message the node received from someone else, and inserting a
@@ -65,7 +66,11 @@ public:
     // Word-wraps like addMessage(), then moves the lines before the first message
     // whose epoch is later. epoch 0 (unknown time) appends.
     int insertMessageByEpoch(int chanIdx, const char *prefix, const char *text, uint16_t color,
-                             uint32_t packetId, uint32_t senderNodeId, uint32_t epoch);
+                             uint32_t packetId, uint32_t senderNodeId, uint32_t epoch,
+                             bool fresh = false);
+    // Drop the "new" mark from every line of a channel (the user has seen it
+    // and moved on). True when anything changed.
+    bool clearFresh(int chanIdx);
 
     void setAckState(uint32_t packetId, DisplayLine::AckState state);
     // Determine ACKED vs ACKED_RELAY by comparing fromNodeId to stored destNodeId
@@ -213,6 +218,7 @@ private:
     bool       _persistReady = false;
     bool       _persistLoading = false;
     bool       _persistDirReady = false;
+    bool       _pushFresh = false;   // what _pushLine stamps into DisplayLine::fresh
     // millis() when each channel first went dirty / was last touched. Zero in
     // _dirtySinceMs means clean. Sized for the persisted channels only: CHAN_LIVE
     // and anything above MESH_CHANNELS is never written to storage.
