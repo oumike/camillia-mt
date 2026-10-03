@@ -5246,7 +5246,7 @@ static void sendConfigPage(const char *msg = "", bool lite = false) {
     html +=
         "<form method='POST' action='/cs-check'>"
         "<button type='submit' style='background:#6b4fa0'>"
-        "&#128260; Check Chat Server Now</button>"
+        "&#128260; Check for Messages Now</button>"
         "</form>"
         "<p style='font-size:.82em;color:#888;margin:.3em 0 1em'>"
         "Asks the chat server for messages missed on this node's channels. "

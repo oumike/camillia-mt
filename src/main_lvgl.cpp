@@ -5269,7 +5269,7 @@ static const char *cfgActionLabel(int actionId, char *buf, size_t bufLen) {
             break;
         }
         case CFG_ACTION_CS_CHECK:
-            snprintf(buf, bufLen, "%s", TR("Check Chat Server Now"));
+            snprintf(buf, bufLen, "%s", TR("Check for Messages Now"));
             break;
         case CFG_ACTION_MQTT_TOGGLE:
             if (!s_cfg.wifiEnabled) {
