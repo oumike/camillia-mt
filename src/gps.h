@@ -77,6 +77,9 @@ float gpsCourse();
 // Speed over ground in km/h.
 float gpsSpeedKmh();
 
+// Horizontal dilution of precision from the last GGA; 99.9 when unknown.
+float gpsHdop();
+
 // UTC date/time from GPS fix (year, month, day, hour, minute, second).
 // Returns false until a valid fix with valid date+time is available.
 bool gpsUtcDateTime(int &year, int &month, int &day,

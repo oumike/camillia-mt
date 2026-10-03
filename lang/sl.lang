@@ -817,7 +817,7 @@ Web Config: On (Lite)	Spletne nastavitve: Vkl. (Lite)
 Web Config: On (chat PAUSED)	Spletne nastavitve: Vkl. (klepet ZAUSTAVLJEN)
 Web config: %s\n\nChat is PAUSED while web config runs - this device needs that memory for Wi-Fi. Messages sent to you now are not received or stored.\n\nTurn web config off to resume messaging.	Spletne nastavitve: %s\n\nKlepet je ZAUSTAVLJEN, dokler delujejo spletne nastavitve - naprava potrebuje ta pomnilnik za Wi-Fi. Sporočila, ki vam jih zdaj pošljejo, niso prejeta ali shranjena.\n\nIzklopite spletne nastavitve za nadaljevanje dopisovanja.
 Wed	sre
-Welcome to Camillia for Meshtastic	Dobrodošli v Camillii za Meshtastic
+Welcome to WDGwars EDITION for Meshtastic	Dobrodošli v Camillii za Meshtastic
 Wheel/j-k=Change   Enter=Next	Kolesce/j-k=Spremeni   Enter=Naprej
 White	Bela
 Wi-Fi needed to fetch conditions.	Za pridobitev vremena je potreben Wi-Fi.

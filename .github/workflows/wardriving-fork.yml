@@ -1,0 +1,183 @@
+# h0tbyt3 fork: build the wardriving firmware automatically.
+#
+# What it does, every time it runs:
+#   1. Takes the wardriving-v2 branch and replays it on top of the latest
+#      upstream (oumike/camillia-mt main) -- locally, in the runner. Nothing is
+#      force-pushed; the branch itself is left as it is.
+#   2. Runs the host test for the wardrive helpers.
+#   3. Builds the T-Deck firmware and merges a factory image.
+#   4. Publishes both to the "wardriving-latest" pre-release, replacing the
+#      previous one, and keeps them as a run artifact as well.
+#
+# When it runs:
+#   - on every push to wardriving-v2;
+#   - once a day, but only builds if upstream has moved since the last
+#     published build (schedules only fire from the default branch, so this
+#     file also lives on main);
+#   - by hand from the Actions tab ("Run workflow").
+#
+# If upstream changes clash with the fork's changes, the replay fails and the
+# run opens an issue instead of publishing anything.
+#
+# The OTA image is NOT signed (the signing key is upstream's), so the device's
+# own OTA updater will reject it. Flash the factory .bin over USB with esptool
+# or the web flasher.
+
+name: Wardriving fork build
+
+on:
+  push:
+    branches: [ wardriving-v2 ]
+  schedule:
+    - cron: '23 4 * * *'
+  workflow_dispatch:
+    inputs:
+      force:
+        description: 'Build even if upstream has not changed'
+        type: boolean
+        default: true
+
+permissions:
+  contents: write
+  issues: write
+
+concurrency:
+  group: wardriving-fork
+  cancel-in-progress: false
+
+env:
+  FORK_BRANCH: wardriving-v2
+  UPSTREAM: https://github.com/oumike/camillia-mt
+  RELEASE_TAG: wardriving-latest
+  ENVS: tdeck
+  # Pinned so gh never has to guess: the replay step adds an "upstream" remote,
+  # and with two remotes a non-interactive gh refuses to pick one.
+  GH_REPO: ${{ github.repository }}
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout fork branch
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ env.FORK_BRANCH }}
+          fetch-depth: 0
+
+      - name: Replay fork changes on latest upstream
+        id: sync
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          git config user.name  "wardriving-bot"
+          git config user.email "actions@users.noreply.github.com"
+          git remote add upstream "$UPSTREAM"
+          git fetch --no-tags upstream main
+          up=$(git rev-parse upstream/main)
+          echo "upstream=$up" >> "$GITHUB_OUTPUT"
+          echo "fork=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+
+          # Daily runs skip the build when the last published one already used
+          # this upstream commit and this fork commit.
+          if [ "${{ github.event_name }}" = "schedule" ]; then
+            last=$(gh release view "$RELEASE_TAG" --json body -q .body 2>/dev/null || true)
+            if echo "$last" | grep -q "upstream: $up" && echo "$last" | grep -q "fork: $(git rev-parse HEAD)"; then
+              echo "Nothing new upstream; skipping."
+              echo "skip=true" >> "$GITHUB_OUTPUT"
+              exit 0
+            fi
+          fi
+
+          if ! git rebase upstream/main; then
+            git rebase --abort || true
+            title="Wardriving fork no longer applies on upstream $(git rev-parse --short upstream/main)"
+            msg="The build could not replay \`$FORK_BRANCH\` on top of upstream main ($up). Rebase the branch by hand (or ask Claude to) and push it; the build runs again on push."
+            echo "### $title" >> "$GITHUB_STEP_SUMMARY"
+            echo "$msg" >> "$GITHUB_STEP_SUMMARY"
+            # Issues are off by default on forks; the failed run (and GitHub's
+            # failure e-mail) is the signal then.
+            if [ "$(gh api "repos/$GH_REPO" -q .has_issues)" = "true" ]; then
+              gh issue list --state open --search "$title" --json number -q '.[0].number' | grep -q . \
+                || gh issue create --title "$title" --body "$msg Run: ${{ github.server_url }}/$GH_REPO/actions/runs/${{ github.run_id }}" || true
+            fi
+            echo "::error::$title"
+            exit 1
+          fi
+          echo "skip=false" >> "$GITHUB_OUTPUT"
+          echo "version=$(cat VERSION 2>/dev/null || echo dev)" >> "$GITHUB_OUTPUT"
+
+      - name: Set up Python
+        if: steps.sync.outputs.skip != 'true'
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Host test (wardrive helpers)
+        if: steps.sync.outputs.skip != 'true'
+        run: |
+          g++ -std=c++17 -Wall -Wextra -I src tools/test_wardrive_util.cpp -o /tmp/twu
+          /tmp/twu
+
+      - name: Cache PlatformIO
+        if: steps.sync.outputs.skip != 'true'
+        uses: actions/cache@v4
+        with:
+          path: ~/.platformio
+          key: pio-${{ runner.os }}-${{ hashFiles('platformio.ini') }}
+
+      - name: Install PlatformIO and esptool
+        if: steps.sync.outputs.skip != 'true'
+        run: pip install platformio 'esptool==4.11.0'
+
+      - name: Build firmware
+        if: steps.sync.outputs.skip != 'true'
+        run: |
+          for e in $ENVS; do pio run -e "$e"; done
+
+      - name: Merge factory images
+        if: steps.sync.outputs.skip != 'true'
+        run: |
+          mkdir -p dist
+          boot_app0=$(find ~/.platformio/packages/framework-arduinoespressif32/tools/partitions -name boot_app0.bin | head -1)
+          for e in $ENVS; do
+            d=.pio/build/$e
+            fs=$(grep -A40 "^\[env:$e\]" platformio.ini | grep -m1 'board_build.flash_size' | awk -F= '{gsub(/ /,"",$2); print $2}')
+            fs=${fs:-16MB}
+            python -m esptool --chip esp32s3 merge_bin -o "dist/camillia-mt-$e-wardriving.bin" \
+              -fm dio -ff 80m -fs "$fs" \
+              0x0 "$d/bootloader.bin" 0x8000 "$d/partitions.bin" \
+              0xe000 "$boot_app0" 0x10000 "$d/firmware.bin"
+            cp "$d/firmware.bin" "dist/camillia-mt-$e-wardriving-ota-unsigned.bin"
+          done
+          ls -la dist
+
+      - name: Keep as run artifact
+        if: steps.sync.outputs.skip != 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: camillia-mt-wardriving
+          path: dist/*.bin
+
+      - name: Publish pre-release
+        if: steps.sync.outputs.skip != 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release delete "$RELEASE_TAG" --cleanup-tag -y 2>/dev/null || true
+          cat > notes.md <<EOF
+          Automatic build: upstream Camillia ${{ steps.sync.outputs.version }} + wardriving changes.
+
+          - upstream: ${{ steps.sync.outputs.upstream }}
+          - fork: ${{ steps.sync.outputs.fork }}
+          - built: $(date -u +%Y-%m-%dT%H:%MZ)
+
+          Flash \`camillia-mt-tdeck-wardriving.bin\` at 0x0 over USB:
+          \`esptool.py --chip esp32s3 write_flash 0x0 camillia-mt-tdeck-wardriving.bin\`
+
+          The OTA image is unsigned and will be refused by the on-device updater.
+          See docs/WARDRIVING.md.
+          EOF
+          gh release create "$RELEASE_TAG" dist/*.bin \
+            --target "$FORK_BRANCH" --prerelease \
+            --title "Wardriving build (${{ steps.sync.outputs.version }})" \
+            --notes-file notes.md

@@ -1,6 +1,10 @@
 #include "node_db.h"
 #include "utf8_utils.h"
 #include "config_io.h"   // sdBegin()
+#include "gps.h"         // own fix for the wardriving heard-position stamp
+#include "wardrive_log.h"
+#include "wardrive_util.h"   // wardriveDeg()
+#include <math.h>        // lroundf
 #include <Preferences.h>
 #include "storage.h"
 #include <nvs.h>
@@ -429,7 +433,12 @@ static void nodeCsvQuote(const char *in, char *out, size_t outLen) {
 const char *nodeCsvHeader() {
     return "lastHeardEpoch,nodeId,shortName,longName,hops,snr,latI,lonI,alt,"
            "battPct,voltage,chUtil,airUtil,tempC,humidityPct,pressureHpa,"
-           "chanIdx,favorite,hasPosition,hasTelemetry,pubKey";
+           "chanIdx,favorite,hasPosition,hasTelemetry,pubKey,"
+           // Wardriving columns, appended so positional readers of the older
+           // schema (the archive restore parser among them) are unaffected.
+           // mapLat/mapLon are what a map upload should use: the node's own
+           // reported position when it has one, else where we heard it.
+           "heardLatI,heardLonI,heardRssi,heardDirect,mapLat,mapLon,mapSource";
 }
 
 void nodeCsvFormatEntry(const NodeEntry &e, char *out, size_t outLen) {
@@ -457,9 +466,27 @@ void nodeCsvFormatEntry(const NodeEntry &e, char *out, size_t outLen) {
         for (int i = 0; i < 32; i++) snprintf(pubHex + i * 2, 3, "%02x", e.pubKey[i]);
     }
 
+    // Map position: the node's own fix wins; otherwise where we heard it.
+    // Decimal degrees with 7 places, ready for an upload without rescaling.
+    char mapLat[24] = "", mapLon[24] = "";
+    const char *mapSource = "";
+    const bool ownPos = e.hasPosition && (e.latI != 0 || e.lonI != 0);
+    if (ownPos) {
+        wardriveDeg(e.latI, mapLat, sizeof(mapLat));
+        wardriveDeg(e.lonI, mapLon, sizeof(mapLon));
+        mapSource = "node";
+    } else if (e.hasHeardPosition) {
+        wardriveDeg(e.heardLatI, mapLat, sizeof(mapLat));
+        wardriveDeg(e.heardLonI, mapLon, sizeof(mapLon));
+        mapSource = e.heardDirect ? "heard-direct" : "heard-relayed";
+    }
+    char heardRssi[8] = "";
+    if (e.hasHeardPosition) snprintf(heardRssi, sizeof(heardRssi), "%d", (int)e.heardRssi);
+
     snprintf(out, outLen,
              "%ld,!%08lx,%s,%s,%u,%.2f,%ld,%ld,%ld,"
-             "%.2f,%.2f,%.2f,%.2f,%.2f,%.2f,%.2f,%d,%d,%d,%d,%s",
+             "%.2f,%.2f,%.2f,%.2f,%.2f,%.2f,%.2f,%d,%d,%d,%d,%s,"
+             "%ld,%ld,%s,%d,%s,%s,%s",
              lastHeardEpoch,
              (unsigned long)e.nodeId,
              shortQ, longQ,
@@ -471,7 +498,12 @@ void nodeCsvFormatEntry(const NodeEntry &e, char *out, size_t outLen) {
              e.favorite ? 1 : 0,
              e.hasPosition ? 1 : 0,
              e.hasTelemetry ? 1 : 0,
-             pubHex);
+             pubHex,
+             e.hasHeardPosition ? (long)e.heardLatI : 0L,
+             e.hasHeardPosition ? (long)e.heardLonI : 0L,
+             heardRssi,
+             (e.hasHeardPosition && e.heardDirect) ? 1 : 0,
+             mapLat, mapLon, mapSource);
 }
 
 // Reader half of nodeCsvQuote(). See node_db.h for the contract.
@@ -1107,6 +1139,35 @@ void NodeDB::updateFromPacket(const MeshPacket &pkt) {
     if (hopStart > 0) {
         e->hops = (hopStart > hopLimit) ? (uint8_t)(hopStart - hopLimit) : 0;
         e->hasHops = true;
+    }
+
+    // Wardriving (see NodeEntry::heardLatI). MQTT sightings say nothing about
+    // where our radio was, so they never stamp a position or reach the log.
+    const bool viaMqtt = (pkt.hdr.flags & 0x10) != 0;
+    if (!viaMqtt && gpsHasFix()) {
+        // Direct only when this packet carried hop_start and spent no hops;
+        // hop_start == 0 is "unknown", not "direct" (see the comment above).
+        const bool direct = (hopStart > 0) && (hopStart <= hopLimit);
+        float r = pkt.rssi;
+        if (r < -32768.0f) r = -32768.0f;
+        if (r >  32767.0f) r =  32767.0f;
+        const int16_t rssi = (int16_t)lroundf(r);
+        const bool better = !e->hasHeardPosition
+                         || (direct && !e->heardDirect)
+                         || (direct == e->heardDirect && rssi > e->heardRssi);
+        if (better) {
+            e->heardLatI = gpsLatI();
+            e->heardLonI = gpsLonI();
+            e->heardRssi = rssi;
+            e->heardDirect = direct;
+            e->hasHeardPosition = true;
+        }
+    }
+    if (!viaMqtt) {
+        const bool known = (hopStart > 0);
+        wardriveLogNoteSighting(pkt.hdr.from, pkt.rssi, pkt.snr,
+                                known ? (int)e->hops : -1,
+                                (int)pkt.portnum, pkt.chanIdx);
     }
     // Don't save on every packet — only on meaningful data changes below.
 }

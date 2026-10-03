@@ -27,6 +27,8 @@
 #include "mqtt_bridge.h"
 #include "i18n.h"   // TR(): UI translations (issue #99)
 #include "node_db.h"
+#include "wardrive_log.h"
+#include "splash_logo.h"   // h0tbyt3 fork boot logo (used when MY_SPLASH_LOGO)
 #include "dm_mgr.h"
 #include "ignore_list.h"
 #include "battery_util.h"
@@ -3358,10 +3360,13 @@ static constexpr uint16_t rgb565(uint8_t red, uint8_t green, uint8_t blue) {
 static uint16_t blend565(uint16_t c1, uint16_t c2, uint8_t t);
 
 static constexpr UiThemePresetLite kUiThemePresets[] = {
-    {UI_THEME_CAMELLIA, UI_MODE_DARK,  0x0843, 0x1065, 0x18A7, 0xDA8E, "Camillia Dark"},
+    // h0tbyt3 fork: the default family is the WDGwars neon look.
+    {UI_THEME_CAMELLIA, UI_MODE_DARK,
+        rgb565(0x03, 0x08, 0x05), rgb565(0x0A, 0x14, 0x0D), rgb565(0x10, 0x20, 0x16), rgb565(0x39, 0xFF, 0x14),
+        "WDGwars Neon"},
     {UI_THEME_CAMELLIA, UI_MODE_LIGHT,
-        rgb565(0xff, 0xf7, 0xfa), rgb565(0xff, 0xfd, 0xfe), rgb565(0xf8, 0xee, 0xf3), rgb565(0xb0, 0x2f, 0x62),
-        "Camillia Light"},
+        rgb565(0xF2, 0xF8, 0xF3), rgb565(0xFF, 0xFF, 0xFF), rgb565(0xE2, 0xF0, 0xE5), rgb565(0x0B, 0x8A, 0x3A),
+        "WDGwars Light"},
     {UI_THEME_EVERGREEN, UI_MODE_DARK,  0x00A8, 0x11AA, 0x1A2C, 0x55B0, "Evergreen Dark"},
     {UI_THEME_EVERGREEN, UI_MODE_LIGHT, 0xE73C, 0xF7DE, 0xE71B, 0x2D2A, "Evergreen Light"},
     {UI_THEME_EARTHEN, UI_MODE_DARK,  0x1082, 0x2104, 0x2945, 0xD38B, "Earthy Dark"},
@@ -3421,15 +3426,15 @@ static constexpr UiThemePresetLite kUiThemePresets[] = {
         rgb565(0xF1, 0xF7, 0xFC), rgb565(0xFF, 0xFF, 0xFF), rgb565(0xDF, 0xEB, 0xF6), rgb565(0x5C, 0x86, 0xB2),
         "Winter Chill Light"},
     {UI_THEME_CAMELLIA_BLACK, UI_MODE_DARK,
-        rgb565(0x00, 0x00, 0x00), rgb565(0x00, 0x00, 0x00), rgb565(0x0A, 0x0A, 0x0A), rgb565(0xFF, 0xFF, 0xFF),
-        "Camillia Black"},
+        rgb565(0x00, 0x00, 0x00), rgb565(0x00, 0x00, 0x00), rgb565(0x0A, 0x0A, 0x0A), rgb565(0x39, 0xFF, 0x14),
+        "WDGwars Black"},
 };
 
 #if !HAS_UI_THEMES
 static constexpr UiThemePresetLite kPaperTheme = {
     UI_THEME_CAMELLIA, UI_MODE_LIGHT,
     0xFFFF, 0xFFFF, 0xFFFF, 0x0000,
-    "Camillia Paper",
+    "WDGwars Paper",
 };
 #endif
 
@@ -4458,7 +4463,7 @@ static int uiThemePresetIndexFromCfg() {
 
 static const char *uiThemePresetNameFromCfg() {
     UiThemeChoice choice;
-    if (!uiThemeChoiceAt(uiThemePresetIndexFromCfg(), choice)) return "Camillia Dark";
+    if (!uiThemeChoiceAt(uiThemePresetIndexFromCfg(), choice)) return "WDGwars Neon";
     return choice.name;
 }
 
@@ -4551,8 +4556,13 @@ static void applyUiThemePalette() {
     const uint16_t inputTop = blend565(panelBg, panelAlt, 120);
     const uint16_t cursor = accent;
 
-    const uint16_t textMain = isLight ? rgb565(0x1E, 0x24, 0x2C) : rgb565(0xF3, 0xF6, 0xFA);
-    const uint16_t textDim = isLight ? rgb565(0x5E, 0x68, 0x76) : rgb565(0xB7, 0xC0, 0xCC);
+    // h0tbyt3 fork: the WDGwars family reads as a green terminal in dark mode.
+    const bool wdgNeon = !custom && !isLight
+        && (s_cfg.uiTheme == UI_THEME_CAMELLIA || s_cfg.uiTheme == UI_THEME_CAMELLIA_BLACK);
+    const uint16_t textMain = isLight ? rgb565(0x1E, 0x24, 0x2C)
+                            : (wdgNeon ? rgb565(0xD6, 0xFF, 0xDE) : rgb565(0xF3, 0xF6, 0xFA));
+    const uint16_t textDim = isLight ? rgb565(0x5E, 0x68, 0x76)
+                           : (wdgNeon ? rgb565(0x7F, 0xB8, 0x8C) : rgb565(0xB7, 0xC0, 0xCC));
     const uint16_t textOnAccent = isLight ? rgb565(0xFF, 0xFF, 0xFF) : rgb565(0x08, 0x0D, 0x14);
     const uint16_t statusText = textMain;
 
@@ -4569,9 +4579,10 @@ static void applyUiThemePalette() {
     const uint16_t splashTop = statusTop;
     const uint16_t splashBottom = bgMain;
     const uint16_t splashCardBg = panelBg;
-    const uint16_t splashCardEdge = blend565(panelBg, accent, isLight ? 52 : 66);
-    const uint16_t splashCardEdgeHi = blend565(panelAlt, accent, isLight ? 74 : 92);
-    const uint16_t splashTitle = textMain;
+    // h0tbyt3 fork: accent-coloured card edge and brand on the boot splash.
+    const uint16_t splashCardEdge = blend565(panelBg, accent, isLight ? 120 : 200);
+    const uint16_t splashCardEdgeHi = blend565(panelAlt, accent, isLight ? 74 : 110);
+    const uint16_t splashTitle = isLight ? textMain : accent;
     const uint16_t splashSub = textDim;
     const uint16_t splashDim = blend565(textDim, panelBg, isLight ? 84 : 72);
 
@@ -8319,9 +8330,18 @@ static void buildGlanceHeader(lv_obj_t *parent, GlanceHeader &w,
     w.title = lv_label_create(parent);
     lv_obj_set_width(w.title, lv_pct(92));
     lv_obj_set_style_text_font(w.title, kSleepOverlayTitleFont, 0);
+#if defined(MY_SPLASH_EDITION) && !defined(DEVICE_TDECK_PRO)
+    // h0tbyt3 fork: the wordmark in the accent colour on themed screens.
+    lv_obj_set_style_text_color(w.title, themed ? lvColorFrom565(s_ui.accent) : pal.ink, 0);
+#else
     lv_obj_set_style_text_color(w.title, pal.ink, 0);
+#endif
     lv_obj_set_style_text_align(w.title, LV_TEXT_ALIGN_CENTER, 0);
+#if defined(MY_SPLASH_EDITION)
+    lv_label_set_text(w.title, MY_SPLASH_EDITION);   // h0tbyt3 fork: home title
+#else
     lv_label_set_text(w.title, TR("Camillia"));
+#endif
     lv_obj_align(w.title, LV_ALIGN_TOP_MID, 0, kTdeckProTitleTop);
 
     // A rule under the wordmark, separating "which device is this" from
@@ -8339,13 +8359,23 @@ static void buildGlanceHeader(lv_obj_t *parent, GlanceHeader &w,
         if (ruleY <= titleBottom) ruleY = titleBottom;   // no gap: sit flush
 
         lv_obj_t *sleepRule = lv_obj_create(parent);
+#if defined(MY_SPLASH_EDITION) && !defined(DEVICE_TDECK_PRO)
+        // h0tbyt3 fork: a heavier accent bar under the wordmark.
+        lv_obj_set_width(sleepRule, lv_pct(88));
+        lv_obj_set_height(sleepRule, 2);
+#else
         lv_obj_set_width(sleepRule, lv_pct(80));
         lv_obj_set_height(sleepRule, 1);
+#endif
         lv_obj_clear_flag(sleepRule, LV_OBJ_FLAG_SCROLLABLE);
         lv_obj_set_style_border_width(sleepRule, 0, 0);
         lv_obj_set_style_radius(sleepRule, 0, 0);
         lv_obj_set_style_pad_all(sleepRule, 0, 0);
+#if defined(MY_SPLASH_EDITION) && !defined(DEVICE_TDECK_PRO)
+        lv_obj_set_style_bg_color(sleepRule, themed ? lvColorFrom565(s_ui.accent) : pal.ink, 0);
+#else
         lv_obj_set_style_bg_color(sleepRule, pal.ink, 0);
+#endif
 #if defined(DEVICE_TDECK_PRO)
         // Full strength on the e-paper: that panel is 1-bit, so a partial
         // opacity thresholds to solid or to nothing with no say in which.
@@ -8353,7 +8383,11 @@ static void buildGlanceHeader(lv_obj_t *parent, GlanceHeader &w,
 #else
         // Dimmer than the type it separates — a divider should organise the
         // screen, not compete with it for attention.
+#if defined(MY_SPLASH_EDITION)
+        lv_obj_set_style_bg_opa(sleepRule, LV_OPA_80, 0);
+#else
         lv_obj_set_style_bg_opa(sleepRule, LV_OPA_40, 0);
+#endif
 #endif
         lv_obj_align(sleepRule, LV_ALIGN_TOP_MID, 0, ruleY);
     }
@@ -34658,7 +34692,7 @@ static void discoveryBuildColumns() {
 
     // Counts sit here rather than on the status line, which belongs to the
     // sweep: a refusal message must not cost the user the summary.
-    char summary[64];
+    char summary[112];
     if (s_presetScanResultFromMs != 0) {
         // Nodes.count() is the whole table, which is exactly what this line must
         // not say while the screen is scoped to one scan.
@@ -34674,6 +34708,26 @@ static void discoveryBuildColumns() {
     } else {
         snprintf(summary, sizeof(summary), TR("%d node(s), %d report(s)"),
                  Nodes.count(), discoveryUsableReportCount());
+    }
+    // Wardriving at a glance: whether sightings are being positioned right now,
+    // and how much the log has taken. A drive with no fix is the failure that
+    // otherwise only shows up at upload time.
+    {
+        const size_t used = strlen(summary);
+        if (!gpsIsEnabled()) {
+            snprintf(summary + used, sizeof(summary) - used, " | GPS off");
+        } else if (!gpsHasFix()) {
+            snprintf(summary + used, sizeof(summary) - used, " | NO GPS FIX");
+        } else {
+            snprintf(summary + used, sizeof(summary) - used, " | GPS %u sat",
+                     (unsigned)gpsSats());
+        }
+        if (wardriveLogIsEnabled()) {
+            const size_t u2 = strlen(summary);
+            snprintf(summary + u2, sizeof(summary) - u2, " | log %lu/%lu",
+                     (unsigned long)wardriveLogNodes(),
+                     (unsigned long)wardriveLogLines());
+        }
     }
     discoveryMakeLabel(s_discoveryColBoxes[kDiscoveryColDirect], summary, false);
 
@@ -35511,8 +35565,18 @@ static void refreshDiscoveryModal(bool force) {
     // That is one cheap pass over the node table, and only while the modal is
     // open -- the price of the screen being live at all.
     const uint32_t sig = discoveryResultSig();
-    if (!force && sig == s_discoveryRenderedSig) return;
+    // The summary also carries GPS fix state and the wardrive log's node count
+    // (discoveryBuildColumns()). Kept out of discoveryResultSig(), which also
+    // drives "save while discovering" rewrites that a fix flapping must not
+    // trigger. Satellite count is left out on purpose: it jitters constantly.
+    static uint32_t s_discoveryRenderedGpsSig = 0;
+    const uint32_t gpsSig = (gpsIsEnabled() ? 1u : 0u)
+                          | (gpsHasFix() ? 2u : 0u)
+                          | (wardriveLogIsEnabled() ? 4u : 0u)
+                          | (wardriveLogNodes() << 3);
+    if (!force && sig == s_discoveryRenderedSig && gpsSig == s_discoveryRenderedGpsSig) return;
     s_discoveryRenderedSig = sig;
+    s_discoveryRenderedGpsSig = gpsSig;
 
     discoveryBuildColumns();
 }
@@ -41269,7 +41333,7 @@ static void renderOnboardingStage() {
     lv_obj_set_style_text_font(title, onboardingTitleFont, 0);
     lv_obj_set_style_text_color(title, lv_color_hex(0xD9E8FF), 0);
     lv_obj_set_style_text_align(title, LV_TEXT_ALIGN_CENTER, 0);
-    lv_label_set_text(title, TR("Welcome to Camillia for Meshtastic"));
+    lv_label_set_text(title, TR("Welcome to WDGwars EDITION for Meshtastic"));
 #endif
 
     lv_obj_t *body = lv_label_create(s_onboardingModal);
@@ -47173,9 +47237,73 @@ static void drawBootSplash() {
     char nodeLine[72];
     const char *nodeLong = s_cfg.nodeLong[0] ? s_cfg.nodeLong : "unknown node";
     const char *nodeShort = s_cfg.nodeShort[0] ? s_cfg.nodeShort : "----";
+#if MY_SPLASH_LOGO && defined(MY_SPLASH_EDITION)
+    // h0tbyt3 fork: edition tag instead of the node name on the boot splash.
+    (void)nodeLong; (void)nodeShort;
+    snprintf(nodeLine, sizeof(nodeLine), "%s", MY_SPLASH_EDITION);
+#else
     snprintf(nodeLine, sizeof(nodeLine), "%s (%s)", nodeLong, nodeShort);
+#endif
 
-#if !defined(DEVICE_TLORA_PAGER_TFT) && !defined(DEVICE_CARDPUTER_LORA_HAT)
+#if MY_SPLASH_LOGO && !defined(DEVICE_TLORA_PAGER_TFT) && !defined(DEVICE_CARDPUTER_LORA_HAT) && !defined(DEVICE_TDECK_PRO)
+    // h0tbyt3 fork: custom logo large on the left, brand/subtitle/version on the
+    // right. The logo is stored at its full size (src/splash_logo.h) and only
+    // shrunk, never enlarged, if the card is smaller than it.
+    int splashContentBottom = cardY + 40;
+    {
+        const int footerH = 44;                      // node line + boot status
+        const int areaTop = cardY + 8;
+        const int areaH = max(16, cardH - footerH - 8);
+        const int d = min(min(kSplashLogoW, areaH), cardW / 2);
+        const int lx = cardX + 10;
+        const int ly = areaTop + (areaH - d) / 2;
+        splashDev().startWrite();
+        for (int y = 0; y < d; y++) {
+            const int sy = (y * kSplashLogoH) / d;
+            for (int x = 0; x < d; x++) {
+                const int sx = (x * kSplashLogoW) / d;
+                const uint16_t c = kSplashLogo[sy * kSplashLogoW + sx];
+                if (c != kSplashLogoKey) splashDev().drawPixel(lx + x, ly + y, c);
+            }
+        }
+        splashDev().endWrite();
+
+        const int tx = lx + d + 10;
+        const int tw = max(8, cardX + cardW - 8 - tx);
+        auto drawInText = [&](const char *text, int y) {
+            const int w = splashDev().textWidth(text);
+            splashDev().drawString(text, tx + max(0, (tw - w) / 2), y);
+        };
+        // Brand: the big face if it fits the column, the medium one if not.
+        splashDev().setTextSize(1.0f);
+        splashDev().setFont(&Roboto_Bold26pt7b);
+        if (splashDev().textWidth(MY_SPLASH_BRAND) > tw) splashDev().setFont(&Roboto_Medium14pt7b);
+        const int brandH = splashDev().fontHeight();
+        splashDev().setFont(&fonts::DejaVu12);
+        const int subH = splashDev().fontHeight();
+        splashDev().setFont(&fonts::DejaVu9);
+        const int verH = splashDev().fontHeight();
+        const int blockH = brandH + 4 + subH + 2 + verH;
+        int ty = ly + (d - blockH) / 2;
+
+        splashDev().setFont(&Roboto_Bold26pt7b);
+        if (splashDev().textWidth(MY_SPLASH_BRAND) > tw) splashDev().setFont(&Roboto_Medium14pt7b);
+        splashDev().setTextColor(titleCol, cardBg);
+        drawInText(MY_SPLASH_BRAND, ty);
+        ty += brandH + 4;
+        splashDev().setFont(&fonts::DejaVu12);
+        splashDev().setTextColor(subCol, cardBg);
+        drawInText("for Meshtastic", ty);
+        ty += subH + 2;
+        char verSmall[32];
+        snprintf(verSmall, sizeof(verSmall), "(%s)", version);
+        splashDev().setFont(&fonts::DejaVu9);
+        splashDev().setTextColor(dimCol, cardBg);
+        drawInText(verSmall, ty);
+        splashDev().setTextColor(titleCol, cardBg);
+        splashContentBottom = ly + d;
+    }
+#elif !defined(DEVICE_TLORA_PAGER_TFT) && !defined(DEVICE_CARDPUTER_LORA_HAT)
     // Native-size Roboto GFX fonts (crisp at this size, no bitmap upscaling).
     int splashContentBottom = cardY + 40;
     splashDev().setTextColor(titleCol, cardBg);
@@ -47189,7 +47317,7 @@ static void drawBootSplash() {
     splashDev().setFont(&Roboto_Bold26pt7b);
     splashDev().setTextSize(MY_SPLASH_TITLE_SCALE);
     const int brandY = cardY + 12 + MY_SPLASH_TITLE_Y_OFFSET;
-    drawCentered("Camillia", brandY);
+    drawCentered(MY_SPLASH_BRAND, brandY);
     const int brandCap = max(8, (int)splashDev().fontHeight() - MY_SPLASH_SUBTITLE_GAP_TRIM);
 
     // "for Meshtastic" underneath (Roboto Medium 14pt).
@@ -47338,9 +47466,14 @@ static void drawBootSplash() {
     // Center the flower in the space between the title block and the footer text.
     const int flowerBandTop = splashContentBottom;
     const int flowerBandBottom = cardY + cardH - 40;
+#if MY_SPLASH_LOGO && !defined(DEVICE_TDECK_PRO)
+    (void)flowerBandTop; (void)flowerBandBottom; (void)flowerScale;
+    (void)drawCamelliaMark;   // the logo was drawn with the title block
+#else
     drawCamelliaMark(cardX + (cardW / 2),
                      (flowerBandTop + flowerBandBottom) / 2,
                      flowerScale);
+#endif
 
     splashDev().setFont(&fonts::DejaVu12);
     splashDev().setTextSize(1.0f);
@@ -56250,6 +56383,11 @@ void loop() {
     // from config (web save, YAML import, and factory reset all land here).
     LOOP_PHASE("archive:set", nodeArchiveSetEnabled(s_cfg.nodeArchiveEnabled));
     LOOP_PHASE("archive:flush", nodeArchiveFlush());
+    // Wardrive log: same mirror-then-flush arrangement, same reason it sits
+    // ahead of the screen-sleep return -- a drive is mostly spent with the
+    // display off.
+    LOOP_PHASE("wardrive:set", wardriveLogSetEnabled(s_cfg.wardriveLogEnabled));
+    LOOP_PHASE("wardrive:flush", wardriveLogFlush());
     // Same reason, same place: web save, YAML import and factory reset all land
     // here, and every module that prints a time reads this mirror.
     LOOP_PHASE("clockfmt", liveClockSet12Hour(s_cfg.clockFormat == CLOCK_FORMAT_12H));

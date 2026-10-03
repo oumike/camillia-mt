@@ -820,7 +820,7 @@ Web Config: On (Lite)	Webes beállítások: Be (Lite)
 Web Config: On (chat PAUSED)	Webes beállítások: Be (chat SZÜNETEL)
 Web config: %s\n\nChat is PAUSED while web config runs - this device needs that memory for Wi-Fi. Messages sent to you now are not received or stored.\n\nTurn web config off to resume messaging.	Webes beállítások: %s\n\nA chat SZÜNETEL, amíg a webes beállítások futnak - az eszköznek ez a memória a Wi-Fihez kell. A most neked küldött üzenetek nem érkeznek meg és nem mentődnek.\n\nKapcsold ki a webes beállításokat az üzenetküldés folytatásához.
 Wed	Sze
-Welcome to Camillia for Meshtastic	Üdvözöl a Camillia a Meshtastichoz
+Welcome to WDGwars EDITION for Meshtastic	Üdvözöl a WDGwars EDITION a Meshtastichoz
 Wheel/j-k=Change   Enter=Next	Görgő/j-k=Módosítás   Enter=Tovább
 White	Fehér
 Wi-Fi needed to fetch conditions.	Az időjárás lekéréséhez Wi-Fi kell.

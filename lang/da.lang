@@ -802,7 +802,7 @@ Web Config: On (Lite)	Webkonfiguration: Til (Lite)
 Web Config: On (chat PAUSED)	Webkonfiguration: Til (chat PAUSERET)
 Web config: %s\n\nChat is PAUSED while web config runs - this device needs that memory for Wi-Fi. Messages sent to you now are not received or stored.\n\nTurn web config off to resume messaging.	Webkonfiguration: %s\n\nChatten er PAUSERET, mens webkonfigurationen kører - enheden har brug for hukommelsen til Wi-Fi. Beskeder, der sendes til dig nu, bliver hverken modtaget eller gemt.\n\nSlå webkonfigurationen fra for at fortsætte med at chatte.
 Wed	ons
-Welcome to Camillia for Meshtastic	Velkommen til Camillia til Meshtastic
+Welcome to WDGwars EDITION for Meshtastic	Velkommen til WDGwars EDITION til Meshtastic
 Wheel/j-k=Change   Enter=Next	Hjul/j-k=Skift   Enter=Næste
 White	Hvid
 Wi-Fi needed to fetch conditions.	Wi-Fi er nødvendigt for at hente vejret.

@@ -816,7 +816,7 @@ Web Config: On (Lite)	Webová konfigurace: Zap. (Lite)
 Web Config: On (chat PAUSED)	Webová konfigurace: Zap. (chat POZASTAVEN)
 Web config: %s\n\nChat is PAUSED while web config runs - this device needs that memory for Wi-Fi. Messages sent to you now are not received or stored.\n\nTurn web config off to resume messaging.	Webová konfigurace: %s\n\nChat je POZASTAVEN, dokud běží webová konfigurace - zařízení potřebuje tu paměť pro Wi-Fi. Zprávy, které vám teď přijdou, se nepřijmou ani neuloží.\n\nVypněte webovou konfiguraci a pokračujte v psaní zpráv.
 Wed	st
-Welcome to Camillia for Meshtastic	Vítejte v Camillia pro Meshtastic
+Welcome to WDGwars EDITION for Meshtastic	Vítejte v WDGwars EDITION pro Meshtastic
 Wheel/j-k=Change   Enter=Next	Kolečko/j-k=Změnit   Enter=Další
 White	Bílá
 Wi-Fi needed to fetch conditions.	Pro načtení počasí je potřeba Wi-Fi.

@@ -819,7 +819,7 @@ Web Config: On (Lite)	Web-asetukset: Päällä (Lite)
 Web Config: On (chat PAUSED)	Web-asetukset: Päällä (chat TAUOLLA)
 Web config: %s\n\nChat is PAUSED while web config runs - this device needs that memory for Wi-Fi. Messages sent to you now are not received or stored.\n\nTurn web config off to resume messaging.	Web-asetukset: %s\n\nChat on TAUOLLA web-asetusten ollessa käynnissä - laite tarvitsee muistin Wi-Fiä varten. Sinulle nyt lähetettyjä viestejä ei vastaanoteta eikä tallenneta.\n\nSammuta web-asetukset jatkaaksesi viestittelyä.
 Wed	ke
-Welcome to Camillia for Meshtastic	Tervetuloa Camilliaan Meshtasticille
+Welcome to WDGwars EDITION for Meshtastic	Tervetuloa WDGwars EDITION Meshtasticille
 Wheel/j-k=Change   Enter=Next	Rulla/j-k=Muuta   Enter=Seuraava
 White	Valkoinen
 Wi-Fi needed to fetch conditions.	Sään hakeminen vaatii Wi-Fin.

@@ -817,7 +817,7 @@ Web Config: On (Lite)	Konfiguracja web: Wł. (Lite)
 Web Config: On (chat PAUSED)	Konfiguracja web: Wł. (czat WSTRZYMANY)
 Web config: %s\n\nChat is PAUSED while web config runs - this device needs that memory for Wi-Fi. Messages sent to you now are not received or stored.\n\nTurn web config off to resume messaging.	Konfiguracja web: %s\n\nCzat jest WSTRZYMANY, gdy działa konfiguracja web - urządzenie potrzebuje tej pamięci na Wi-Fi. Wysyłane teraz do ciebie wiadomości nie są odbierane ani zapisywane.\n\nWyłącz konfigurację web, aby wrócić do czatu.
 Wed	śr
-Welcome to Camillia for Meshtastic	Witaj w Camillia dla Meshtastic
+Welcome to WDGwars EDITION for Meshtastic	Witaj w WDGwars EDITION dla Meshtastic
 Wheel/j-k=Change   Enter=Next	Kółko/j-k=Zmień   Enter=Dalej
 White	Biały
 Wi-Fi needed to fetch conditions.	Do pobrania pogody potrzebne jest Wi-Fi.

@@ -811,7 +811,7 @@ Web Config: On (Lite)	Config web: attiva (Lite)
 Web Config: On (chat PAUSED)	Config web: Accesa (chat IN PAUSA)
 Web config: %s\n\nChat is PAUSED while web config runs - this device needs that memory for Wi-Fi. Messages sent to you now are not received or stored.\n\nTurn web config off to resume messaging.	Config web: %s\n\nLa chat è IN PAUSA mentre la config web è attiva: il dispositivo ha bisogno di quella memoria per il Wi-Fi. I messaggi inviati ora non vengono ricevuti né salvati.\n\nDisattiva la config web per riprendere i messaggi.
 Wed	mer
-Welcome to Camillia for Meshtastic	Benvenuto in Camillia per Meshtastic
+Welcome to WDGwars EDITION for Meshtastic	Benvenuto in WDGwars EDITION per Meshtastic
 Wheel/j-k=Change   Enter=Next	Rotella/j-k=Cambia   Enter=Avanti
 White	Bianco
 Wi-Fi needed to fetch conditions.	Serve il Wi-Fi per ottenere il meteo.

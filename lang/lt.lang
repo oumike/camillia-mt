@@ -819,7 +819,7 @@ Web Config: On (Lite)	Žiniatinklio nustatymai: Įj. (Lite)
 Web Config: On (chat PAUSED)	Žiniatinklio nustatymai: Įj. (pokalbis PRISTABDYTAS)
 Web config: %s\n\nChat is PAUSED while web config runs - this device needs that memory for Wi-Fi. Messages sent to you now are not received or stored.\n\nTurn web config off to resume messaging.	Žiniatinklio nustatymai: %s\n\nPokalbis PRISTABDYTAS, kol veikia žiniatinklio nustatymai - įrenginiui ta atmintis reikalinga Wi-Fi. Dabar jums siunčiamos žinutės nebus gautos ir neįrašytos.\n\nIšjunkite žiniatinklio nustatymus, kad tęstumėte susirašinėjimą.
 Wed	tr
-Welcome to Camillia for Meshtastic	Sveiki atvykę į Camillia, skirtą Meshtastic
+Welcome to WDGwars EDITION for Meshtastic	Sveiki atvykę į WDGwars EDITION, skirtą Meshtastic
 Wheel/j-k=Change   Enter=Next	Ratukas/j-k=Keisti   Enter=Toliau
 White	Balta
 Wi-Fi needed to fetch conditions.	Orams gauti reikia Wi-Fi.

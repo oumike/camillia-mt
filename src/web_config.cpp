@@ -11,6 +11,7 @@
 #include "admin_client.h"   // the help text, which is the firmware's, not the page's
 #include "web_icon.h"
 #include "node_db.h"
+#include "wardrive_log.h"
 #include "channel_mgr.h"
 #include "dm_mgr.h"
 #include <WiFi.h>
@@ -638,7 +639,7 @@ static const char kHead[] =
     "<!DOCTYPE html><html><head>"
     "<meta charset='utf-8'>"
     "<meta name='viewport' content='width=device-width,initial-scale=1'>"
-    "<title>Camillia for Meshtastic</title>"
+    "<title>WDGwars EDITION</title>"
     "<link rel='icon' type='image/svg+xml' href='/favicon.ico'>"
     "<link rel='stylesheet' href='https://unpkg.com/leaflet@1.9.4/dist/leaflet.css'>"
     "<style>"
@@ -812,7 +813,7 @@ static const char kLiteHead[] =
         "<!DOCTYPE html><html><head>"
         "<meta charset='utf-8'>"
         "<meta name='viewport' content='width=device-width,initial-scale=1'>"
-        "<title>Camillia &mdash; Web Config Lite</title>"
+        "<title>WDGwars EDITION &mdash; Web Config Lite</title>"
         "<link rel='icon' type='image/svg+xml' href='/favicon.ico'>"
         "<style>"
         "body{font-family:sans-serif;margin:0 auto;padding:1em;max-width:40em}"
@@ -923,7 +924,7 @@ static const char kCustomLoraFields[] =
 // Theme preset names used by both the lite select and the swatch picker.
 // Most families offer dark+light; Camillia Black is dark-only.
 static const char *kThemePresetNames[] = {
-    "Camillia Dark",        "Camillia Light",
+    "WDGwars Neon",         "WDGwars Light",
     "Evergreen Dark",       "Evergreen Light",
     "Earthy Dark",          "Earthy Light",
     "Solarized Dark",       "Solarized Light",
@@ -935,7 +936,7 @@ static const char *kThemePresetNames[] = {
     "Quiet Luxury Dark",    "Quiet Luxury Light",
     "Morning Dew Dark",     "Morning Dew Light",
     "Winter Chill Dark",    "Winter Chill Light",
-    "Camillia Black",
+    "WDGwars Black",
 };
 static const uint8_t kThemePresetCount =
     (uint8_t)(sizeof(kThemePresetNames) / sizeof(kThemePresetNames[0]));
@@ -1473,8 +1474,8 @@ static const char kThemePicker[] =
         "<script>"
         "(function(){"
         "var P={"
-                        "'0':{bg:'#10141d',panel:'#1a2230',panel2:'#232d3e',line:'#4a5b73',text:'#f4f6fb',dim:'#b0b8c8',accent:'#d7869d',ink:'#ffffff'},"
-                        "'1':{bg:'#f6ede9',panel:'#fff6f3',panel2:'#f4e2dc',line:'#cfb2ab',text:'#2e2220',dim:'#6f5c58',accent:'#b75a74',ink:'#ffffff'},"
+                        "'0':{bg:'#030805',panel:'#0a140d',panel2:'#102016',line:'#1f6b33',text:'#d6ffde',dim:'#7fb88c',accent:'#39ff14',ink:'#03140a'},"
+                        "'1':{bg:'#f2f8f3',panel:'#ffffff',panel2:'#e2f0e5',line:'#a9d1b2',text:'#1e2a22',dim:'#5e7466',accent:'#0b8a3a',ink:'#ffffff'},"
                         "'2':{bg:'#091713',panel:'#102722',panel2:'#18332d',line:'#3a5f55',text:'#e8f4ef',dim:'#a5beb4',accent:'#5dbf9a',ink:'#073022'},"
                         "'3':{bg:'#eaf4ee',panel:'#f7fcf9',panel2:'#deece4',line:'#b5ccbf',text:'#1f2e25',dim:'#5f7668',accent:'#2f8f63',ink:'#ffffff'},"
                         "'4':{bg:'#1f1712',panel:'#2a2019',panel2:'#352920',line:'#655345',text:'#f3e9df',dim:'#c4b2a2',accent:'#c38a4a',ink:'#ffffff'},"
@@ -1497,15 +1498,15 @@ static const char kThemePicker[] =
                         "'21':{bg:'#eef9f6',panel:'#ffffff',panel2:'#ddf1ec',line:'#b5d5cd',text:'#213531',dim:'#5f7c76',accent:'#4e9c8a',ink:'#ffffff'},"
                                                 "'22':{bg:'#151f2b',panel:'#1c2a3a',panel2:'#243649',line:'#4c637c',text:'#ecf3fa',dim:'#b5c5d6',accent:'#8fb3d9',ink:'#132030'},"
                                                 "'23':{bg:'#f1f7fc',panel:'#ffffff',panel2:'#dfebf6',line:'#b6c9dd',text:'#22354a',dim:'#607891',accent:'#5c86b2',ink:'#ffffff'},"
-                                                "'24':{bg:'#000000',panel:'#000000',panel2:'#0a0a0a',line:'#666666',text:'#f3f6fa',dim:'#b7c0cc',accent:'#ffffff',ink:'#080d14'}"
+                                                "'24':{bg:'#000000',panel:'#000000',panel2:'#0a0a0a',line:'#1f6b33',text:'#d6ffde',dim:'#7fb88c',accent:'#39ff14',ink:'#03140a'}"
         "};"
-        "var NAMES=['Camillia Dark','Camillia Light','Evergreen Dark','Evergreen Light',"
+        "var NAMES=['WDGwars Neon','WDGwars Light','Evergreen Dark','Evergreen Light',"
           "'Earthy Dark','Earthy Light','Solarized Dark','Solarized Light',"
           "'Crimson Blue Dark','Crimson Blue Light','Scarlet Pop Dark','Scarlet Pop Light',"
           "'Ink Wash Dark','Ink Wash Light','Lavendar Fields Dark','Lavendar Fields Light',"
           "'Wild Flowers Dark','Wild Flowers Light','Quiet Luxury Dark','Quiet Luxury Light',"
                     "'Morning Dew Dark','Morning Dew Light','Winter Chill Dark','Winter Chill Light',"
-                    "'Camillia Black'];"
+                    "'WDGwars Black'];"
         "var input=document.getElementById('themeInput');"
         // Custom themes are authored as four colors; the rest of their web
         // palette is derived here the same way applyUiThemePalette() derives it
@@ -3693,8 +3694,8 @@ static void sendConfigPage(const char *msg = "", bool lite = false) {
     // and here, it is that build, not the socket.
     if (!lite) logWifiHeapDiag("node list built");
 
-    html += lite ? "<h2>Camillia &mdash; Web Config Lite"
-                 : "<h2>Camillia for Meshtastic";
+    html += lite ? "<h2>WDGwars EDITION &mdash; Web Config Lite"
+                 : "<h2>WDGwars EDITION";
     if (gCfg && gCfg->webCfgAuthEnabled)
         html += " <a class='logout' href='/logout'>Logout</a>";
     html += "</h2>";
@@ -5142,7 +5143,55 @@ static void sendConfigPage(const char *msg = "", bool lite = false) {
                 "&#11015; Export Node List (CSV)</a></p>"
                 "<p style='font-size:.82em;color:#888;margin:-.6em 0 1em'>"
                 "Downloads every node currently known to the device, plus any "
-                "previously archived nodes if an archive exists.</p>";
+                "previously archived nodes if an archive exists. The "
+                "<code>mapLat</code>/<code>mapLon</code> columns hold the node's "
+                "own position when it reports one, else where this device was "
+                "when it heard the node strongest (<code>mapSource</code> says "
+                "which).</p>";
+
+        // ── Wardrive log ────────────────────────────────────────────────────
+        {
+            const bool wdOk = wardriveLogFilePath() && wardriveLogAvailable();
+            html += "<label style='display:flex;align-items:center;gap:.5em;margin-top:.6em'>"
+                    "<input type='checkbox' name='wardrive_log' value='1'";
+            if (gCfg->wardriveLogEnabled) html += " checked";
+            if (!wdOk) html += " disabled";
+            html += " style='width:auto;margin:0'>"
+                    "<span>Wardrive log (every sighting + GPS fix)</span></label>";
+            html += "<p style='font-size:.82em;color:#888;margin:.3em 0 .6em'>";
+            if (!wardriveLogFilePath()) {
+                html += "Unavailable: this board has no file storage.";
+            } else if (!wdOk) {
+                html += "Unavailable: no storage mounted. Insert a card and reboot.";
+            } else {
+                html += "Appends one line per node per 30&nbsp;s (or per 50&nbsp;m "
+                        "moved) to <code>";
+                html += wardriveLogFilePath();
+                html += "</code>: time, RSSI/SNR, hops and your own GPS position. "
+                        "Radio only, and only with a GPS fix.";
+                char st[200];
+                snprintf(st, sizeof(st),
+                         "<br><b>This session:</b> %lu line(s), %lu node(s), "
+                         "%lu skipped without GPS fix, %lu dropped. GPS: %s",
+                         (unsigned long)wardriveLogLines(),
+                         (unsigned long)wardriveLogNodes(),
+                         (unsigned long)wardriveLogSkippedNoFix(),
+                         (unsigned long)wardriveLogDropped(),
+                         gpsHasFix() ? "fix" : "<b style='color:#c0392b'>NO FIX</b>");
+                html += st;
+            }
+            html += "</p>";
+            if (wdOk) {
+                html += "<p style='margin:.2em 0 .4em'><a href='/wardrive.csv'"
+                        " style='display:inline-block;padding:.4em 1.2em;background:#3b82f6;"
+                        "color:#fff;border-radius:3px;text-decoration:none;font-size:.95em'>"
+                        "&#11015; Download Wardrive Log (CSV)</a></p>"
+                        "<form method='POST' action='/clear-wardrive' style='margin:0 0 1em'"
+                        " onsubmit=\"return confirm('Delete the wardrive log file? Download it first if you need it.')\">"
+                        "<button type='submit' style='background:#c0392b'>"
+                        "Clear Wardrive Log</button></form>";
+            }
+        }
         sectionEnd(html, lite);
     }
 
@@ -7894,6 +7943,10 @@ static void handlePostSave() {
         gCfg->nodeArchiveEnabled = server.hasArg("node_archive");
         gCfg->nodeArchiveShow    = server.hasArg("node_archive_show");
     }
+    // Same disabled-checkbox guard as the archive above.
+    if (wardriveLogFilePath() && wardriveLogAvailable()) {
+        gCfg->wardriveLogEnabled = server.hasArg("wardrive_log");
+    }
     gCfg->autoFavoriteEnabled = server.hasArg("autofav");
     if (server.hasArg("autofav_range")) {
         // Shown in km or miles per the Units setting; stored in meters. Read in
@@ -8163,10 +8216,14 @@ static void handlePostSave() {
     RhinoConfig cfgMasked = *gCfg;
     cfgMasked.fontSize = cfgBefore.fontSize;
     cfgMasked.spellCheckEnabled = cfgBefore.spellCheckEnabled;
+    // Mirrored into wardrive_log by the main loop every pass, so toggling it
+    // needs no reboot -- and a reboot would also wipe the session counters.
+    cfgMasked.wardriveLogEnabled = cfgBefore.wardriveLogEnabled;
     const bool fontChanged  = (gCfg->fontSize != cfgBefore.fontSize);
     const bool spellChanged = (gCfg->spellCheckEnabled != cfgBefore.spellCheckEnabled);
+    const bool wardriveChanged = (gCfg->wardriveLogEnabled != cfgBefore.wardriveLogEnabled);
     const bool liveOnly = (memcmp(&cfgMasked, &cfgBefore, sizeof(RhinoConfig)) == 0)
-                          && (fontChanged || spellChanged);
+                          && (fontChanged || spellChanged || wardriveChanged);
 
     if (liveOnly) {
         redirectHomeWithFlash(fontChanged ? "Saved. Font size applied." : "Saved.");
@@ -9256,6 +9313,50 @@ static void handleGetNodesCsv() {
     server.sendContent("");   // terminate the chunked response
 }
 
+// The wardrive log, streamed from storage as-is. Flushed first so whatever the
+// main loop has not written yet is in the download too.
+static void handleGetWardriveCsv() {
+    if (!isLoggedIn()) { redirect("/login"); return; }
+    const char *path = wardriveLogFilePath();
+    wardriveLogFlush();
+    if (!path || !sdBegin() || !storageFs().exists(path)) {
+        server.send(404, "text/plain", "No wardrive log yet (needs a GPS fix and heard nodes).");
+        return;
+    }
+    File f = storageFs().open(path, FILE_READ);
+    if (!f) { server.send(500, "text/plain", "Could not open the wardrive log."); return; }
+
+    char fileName[64];
+    snprintf(fileName, sizeof(fileName), "camillia-wardrive-%s.csv",
+             (gCfg && gCfg->nodeShort[0]) ? gCfg->nodeShort : "node");
+    char cd[128];
+    snprintf(cd, sizeof(cd), "attachment; filename=\"%s\"", fileName);
+    server.sendHeader("Content-Disposition", cd);
+    server.sendHeader("Cache-Control", "no-store");
+    gSendAborted = false;
+    server.setContentLength(CONTENT_LENGTH_UNKNOWN);
+    server.send(200, "text/csv", "");
+
+    // Straight from the file in fixed blocks: the log grows for as long as a
+    // drive lasts, so it is never assembled in RAM. sendSliced() frames each
+    // block and reports an abandoned response.
+    static char buf[1024];   // static: off the WebServer task's stack
+    bool ok = true;
+    while (ok && f.available()) {
+        const int n = f.read((uint8_t *)buf, sizeof(buf));
+        if (n <= 0) break;
+        ok = sendSliced(buf, (size_t)n, "wardrive csv");
+    }
+    f.close();
+    if (ok) server.sendContent("");
+}
+
+static void handlePostClearWardrive() {
+    if (!isLoggedIn()) { redirect("/login"); return; }
+    redirectHomeWithFlash(wardriveLogClear() ? "Wardrive log cleared."
+                                             : "Could not clear the wardrive log (no storage?).");
+}
+
 // Export every stored message as CSV, streamed straight to the browser. Web
 // config only, and deliberately never written to the card: the device already
 // persists chat to keep it across reboots, and a second copy sitting in the
@@ -10067,6 +10168,8 @@ static void registerCommonRoutes() {
 #endif
     onRoute("/nodes.csv",         HTTP_GET,  handleGetNodesCsv);
     onRoute("/messages.csv",      HTTP_GET,  handleGetMessagesCsv);
+    onRoute("/wardrive.csv",      HTTP_GET,  handleGetWardriveCsv);
+    onRoute("/clear-wardrive",    HTTP_POST, handlePostClearWardrive);
     onRoute("/export",            HTTP_GET,  handleGetExport);
     onRoute("/import",            HTTP_POST, handleImportDone, handleImportUpload);
 #if HAS_UI_COLOR_OPTIONS

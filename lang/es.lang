@@ -844,7 +844,7 @@ Web Lite: %s	Web Lite: %s
 Web config: %s\n\nChat is PAUSED while web config runs - this device needs that memory for Wi-Fi. Messages sent to you now are not received or stored.\n\nTurn web config off to resume messaging.	Config web: %s\n\nEl chat está EN PAUSA mientras funciona la config web: este dispositivo necesita esa memoria para el Wi-Fi. Los mensajes que te envíen ahora no se reciben ni se guardan.\n\nDesactiva la config web para reanudar los mensajes.
 Web: %s	Web: %s
 Wed	mié
-Welcome to Camillia for Meshtastic	Bienvenido a Camillia para Meshtastic
+Welcome to WDGwars EDITION for Meshtastic	Bienvenido a WDGwars EDITION para Meshtastic
 Wheel/j-k=Change   Enter=Next	Rueda/j-k=Cambiar   Enter=Siguiente
 White	Blanco
 Wi-Fi needed to fetch conditions.	Se necesita Wi-Fi para obtener el tiempo.

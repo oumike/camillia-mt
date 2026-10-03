@@ -817,7 +817,7 @@ Web Config: On (Lite)	Veebiseaded: Sees (Lite)
 Web Config: On (chat PAUSED)	Veebiseaded: Sees (vestlus PEATATUD)
 Web config: %s\n\nChat is PAUSED while web config runs - this device needs that memory for Wi-Fi. Messages sent to you now are not received or stored.\n\nTurn web config off to resume messaging.	Veebiseaded: %s\n\nVestlus on PEATATUD, kuni veebiseaded töötavad - seade vajab seda mälu Wi-Fi jaoks. Teile praegu saadetud sõnumeid ei võeta vastu ega salvestata.\n\nLülitage veebiseaded välja, et sõnumite saatmist jätkata.
 Wed	K
-Welcome to Camillia for Meshtastic	Tere tulemast Camilliasse Meshtasticu jaoks
+Welcome to WDGwars EDITION for Meshtastic	Tere tulemast WDGwars EDITION Meshtasticu jaoks
 Wheel/j-k=Change   Enter=Next	Ratas/j-k=Muuda   Enter=Edasi
 White	Valge
 Wi-Fi needed to fetch conditions.	Ilma toomiseks on vaja Wi-Fi-t.

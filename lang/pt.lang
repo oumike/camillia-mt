@@ -812,7 +812,7 @@ Web Config: On (Lite)	Config web: Ligada (Lite)
 Web Config: On (chat PAUSED)	Config web: Ligada (chat PAUSADO)
 Web config: %s\n\nChat is PAUSED while web config runs - this device needs that memory for Wi-Fi. Messages sent to you now are not received or stored.\n\nTurn web config off to resume messaging.	Config web: %s\n\nO chat fica PAUSADO enquanto a config web roda - o dispositivo precisa dessa memória para o Wi-Fi. Mensagens enviadas a você agora não são recebidas nem salvas.\n\nDesligue a config web para voltar a trocar mensagens.
 Wed	qua
-Welcome to Camillia for Meshtastic	Bem-vindo ao Camillia para Meshtastic
+Welcome to WDGwars EDITION for Meshtastic	Bem-vindo ao WDGwars EDITION para Meshtastic
 Wheel/j-k=Change   Enter=Next	Roda/j-k=Mudar   Enter=Avançar
 White	Branco
 Wi-Fi needed to fetch conditions.	É preciso Wi-Fi para obter o tempo.

@@ -820,7 +820,7 @@ Web Config: On (Lite)	Web yapılandırması: Açık (Lite)
 Web Config: On (chat PAUSED)	Web yapılandırması: Açık (sohbet DURAKLATILDI)
 Web config: %s\n\nChat is PAUSED while web config runs - this device needs that memory for Wi-Fi. Messages sent to you now are not received or stored.\n\nTurn web config off to resume messaging.	Web yapılandırması: %s\n\nWeb yapılandırması çalışırken sohbet DURAKLATILIR - cihazın bu belleğe Wi-Fi için ihtiyacı var. Şu an size gönderilen mesajlar alınmaz ve kaydedilmez.\n\nMesajlaşmaya devam etmek için web yapılandırmasını kapatın.
 Wed	Çar
-Welcome to Camillia for Meshtastic	Meshtastic için Camillia'ya hoş geldiniz
+Welcome to WDGwars EDITION for Meshtastic	Meshtastic için WDGwars EDITION hoş geldiniz
 Wheel/j-k=Change   Enter=Next	Tekerlek/j-k=Değiştir   Enter=İleri
 White	Beyaz
 Wi-Fi needed to fetch conditions.	Hava durumunu almak için Wi-Fi gerekli.
