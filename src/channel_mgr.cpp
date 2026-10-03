@@ -220,6 +220,86 @@ int ChannelMgr::addMessage(int chanIdx, const char *prefix, const char *text,
     return firstLine;
 }
 
+bool ChannelMgr::hasMessage(int chanIdx, uint32_t fromNodeId, uint32_t packetId) const {
+    if (chanIdx < 0 || chanIdx >= MAX_CHANNELS || packetId == 0) return false;
+    const Channel &ch = _chans[chanIdx];
+    if (!ch.lines) return false;
+    for (int i = max(0, ch.count - MAX_MSG_LINES); i < ch.count; i++) {
+        const DisplayLine &dl = ch.lines[i % MAX_MSG_LINES];
+        if (dl.packetId == packetId && dl.senderNodeId == fromNodeId) return true;
+    }
+    return false;
+}
+
+bool ChannelMgr::newestReceived(int chanIdx, uint32_t myNodeId, uint32_t &fromNodeId,
+                                uint32_t &packetId) const {
+    if (chanIdx < 0 || chanIdx >= MAX_CHANNELS) return false;
+    const Channel &ch = _chans[chanIdx];
+    if (!ch.lines) return false;
+    for (int i = ch.count - 1; i >= max(0, ch.count - MAX_MSG_LINES); i--) {
+        const DisplayLine &dl = ch.lines[i % MAX_MSG_LINES];
+        if (dl.packetId && dl.senderNodeId && dl.senderNodeId != myNodeId) {
+            fromNodeId = dl.senderNodeId;
+            packetId = dl.packetId;
+            return true;
+        }
+    }
+    return false;
+}
+
+int ChannelMgr::insertMessageByEpoch(int chanIdx, const char *prefix, const char *text,
+                                     uint16_t color, uint32_t packetId,
+                                     uint32_t senderNodeId, uint32_t epoch) {
+    if (chanIdx < 0 || chanIdx >= MAX_CHANNELS) return -1;
+    Channel &ch = _chans[chanIdx];
+    if (!ch.lines) return -1;
+
+    // Where it belongs, among the lines held before it is added: in front of the
+    // first message (its first line) that is later than it.
+    const int before = ch.count;
+    const int oldest = max(0, before - MAX_MSG_LINES);
+    int pos = before;
+    if (epoch) {
+        for (int i = oldest; i < before; i++) {
+            const DisplayLine &dl = ch.lines[i % MAX_MSG_LINES];
+            bool starts = (i == oldest) || dl.packetId == 0;
+            if (!starts) {
+                const DisplayLine &prev = ch.lines[(i - 1) % MAX_MSG_LINES];
+                starts = prev.packetId != dl.packetId || prev.senderNodeId != dl.senderNodeId ||
+                         prev.epoch != dl.epoch;
+            }
+            if (starts && dl.epoch > epoch) { pos = i; break; }
+        }
+    }
+
+    _wordWrap(chanIdx, prefix, text, color, packetId, false, epoch, senderNodeId);
+    const int added = ch.count - before;
+    if (chanIdx != _active) ch.unread = true;
+    if (added <= 0 || pos >= before) return before;
+
+    // Appending may have pushed the oldest lines out of the ring; the insert point
+    // cannot be older than what is still held.
+    pos = max(pos, ch.count - MAX_MSG_LINES);
+    if (pos >= before) return before;
+
+    // Rotate [pos, count) right by `added`: the new lines move to pos, later lines up.
+    DisplayLine *tmp = (DisplayLine *)malloc(sizeof(DisplayLine) * (size_t)added);
+    if (!tmp) return before;   // out of memory: leave it at the bottom
+    for (int k = 0; k < added; k++) tmp[k] = ch.lines[(before + k) % MAX_MSG_LINES];
+    for (int i = before - 1; i >= pos; i--)
+        ch.lines[(i + added) % MAX_MSG_LINES] = ch.lines[i % MAX_MSG_LINES];
+    for (int k = 0; k < added; k++) ch.lines[(pos + k) % MAX_MSG_LINES] = tmp[k];
+    free(tmp);
+
+    for (int p = 0; p < MAX_PENDING_ACK; p++) {
+        PendingAck &pa = _pending[p];
+        if (pa.active && pa.chanIdx == chanIdx && pa.lineIdx >= pos) pa.lineIdx += added;
+    }
+    ch.revision++;
+    _markPersistDirty(chanIdx);
+    return pos;
+}
+
 void ChannelMgr::_wordWrap(int chanIdx, const char *prefix, const char *text,
                              uint16_t color, uint32_t packetId, bool trackAck,
                              uint32_t epoch, uint32_t senderNodeId) {

@@ -56,6 +56,17 @@ public:
                    uint16_t color, uint32_t packetId = 0,
                    bool trackAck = false, uint32_t senderNodeId = 0);
 
+    // Chat server replays (cs_client): whether a channel already shows a message,
+    // the newest message the node received from someone else, and inserting a
+    // replayed message at its place in time rather than at the bottom.
+    bool hasMessage(int chanIdx, uint32_t fromNodeId, uint32_t packetId) const;
+    bool newestReceived(int chanIdx, uint32_t myNodeId, uint32_t &fromNodeId,
+                        uint32_t &packetId) const;
+    // Word-wraps like addMessage(), then moves the lines before the first message
+    // whose epoch is later. epoch 0 (unknown time) appends.
+    int insertMessageByEpoch(int chanIdx, const char *prefix, const char *text, uint16_t color,
+                             uint32_t packetId, uint32_t senderNodeId, uint32_t epoch);
+
     void setAckState(uint32_t packetId, DisplayLine::AckState state);
     // Determine ACKED vs ACKED_RELAY by comparing fromNodeId to stored destNodeId
     void setAckStateFrom(uint32_t packetId, uint32_t fromNodeId);
