@@ -15,6 +15,16 @@
 #include <math.h>
 #include <string.h>
 #include <ctype.h>
+#include <stddef.h>
+
+// The chat server fields reuse the S&F client's bytes and one pad byte; the
+// blob layout must not move (see the notes in config_io.h).
+static_assert(sizeof(((RhinoConfig *)nullptr)->chatServerMode) == sizeof(bool),
+              "chatServerMode must keep snfClientEnabled's size");
+static_assert(offsetof(RhinoConfig, chatServerFlags) == offsetof(RhinoConfig, webFilesEnabled) + 1,
+              "chatServerFlags must take the first byte of the old _reservedPad16");
+static_assert(offsetof(RhinoConfig, _reservedPad16) == offsetof(RhinoConfig, webFilesEnabled) + 2,
+              "one pad byte must remain where it was");
 
 // ── Channel plan tables ──────────────────────────────────────────────────────
 const PresetParams kPresets[PRESET_COUNT] = {
@@ -1152,8 +1162,9 @@ void cfgInitDefaults(RhinoConfig &cfg) {
     cfg.cannedEnabled      = MY_CANNED_EN;
     strncpy(cfg.cannedMessages, MY_CANNED_MSGS, sizeof(cfg.cannedMessages) - 1);
     cfg.cannedMessages[sizeof(cfg.cannedMessages) - 1] = '\0';
-    cfg.snfClientEnabled   = MY_SNF_CLIENT_EN;
-    cfg.snfRouterNodeId    = MY_SNF_ROUTER_ID;
+    cfg.chatServerMode     = MY_CHAT_SERVER_MODE;
+    cfg.chatServerNodeId   = 0;
+    cfg.chatServerFlags    = CHAT_SERVER_FLAGS_MAGIC;
     cfg.otaAutoCheckEnabled = MY_OTA_AUTOCHECK;
     cfg.otaChannel          = MY_OTA_CHANNEL;
     cfg.otaAutoUpdatePeriod = MY_OTA_AUTOUPDATE;
@@ -1771,16 +1782,21 @@ void cfgToYaml(const RhinoConfig &cfg, String &out) {
     snprintf(tmp, sizeof(tmp), "  autoFavoriteRangeM: %lu\n", (unsigned long)cfg.autoFavoriteRangeM); out += tmp;
     // module_config
     out += "module_config:\n";
-    out += "  storeForward:\n";
-    snprintf(tmp, sizeof(tmp), "    client_enabled: %s\n", cfg.snfClientEnabled ? "true" : "false"); out += tmp;
+    out += "  chatServer:\n";
+    snprintf(tmp, sizeof(tmp), "    mode: %s\n",
+             cfg.chatServerMode == CHAT_SERVER_MODE_OFF    ? "off" :
+             cfg.chatServerMode == CHAT_SERVER_MODE_MANUAL ? "manual" : "auto");
+    out += tmp;
     // "none" rather than !00000000 for unset: the file is meant to be read, and
     // a zeroed node id is not a node. parseNodeIdText() maps it back to 0.
-    if (cfg.snfRouterNodeId != 0) {
-        snprintf(tmp, sizeof(tmp), "    router_id: !%08lx\n",
-                 (unsigned long)cfg.snfRouterNodeId);
+    if (cfg.chatServerNodeId != 0) {
+        snprintf(tmp, sizeof(tmp), "    server: !%08lx\n", (unsigned long)cfg.chatServerNodeId);
     } else {
-        snprintf(tmp, sizeof(tmp), "    router_id: none\n");
+        snprintf(tmp, sizeof(tmp), "    server: none\n");
     }
+    out += tmp;
+    snprintf(tmp, sizeof(tmp), "    manual: %s\n",
+             (cfg.chatServerFlags & CHAT_SERVER_FLAG_MANUAL) ? "true" : "false");
     out += tmp;
     // MQTT subsection: include full bridge settings so export/import round-trips
     // all MQTT behavior and connectivity fields.
@@ -2432,8 +2448,19 @@ bool cfgImportFromBuf(const char *buf, size_t len, RhinoConfig &cfg) {
             } else if (!strcmp(section, "module_config") && !strcmp(subsection, "cannedMessage")) {
                 if (!strcmp(key, "enabled")) cfg.cannedEnabled = (!strcmp(val,"true"));
             } else if (!strcmp(section, "module_config") && !strcmp(subsection, "storeForward")) {
-                if      (!strcmp(key, "client_enabled")) cfg.snfClientEnabled = (!strcmp(val,"true"));
-                else if (!strcmp(key, "router_id"))      cfg.snfRouterNodeId = parseNodeIdText(val);
+                // Meshtastic Store & Forward client, removed: older exports still
+                // carry this block, which is accepted and ignored.
+            } else if (!strcmp(section, "module_config") && !strcmp(subsection, "chatServer")) {
+                if (!strcmp(key, "mode")) {
+                    cfg.chatServerMode = !strcmp(val, "off")    ? CHAT_SERVER_MODE_OFF :
+                                         !strcmp(val, "manual") ? CHAT_SERVER_MODE_MANUAL
+                                                                : CHAT_SERVER_MODE_AUTO;
+                } else if (!strcmp(key, "server")) {
+                    cfg.chatServerNodeId = parseNodeIdText(val);
+                } else if (!strcmp(key, "manual")) {
+                    cfg.chatServerFlags = (uint8_t)(CHAT_SERVER_FLAGS_MAGIC |
+                                          (!strcmp(val, "true") ? CHAT_SERVER_FLAG_MANUAL : 0));
+                }
             } else if (!strcmp(section, "nodes")) {
                 // Also handled at indent 2, which is where cfgToYaml writes it.
                 parseNodesSectionKey(cfg, key, val);

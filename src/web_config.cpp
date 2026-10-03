@@ -4868,8 +4868,8 @@ static void sendConfigPage(const char *msg = "", bool lite = false) {
     // Store and Forward (client)
     html += "<h3 style='font-size:.95em;margin:.8em 0 .3em'>Store &amp; Forward (Client)</h3>";
     html += "<label>Receive Replayed Messages<select name='snf_client_en'>"
-            "<option value='1'"; if ( gCfg->snfClientEnabled) html += " selected"; html += ">Yes</option>"
-            "<option value='0'"; if (!gCfg->snfClientEnabled) html += " selected"; html += ">No</option>"
+            "<option value='1'"; if ( gCfg->chatServerMode) html += " selected"; html += ">Yes</option>"
+            "<option value='0'"; if (!gCfg->chatServerMode) html += " selected"; html += ">No</option>"
             "</select></label>";
     // A router never replays unsolicited — it only answers a CLIENT_HISTORY — so
     // this switch on its own never receives anything but heartbeats. The button
@@ -4883,9 +4883,9 @@ static void sendConfigPage(const char *msg = "", bool lite = false) {
 
     html += "<label>Router Node ID<input name='snf_router_id' type='text' maxlength='16'"
             " placeholder='auto' value='";
-    if (gCfg->snfRouterNodeId != 0) {
+    if (gCfg->chatServerNodeId != 0) {
         char routerBuf[16];
-        snprintf(routerBuf, sizeof(routerBuf), "!%08lx", (unsigned long)gCfg->snfRouterNodeId);
+        snprintf(routerBuf, sizeof(routerBuf), "!%08lx", (unsigned long)gCfg->chatServerNodeId);
         html += routerBuf;
     }
     html += "'></label>"
@@ -8098,10 +8098,10 @@ static void handlePostSave() {
         // way to hand router selection back to heartbeat discovery. Shared with
         // the YAML importer so a hand-edited config.yaml and this box accept
         // exactly the same spellings.
-        gCfg->snfRouterNodeId = parseNodeIdText(server.arg("snf_router_id").c_str());
+        gCfg->chatServerNodeId = parseNodeIdText(server.arg("snf_router_id").c_str());
     }
     if (server.hasArg("snf_client_en")) {
-        gCfg->snfClientEnabled = server.arg("snf_client_en").toInt() != 0;
+        gCfg->chatServerMode = server.arg("snf_client_en").toInt() != 0 ? 1 : 0;
     }
 #if HAS_AUDIO_ALERTS
     if (server.hasArg("msg_alert_sound")) {   // same guard, same reason

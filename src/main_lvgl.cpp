@@ -5246,7 +5246,7 @@ static const char *cfgActionLabel(int actionId, char *buf, size_t bufLen) {
             snprintf(buf, bufLen, TR("Mesh Beacons: %s"), s_cfg.meshBeaconListen ? TR("On") : TR("Off"));
             break;
         case CFG_ACTION_SNF_CLIENT:
-            snprintf(buf, bufLen, TR("Store&Fwd Client: %s"), s_cfg.snfClientEnabled ? TR("On") : TR("Off"));
+            snprintf(buf, bufLen, TR("Store&Fwd Client: %s"), s_cfg.chatServerMode ? TR("On") : TR("Off"));
             break;
         case CFG_ACTION_SNF_REQUEST:
             // Names the router when one has been heard: a request can only go to
@@ -5398,7 +5398,7 @@ static bool cfgActionDisabled(int actionId) {
     switch (actionId) {
         case CFG_ACTION_MQTT_TOGGLE: return !s_cfg.wifiEnabled;
         // Nothing to ask for with the client switched off.
-        case CFG_ACTION_SNF_REQUEST:  return !s_cfg.snfClientEnabled;
+        case CFG_ACTION_SNF_REQUEST:  return !s_cfg.chatServerMode;
 #if HAS_SD_MALWARE_SCAN
         // Nothing to look at. The row stays visible rather than disappearing:
         // "no card" is the answer to the question someone opened this to ask.
@@ -10411,6 +10411,14 @@ static void cfgMigrateStoredConfig() {
 // are mutually exclusive, and the radio parameters are always re-derived from
 // region + preset rather than trusted from storage.
 static void applyLoadedConfigInvariants() {
+    // Chat server (replacing the S&F client in the same bytes): an unmigrated
+    // flags byte means the node id slot still holds an S&F router pin.
+    if ((s_cfg.chatServerFlags & 0xF0) != CHAT_SERVER_FLAGS_MAGIC) {
+        s_cfg.chatServerNodeId = 0;
+        s_cfg.chatServerFlags = CHAT_SERVER_FLAGS_MAGIC;
+    }
+    if (s_cfg.chatServerMode > CHAT_SERVER_MODE_MANUAL) s_cfg.chatServerMode = CHAT_SERVER_MODE_AUTO;
+
 #if HAS_RUNTIME_ORIENTATION
     // The blob field is a mirror, not the home. A device upgrading from a build
     // that predates it reads zero out of the short blob whichever way its panel
@@ -10718,7 +10726,8 @@ static void loadConfigFromPrefs() {
     }
 
     if (prefs.isKey("cannedEn")) s_cfg.cannedEnabled = prefs.getBool("cannedEn");
-    if (prefs.isKey("snfClientEn")) s_cfg.snfClientEnabled = prefs.getBool("snfClientEn");
+    if (prefs.isKey("snfClientEn"))
+        s_cfg.chatServerMode = prefs.getBool("snfClientEn") ? CHAT_SERVER_MODE_AUTO : CHAT_SERVER_MODE_OFF;
     if (prefs.isKey("otaAutoChk")) s_cfg.otaAutoCheckEnabled = prefs.getBool("otaAutoChk");
     if (prefs.isKey("nodeArchive")) s_cfg.nodeArchiveEnabled = prefs.getBool("nodeArchive");
     if (prefs.isKey("autoFav")) s_cfg.autoFavoriteEnabled = prefs.getBool("autoFav");
@@ -39801,12 +39810,12 @@ static void performCfgAction(int actionId) {
         case CFG_ACTION_SNF_CLIENT:
             if (s_cfgDebugLog) Serial.println("[lvgl-cfg] exec SNF_CLIENT");
             showActionPopup = false;   // row already reads On/Off
-            s_cfg.snfClientEnabled = !s_cfg.snfClientEnabled;
+            s_cfg.chatServerMode = s_cfg.chatServerMode ? 0 : 1;
             persistConfigToPrefs();
             snprintf(s_cfgStatus,
                      sizeof(s_cfgStatus),
                      TR("Store&Fwd Client: %s"),
-                     s_cfg.snfClientEnabled ? TR("On") : TR("Off"));
+                     s_cfg.chatServerMode ? TR("On") : TR("Off"));
             break;
 
         case CFG_ACTION_SNF_REQUEST: {
@@ -50233,7 +50242,7 @@ static constexpr uint32_t kSnfRouterStaleMs = 30UL * 60UL * 1000UL;
 // refuses it — so without this the row would claim a router while every request
 // failed. Covers the web form, YAML import and the settings blob at once.
 static bool snfRouterPinned() {
-    return s_cfg.snfRouterNodeId != 0 && s_cfg.snfRouterNodeId != 0xFFFFFFFFu;
+    return s_cfg.chatServerNodeId != 0 && s_cfg.chatServerNodeId != 0xFFFFFFFFu;
 }
 
 static bool snfRouterKnown() {
@@ -50251,7 +50260,7 @@ static bool snfRouterKnown() {
 }
 
 static uint32_t snfRouterId() {
-    return snfRouterPinned() ? s_cfg.snfRouterNodeId : s_snfRouterId;
+    return snfRouterPinned() ? s_cfg.chatServerNodeId : s_snfRouterId;
 }
 
 // Which channel to address the router on. A heard router answers on the channel
@@ -50261,7 +50270,7 @@ static uint32_t snfRouterId() {
 // it is better than refusing to send at all.
 static int snfRouterChanIdx() {
     if (snfRouterPinned()) {
-        const NodeEntry *n = Nodes.find(s_cfg.snfRouterNodeId);
+        const NodeEntry *n = Nodes.find(s_cfg.chatServerNodeId);
         if (n && n->chanIdx >= 0 && n->chanIdx < MESH_CHANNELS) return n->chanIdx;
         return 0;
     }
@@ -50320,7 +50329,7 @@ static bool sendStoreForwardTo(uint32_t toNodeId, uint32_t rr, uint32_t windowMi
 // `why` so the CFG row and web config can say *which* precondition failed —
 // "no router heard yet" and "asked a moment ago" are different problems.
 static bool snfRequestHistory(const char **why) {
-    if (!s_cfg.snfClientEnabled) {
+    if (!s_cfg.chatServerMode) {
         if (why) *why = TR("Store&Fwd client is off");
         return false;
     }
@@ -50698,7 +50707,7 @@ static bool processMeshPacket(const MeshPacket &rxPkt) {
             // off we are not participating, and a replay's hdr.from is the
             // original author rather than whoever actually transmitted. The
             // router still appears in the node list via its ordinary NodeInfo.
-            if (!s_cfg.snfClientEnabled) {
+            if (!s_cfg.chatServerMode) {
                 return false;
             }
 

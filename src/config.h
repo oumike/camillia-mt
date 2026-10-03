@@ -483,10 +483,8 @@
 #endif
 #define MY_CANNED_EN        1
 #define MY_CANNED_MSGS      "Hi|Bye|Yes|No|Ok"
-#define MY_SNF_CLIENT_EN    1   // Store and Forward: act as client (receive replayed messages)
-// Store and Forward: pin the router to ask for replays, as a raw node id.
-// 0 = unset — discover the router from its broadcast heartbeat instead.
-#define MY_SNF_ROUTER_ID    0
+// camillia chat server client: 0 off, 1 automatic (boot + every 15 min), 2 manual only.
+#define MY_CHAT_SERVER_MODE 1
 // Ask the release server for a newer build once per boot and offer to install
 // it. Opt-out: the check is a single plain-HTTP GET and costs nothing when
 // there is no update, so it is on by default.

@@ -234,8 +234,11 @@ struct RhinoConfig {
     bool     cannedEnabled;
     char     cannedMessages[200];
 
-    // Module: Store and Forward (client)
-    bool     snfClientEnabled;
+    // Module: camillia chat server client (CHAT_SERVER_MODE_*). Was the bool
+    // snfClientEnabled (Meshtastic Store & Forward client, removed): same byte,
+    // and an old `true` (1) reads as CHAT_SERVER_MODE_AUTO, so devices that had
+    // the client on keep a client on.
+    uint8_t  chatServerMode;
 
     // Firmware updates
     bool     otaAutoCheckEnabled; // check for a newer release once per boot
@@ -401,7 +404,11 @@ struct RhinoConfig {
     // padding. This is a uint32_t, and its natural 4-alignment already places
     // it at offset 940 — exactly the previous sizeof(RhinoConfig), with
     // meshBeaconListen at 938. Verified by compiling both layouts on the host.
-    uint32_t snfRouterNodeId;
+    //
+    // Now the chat server's node id (0 = none), in the old snfRouterNodeId
+    // slot. An S&F router pinned there is not a chat server, so it is cleared
+    // once on upgrade -- see chatServerFlags.
+    uint32_t chatServerNodeId;
     // Battery indicator format: BATT_DISPLAY_PERCENT / BATT_DISPLAY_VOLTAGE.
     // Lands at the previous sizeof(RhinoConfig) because snfRouterNodeId above
     // is a uint32_t that ends flush with it — verified on the host, same check
@@ -677,10 +684,22 @@ struct RhinoConfig {
     // Deliberately not in the YAML export, for the same reason it is off by
     // default: restoring a backup must not open the device's files.
     uint8_t  webFilesEnabled;
-    // For whoever appends next: two pad bytes remain, carrying whatever older
-    // builds wrote into them. Past them is the old sizeof(RhinoConfig).
-    uint8_t  _reservedPad16[2];
+    // Chat server flags: CHAT_SERVER_FLAGS_MAGIC in the high nibble, bit0 =
+    // the server was set manually (never replaced automatically). Takes the
+    // first of what was _reservedPad16[2]; older blobs carry whatever sat in
+    // that pad byte, so a missing magic means "not migrated": the node id is
+    // cleared and the flags reset (applyLoadedConfigInvariants).
+    uint8_t  chatServerFlags;
+    // For whoever appends next: one pad byte remains, carrying whatever older
+    // builds wrote into it. Past it is the old sizeof(RhinoConfig).
+    uint8_t  _reservedPad16[1];
 };
+
+#define CHAT_SERVER_MODE_OFF     0
+#define CHAT_SERVER_MODE_AUTO    1
+#define CHAT_SERVER_MODE_MANUAL  2
+#define CHAT_SERVER_FLAGS_MAGIC  0xA0
+#define CHAT_SERVER_FLAG_MANUAL  0x01
 
 static constexpr uint8_t kP4AntennaExternal = 0x5A;
 inline bool cfgP4AntennaExternal(const RhinoConfig &c) {
