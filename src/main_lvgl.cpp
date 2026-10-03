@@ -21,6 +21,8 @@
 #endif
 #include "live_util.h"
 #include "live_feed.h"
+#include "cs_client.h"
+#include "cs_proto.h"
 #include "mesh_proto.h"
 #include "xeddsa.h"
 #include "mesh_radio.h"
@@ -2751,6 +2753,13 @@ static int nodesMapRenderTiles(float lat, float lon, int x0, int y0, int w, int 
 static void sdRmDirRecursive(const char *path);
 static bool clearNodeDbOnSd();
 
+// camillia chat server client (defined with the mesh TX helpers). The Config
+// screen, the Nodes action menu and the web config call these.
+static bool chatServerCheckNow(const char **why);
+static void chatServerSetManual(uint32_t nodeId);
+static void chatServerClear();
+static void chatServerModeChanged();
+static void chatServerLabel(char *out, size_t outLen);
 static bool pagerSelectChatCursorIndex(int displayIndex);
 static void pagerExitChatCursorMode(bool clearSelection = true);
 static void setActiveChannel(int channelIdx);
@@ -50291,6 +50300,327 @@ static void servicePendingRebroadcast(uint32_t now) {
     }
 }
 
+// ── camillia chat server client ──────────────────────────────────────────────
+// Catches up on channel messages missed while this node was off or away, from a
+// camillia chat server (camillia-chat-server repo; protocol in cs_proto.h). The
+// decisions live in cs_client.cpp, host-tested; this is the radio, storage and
+// UI around it. Port 256 (Meshtastic PRIVATE_APP).
+static constexpr uint32_t kCsPortnum = 256;
+static constexpr int      kCsDiscoveryChanIdx = -3;   // pkt.chanIdx for the camillia-cs channel
+static csc::Client s_csClient;
+static bool        s_csStarted = false;
+static uint32_t    s_csChanIds[MESH_CHANNELS] = {};
+
+static uint8_t csDiscoveryHash() {
+    static int16_t hash = -1;
+    if (hash < 0) hash = computeChannelHash(csp::DISCOVERY_CHANNEL_NAME, csp::DISCOVERY_KEY, 16);
+    return (uint8_t)hash;
+}
+
+static void csComputeChanIds(uint32_t out[MESH_CHANNELS]) {
+    for (int i = 0; i < MESH_CHANNELS; i++) {
+        const ChannelKey &ck = CHANNEL_KEYS[i];
+        const char *name = ck.name_buf[0] ? ck.name_buf : ck.name;
+        out[i] = (ck.role != 2 && name && name[0]) ? csp::channelId(name, ck.key, ck.keyLen) : 0;
+    }
+}
+
+// Saved catch-up positions: which server they belong to and, per channel, which
+// channel (by id) they were for, so a reconfigured channel never reuses one.
+struct CsSavedStates {
+    uint32_t serverId;
+    uint32_t chanId[MESH_CHANNELS];
+    csc::ChannelState st[MESH_CHANNELS];
+};
+
+static void csLoadStates(csc::ChannelState out[MESH_CHANNELS]) {
+    memset(out, 0, sizeof(csc::ChannelState) * MESH_CHANNELS);
+    CsSavedStates saved = {};
+    Preferences p;
+    if (!p.begin("cschan", true)) return;
+    bool ok = p.getBytesLength("st") == sizeof(saved) && p.getBytes("st", &saved, sizeof(saved)) == sizeof(saved);
+    p.end();
+    if (!ok || saved.serverId != s_cfg.chatServerNodeId) return;
+    for (int i = 0; i < MESH_CHANNELS; i++)
+        if (saved.chanId[i] && saved.chanId[i] == s_csChanIds[i]) out[i] = saved.st[i];
+}
+
+static void csSaveStates() {
+    CsSavedStates saved = {};
+    saved.serverId = s_csClient.serverId();
+    for (int i = 0; i < MESH_CHANNELS; i++) {
+        saved.chanId[i] = s_csChanIds[i];
+        saved.st[i] = s_csClient.state(i);
+    }
+    Preferences p;
+    if (!p.begin("cschan", false)) return;
+    p.putBytes("st", &saved, sizeof(saved));
+    p.end();
+}
+
+static void csBegin(uint32_t nowMs) {
+    csComputeChanIds(s_csChanIds);
+    csc::ChannelState saved[MESH_CHANNELS];
+    csLoadStates(saved);
+    s_csClient.begin((csc::Mode)s_cfg.chatServerMode, s_cfg.chatServerNodeId,
+                     (s_cfg.chatServerFlags & CHAT_SERVER_FLAG_MANUAL) != 0,
+                     s_csChanIds, MESH_CHANNELS, saved, nowMs);
+    s_csStarted = true;
+}
+
+static void csServerLabel(uint32_t nodeId, char *out, size_t outLen) {
+    liveNodeLabel(nodeId, out, outLen, false);
+}
+
+static void csLive(const char *text, uint16_t color) {
+    char timePrefix[12];
+    liveBuildPrefix(timePrefix, sizeof(timePrefix));
+    liveFeedAddPrefixed(timePrefix, text, color, 0, false);
+}
+
+// Mirror the client's server choice into the persisted config.
+static void csSyncConfig() {
+    const uint32_t id = s_csClient.serverId();
+    const uint8_t flags = (uint8_t)(CHAT_SERVER_FLAGS_MAGIC | (s_csClient.manual() ? CHAT_SERVER_FLAG_MANUAL : 0));
+    if (id != s_cfg.chatServerNodeId || flags != s_cfg.chatServerFlags) {
+        s_cfg.chatServerNodeId = id;
+        s_cfg.chatServerFlags = flags;
+        markConfigDirty();
+    }
+}
+
+static bool csTransmit(const csc::Send &out) {
+    if (!Radio.isReady() || s_myNodeId == 0) return false;
+    uint8_t data[csp::MAX_PAYLOAD + 16];
+    size_t n = 0;
+    data[n++] = (1 << 3) | 0;                 // Data.portnum = 256 (varint)
+    data[n++] = 0x80; data[n++] = 0x02;
+    data[n++] = (2 << 3) | 2;                 // Data.payload
+    if (out.len < 128) {
+        data[n++] = (uint8_t)out.len;
+    } else {
+        data[n++] = (uint8_t)(out.len | 0x80);
+        data[n++] = (uint8_t)(out.len >> 7);
+    }
+    memcpy(data + n, out.payload, out.len);
+    n += out.len;
+    data[n++] = (9 << 3) | 0;                 // Data.bitfield = 0 (2.8 drops Data without it)
+    data[n++] = 0;
+
+    const uint8_t *key;
+    uint8_t keyLen, hash;
+    if (out.chanIdx < 0) {
+        key = csp::DISCOVERY_KEY; keyLen = 16; hash = csDiscoveryHash();
+    } else {
+        const ChannelKey &ck = CHANNEL_KEYS[out.chanIdx];
+        key = ck.key; keyLen = ck.keyLen; hash = ck.hash;
+    }
+    uint8_t frame[sizeof(MeshHdr) + sizeof(data)];
+    MeshHdr hdr = {};
+    hdr.to = out.to;
+    hdr.from = s_myNodeId;
+    hdr.id = nextMeshPacketId();
+    hdr.channel = hash;
+    const uint8_t hop = out.hopLimit & 0x07;
+    hdr.flags = (uint8_t)(hop | (hop << 5));
+    hdr.relay_node = (uint8_t)(s_myNodeId & 0xFF);
+    if (!encryptPayload(hdr.id, s_myNodeId, key, keyLen, data, frame + sizeof(MeshHdr), n)) return false;
+    memcpy(frame, &hdr, sizeof(hdr));
+    const bool ok = Radio.transmit(frame, sizeof(hdr) + n);
+
+    csp::Type t = csp::DISCOVER;
+    csp::peekType(out.payload, out.len, t);
+    char dst[16], line[72];
+    liveNodeLabel(out.to, dst, sizeof(dst), true);
+    snprintf(line, sizeof(line), "T CS U %s %s %s", dst, t == csp::REQUEST ? "REQ" : "DISC", ok ? "TX" : "ER");
+    csLive(line, ok ? TFT_DARKGREY : TFT_RED);
+    return ok;
+}
+
+// A packet on the camillia-cs discovery channel is not in CHANNEL_KEYS, so the
+// radio path leaves it encrypted. AES-CTR is symmetric: encryptPayload decrypts.
+static void chatServerTryDiscovery(MeshPacket &pkt) {
+    if (pkt.decrypted || pkt.rawLen == 0 || pkt.hdr.channel != csDiscoveryHash()) return;
+    uint8_t plain[256];
+    if (pkt.rawLen > sizeof(plain)) return;
+    if (!encryptPayload(pkt.hdr.id, pkt.hdr.from, csp::DISCOVERY_KEY, 16, pkt.rawCipher, plain, pkt.rawLen))
+        return;
+    uint32_t portnum = 0, requestId = 0;
+    bool wantResponse = false;
+    const uint8_t *pay = nullptr;
+    size_t payLen = 0;
+    if (!decodeData(plain, pkt.rawLen, portnum, pay, payLen, requestId, wantResponse)) return;
+    if (portnum != kCsPortnum || !pay || payLen > sizeof(pkt.payload)) return;
+    memcpy(pkt.payload, pay, payLen);
+    pkt.payloadLen = payLen;
+    pkt.portnum = portnum;
+    pkt.decrypted = true;
+    pkt.chanIdx = kCsDiscoveryChanIdx;
+}
+
+static uint8_t csHopsTravelled(const MeshHdr &hdr) {
+    const uint8_t start = (hdr.flags >> 5) & 0x07, limit = hdr.flags & 0x07;
+    return (start == 0 || limit > start) ? 0 : (uint8_t)(start - limit);
+}
+
+// Posts one batch's messages into the channel, each at its place in time.
+static int csPostItems(int chanIdx, const csp::BatchHeader &h, const csp::Item *items, uint8_t n) {
+    const time_t nowT = time(nullptr);
+    const bool clockSet = nowT >= 1700000000;
+    int posted = 0;
+    for (uint8_t k = 0; k < n; k++) {
+        const csp::Item &it = items[k];
+        if (Channels.hasMessage(chanIdx, it.from, it.packetId) || Ignored.contains(it.from)) continue;
+
+        char text[MESH_TEXT_MAX_LEN + 1];
+        utf8util::copyTruncateBytes(text, sizeof(text), (const uint8_t *)it.text, it.textLen);
+        for (char *c = text; *c; c++) if (*c == '\r' || *c == '\n') *c = ' ';
+
+        const uint32_t epoch = csc::displayEpoch((uint32_t)nowT, clockSet, it.ageSec);
+        char clock[LIVE_CLOCK_BUF] = "--:--";
+        if (epoch) {
+            time_t e = (time_t)epoch;
+            struct tm tmv;
+            localtime_r(&e, &tmv);
+            liveFormatClock(tmv, clock, sizeof(clock));
+        }
+        char sender[48], prefix[96];
+        chatSenderLabel(it.from, sender, sizeof(sender));
+#if defined(DEVICE_CARDPUTER_LORA_HAT)
+        snprintf(prefix, sizeof(prefix), "CS %s [%s] ", clock, sender);
+#else
+        // The refresh mark where LoRa/MQTT messages show their transport icon:
+        // "this arrived from the chat server" (v1 marker; to be refined).
+        snprintf(prefix, sizeof(prefix), "%s  %s [%s] ", LV_SYMBOL_REFRESH, clock, sender);
+#endif
+        Channels.insertMessageByEpoch(chanIdx, prefix, text, TFT_WHITE, it.packetId, it.from, epoch);
+        posted++;
+    }
+    (void)h;
+    if (posted && !channelIsMuted(chanIdx)) {
+        const bool chanOnScreen = (chanIdx == s_activeChannel) && !glanceOverlayHidesUi();
+        if (!chanOnScreen && chanIdx < MESH_CHANNELS) s_channelNeedsAttention[chanIdx] = true;
+        triggerMessageAlert(false, MSG_ALERT_VISUAL_CHANNEL);
+    }
+    return posted;
+}
+
+// Port-256 packet on a channel (or the discovery channel). True = the visible
+// chat changed.
+static bool chatServerHandleRx(const MeshPacket &pkt) {
+    if (!s_csStarted) return false;
+    csp::Type t;
+    if (!csp::peekType(pkt.payload, pkt.payloadLen, t)) return false;
+    const uint32_t now = millis();
+    const uint8_t hops = csHopsTravelled(pkt.hdr);
+
+    if (t == csp::ANNOUNCE && pkt.chanIdx == kCsDiscoveryChanIdx &&
+        (pkt.hdr.to == s_myNodeId || pkt.hdr.to == 0xFFFFFFFF)) {
+        csp::Announce a;
+        if (csp::decodeAnnounce(pkt.payload, pkt.payloadLen, a)) s_csClient.onAnnounce(pkt.hdr.from, hops, a, now);
+        return false;
+    }
+    if (t == csp::BATCH && pkt.hdr.to == s_myNodeId && pkt.chanIdx >= 0 && pkt.chanIdx < MESH_CHANNELS &&
+        pkt.hdr.channel == CHANNEL_KEYS[pkt.chanIdx].hash) {
+        csp::BatchHeader h;
+        static csp::Item items[csp::MAX_PAYLOAD / csp::ITEM_OVERHEAD];
+        uint8_t n = 0;
+        if (!csp::decodeBatch(pkt.payload, pkt.payloadLen, h, items,
+                              (uint8_t)(sizeof(items) / sizeof(items[0])), n))
+            return false;
+        const int accepted = s_csClient.onBatch(pkt.hdr.from, pkt.chanIdx, h, items, n, now);
+        if ((h.flags & csp::FLAG_TIME_VALID) && !clockIsSet() && !timeSourceIsManual()) {
+            struct timeval tv = {(time_t)h.serverTime, 0};
+            settimeofday(&tv, nullptr);
+            csLive("[cs] clock set from chat server", TFT_DARKGREY);
+        }
+        if (accepted <= 0) return false;
+        return csPostItems(pkt.chanIdx, h, items, (uint8_t)accepted) > 0 && pkt.chanIdx == s_activeChannel;
+    }
+    return false;
+}
+
+static void chatServerService(uint32_t now) {
+    if (s_myNodeId == 0) return;
+    if (!s_csStarted) csBegin(now);
+
+    uint32_t ids[MESH_CHANNELS];
+    csComputeChanIds(ids);
+    if (memcmp(ids, s_csChanIds, sizeof(ids)) != 0) csBegin(now);   // channels reconfigured
+
+    csc::Send out;
+    if (s_csClient.poll(now, [](int i) {
+            csc::Anchor a{0, 0};
+            Channels.newestReceived(i, s_myNodeId, a.from, a.packetId);
+            return a;
+        }, out)) {
+        csTransmit(out);
+    }
+
+    for (csc::Notice n = s_csClient.takeNotice(); n != csc::NOTICE_NONE; n = s_csClient.takeNotice()) {
+        char who[16], line[72];
+        csServerLabel(s_csClient.serverId(), who, sizeof(who));
+        if (n == csc::NOTICE_FOUND) {
+            snprintf(line, sizeof(line), TR("Chat server %s found"), who);
+            csLive(line, TFT_GREEN);
+        } else if (n == csc::NOTICE_UNREACHABLE) {
+            snprintf(line, sizeof(line), TR("Can't reach chat server %s"), who);
+            csLive(line, TFT_RED);
+        } else if (n == csc::NOTICE_REACHABLE) {
+            snprintf(line, sizeof(line), TR("Chat server %s reachable again"), who);
+            csLive(line, TFT_GREEN);
+        }
+    }
+    csSyncConfig();
+    if (s_csClient.takeStatesDirty()) csSaveStates();
+}
+
+static bool chatServerCheckNow(const char **why) {
+    const char *reason = nullptr;
+    if (!s_csStarted) {
+        reason = "busy";
+    } else if (s_csClient.checkNow(millis(), &reason)) {
+        if (why) *why = nullptr;
+        return true;
+    }
+    if (why) {
+        *why = !strcmp(reason, "off")       ? TR("Chat server is off")
+             : !strcmp(reason, "no server") ? TR("No chat server yet")
+             : !strcmp(reason, "cooldown")  ? TR("Checked recently, try again in a few minutes")
+                                            : TR("Already checking");
+    }
+    return false;
+}
+
+static void chatServerSetManual(uint32_t nodeId) {
+    if (!s_csStarted) csBegin(millis());
+    s_csClient.setServer(nodeId, true, millis());
+    csSyncConfig();
+    csSaveStates();
+}
+
+static void chatServerClear() {
+    if (!s_csStarted) csBegin(millis());
+    s_csClient.clearServer(millis());
+    csSyncConfig();
+    csSaveStates();
+}
+
+static void chatServerModeChanged() {
+    if (s_csStarted) s_csClient.setMode((csc::Mode)s_cfg.chatServerMode, millis());
+}
+
+// "RiCs (manual)" / "RiCs" / "none".
+static void chatServerLabel(char *out, size_t outLen) {
+    const uint32_t id = s_csStarted ? s_csClient.serverId() : s_cfg.chatServerNodeId;
+    if (!id) { snprintf(out, outLen, "%s", TR("none")); return; }
+    char who[16];
+    csServerLabel(id, who, sizeof(who));
+    const bool manual = s_csStarted ? s_csClient.manual() : (s_cfg.chatServerFlags & CHAT_SERVER_FLAG_MANUAL);
+    if (manual) snprintf(out, outLen, TR("%s (manual)"), who);
+    else snprintf(out, outLen, "%s", who);
+}
+
 static bool processMeshPacket(const MeshPacket &rxPkt) {
     MeshPacket pkt = rxPkt;
 
@@ -50353,6 +50683,8 @@ static bool processMeshPacket(const MeshPacket &rxPkt) {
     // while a preset scan has the radio parked: relaying there makes this node a
     // router on a mesh it is visiting for five minutes, and a downlinked MQTT
     // packet relayed from that perch puts one mesh's traffic on another's air.
+    chatServerTryDiscovery(pkt);
+
     if (!discoveryRadioParked()) maybeRebroadcastPacket(pkt);
 
     // Native MQTT uplink: mirror packets heard on a known, named, uplink-enabled
@@ -50500,6 +50832,12 @@ static bool processMeshPacket(const MeshPacket &rxPkt) {
                 return isDirectToMe ? (s_dmModal != nullptr) : (chanIdx == s_activeChannel);
             }
             return false;
+        }
+
+        case kCsPortnum: {
+            const bool changed = chatServerHandleRx(pkt);
+            appendLiveRxSummary(pkt, chanIdx, "C");
+            return changed;
         }
 
         case STORE_FORWARD_APP:
@@ -55764,6 +56102,7 @@ void loop() {
         LOOP_PHASE("ann:nodeinfo", serviceNodeInfoAnnounce(now));
         LOOP_PHASE("ann:telemetry", serviceTelemetryAnnounce(now));
         LOOP_PHASE("ann:neighbor", serviceNeighborInfoAnnounce(now));
+        if (s_radioReady) LOOP_PHASE("cs", chatServerService(now));
     }
     LOOP_PHASE("ann:mapreport", serviceMapReport(now));
     LOOP_PHASE("autofav", serviceAutoFavorite(now));
