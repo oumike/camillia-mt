@@ -50457,6 +50457,7 @@ static void csServerLabel(uint32_t nodeId, char *out, size_t outLen) {
 }
 
 static void csLive(const char *text, uint16_t color) {
+    Serial.printf("[cs] %s\n", text);
     char timePrefix[12];
     liveBuildPrefix(timePrefix, sizeof(timePrefix));
     liveFeedAddPrefixed(timePrefix, text, color, 0, false);
@@ -50601,7 +50602,11 @@ static bool chatServerHandleRx(const MeshPacket &pkt) {
     if (t == csp::ANNOUNCE && pkt.chanIdx == kCsDiscoveryChanIdx &&
         (pkt.hdr.to == s_myNodeId || pkt.hdr.to == 0xFFFFFFFF)) {
         csp::Announce a;
-        if (csp::decodeAnnounce(pkt.payload, pkt.payloadLen, a)) s_csClient.onAnnounce(pkt.hdr.from, hops, a, now);
+        if (csp::decodeAnnounce(pkt.payload, pkt.payloadLen, a)) {
+            Serial.printf("[cs] rx ANNOUNCE from !%08lx \"%s\" hops %u, %u channel(s)\n",
+                          (unsigned long)pkt.hdr.from, a.shortName, hops, a.count);
+            s_csClient.onAnnounce(pkt.hdr.from, hops, a, now);
+        }
         return false;
     }
     if (t == csp::BATCH && pkt.hdr.to == s_myNodeId && pkt.chanIdx >= 0 && pkt.chanIdx < MESH_CHANNELS &&
@@ -50613,6 +50618,12 @@ static bool chatServerHandleRx(const MeshPacket &pkt) {
                               (uint8_t)(sizeof(items) / sizeof(items[0])), n))
             return false;
         const int accepted = s_csClient.onBatch(pkt.hdr.from, pkt.chanIdx, h, items, n, now);
+        Serial.printf("[cs] rx BATCH ch%d %u item(s)%s%s%s seq %lu..%lu -> cursor %lu (epoch %08lx)\n",
+                      pkt.chanIdx, n, (h.flags & csp::FLAG_FIRST) ? " FIRST" : "",
+                      (h.flags & csp::FLAG_LAST) ? " LAST" : "", (h.flags & csp::FLAG_MORE) ? " MORE" : "",
+                      n ? (unsigned long)items[0].seq : 0UL, n ? (unsigned long)items[n - 1].seq : 0UL,
+                      (unsigned long)s_csClient.state(pkt.chanIdx).cursor,
+                      (unsigned long)s_csClient.state(pkt.chanIdx).epoch);
         if ((h.flags & csp::FLAG_TIME_VALID) && !clockIsSet() && !timeSourceIsManual()) {
             struct timeval tv = {(time_t)h.serverTime, 0};
             settimeofday(&tv, nullptr);
