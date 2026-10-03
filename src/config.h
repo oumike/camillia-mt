@@ -953,10 +953,6 @@ extern int VISIBLE_LINES;   // visible rows at LINE_H spacing
 #else
 #define HAS_STATE_MAPS 1
 #endif
-// How far back a Store-and-Forward replay request asks for, in minutes. The
-// router clamps this to its own history_return_window, so asking for more than
-// it kept is harmless. Shared so the device row and the web button agree.
-#define SNF_HISTORY_WINDOW_MIN 240
 #define MAX_PENDING_ACK   8
 
 // ── Battery ADC ───────────────────────────────────────────────

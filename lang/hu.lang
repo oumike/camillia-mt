@@ -478,7 +478,6 @@ Next	Tovább
 No %s - not saved	Nincs %s - nincs mentve
 No %s - not saving	Nincs %s - nincs mentés
 No %s traffic yet\n(filter is on - %s)	Még nincs %s forgalom\n(szűrő bekapcsolva - %s)
-No S&F router heard yet	Még nem hallatszott S&F útválasztó
 No SD card is mounted.	Nincs csatolt SD-kártya.
 No WiFi network configured	Nincs beállított WiFi-hálózat
 No beacons heard yet.\n\nA beacon is only audible while its sender has retuned onto this channel, preset and region, and it repeats on that node's own schedule - minutes to hours apart. This list keeps what it hears until you clear it.	Még nem hallatszott jeladó.\n\nEgy jeladó csak akkor hallható, amikor a küldője erre a csatornára, előbeállításra és régióra hangolt, és a csomópont saját ütemezése szerint ismétlődik - percek vagy órák különbséggel. A lista megtartja, amit hall, amíg nem törlöd.
@@ -597,18 +596,12 @@ Removed %u file%s. %u could not be deleted - the card may be write-protected.\n\
 Removed %u file%s.\n\nThis card looked clean afterwards, but the scan reads names and headers, not contents - it cannot promise the card is clean. Reformatting is the only answer that can.	%u fájl%.0s eltávolítva.\n\nA kártya utána tisztának tűnt, de a vizsgálat neveket és fejléceket olvas, nem tartalmat - nem ígérheti, hogy a kártya tiszta. Erre csak az újraformázás képes.
 Removing Files	Fájlok eltávolítása
 Removing legacy maps...	Régi térképek eltávolítása...
-Replay already requested	Visszajátszás már kérve
-Replay not sent: %s	Visszajátszás nincs elküldve: %s
-Replay requested (last %lu min)	Visszajátszás kérve (utolsó %lu perc)
 Reply	Válasz
 Reply from %s	Válasz tőle: %s
 Reply from %s (%lus)	Válasz tőle: %s (%lus)
 Request (P)osition	(P)ozíció kérése
 Request Node	Csomópont kérése
 Request Position	Pozíció kérése
-Request S&F Replay (%s)	S&F visszajátszás kérése (%s)
-Request S&F Replay (no router)	S&F visszajátszás kérése (nincs útválasztó)
-Requested (last %lu min)	Kérve (utolsó %lu perc)
 Rescan	Újrakeresés
 Reset	Visszaállítás
 Reset Chat Colors	Chat színek visszaállítása
@@ -696,8 +689,6 @@ State map unavailable	A régiótérkép nem érhető el
 Stay on	Mindig be
 Storage: %s %s	Tárhely: %s %s
 Storage: %s (not mounted)	Tárhely: %s (nincs csatolva)
-Store&Fwd Client: %s	Store&Fwd kliens: %s
-Store&Fwd client is off	A Store&Fwd kliens ki van kapcsolva
 Sun	V
 Sweep	Pásztázás
 Sweep already running	A pásztázás már fut
@@ -880,7 +871,6 @@ sensor %.2f V    trim %s	érzékelő %.2f V    korr. %s
 sensor: read failed	érzékelő: olvasási hiba
 stay on	mindig be
 tap Filter to change	koppints a Szűrőre a módosításhoz
-unavailable	nem érhető el
 unknown	ismeretlen
 unknown date	ismeretlen dátum
 unknown error	ismeretlen hiba

@@ -463,7 +463,6 @@ Next	Volgende
 No %s - not saved	Geen %s - niet opgeslagen
 No %s - not saving	Geen %s - wordt niet opgeslagen
 No %s traffic yet\n(filter is on - %s)	Nog geen %s-verkeer\n(filter aan - %s)
-No S&F router heard yet	Nog geen S&F-router gehoord
 No SD card is mounted.	Geen SD-kaart gekoppeld.
 No WiFi network configured	Geen wifinetwerk ingesteld
 No beacons heard yet.\n\nA beacon is only audible while its sender has retuned onto this channel, preset and region, and it repeats on that node's own schedule - minutes to hours apart. This list keeps what it hears until you clear it.	Nog geen bakens gehoord.\n\nEen baken is alleen hoorbaar terwijl de zender is afgestemd op dit kanaal, deze preset en regio, en het herhaalt volgens het eigen schema van die node - minuten tot uren uit elkaar. Deze lijst houdt vast wat hij hoort tot je hem wist.
@@ -579,18 +578,12 @@ Removed %u file%s. %u could not be deleted - the card may be write-protected.\n\
 Removed %u file%s.\n\nThis card looked clean afterwards, but the scan reads names and headers, not contents - it cannot promise the card is clean. Reformatting is the only answer that can.	%u bestand(en)%.0s verwijderd.\n\nDe kaart leek daarna schoon, maar de scan leest namen en koppen, geen inhoud - hij kan niet beloven dat de kaart schoon is. Alleen opnieuw formatteren kan dat.
 Removing Files	Bestanden verwijderen
 Removing legacy maps...	Oude kaarten verwijderen...
-Replay already requested	Herhaling al aangevraagd
-Replay not sent: %s	Herhaling niet verzonden: %s
-Replay requested (last %lu min)	Herhaling aangevraagd (laatste %lu min)
 Reply	Antwoorden
 Reply from %s	Antwoord van %s
 Reply from %s (%lus)	Antwoord van %s (%lus)
 Request (P)osition	(P)ositie opvragen
 Request Node	Node opvragen
 Request Position	Positie opvragen
-Request S&F Replay (%s)	S&F-herhaling aanvragen (%s)
-Request S&F Replay (no router)	S&F-herhaling aanvragen (geen router)
-Requested (last %lu min)	Aangevraagd (laatste %lu min)
 Rescan	Opnieuw scannen
 Reset	Resetten
 Reset Chat Colors	Chatkleuren resetten
@@ -677,8 +670,6 @@ State map unavailable	Regiokaart niet beschikbaar
 Stay on	Blijft aan
 Storage: %s %s	Opslag: %s %s
 Storage: %s (not mounted)	Opslag: %s (niet gekoppeld)
-Store&Fwd Client: %s	Store&Fwd-client: %s
-Store&Fwd client is off	Store&Fwd-client staat uit
 Sun	zo
 Sweep already running	Sweep loopt al
 Sweep cancelled	Sweep geannuleerd
@@ -855,7 +846,6 @@ sensor %.2f V    trim %s	sensor %.2f V    correctie %s
 sensor: read failed	sensor: leesfout
 stay on	blijft aan
 tap Filter to change	tik op Filter om te wijzigen
-unavailable	niet beschikbaar
 unknown	onbekend
 unknown date	onbekende datum
 unknown error	onbekende fout

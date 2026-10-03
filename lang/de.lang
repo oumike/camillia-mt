@@ -457,7 +457,6 @@ Next	Weiter
 No %s - not saved	Kein %s - nicht gespeichert
 No %s - not saving	Kein %s - wird nicht gespeichert
 No %s traffic yet\n(filter is on - %s)	Noch kein %s-Verkehr\n(Filter aktiv - %s)
-No S&F router heard yet	Noch kein S&F-Router gehört
 No SD card is mounted.	Keine SD-Karte eingebunden.
 No WiFi network configured	Kein WLAN konfiguriert
 No beacons heard yet.\n\nA beacon is only audible while its sender has retuned onto this channel, preset and region, and it repeats on that node's own schedule - minutes to hours apart. This list keeps what it hears until you clear it.	Noch keine Baken gehört.\n\nEine Bake ist nur hörbar, solange ihr Sender auf diesen Kanal, dieses Preset und diese Region umgestellt hat, und sie wiederholt sich nach dem eigenen Zeitplan dieses Knotens - Minuten bis Stunden auseinander. Diese Liste behält, was sie hört, bis du sie leerst.
@@ -569,18 +568,12 @@ Removed %u file%s. %u could not be deleted - the card may be write-protected.\n\
 Removed %u file%s.\n\nThis card looked clean afterwards, but the scan reads names and headers, not contents - it cannot promise the card is clean. Reformatting is the only answer that can.	%u Datei(en)%.0s entfernt.\n\nDie Karte wirkte danach sauber, aber der Scan liest Namen und Dateiköpfe, keine Inhalte - er kann nicht versprechen, dass die Karte sauber ist. Das kann nur Neuformatieren.
 Removing Files	Dateien werden entfernt
 Removing legacy maps...	Alte Karten werden entfernt...
-Replay already requested	Wiedergabe bereits angefordert
-Replay not sent: %s	Wiedergabe nicht gesendet: %s
-Replay requested (last %lu min)	Wiedergabe angefordert (letzte %lu min)
 Reply	Antworten
 Reply from %s	Antwort von %s
 Reply from %s (%lus)	Antwort von %s (%lus)
 Request (P)osition	(P)osition anfordern
 Request Node	Knoten anfordern
 Request Position	Position anfordern
-Request S&F Replay (%s)	S&F-Wiedergabe anfordern (%s)
-Request S&F Replay (no router)	S&F-Wiedergabe anfordern (kein Router)
-Requested (last %lu min)	Angefordert (letzte %lu min)
 Rescan	Neu scannen
 Reset	Zurücksetzen
 Reset Chat Colors	Chatfarben zurücksetzen
@@ -664,8 +657,6 @@ State map unavailable	Regionalkarte nicht verfügbar
 Stay on	Bleibt an
 Storage: %s %s	Speicher: %s %s
 Storage: %s (not mounted)	Speicher: %s (nicht eingebunden)
-Store&Fwd Client: %s	Store&Fwd-Client: %s
-Store&Fwd client is off	Store&Fwd-Client ist aus
 Sun	So
 Sweep already running	Sweep läuft bereits
 Sweep cancelled	Sweep abgebrochen
@@ -846,7 +837,6 @@ sensor %.2f V    trim %s	Sensor %.2f V    Korr. %s
 sensor: read failed	Sensor: Lesefehler
 stay on	bleibt an
 tap Filter to change	Filter tippen zum Ändern
-unavailable	nicht verfügbar
 unknown	unbekannt
 unknown date	unbekanntes Datum
 unknown error	unbekannter Fehler

@@ -493,7 +493,6 @@ Next	Siguiente
 No %s - not saved	Sin %s: no guardado
 No %s - not saving	Sin %s: no se guarda
 No %s traffic yet\n(filter is on - %s)	Aún no hay tráfico %s\n(filtro activo - %s)
-No S&F router heard yet	Aún no se ha oído ningún router S&F
 No SD card is mounted.	No hay tarjeta SD montada.
 No WiFi network configured	No hay red WiFi configurada
 No beacons heard yet.\n\nA beacon is only audible while its sender has retuned onto this channel, preset and region, and it repeats on that node's own schedule - minutes to hours apart. This list keeps what it hears until you clear it.	Aún no se ha oído ninguna baliza.\n\nUna baliza solo se oye mientras su emisor está sintonizado en este canal, preajuste y región, y se repite según el calendario de ese nodo, con minutos u horas de separación. Esta lista guarda lo que oye hasta que la borres.
@@ -613,9 +612,6 @@ Removed %u file%s. %u could not be deleted - the card may be write-protected.\n\
 Removed %u file%s.\n\nThis card looked clean afterwards, but the scan reads names and headers, not contents - it cannot promise the card is clean. Reformatting is the only answer that can.	Borrados %u archivo(s)%.0s.\n\nDespués la tarjeta parecía limpia, pero el análisis lee nombres y cabeceras, no el contenido: no puede garantizar que esté limpia. Solo formatearla lo garantiza.
 Removing Files	Borrando archivos
 Removing legacy maps...	Quitando mapas antiguos...
-Replay already requested	Reenvío ya solicitado
-Replay not sent: %s	Reenvío no enviado: %s
-Replay requested (last %lu min)	Reenvío solicitado (últimos %lu min)
 Reply	Responder
 Reply from %s	Respuesta de %s
 Reply from %s (%lus)	Respuesta de %s (%lus)
@@ -623,9 +619,6 @@ Request (P)osition	Pedir (P)osición
 Request Info	Pedir info
 Request Node	Pedir nodo
 Request Position	Pedir posición
-Request S&F Replay (%s)	Pedir reenvío S&F (%s)
-Request S&F Replay (no router)	Pedir reenvío S&F (sin router)
-Requested (last %lu min)	Solicitado (últimos %lu min)
 Rescan	Reescanear
 Reset	Reiniciar
 Reset Chat Colors	Restablecer colores del chat
@@ -716,8 +709,6 @@ State map unavailable	Mapa de estado no disponible
 Stay on	Siempre encendida
 Storage: %s %s	Almacenamiento: %s %s
 Storage: %s (not mounted)	Almacenamiento: %s (sin montar)
-Store&Fwd Client: %s	Cliente Store&Fwd: %s
-Store&Fwd client is off	El cliente Store&Fwd está desactivado
 Sun	dom
 Sweep	Barrido
 Sweep already running	Barrido ya en curso
@@ -905,7 +896,6 @@ sensor %.2f V    trim %s	sensor %.2f V    ajuste %s
 sensor: read failed	sensor: error de lectura
 stay on	siempre encendida
 tap Filter to change	toca Filtro para cambiar
-unavailable	no disponible
 unknown	desconocido
 unknown date	fecha desconocida
 unknown error	error desconocido

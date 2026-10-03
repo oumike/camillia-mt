@@ -478,7 +478,6 @@ Next	Dalje
 No %s - not saved	Nema %s - nije spremljeno
 No %s - not saving	Nema %s - ne spremam
 No %s traffic yet\n(filter is on - %s)	Još nema %s prometa\n(filtar uključen - %s)
-No S&F router heard yet	Još nije čut S&F usmjerivač
 No SD card is mounted.	Nije montirana SD kartica.
 No WiFi network configured	Nije postavljena WiFi mreža
 No beacons heard yet.\n\nA beacon is only audible while its sender has retuned onto this channel, preset and region, and it repeats on that node's own schedule - minutes to hours apart. This list keeps what it hears until you clear it.	Još nisu čuti svjetionici.\n\nSvjetionik se čuje samo dok je pošiljatelj prebačen na ovaj kanal, predložak i regiju, a ponavlja se po rasporedu tog čvora - u razmacima od nekoliko minuta do nekoliko sati. Ovaj popis čuva ono što čuje dok ga ne očistite.
@@ -597,18 +596,12 @@ Removed %u file%s. %u could not be deleted - the card may be write-protected.\n\
 Removed %u file%s.\n\nThis card looked clean afterwards, but the scan reads names and headers, not contents - it cannot promise the card is clean. Reformatting is the only answer that can.	Uklonjeno %u datoteka%.0s.\n\nKartica je nakon toga izgledala čisto, ali skeniranje čita nazive i zaglavlja, ne sadržaj - ne može obećati da je kartica čista. To može samo ponovno formatiranje.
 Removing Files	Uklanjam datoteke
 Removing legacy maps...	Uklanjam stare karte...
-Replay already requested	Ponovna reprodukcija već zatražena
-Replay not sent: %s	Ponovna reprodukcija nije poslana: %s
-Replay requested (last %lu min)	Ponovna reprodukcija zatražena (zadnjih %lu min)
 Reply	Odgovori
 Reply from %s	Odgovor od %s
 Reply from %s (%lus)	Odgovor od %s (%lus)
 Request (P)osition	Zatraži (p)oziciju
 Request Node	Zatraži čvor
 Request Position	Zatraži poziciju
-Request S&F Replay (%s)	Zatraži S&F reprodukciju (%s)
-Request S&F Replay (no router)	Zatraži S&F reprodukciju (nema usmjerivača)
-Requested (last %lu min)	Zatraženo (zadnjih %lu min)
 Rescan	Ponovno skeniraj
 Reset	Poništi
 Reset Chat Colors	Poništi boje chata
@@ -695,8 +688,6 @@ State map unavailable	Karta regije nije dostupna
 Stay on	Uvijek uključeno
 Storage: %s %s	Pohrana: %s %s
 Storage: %s (not mounted)	Pohrana: %s (nije montirana)
-Store&Fwd Client: %s	Store&Fwd klijent: %s
-Store&Fwd client is off	Store&Fwd klijent je isključen
 Sun	ned
 Sweep	Pretraga
 Sweep already running	Pretraga je već u tijeku
@@ -879,7 +870,6 @@ sensor %.2f V    trim %s	senzor %.2f V    korekcija %s
 sensor: read failed	senzor: pogreška čitanja
 stay on	uvijek uključeno
 tap Filter to change	dodirnite Filtar za promjenu
-unavailable	nedostupno
 unknown	nepoznato
 unknown date	nepoznat datum
 unknown error	nepoznata pogreška

@@ -475,7 +475,6 @@ Next	Edasi
 No %s - not saved	%s puudub - ei salvestatud
 No %s - not saving	%s puudub - ei salvesta
 No %s traffic yet\n(filter is on - %s)	Veel pole %s liiklust\n(filter sees - %s)
-No S&F router heard yet	S&F ruuterit pole veel kuuldud
 No SD card is mounted.	SD-kaarti pole ühendatud.
 No WiFi network configured	WiFi-võrku pole seadistatud
 No beacons heard yet.\n\nA beacon is only audible while its sender has retuned onto this channel, preset and region, and it repeats on that node's own schedule - minutes to hours apart. This list keeps what it hears until you clear it.	Majakaid pole veel kuuldud.\n\nMajakas on kuuldav ainult siis, kui selle saatja on häälestunud sellele kanalile, eelseadistusele ja piirkonnale, ning see kordub selle sõlme ajakava järgi - minutite kuni tundide tagant. Nimekiri säilitab kuuldu, kuni selle tühjendate.
@@ -594,18 +593,12 @@ Removed %u file%s. %u could not be deleted - the card may be write-protected.\n\
 Removed %u file%s.\n\nThis card looked clean afterwards, but the scan reads names and headers, not contents - it cannot promise the card is clean. Reformatting is the only answer that can.	Eemaldatud %u faili%.0s.\n\nKaart näis pärast puhas, kuid kontroll loeb nimesid ja päiseid, mitte sisu - see ei saa lubada, et kaart on puhas. Seda saab tagada ainult uuesti vormindamine.
 Removing Files	Eemaldan faile
 Removing legacy maps...	Eemaldan vanu kaarte...
-Replay already requested	Taasesitus juba küsitud
-Replay not sent: %s	Taasesitust ei saadetud: %s
-Replay requested (last %lu min)	Taasesitus küsitud (viimased %lu min)
 Reply	Vasta
 Reply from %s	Vastus saatjalt %s
 Reply from %s (%lus)	Vastus saatjalt %s (%lus)
 Request (P)osition	Küsi asendit (P)
 Request Node	Küsi sõlme
 Request Position	Küsi asendit
-Request S&F Replay (%s)	Küsi S&F taasesitust (%s)
-Request S&F Replay (no router)	Küsi S&F taasesitust (ruuterit pole)
-Requested (last %lu min)	Küsitud (viimased %lu min)
 Rescan	Skanni uuesti
 Reset	Lähtesta
 Reset Chat Colors	Lähtesta vestluse värvid
@@ -693,8 +686,6 @@ State map unavailable	Piirkonnakaart pole saadaval
 Stay on	Alati sees
 Storage: %s %s	Salvestusruum: %s %s
 Storage: %s (not mounted)	Salvestusruum: %s (pole ühendatud)
-Store&Fwd Client: %s	Store&Fwd klient: %s
-Store&Fwd client is off	Store&Fwd klient on väljas
 Sun	P
 Sweep	Läbikamm
 Sweep already running	Läbikamm juba käib
@@ -877,7 +868,6 @@ sensor %.2f V    trim %s	andur %.2f V    korrektsioon %s
 sensor: read failed	andur: lugemisviga
 stay on	alati sees
 tap Filter to change	muutmiseks puudutage Filter
-unavailable	pole saadaval
 unknown	tundmatu
 unknown date	tundmatu kuupäev
 unknown error	tundmatu viga

@@ -2751,15 +2751,6 @@ static int nodesMapRenderTiles(float lat, float lon, int x0, int y0, int w, int 
 static void sdRmDirRecursive(const char *path);
 static bool clearNodeDbOnSd();
 
-// Store-and-Forward client. Defined down with the mesh TX helpers; the CFG
-// screen needs them ~22k lines earlier to label and run its "Request S&F Replay"
-// row. snfRequestHistory() reports failure through `why` so the row can say
-// which precondition was not met.
-static bool     snfRouterKnown();
-static uint32_t snfRouterId();
-static bool     snfRequestHistory(const char **why);
-
-static constexpr uint32_t kSnfHistoryWindowMin = SNF_HISTORY_WINDOW_MIN;
 static bool pagerSelectChatCursorIndex(int displayIndex);
 static void pagerExitChatCursorMode(bool clearSelection = true);
 static void setActiveChannel(int channelIdx);
@@ -3287,8 +3278,6 @@ enum CfgActionId {
     CFG_ACTION_BATT_CAL,
     CFG_ACTION_NEIGHBOR_INFO,
     CFG_ACTION_MESH_BEACON,
-    CFG_ACTION_SNF_CLIENT,
-    CFG_ACTION_SNF_REQUEST,
     CFG_ACTION_MQTT_TOGGLE,
     #if HAS_VOLUME_CONTROL
     CFG_ACTION_VOLUME,
@@ -5245,20 +5234,6 @@ static const char *cfgActionLabel(int actionId, char *buf, size_t bufLen) {
         case CFG_ACTION_MESH_BEACON:
             snprintf(buf, bufLen, TR("Mesh Beacons: %s"), s_cfg.meshBeaconListen ? TR("On") : TR("Off"));
             break;
-        case CFG_ACTION_SNF_CLIENT:
-            snprintf(buf, bufLen, TR("Store&Fwd Client: %s"), s_cfg.chatServerMode ? TR("On") : TR("Off"));
-            break;
-        case CFG_ACTION_SNF_REQUEST:
-            // Names the router when one has been heard: a request can only go to
-            // a specific node, so "which one" is the first thing to know.
-            if (snfRouterKnown()) {
-                char who[16];
-                liveNodeLabel(snfRouterId(), who, sizeof(who), false);
-                snprintf(buf, bufLen, TR("Request S&F Replay (%s)"), who);
-            } else {
-                snprintf(buf, bufLen, "%s", TR("Request S&F Replay (no router)"));
-            }
-            break;
         case CFG_ACTION_MQTT_TOGGLE:
             if (!s_cfg.wifiEnabled) {
                 snprintf(buf, bufLen, "%s", TR("MQTT Bridge: Off (WiFi off)"));
@@ -5397,8 +5372,6 @@ static const char *cfgActionLabel(int actionId, char *buf, size_t bufLen) {
 static bool cfgActionDisabled(int actionId) {
     switch (actionId) {
         case CFG_ACTION_MQTT_TOGGLE: return !s_cfg.wifiEnabled;
-        // Nothing to ask for with the client switched off.
-        case CFG_ACTION_SNF_REQUEST:  return !s_cfg.chatServerMode;
 #if HAS_SD_MALWARE_SCAN
         // Nothing to look at. The row stays visible rather than disappearing:
         // "no card" is the answer to the question someone opened this to ask.
@@ -13727,10 +13700,6 @@ static void initCfgActions() {
     // ── Mesh modules ─────────────────────────────────────────────────────────
     s_cfgActions[s_cfgActionCount++] = CFG_ACTION_NEIGHBOR_INFO;
     s_cfgActions[s_cfgActionCount++] = CFG_ACTION_MESH_BEACON;
-    s_cfgActions[s_cfgActionCount++] = CFG_ACTION_SNF_CLIENT;
-    // Directly under the toggle it depends on: a router never replays history
-    // unsolicited, so asking is the only way the client ever receives anything.
-    s_cfgActions[s_cfgActionCount++] = CFG_ACTION_SNF_REQUEST;
 
     // ── Done once, or rarely ─────────────────────────────────────────────────
     // Hardware trim: set once per unit rather than adjusted, which is why it is
@@ -39807,32 +39776,6 @@ static void performCfgAction(int actionId) {
                      s_cfg.meshBeaconListen ? TR("On (listening)") : TR("Off"));
             break;
 
-        case CFG_ACTION_SNF_CLIENT:
-            if (s_cfgDebugLog) Serial.println("[lvgl-cfg] exec SNF_CLIENT");
-            showActionPopup = false;   // row already reads On/Off
-            s_cfg.chatServerMode = s_cfg.chatServerMode ? 0 : 1;
-            persistConfigToPrefs();
-            snprintf(s_cfgStatus,
-                     sizeof(s_cfgStatus),
-                     TR("Store&Fwd Client: %s"),
-                     s_cfg.chatServerMode ? TR("On") : TR("Off"));
-            break;
-
-        case CFG_ACTION_SNF_REQUEST: {
-            if (s_cfgDebugLog) Serial.println("[lvgl-cfg] exec SNF_REQUEST");
-            showActionPopup = false;   // the status line carries the outcome
-            const char *why = nullptr;
-            if (snfRequestHistory(&why)) {
-                snprintf(s_cfgStatus, sizeof(s_cfgStatus),
-                         TR("Replay requested (last %lu min)"),
-                         (unsigned long)kSnfHistoryWindowMin);
-            } else {
-                snprintf(s_cfgStatus, sizeof(s_cfgStatus),
-                         TR("Replay not sent: %s"), why ? why : TR("unavailable"));
-            }
-            break;
-        }
-
         case CFG_ACTION_WIFI_TOGGLE:
             if (s_cfgDebugLog) Serial.println("[lvgl-cfg] exec WIFI_TOGGLE");
             s_cfg.wifiEnabled = !s_cfg.wifiEnabled;
@@ -50210,147 +50153,6 @@ static bool sendTracerouteReply(uint32_t toNodeId, uint32_t requestId,
     return ok;
 }
 
-// ── Store and Forward client ──────────────────────────────────────────────────
-// A router never pushes history unsolicited: upstream's historySend() only runs
-// in response to a CLIENT_HISTORY (rr=65) or the legacy "SF\0" text trigger. The
-// only thing it broadcasts on its own is a ROUTER_HEARTBEAT, which is also how
-// we learn a router exists and which node to address a request to.
-static uint32_t s_snfRouterId = 0;        // node id of the last router heard
-static uint32_t s_snfRouterHeardMs = 0;   // millis() of its last heartbeat/pong
-static uint32_t s_snfRouterPeriodS = 0;   // advertised heartbeat period, seconds
-static int      s_snfRouterChanIdx = 0;   // channel it was heard on
-static uint32_t s_snfLastRequestMs = 0;   // throttles outgoing CLIENT_HISTORY
-
-// A history request can pull the router's entire return_max down on us; a stray
-// double-press should not do that twice.
-static constexpr uint32_t kSnfRequestThrottleMs = 30000;
-// A router that has gone quiet is treated as gone rather than left addressable
-// forever. When it advertised a heartbeat period we hold it to three of those —
-// one missed beat is a lost packet, three is a router that is off — and fall
-// back to a flat half hour for one that never said.
-static constexpr uint32_t kSnfRouterStaleMs = 30UL * 60UL * 1000UL;
-
-// A router pinned in web config wins outright, and no heartbeat can displace it
-// — the point of setting it is that the router you want is the one you named,
-// whether or not it announces itself. Upstream defaults heartbeats *off*
-// (StoreForwardModule.h: `bool heartbeat = false`), so a perfectly good router
-// can be sitting there undiscoverable; this is the way to reach it.
-//
-// Clear the setting to go back to picking up whichever router is heard.
-// The broadcast id is rejected here rather than at each entry point: it parses
-// cleanly from "!ffffffff" but is never a router, and sendStoreForwardTo()
-// refuses it — so without this the row would claim a router while every request
-// failed. Covers the web form, YAML import and the settings blob at once.
-static bool snfRouterPinned() {
-    return s_cfg.chatServerNodeId != 0 && s_cfg.chatServerNodeId != 0xFFFFFFFFu;
-}
-
-static bool snfRouterKnown() {
-    // No staleness test for a pinned router: we have no heartbeat to measure it
-    // by, and timing out the user's explicit choice would leave the row reading
-    // "no router" with a router plainly configured.
-    if (snfRouterPinned()) return true;
-
-    if (s_snfRouterId == 0) return false;
-    uint32_t staleMs = kSnfRouterStaleMs;
-    if (s_snfRouterPeriodS > 0 && s_snfRouterPeriodS < (kSnfRouterStaleMs / 3000UL)) {
-        staleMs = s_snfRouterPeriodS * 3000UL;
-    }
-    return (uint32_t)(millis() - s_snfRouterHeardMs) < staleMs;
-}
-
-static uint32_t snfRouterId() {
-    return snfRouterPinned() ? s_cfg.chatServerNodeId : s_snfRouterId;
-}
-
-// Which channel to address the router on. A heard router answers on the channel
-// its heartbeat arrived on; a pinned one has told us nothing, so fall back to
-// wherever the node DB last heard from it. Channel 0 is the last resort and
-// usually the wrong answer — upstream refuses S&F on the default channel — but
-// it is better than refusing to send at all.
-static int snfRouterChanIdx() {
-    if (snfRouterPinned()) {
-        const NodeEntry *n = Nodes.find(s_cfg.chatServerNodeId);
-        if (n && n->chanIdx >= 0 && n->chanIdx < MESH_CHANNELS) return n->chanIdx;
-        return 0;
-    }
-    return s_snfRouterChanIdx;
-}
-
-// Send a bare StoreAndForward frame (rr, plus an optional History window) to one
-// node. Unicast on the channel the router was heard on: upstream refuses S&F on
-// the default channel outright, so the primary is usually the wrong one.
-static bool sendStoreForwardTo(uint32_t toNodeId, uint32_t rr, uint32_t windowMinutes,
-                               int chanIdx) {
-    if (!Radio.isReady()) return false;
-    if (toNodeId == 0 || toNodeId == 0xFFFFFFFF) return false;
-    if (s_myNodeId == 0) deriveNodeId();
-    if (s_myNodeId == 0 || toNodeId == s_myNodeId) return false;
-    if (chanIdx < 0 || chanIdx >= MESH_CHANNELS) chanIdx = 0;
-
-    uint8_t proto[48];
-    size_t protoLen = encodeStoreForward(rr, windowMinutes, proto, sizeof(proto),
-                                         s_cfg.okToMqtt ? 0x01 : 0);
-    if (protoLen == 0) return false;
-
-    const ChannelKey &ck = CHANNEL_KEYS[chanIdx];
-    uint8_t cipher[sizeof(proto)];
-    uint32_t packetId = nextMeshPacketId();
-    if (!encryptPayload(packetId, s_myNodeId, ck.key, ck.keyLen, proto, cipher, protoLen)) {
-        return false;
-    }
-
-    uint8_t frame[sizeof(MeshHdr) + sizeof(cipher)];
-    MeshHdr hdr = {};
-    hdr.to = toNodeId;
-    hdr.from = s_myNodeId;
-    hdr.id = packetId;
-    hdr.channel = ck.hash;
-    hdr.flags   = meshOriginHopFlagsForChannel(chanIdx);
-    hdr.relay_node = (uint8_t)(s_myNodeId & 0xFF);
-
-    memcpy(frame, &hdr, sizeof(hdr));
-    memcpy(frame + sizeof(hdr), cipher, protoLen);
-    const bool ok = Radio.transmit(frame, sizeof(hdr) + protoLen);
-
-    char timePrefix[12];
-    char dst[16];
-    char line[72];
-    liveBuildPrefix(timePrefix, sizeof(timePrefix));
-    liveNodeLabel(toNodeId, dst, sizeof(dst), true);
-    snprintf(line, sizeof(line), "T SNF U %s rr=%lu %s",
-             dst, (unsigned long)rr, ok ? "TX" : "ER");
-    liveFeedAddPrefixed(timePrefix, line, ok ? TFT_DARKGREY : TFT_RED, 0, false);
-
-    return ok;
-}
-
-// Ask the known router to replay its history. Returns false with a reason in
-// `why` so the CFG row and web config can say *which* precondition failed —
-// "no router heard yet" and "asked a moment ago" are different problems.
-static bool snfRequestHistory(const char **why) {
-    if (!s_cfg.chatServerMode) {
-        if (why) *why = TR("Store&Fwd client is off");
-        return false;
-    }
-    if (!snfRouterKnown()) {
-        if (why) *why = TR("No S&F router heard yet");
-        return false;
-    }
-    if (s_snfLastRequestMs != 0 &&
-        (uint32_t)(millis() - s_snfLastRequestMs) < kSnfRequestThrottleMs) {
-        if (why) *why = TR("Replay already requested");
-        return false;
-    }
-    if (!sendStoreForwardTo(snfRouterId(), SNF_CLIENT_HISTORY,
-                            kSnfHistoryWindowMin, snfRouterChanIdx())) {
-        if (why) *why = TR("Send failed");
-        return false;
-    }
-    s_snfLastRequestMs = millis();
-    if (why) *why = nullptr;
-    return true;
-}
 
 // ── Managed flood rebroadcasting ──────────────────────────────────────────────
 // CLIENT_MUTE is the role that does not forward other people's packets, and
@@ -50700,259 +50502,11 @@ static bool processMeshPacket(const MeshPacket &rxPkt) {
             return false;
         }
 
-        case STORE_FORWARD_APP: {
-            // If the user has disabled the Store-and-Forward client, drop these
-            // packets silently (no live entry, no display). NodeDB was already
-            // skipped for this port above and stays skipped: with the feature
-            // off we are not participating, and a replay's hdr.from is the
-            // original author rather than whoever actually transmitted. The
-            // router still appears in the node list via its ordinary NodeInfo.
-            if (!s_cfg.chatServerMode) {
-                return false;
-            }
-
-            // Decode the Meshtastic StoreAndForward proto looking for:
-            //   field 1 (varint): rr  (RequestResponse enum)
-            //   field 4 (msg):    heartbeat { period = 1 }
-            //   field 5 (bytes):  text payload (only present for replayed text)
-            uint32_t rr = 0;
-            uint32_t hbPeriodS = 0;
-            const uint8_t *sfText = nullptr;
-            size_t sfTextLen = 0;
-            size_t i = 0;
-            while (i < pkt.payloadLen) {
-                uint64_t tag = 0;
-                i = pbReadVarint(pkt.payload, pkt.payloadLen, i, tag);
-                if (!i) break;
-
-                uint32_t field = (uint32_t)(tag >> 3);
-                uint32_t wt = (uint32_t)(tag & 7);
-                if (wt == 0) {
-                    uint64_t v = 0;
-                    i = pbReadVarint(pkt.payload, pkt.payloadLen, i, v);
-                    if (!i) break;
-                    if (field == 1) rr = (uint32_t)v;
-                } else if (wt == 2) {
-                    uint64_t sz = 0;
-                    size_t j = pbReadVarint(pkt.payload, pkt.payloadLen, i, sz);
-                    if (!j) break;
-                    if (j + sz > pkt.payloadLen) break;
-                    if (field == 5) {
-                        sfText = pkt.payload + j;
-                        sfTextLen = (size_t)sz;
-                    } else if (field == 4) {
-                        // Heartbeat submessage: field 1 is the period in seconds.
-                        size_t h = j;
-                        while (h < j + (size_t)sz) {
-                            uint64_t htag = 0;
-                            h = pbReadVarint(pkt.payload, j + (size_t)sz, h, htag);
-                            if (!h) break;
-                            uint32_t hfield = (uint32_t)(htag >> 3);
-                            uint32_t hwt = (uint32_t)(htag & 7);
-                            if (hwt == 0) {
-                                uint64_t hv = 0;
-                                h = pbReadVarint(pkt.payload, j + (size_t)sz, h, hv);
-                                if (!h) break;
-                                if (hfield == 1) hbPeriodS = (uint32_t)hv;
-                            } else if (hwt == 2) {
-                                uint64_t hsz = 0;
-                                size_t hj = pbReadVarint(pkt.payload, j + (size_t)sz, h, hsz);
-                                if (!hj || hj + hsz > j + (size_t)sz) break;
-                                h = hj + (size_t)hsz;
-                            } else if (hwt == 5) {
-                                if (h + 4 > j + (size_t)sz) break;
-                                h += 4;
-                            } else if (hwt == 1) {
-                                if (h + 8 > j + (size_t)sz) break;
-                                h += 8;
-                            } else {
-                                break;
-                            }
-                        }
-                    }
-                    i = j + sz;
-                } else if (wt == 5) {
-                    if (i + 4 > pkt.payloadLen) break;
-                    i += 4;
-                } else if (wt == 1) {
-                    if (i + 8 > pkt.payloadLen) break;
-                    i += 8;
-                } else {
-                    break;
-                }
-            }
-
-            // Replays are unicast to the client that asked for them, but they go
-            // out encrypted with the *shared channel key* — so every node on the
-            // channel within earshot of the router decrypts them just fine.
-            // Without this check we would absorb another client's entire history
-            // burst as our own, including DMs between two other people.
-            const bool addressedToMe = (pkt.hdr.to == s_myNodeId)
-                                    || (pkt.hasDataDest && pkt.dataDest == s_myNodeId);
-
-            switch (rr) {
-                case SNF_ROUTER_HEARTBEAT:
-                case SNF_ROUTER_PONG:
-                case SNF_ROUTER_STATS:
-                case SNF_ROUTER_PING: {
-                    // These really were originated by the node that sent them,
-                    // so hdr.from means what it usually does and NodeDB can have
-                    // it — the call skipped in processMeshPacket() for this port.
-                    Nodes.updateFromPacket(pkt);
-
-                    // Remember who to address a history request to. A heartbeat
-                    // is broadcast, which is exactly how upstream expects a
-                    // client to discover a router in the first place.
-                    //
-                    // Skipped entirely while a router is pinned in config: the
-                    // user named the one to talk to, and a louder router down
-                    // the road should not quietly take the request. Discovery
-                    // resumes the moment the setting is cleared. The NodeDB
-                    // update above still runs either way — that is about having
-                    // heard the node at all, not about who we ask.
-                    //
-                    // A different router taking over drops the remembered period
-                    // rather than inheriting it: how often the last one beat says
-                    // nothing about this one, and holding a silent router to a
-                    // stranger's interval is how it ends up looking alive.
-                    if (!snfRouterPinned()) {
-                        if (pkt.hdr.from != s_snfRouterId) s_snfRouterPeriodS = 0;
-                        s_snfRouterId = pkt.hdr.from;
-                        s_snfRouterHeardMs = millis();
-                        s_snfRouterChanIdx = chanIdx;
-                        if (hbPeriodS) s_snfRouterPeriodS = hbPeriodS;
-                    }
-
-                    // Answer a ping so the router knows we are still here. Only
-                    // when it was aimed at us: a broadcast probe answered by
-                    // every client on the channel is a self-inflicted storm, and
-                    // the router learns nothing from the pile-up it wouldn't
-                    // learn from one reply.
-                    if (rr == SNF_ROUTER_PING && addressedToMe) {
-                        (void)sendStoreForwardTo(pkt.hdr.from, SNF_CLIENT_PONG, 0, chanIdx);
-                    }
-
-                    appendLiveRxSummary(pkt, chanIdx, "F");
-                    return false;
-                }
-
-                case SNF_ROUTER_TEXT_DIRECT:
-                case SNF_ROUTER_TEXT_BROADCAST:
-                    break;   // handled below
-
-                default:
-                    // Errors, busy, history announcements, anything a future
-                    // router adds. Logged, not acted on, and deliberately not
-                    // fed to NodeDB — we cannot tell whose id hdr.from carries.
-                    appendLiveRxSummary(pkt, chanIdx, "F");
-                    return false;
-            }
-
-            if (!addressedToMe || !sfText || sfTextLen == 0) {
-                appendLiveRxSummary(pkt, chanIdx, "F");
-                return false;
-            }
-
-            // The replay preserves the original author in hdr.from, so a blocked
-            // sender walks straight back in through a replay unless we apply the
-            // same filter the live text path does. No ACK is owed on this branch
-            // — upstream sends replays with want_ack clear.
-            if (Ignored.contains(pkt.hdr.from)) {
-                appendLiveRxSummary(pkt, chanIdx, "F");
-                return false;
-            }
-
-            {
-                char textBuf[MESH_TEXT_MAX_LEN + 1];
-                size_t copy = utf8util::copyTruncateBytes(
-                    textBuf,
-                    sizeof(textBuf),
-                    sfText,
-                    sfTextLen);
-                for (size_t k = 0; k < copy; k++) {
-                    if (textBuf[k] == '\r' || textBuf[k] == '\n') textBuf[k] = ' ';
-                }
-
-                if (textBuf[0]) {
-                    // Prefix the replayed text with "[SF]" so the user can tell
-                    // it came from a Store-and-Forward server rather than the
-                    // original sender in real time. Sized to hold the prefix on
-                    // top of a full-length message, and truncated through
-                    // utf8util so a message that does overflow loses whole
-                    // characters rather than half of a multi-byte sequence.
-                    static const char kSfPrefix[] = "[SF] ";
-                    char prefixedBuf[MESH_TEXT_MAX_LEN + sizeof(kSfPrefix)];
-                    memcpy(prefixedBuf, kSfPrefix, sizeof(kSfPrefix) - 1);
-                    utf8util::copyTruncate(prefixedBuf + sizeof(kSfPrefix) - 1,
-                                           sizeof(prefixedBuf) - (sizeof(kSfPrefix) - 1),
-                                           textBuf);
-
-                    const bool viaMqtt = (pkt.hdr.flags & 0x10) != 0;
-                    noteMsgRxInfo(pkt);   // for Message Info (message actions)
-                    // rr=8 (ROUTER_TEXT_DIRECT) is a replay of a message that was
-                    // originally a DM; rr=9 (ROUTER_TEXT_BROADCAST) was a
-                    // broadcast. Upstream picks between them on the stored
-                    // packet's `to` (NODENUM_BROADCAST -> 9, else 8).
-                    bool isDirectToMe = (rr == SNF_ROUTER_TEXT_DIRECT);
-
-                    if (isDirectToMe) {
-                        NodeEntry *sender = Nodes.find(pkt.hdr.from);
-                        char senderShort[5] = {};
-                        if (sender && sender->shortName[0]) {
-                            utf8util::copyTruncate(senderShort, sizeof(senderShort), sender->shortName);
-                        }
-
-                        char timePrefix[12];
-                        char prefix[32];
-                        liveBuildPrefix(timePrefix, sizeof(timePrefix));
-                        if (senderShort[0]) {
-                            snprintf(prefix, sizeof(prefix), "%s[%s] ", timePrefix, senderShort);
-                        } else {
-                            char who[16];
-                            liveNodeLabel(pkt.hdr.from, who, sizeof(who), false);
-                            snprintf(prefix, sizeof(prefix), "%s[%s] ", timePrefix, who);
-                        }
-
-                        const bool dmOnScreen = dmConversationOnScreen(pkt.hdr.from);
-
-                        DMs.addMessage(pkt.hdr.from,
-                                       senderShort[0] ? senderShort : nullptr,
-                                       prefix,
-                                       prefixedBuf,
-                                       TFT_WHITE,
-                                       !dmOnScreen,
-                                       chanIdx,
-                                       // Upstream restores the original packet id
-                                       // on a replay, so the web UI's reply and
-                                       // tapback flow can target it like any DM.
-                                       pkt.hdr.id);
-                        if (dmOnScreen) {
-                            DMs.markRead(pkt.hdr.from);
-                        }
-#if HAS_SLEEP_OVERLAY
-                        else {
-                            // Keeps the "[SF] " marker, so a replayed message
-                            // reads as one on the lock screen too.
-                            tdeckProNoteRecentMessage(-1, pkt.hdr.from, prefixedBuf);
-                        }
-#endif
-                    } else {
-                        appendRxText(chanIdx, pkt.hdr.from, prefixedBuf, pkt.hdr.id, viaMqtt);
-                    }
-
-                    if (isDirectToMe || !channelIsMuted(chanIdx)) {
-                        triggerMessageAlert(false,
-                                            isDirectToMe ? MSG_ALERT_VISUAL_DM
-                                                         : MSG_ALERT_VISUAL_CHANNEL);
-                    }
-                    appendLiveRxSummary(pkt, chanIdx, "F");
-                    return isDirectToMe ? (s_dmModal != nullptr) : (chanIdx == s_activeChannel);
-                }
-            }
-
+        case STORE_FORWARD_APP:
+            // Meshtastic Store & Forward is no longer a client here (replaced by
+            // the camillia chat server); its traffic stays visible in Live.
             appendLiveRxSummary(pkt, chanIdx, "F");
             return false;
-        }
 
         case ROUTING_APP: {
             if (!pkt.requestId) return false;
@@ -51236,23 +50790,6 @@ static void serviceWebVncToggle() {
     }
 }
 #endif
-
-// Drain a pending "Request Replay" from the web UI. Same reason as the chat
-// send below: the LoRa TX path and the router-tracking state live here. The
-// outcome goes back to the page rather than being swallowed, so "nothing
-// happened" can be told apart from "no router has been heard yet".
-static void serviceWebSnfRequest() {
-    if (!webCfgTakeSnfRequest()) return;
-    const char *why = nullptr;
-    if (snfRequestHistory(&why)) {
-        char msg[64];
-        snprintf(msg, sizeof(msg), TR("Requested (last %lu min)"),
-                 (unsigned long)kSnfHistoryWindowMin);
-        webCfgSetSnfResult(msg);
-    } else {
-        webCfgSetSnfResult(why ? why : "unavailable");
-    }
-}
 
 // Drain a pending Chat-tab send (queued by the web server) on the main loop,
 // where we own the node id and the LoRa TX path.
@@ -56155,7 +55692,6 @@ void loop() {
         LOOP_PHASE("web:vnc", serviceWebVncToggle());
 #endif
         LOOP_PHASE("web:chat", serviceWebChatSend());
-        LOOP_PHASE("web:snf", serviceWebSnfRequest());
         LOOP_PHASE("web:time", serviceWebManualTime());
         // Idle auto-stop. Mirrors the manual CFG_ACTION_WEBCFG disable exactly:
         // the flag is cleared and persisted too, so the device doesn't come

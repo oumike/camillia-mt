@@ -476,7 +476,6 @@ Next	Naprej
 No %s - not saved	Ni %s - ni shranjeno
 No %s - not saving	Ni %s - ne shranjujem
 No %s traffic yet\n(filter is on - %s)	Še ni prometa %s\n(filter vklopljen - %s)
-No S&F router heard yet	Usmerjevalnik S&F še ni slišan
 No SD card is mounted.	Kartica SD ni priklopljena.
 No WiFi network configured	Omrežje WiFi ni nastavljeno
 No beacons heard yet.\n\nA beacon is only audible while its sender has retuned onto this channel, preset and region, and it repeats on that node's own schedule - minutes to hours apart. This list keeps what it hears until you clear it.	Svetilniki še niso slišani.\n\nSvetilnik se sliši le, ko se je njegov pošiljatelj preklopil na ta kanal, prednastavitev in regijo, ponavlja pa se po urniku tistega vozlišča - v razmikih od nekaj minut do nekaj ur. Seznam hrani, kar sliši, dokler ga ne počistite.
@@ -595,18 +594,12 @@ Removed %u file%s. %u could not be deleted - the card may be write-protected.\n\
 Removed %u file%s.\n\nThis card looked clean afterwards, but the scan reads names and headers, not contents - it cannot promise the card is clean. Reformatting is the only answer that can.	Odstranjenih %u datotek%.0s.\n\nKartica je bila nato videti čista, a pregled bere imena in glave, ne vsebine - ne more zagotoviti, da je kartica čista. To lahko zagotovi le vnovično formatiranje.
 Removing Files	Odstranjujem datoteke
 Removing legacy maps...	Odstranjujem stare zemljevide...
-Replay already requested	Ponovno predvajanje že zahtevano
-Replay not sent: %s	Ponovno predvajanje ni poslano: %s
-Replay requested (last %lu min)	Ponovno predvajanje zahtevano (zadnjih %lu min)
 Reply	Odgovori
 Reply from %s	Odgovor od %s
 Reply from %s (%lus)	Odgovor od %s (%lus)
 Request (P)osition	Zahtevaj (p)oložaj
 Request Node	Zahtevaj vozlišče
 Request Position	Zahtevaj položaj
-Request S&F Replay (%s)	Zahtevaj predvajanje S&F (%s)
-Request S&F Replay (no router)	Zahtevaj predvajanje S&F (ni usmerjevalnika)
-Requested (last %lu min)	Zahtevano (zadnjih %lu min)
 Rescan	Preišči znova
 Reset	Ponastavi
 Reset Chat Colors	Ponastavi barve klepeta
@@ -693,8 +686,6 @@ State map unavailable	Zemljevid regije ni na voljo
 Stay on	Vedno vklopljeno
 Storage: %s %s	Shramba: %s %s
 Storage: %s (not mounted)	Shramba: %s (ni priklopljena)
-Store&Fwd Client: %s	Odjemalec Store&Fwd: %s
-Store&Fwd client is off	Odjemalec Store&Fwd je izklopljen
 Sun	ned
 Sweep	Preiskovanje
 Sweep already running	Preiskovanje že poteka
@@ -877,7 +868,6 @@ sensor %.2f V    trim %s	senzor %.2f V    popravek %s
 sensor: read failed	senzor: napaka branja
 stay on	vedno vklopljeno
 tap Filter to change	za spremembo tapnite Filter
-unavailable	ni na voljo
 unknown	neznano
 unknown date	neznan datum
 unknown error	neznana napaka

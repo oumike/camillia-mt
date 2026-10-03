@@ -400,42 +400,6 @@ size_t encodeTracerouteReply(uint8_t *buf, size_t bufLen,
 // Used to ask a specific peer to reply with their current Position.
 size_t encodePositionRequest(uint8_t *buf, size_t bufLen, uint32_t bitfield = 0);
 
-// ── Store and Forward (port 65) ───────────────────────────────
-// StoreAndForward.RequestResponse. Router-originated values are < 64, client
-// ones >= 64. Only the ones this firmware acts on are named; the rest arrive,
-// get logged and are ignored.
-enum StoreForwardRR : uint32_t {
-    SNF_ROUTER_ERROR          = 1,
-    SNF_ROUTER_HEARTBEAT      = 2,
-    SNF_ROUTER_PING           = 3,
-    SNF_ROUTER_PONG           = 4,
-    SNF_ROUTER_BUSY           = 5,
-    SNF_ROUTER_HISTORY        = 6,
-    SNF_ROUTER_STATS          = 7,
-    // 8 was a *direct* message, 9 was a *broadcast* — this way round, matching
-    // upstream's storeforward.pb.h. Getting them backwards files every replayed
-    // DM into the channel view and every replayed broadcast into a DM thread.
-    SNF_ROUTER_TEXT_DIRECT    = 8,
-    SNF_ROUTER_TEXT_BROADCAST = 9,
-    SNF_CLIENT_ERROR          = 64,
-    SNF_CLIENT_HISTORY        = 65,
-    SNF_CLIENT_STATS          = 66,
-    SNF_CLIENT_PING           = 67,
-    SNF_CLIENT_PONG           = 68,
-    SNF_CLIENT_ABORT          = 106,
-};
-
-// Encode a STORE_FORWARD_APP Data message carrying just a request/response code,
-// optionally with a History submessage naming how far back to replay.
-//
-// StoreAndForward { rr = 1, stats = 2, history = 3, heartbeat = 4, text = 5 }
-// History         { history_messages = 1, window = 2, last_request = 3 }
-//
-// windowMinutes = 0 omits the History submessage entirely, which is what a plain
-// CLIENT_PONG or a "use your own default window" CLIENT_HISTORY wants.
-size_t encodeStoreForward(uint32_t rr, uint32_t windowMinutes,
-                          uint8_t *buf, size_t bufLen, uint32_t bitfield = 0);
-
 // ── ServiceEnvelope (MQTT bridge) ─────────────────────────────
 // Meshtastic MQTT does not carry the packed 16-byte on-air header. It publishes
 // a ServiceEnvelope { packet: MeshPacket, channel_id: string, gateway_id: string }

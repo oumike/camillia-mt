@@ -478,7 +478,6 @@ Next	Dalej
 No %s - not saved	Brak %s - nie zapisano
 No %s - not saving	Brak %s - bez zapisu
 No %s traffic yet\n(filter is on - %s)	Brak ruchu %s\n(filtr włączony - %s)
-No S&F router heard yet	Nie słyszano jeszcze routera S&F
 No SD card is mounted.	Brak zamontowanej karty SD.
 No WiFi network configured	Nie skonfigurowano sieci WiFi
 No beacons heard yet.\n\nA beacon is only audible while its sender has retuned onto this channel, preset and region, and it repeats on that node's own schedule - minutes to hours apart. This list keeps what it hears until you clear it.	Nie słyszano jeszcze beaconów.\n\nBeacon jest słyszalny tylko wtedy, gdy nadawca przestroił się na ten kanał, preset i region, i powtarza się według harmonogramu tego węzła - co kilka minut lub godzin. Ta lista zachowuje to, co usłyszy, dopóki jej nie wyczyścisz.
@@ -594,18 +593,12 @@ Removed %u file%s. %u could not be deleted - the card may be write-protected.\n\
 Removed %u file%s.\n\nThis card looked clean afterwards, but the scan reads names and headers, not contents - it cannot promise the card is clean. Reformatting is the only answer that can.	Usunięto %u plik.%.0s\n\nKarta wyglądała potem na czystą, ale skanowanie czyta nazwy i nagłówki, nie zawartość - nie może zagwarantować, że karta jest czysta. Tylko ponowne formatowanie to zapewni.
 Removing Files	Usuwanie plików
 Removing legacy maps...	Usuwanie starych map...
-Replay already requested	Odtworzenie już zażądane
-Replay not sent: %s	Odtworzenie nie wysłane: %s
-Replay requested (last %lu min)	Zażądano odtworzenia (ostatnie %lu min)
 Reply	Odpowiedz
 Reply from %s	Odpowiedź od %s
 Reply from %s (%lus)	Odpowiedź od %s (%lus)
 Request (P)osition	Zażądaj (p)ozycji
 Request Node	Zażądaj węzła
 Request Position	Zażądaj pozycji
-Request S&F Replay (%s)	Zażądaj odtworzenia S&F (%s)
-Request S&F Replay (no router)	Zażądaj odtworzenia S&F (brak routera)
-Requested (last %lu min)	Zażądano (ostatnie %lu min)
 Rescan	Skanuj ponownie
 Reset	Resetuj
 Reset Chat Colors	Resetuj kolory czatu
@@ -693,8 +686,6 @@ State map unavailable	Mapa regionu niedostępna
 Stay on	Zawsze włączony
 Storage: %s %s	Pamięć: %s %s
 Storage: %s (not mounted)	Pamięć: %s (niezamontowana)
-Store&Fwd Client: %s	Klient Store&Fwd: %s
-Store&Fwd client is off	Klient Store&Fwd jest wyłączony
 Sun	nd
 Sweep	Przeszukiwanie
 Sweep already running	Przeszukiwanie już trwa
@@ -877,7 +868,6 @@ sensor %.2f V    trim %s	czujnik %.2f V    korekta %s
 sensor: read failed	czujnik: błąd odczytu
 stay on	zawsze włączony
 tap Filter to change	dotknij Filtr, aby zmienić
-unavailable	niedostępne
 unknown	nieznany
 unknown date	nieznana data
 unknown error	nieznany błąd

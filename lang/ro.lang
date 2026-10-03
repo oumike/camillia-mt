@@ -472,7 +472,6 @@ No	Nu
 No %s - not saved	Fără %s - nesalvat
 No %s - not saving	Fără %s - nu se salvează
 No %s traffic yet\n(filter is on - %s)	Încă nu există trafic %s\n(filtru activ - %s)
-No S&F router heard yet	Niciun router S&F auzit încă
 No SD card is mounted.	Niciun card SD montat.
 No WiFi network configured	Nicio rețea WiFi configurată
 No beacons heard yet.\n\nA beacon is only audible while its sender has retuned onto this channel, preset and region, and it repeats on that node's own schedule - minutes to hours apart. This list keeps what it hears until you clear it.	Nicio baliză auzită încă.\n\nO baliză se aude doar cât timp emițătorul ei s-a reacordat pe acest canal, presetare și regiune, și se repetă după programul acelui nod - la minute sau ore distanță. Lista păstrează ce aude până o ștergi.
@@ -591,18 +590,12 @@ Removed %u file%s. %u could not be deleted - the card may be write-protected.\n\
 Removed %u file%s.\n\nThis card looked clean afterwards, but the scan reads names and headers, not contents - it cannot promise the card is clean. Reformatting is the only answer that can.	Au fost șterse %u fișier(e)%.0s.\n\nDupă aceea cardul părea curat, dar scanarea citește nume și anteturi, nu conținut - nu poate garanta că e curat. Doar reformatarea poate.
 Removing Files	Se șterg fișierele
 Removing legacy maps...	Se elimină hărțile vechi...
-Replay already requested	Reluare deja cerută
-Replay not sent: %s	Retransmitere netrimisă: %s
-Replay requested (last %lu min)	Retransmitere cerută (ultimele %lu min)
 Reply	Răspunde
 Reply from %s	Răspuns de la %s
 Reply from %s (%lus)	Răspuns de la %s (%lus)
 Request (P)osition	Cere (p)oziția
 Request Node	Cere nodul
 Request Position	Cere poziția
-Request S&F Replay (%s)	Cere retransmitere S&F (%s)
-Request S&F Replay (no router)	Cere retransmitere S&F (fără router)
-Requested (last %lu min)	Cerut (ultimele %lu min)
 Rescan	Rescanează
 Reset	Resetează
 Reset Chat Colors	Resetează culorile chat
@@ -691,8 +684,6 @@ State map unavailable	Harta de stat indisponibilă
 Stay on	Rămâne pornit
 Storage: %s %s	Stocare: %s %s
 Storage: %s (not mounted)	Stocare: %s (nemontat)
-Store&Fwd Client: %s	Client Store&Fwd: %s
-Store&Fwd client is off	Clientul Store&Fwd e oprit
 Sun	dum
 Sweep	Baleiere
 Sweep already running	Baleiere deja în curs
@@ -874,7 +865,6 @@ sensor %.2f V    trim %s	senzor %.2f V    ajustare %s
 sensor: read failed	senzor: citire eșuată
 stay on	rămâne pornit
 tap Filter to change	atinge Filtru pentru a schimba
-unavailable	indisponibil
 unknown	necunoscut
 unknown date	dată necunoscută
 unknown error	eroare necunoscută

@@ -4865,37 +4865,6 @@ static void sendConfigPage(const char *msg = "", bool lite = false) {
             "<option value='0'"; if (!gCfg->neighborInfoOverLora) html += " selected"; html += ">No</option>"
             "</select></label>";
 
-    // Store and Forward (client)
-    html += "<h3 style='font-size:.95em;margin:.8em 0 .3em'>Store &amp; Forward (Client)</h3>";
-    html += "<label>Receive Replayed Messages<select name='snf_client_en'>"
-            "<option value='1'"; if ( gCfg->chatServerMode) html += " selected"; html += ">Yes</option>"
-            "<option value='0'"; if (!gCfg->chatServerMode) html += " selected"; html += ">No</option>"
-            "</select></label>";
-    // A router never replays unsolicited — it only answers a CLIENT_HISTORY — so
-    // this switch on its own never receives anything but heartbeats. The button
-    // that does the asking is a standalone form, so it lives with the other
-    // "do something now" actions under Utilities rather than inside the config
-    // form here; this just says where it went.
-    html += "<p style='font-size:.82em;color:#888;margin:.1em 0 .6em'>"
-            "Displays messages replayed by a Store &amp; Forward router, prefixed "
-            "<code>[SF]</code>. A router only replays when asked &mdash; use "
-            "<em>Request Replay Now</em> under Utilities &rarr; Diagnostics.</p>";
-
-    html += "<label>Router Node ID<input name='snf_router_id' type='text' maxlength='16'"
-            " placeholder='auto' value='";
-    if (gCfg->chatServerNodeId != 0) {
-        char routerBuf[16];
-        snprintf(routerBuf, sizeof(routerBuf), "!%08lx", (unsigned long)gCfg->chatServerNodeId);
-        html += routerBuf;
-    }
-    html += "'></label>"
-            "<p style='font-size:.82em;color:#888;margin:.1em 0 .6em'>"
-            "Leave blank to use whichever router this node hears a heartbeat from. "
-            "Set it &mdash; as <code>!aabbccdd</code> &mdash; to always ask one "
-            "specific router, and heartbeats from any other are then ignored when "
-            "choosing who to ask. Worth setting when your router has heartbeats "
-            "switched off, which is the Meshtastic default and leaves it "
-            "undiscoverable otherwise.</p>";
     sectionEnd(html, lite);
     sendChunk(html);
 
@@ -5245,23 +5214,6 @@ static void sendConfigPage(const char *msg = "", bool lite = false) {
         "<p style='font-size:.82em;color:#888;margin:.3em 0 1em'>"
         "Forces immediate telemetry TX (device + environment when available).</p>";
 
-    html +=
-        "<form method='POST' action='/snf-request'>"
-        "<button type='submit' style='background:#6b4fa0'>"
-        "&#128260; Request Replay Now</button>"
-        "</form>"
-        "<p style='font-size:.82em;color:#888;margin:.3em 0 1em'>"
-        "Asks a Store &amp; Forward router for the last ";
-    html += String((unsigned)SNF_HISTORY_WINDOW_MIN);
-    html += " minutes of stored messages. A router never replays on its own, so "
-            "this is what makes <em>Receive Replayed Messages</em> do anything. "
-            "Needs that setting on and a router that has been heard recently &mdash; "
-            "routers announce themselves with a periodic heartbeat.";
-    if (webCfgSnfResult()[0]) {
-        html += "<br>Last attempt: ";
-        html += webCfgSnfResult();
-    }
-    html += "</p>";
 
 #if HAS_SD_MALWARE_SCAN
     // Scanning changes nothing, so the scan button asks nothing. The delete
@@ -8093,16 +8045,6 @@ static void handlePostSave() {
             otaRequestBootCheckOnce();
         }
     }
-    if (server.hasArg("snf_router_id")) {
-        // Blank, "none" or unparseable all come back 0, which is "unset" — the
-        // way to hand router selection back to heartbeat discovery. Shared with
-        // the YAML importer so a hand-edited config.yaml and this box accept
-        // exactly the same spellings.
-        gCfg->chatServerNodeId = parseNodeIdText(server.arg("snf_router_id").c_str());
-    }
-    if (server.hasArg("snf_client_en")) {
-        gCfg->chatServerMode = server.arg("snf_client_en").toInt() != 0 ? 1 : 0;
-    }
 #if HAS_AUDIO_ALERTS
     if (server.hasArg("msg_alert_sound")) {   // same guard, same reason
         gCfg->msgAlertSound  = (uint8_t)constrain(server.arg("msg_alert_sound").toInt(), 0, 3);
@@ -8793,16 +8735,6 @@ static void handlePostWifiUse() {
     // page first at least lets the message land.
     redirectHomeWithFlash("Switched network. Reconnecting - this page may become "
                           "unreachable until you join the new network.");
-}
-
-// ── Store & Forward: request a replay ─────────────────────────
-// Queued rather than sent here: the main loop owns the LoRa TX path and the
-// router-tracking state, and it writes the outcome back through
-// webCfgSetSnfResult() for the next render of the Modules section.
-static void handlePostSnfRequest() {
-    if (!isLoggedIn()) { redirect("/login"); return; }
-    webCfgQueueSnfRequest();
-    redirectHomeWithFlash("Replay requested from the Store & Forward router.");
 }
 
 #if HAS_ADMIN_TERMINAL
@@ -10077,7 +10009,6 @@ static void registerCommonRoutes() {
     onRoute("/wifi-add",          HTTP_POST, handlePostWifiAdd);
     onRoute("/wifi-forget",       HTTP_POST, handlePostWifiForget);
     onRoute("/wifi-use",          HTTP_POST, handlePostWifiUse);
-    onRoute("/snf-request",       HTTP_POST, handlePostSnfRequest);
 #if HAS_ADMIN_TERMINAL
     // Registered here only: the AP-lite page gets none of these, same heap rule
     // as chat and the live feed.
@@ -10559,24 +10490,6 @@ bool webCfgTakeChatSend(bool &isDm, uint32_t &targetId,
     if (text && textLen) strlcpy(text, gChatSendText, textLen);
     return true;
 }
-
-// ── Store & Forward replay bridge ────────────────────────────────────────────
-static bool gSnfReq = false;
-static char gSnfResult[64] = "";
-
-void webCfgQueueSnfRequest() { gSnfReq = true; }
-
-bool webCfgTakeSnfRequest() {
-    if (!gSnfReq) return false;
-    gSnfReq = false;
-    return true;
-}
-
-void webCfgSetSnfResult(const char *msg) {
-    strlcpy(gSnfResult, msg ? msg : "", sizeof(gSnfResult));
-}
-
-const char *webCfgSnfResult() { return gSnfResult; }
 
 bool webCfgTakeManualTime(int &year, int &mon, int &day, int &hour, int &minute) {
     if (!gManualTimeReq) return false;

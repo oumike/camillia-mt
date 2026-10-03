@@ -468,7 +468,6 @@ Next	Næste
 No %s - not saved	Intet %s - ikke gemt
 No %s - not saving	Intet %s - gemmer ikke
 No %s traffic yet\n(filter is on - %s)	Ingen %s-trafik endnu\n(filter til - %s)
-No S&F router heard yet	Ingen S&F-router hørt endnu
 No SD card is mounted.	Intet SD-kort monteret.
 No WiFi network configured	Intet WiFi-netværk konfigureret
 No beacons heard yet.\n\nA beacon is only audible while its sender has retuned onto this channel, preset and region, and it repeats on that node's own schedule - minutes to hours apart. This list keeps what it hears until you clear it.	Ingen beacons hørt endnu.\n\nEn beacon kan kun høres, mens afsenderen har stillet om til denne kanal, dette forvalg og denne region, og den gentages efter nodens egen plan - minutter til timer imellem. Listen beholder det, den hører, til du rydder den.
@@ -584,18 +583,12 @@ Removed %u file%s. %u could not be deleted - the card may be write-protected.\n\
 Removed %u file%s.\n\nThis card looked clean afterwards, but the scan reads names and headers, not contents - it cannot promise the card is clean. Reformatting is the only answer that can.	%u fil(er)%.0s fjernet.\n\nKortet så rent ud bagefter, men scanningen læser navne og filhoveder, ikke indhold - den kan ikke love, at kortet er rent. Det kan kun genformatering.
 Removing Files	Fjerner filer
 Removing legacy maps...	Fjerner gamle kort...
-Replay already requested	Genafspilning allerede anmodet
-Replay not sent: %s	Genafspilning ikke sendt: %s
-Replay requested (last %lu min)	Genafspilning anmodet (seneste %lu min)
 Reply	Svar
 Reply from %s	Svar fra %s
 Reply from %s (%lus)	Svar fra %s (%lus)
 Request (P)osition	Anmod om (p)osition
 Request Node	Anmod om node
 Request Position	Anmod om position
-Request S&F Replay (%s)	Anmod om S&F-genafspilning (%s)
-Request S&F Replay (no router)	Anmod om S&F-genafspilning (ingen router)
-Requested (last %lu min)	Anmodet (seneste %lu min)
 Rescan	Scan igen
 Reset	Nulstil
 Reset Chat Colors	Nulstil chatfarver
@@ -679,8 +672,6 @@ State map unavailable	Regionskort ikke tilgængeligt
 Stay on	Altid tændt
 Storage: %s %s	Lager: %s %s
 Storage: %s (not mounted)	Lager: %s (ikke monteret)
-Store&Fwd Client: %s	Store&Fwd-klient: %s
-Store&Fwd client is off	Store&Fwd-klienten er slået fra
 Sun	søn
 Sweep	Afsøgning
 Sweep already running	Afsøgning kører allerede
@@ -862,7 +853,6 @@ sensor %.2f V    trim %s	sensor %.2f V    justering %s
 sensor: read failed	sensor: læsefejl
 stay on	altid tændt
 tap Filter to change	tryk Filter for at skifte
-unavailable	ikke tilgængelig
 unknown	ukendt
 unknown date	ukendt dato
 unknown error	ukendt fejl

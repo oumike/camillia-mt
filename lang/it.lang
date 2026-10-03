@@ -473,7 +473,6 @@ Next	Avanti
 No %s - not saved	Nessuna %s: non salvato
 No %s - not saving	Nessuna %s: nessun salvataggio
 No %s traffic yet\n(filter is on - %s)	Ancora nessun traffico %s\n(filtro attivo - %s)
-No S&F router heard yet	Nessun router S&F ancora sentito
 No SD card is mounted.	Nessuna scheda SD montata.
 No WiFi network configured	Nessuna rete WiFi configurata
 No beacons heard yet.\n\nA beacon is only audible while its sender has retuned onto this channel, preset and region, and it repeats on that node's own schedule - minutes to hours apart. This list keeps what it hears until you clear it.	Nessun beacon ancora sentito.\n\nUn beacon si sente solo mentre il mittente è sintonizzato su questo canale, preset e regione, e si ripete secondo il calendario di quel nodo, a distanza di minuti o ore. L'elenco conserva ciò che sente finché non lo cancelli.
@@ -589,18 +588,12 @@ Removed %u file%s. %u could not be deleted - the card may be write-protected.\n\
 Removed %u file%s.\n\nThis card looked clean afterwards, but the scan reads names and headers, not contents - it cannot promise the card is clean. Reformatting is the only answer that can.	Rimossi %u file%.0s.\n\nDopo la scheda sembrava pulita, ma la scansione legge nomi e intestazioni, non il contenuto: non può garantirlo. Solo la formattazione può.
 Removing Files	Rimozione file
 Removing legacy maps...	Rimozione vecchie mappe...
-Replay already requested	Riproduzione già richiesta
-Replay not sent: %s	Replay non inviato: %s
-Replay requested (last %lu min)	Replay richiesto (ultimi %lu min)
 Reply	Rispondi
 Reply from %s	Risposta da %s
 Reply from %s (%lus)	Risposta da %s (%lus)
 Request (P)osition	Richiedi (p)osizione
 Request Node	Richiedi nodo
 Request Position	Richiedi posizione
-Request S&F Replay (%s)	Richiedi replay S&F (%s)
-Request S&F Replay (no router)	Richiedi replay S&F (nessun router)
-Requested (last %lu min)	Richiesto (ultimi %lu min)
 Rescan	Riscansiona
 Reset	Azzera
 Reset Chat Colors	Ripristina colori chat
@@ -689,8 +682,6 @@ State map unavailable	Mappa di stato non disponibile
 Stay on	Sempre acceso
 Storage: %s %s	Archiviazione: %s %s
 Storage: %s (not mounted)	Archiviazione: %s (non montata)
-Store&Fwd Client: %s	Client Store&Fwd: %s
-Store&Fwd client is off	Il client Store&Fwd è disattivato
 Sun	dom
 Sweep already running	Sweep già in corso
 Sweep cancelled	Sweep annullato
@@ -871,7 +862,6 @@ sensor %.2f V    trim %s	sensore %.2f V    correz. %s
 sensor: read failed	sensore: lettura non riuscita
 stay on	sempre acceso
 tap Filter to change	tocca Filtro per cambiare
-unavailable	non disponibile
 unknown	sconosciuto
 unknown date	data sconosciuta
 unknown error	errore sconosciuto

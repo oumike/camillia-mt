@@ -477,7 +477,6 @@ Next	Seuraava
 No %s - not saved	Ei %s - ei tallennettu
 No %s - not saving	Ei %s - ei tallenneta
 No %s traffic yet\n(filter is on - %s)	Ei vielä %s-liikennettä\n(suodatin päällä - %s)
-No S&F router heard yet	S&F-reititintä ei ole vielä kuultu
 No SD card is mounted.	SD-korttia ei ole liitetty.
 No WiFi network configured	WiFi-verkkoa ei ole määritetty
 No beacons heard yet.\n\nA beacon is only audible while its sender has retuned onto this channel, preset and region, and it repeats on that node's own schedule - minutes to hours apart. This list keeps what it hears until you clear it.	Majakoita ei ole vielä kuultu.\n\nMajakka kuuluu vain, kun sen lähettäjä on virittäytynyt tälle kanavalle, esiasetukselle ja alueelle, ja se toistuu solmun oman aikataulun mukaan - minuuttien tai tuntien välein. Lista säilyttää kuulemansa, kunnes tyhjennät sen.
@@ -596,18 +595,12 @@ Removed %u file%s. %u could not be deleted - the card may be write-protected.\n\
 Removed %u file%s.\n\nThis card looked clean afterwards, but the scan reads names and headers, not contents - it cannot promise the card is clean. Reformatting is the only answer that can.	%u tiedosto(a)%.0s poistettu.\n\nKortti näytti jälkeenpäin puhtaalta, mutta tarkistus lukee nimiä ja otsakkeita, ei sisältöä - se ei voi luvata, että kortti on puhdas. Vain uudelleenalustus voi.
 Removing Files	Poistetaan tiedostoja
 Removing legacy maps...	Poistetaan vanhoja karttoja...
-Replay already requested	Toisto jo pyydetty
-Replay not sent: %s	Toistoa ei lähetetty: %s
-Replay requested (last %lu min)	Toisto pyydetty (viim. %lu min)
 Reply	Vastaa
 Reply from %s	Vastaus kohteelta %s
 Reply from %s (%lus)	Vastaus kohteelta %s (%lus)
 Request (P)osition	Pyydä sijaintia (P)
 Request Node	Pyydä solmua
 Request Position	Pyydä sijaintia
-Request S&F Replay (%s)	Pyydä S&F-toistoa (%s)
-Request S&F Replay (no router)	Pyydä S&F-toistoa (ei reititintä)
-Requested (last %lu min)	Pyydetty (viim. %lu min)
 Rescan	Skannaa uudelleen
 Reset	Nollaa
 Reset Chat Colors	Nollaa chatin värit
@@ -695,8 +688,6 @@ State map unavailable	Aluekartta ei saatavilla
 Stay on	Aina päällä
 Storage: %s %s	Tallennustila: %s %s
 Storage: %s (not mounted)	Tallennustila: %s (ei liitetty)
-Store&Fwd Client: %s	Store&Fwd-asiakas: %s
-Store&Fwd client is off	Store&Fwd-asiakas on pois päältä
 Sun	su
 Sweep	Haravointi
 Sweep already running	Haravointi on jo käynnissä
@@ -879,7 +870,6 @@ sensor %.2f V    trim %s	anturi %.2f V    korjaus %s
 sensor: read failed	anturi: lukuvirhe
 stay on	aina päällä
 tap Filter to change	napauta Suodatin muuttaaksesi
-unavailable	ei saatavilla
 unknown	tuntematon
 unknown date	tuntematon päivämäärä
 unknown error	tuntematon virhe

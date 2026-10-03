@@ -83,17 +83,6 @@ bool webCfgTakeChatSend(bool &isDm, uint32_t &targetId,
                         char *text, size_t textLen,
                         uint32_t &replyId, uint32_t &emoji);
 
-// ── Store & Forward replay bridge ─────────────────────────────────
-// A Store-and-Forward router only replays history when a client asks for it, so
-// the web UI needs a way to ask. The button queues the request here; the main
-// loop drains it (it owns the LoRa TX path and the router-tracking state) and
-// posts the outcome back, which the next page render shows. Same queue-and-drain
-// shape as the Chat tab send above, for the same reason.
-void webCfgQueueSnfRequest();
-bool webCfgTakeSnfRequest();
-void webCfgSetSnfResult(const char *msg);
-const char *webCfgSnfResult();   // "" until a request has been attempted
-
 #if HAS_ADMIN_TERMINAL
 // The remote admin session lives in main_lvgl.cpp beside the transport it
 // drives; these are how the web terminal reaches it. There is one session, not

@@ -468,7 +468,6 @@ Next	Neste
 No %s - not saved	Intet %s - ikke lagret
 No %s - not saving	Intet %s - lagrer ikke
 No %s traffic yet\n(filter is on - %s)	Ingen %s-trafikk ennå\n(filter på - %s)
-No S&F router heard yet	Ingen S&F-ruter hørt ennå
 No SD card is mounted.	Intet SD-kort montert.
 No WiFi network configured	Intet WiFi-nettverk konfigurert
 No beacons heard yet.\n\nA beacon is only audible while its sender has retuned onto this channel, preset and region, and it repeats on that node's own schedule - minutes to hours apart. This list keeps what it hears until you clear it.	Ingen beacons hørt ennå.\n\nEn beacon høres bare mens avsenderen har stilt seg om til denne kanalen, forhåndsinnstillingen og regionen, og den gjentas etter nodens egen plan - minutter til timer imellom. Listen beholder det den hører til du tømmer den.
@@ -587,18 +586,12 @@ Removed %u file%s. %u could not be deleted - the card may be write-protected.\n\
 Removed %u file%s.\n\nThis card looked clean afterwards, but the scan reads names and headers, not contents - it cannot promise the card is clean. Reformatting is the only answer that can.	%u fil(er)%.0s fjernet.\n\nKortet så rent ut etterpå, men skanningen leser navn og filhoder, ikke innhold - den kan ikke love at kortet er rent. Det kan bare ny formatering.
 Removing Files	Fjerner filer
 Removing legacy maps...	Fjerner gamle kart...
-Replay already requested	Avspilling allerede forespurt
-Replay not sent: %s	Avspilling ikke sendt: %s
-Replay requested (last %lu min)	Avspilling forespurt (siste %lu min)
 Reply	Svar
 Reply from %s	Svar fra %s
 Reply from %s (%lus)	Svar fra %s (%lus)
 Request (P)osition	Be om (p)osisjon
 Request Node	Be om node
 Request Position	Be om posisjon
-Request S&F Replay (%s)	Be om S&F-avspilling (%s)
-Request S&F Replay (no router)	Be om S&F-avspilling (ingen ruter)
-Requested (last %lu min)	Forespurt (siste %lu min)
 Rescan	Skann på nytt
 Reset	Tilbakestill
 Reset Chat Colors	Tilbakestill chatfarger
@@ -683,8 +676,6 @@ State map unavailable	Regionkart ikke tilgjengelig
 Stay on	Alltid på
 Storage: %s %s	Lagring: %s %s
 Storage: %s (not mounted)	Lagring: %s (ikke montert)
-Store&Fwd Client: %s	Store&Fwd-klient: %s
-Store&Fwd client is off	Store&Fwd-klienten er av
 Sun	søn
 Sweep	Sveip
 Sweep already running	Sveip pågår allerede
@@ -866,7 +857,6 @@ sensor %.2f V    trim %s	sensor %.2f V    justering %s
 sensor: read failed	sensor: lesefeil
 stay on	alltid på
 tap Filter to change	trykk Filter for å endre
-unavailable	ikke tilgjengelig
 unknown	ukjent
 unknown date	ukjent dato
 unknown error	ukjent feil

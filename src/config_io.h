@@ -394,20 +394,16 @@ struct RhinoConfig {
     // Decode and display MeshBeacon (port 37) advertisements from other meshes.
     // Receive-only; see MY_MESH_BEACON_LISTEN.
     bool     meshBeaconListen;
-    // Store-and-Forward router to address replay requests to, when the user has
-    // pinned one. 0 = unset, which is the default and means "use whichever
-    // router we heard a heartbeat from". Set it when the router has heartbeats
-    // switched off, which is upstream's default and leaves it undiscoverable.
+    // The camillia chat server's node id (0 = none). This slot was the pinned
+    // Store-and-Forward router (snfRouterNodeId) before that client was removed;
+    // an S&F router there is not a chat server, so it is cleared once on
+    // upgrade -- see chatServerFlags.
     //
     // No _reservedPad here on purpose, unlike every field above: those are
     // bools and uint8_ts that would have landed inside the old blob's trailing
     // padding. This is a uint32_t, and its natural 4-alignment already places
     // it at offset 940 — exactly the previous sizeof(RhinoConfig), with
     // meshBeaconListen at 938. Verified by compiling both layouts on the host.
-    //
-    // Now the chat server's node id (0 = none), in the old snfRouterNodeId
-    // slot. An S&F router pinned there is not a chat server, so it is cleared
-    // once on upgrade -- see chatServerFlags.
     uint32_t chatServerNodeId;
     // Battery indicator format: BATT_DISPLAY_PERCENT / BATT_DISPLAY_VOLTAGE.
     // Lands at the previous sizeof(RhinoConfig) because snfRouterNodeId above

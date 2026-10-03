@@ -477,7 +477,6 @@ Next	Ďalej
 No %s - not saved	Bez %s - neuložené
 No %s - not saving	Bez %s - neukladá sa
 No %s traffic yet\n(filter is on - %s)	Zatiaľ žiadna prevádzka %s\n(filter zapnutý - %s)
-No S&F router heard yet	Zatiaľ nepočutý žiadny router S&F
 No SD card is mounted.	Nie je pripojená karta SD.
 No WiFi network configured	Nie je nastavená sieť WiFi
 No beacons heard yet.\n\nA beacon is only audible while its sender has retuned onto this channel, preset and region, and it repeats on that node's own schedule - minutes to hours apart. This list keeps what it hears until you clear it.	Zatiaľ nepočuť žiadne majáky.\n\nMaják je počuť len vtedy, keď sa jeho odosielateľ preladil na tento kanál, preset a región, a opakuje sa podľa rozvrhu toho uzla - po minútach až hodinách. Tento zoznam uchováva, čo zachytí, kým ho nevymažete.
@@ -593,18 +592,12 @@ Removed %u file%s. %u could not be deleted - the card may be write-protected.\n\
 Removed %u file%s.\n\nThis card looked clean afterwards, but the scan reads names and headers, not contents - it cannot promise the card is clean. Reformatting is the only answer that can.	Odstránených %u súb.%.0s\n\nKarta potom vyzerala čistá, ale kontrola číta názvy a hlavičky, nie obsah - nemôže zaručiť, že je karta čistá. To zaručí len nové formátovanie.
 Removing Files	Odstraňujem súbory
 Removing legacy maps...	Odstraňujem staré mapy...
-Replay already requested	Prehratie už vyžiadané
-Replay not sent: %s	Prehratie neodoslané: %s
-Replay requested (last %lu min)	Prehratie vyžiadané (posledných %lu min)
 Reply	Odpovedať
 Reply from %s	Odpoveď od %s
 Reply from %s (%lus)	Odpoveď od %s (%lus)
 Request (P)osition	Vyžiadať (p)olohu
 Request Node	Vyžiadať uzol
 Request Position	Vyžiadať polohu
-Request S&F Replay (%s)	Vyžiadať prehratie S&F (%s)
-Request S&F Replay (no router)	Vyžiadať prehratie S&F (bez routera)
-Requested (last %lu min)	Vyžiadané (posledných %lu min)
 Rescan	Znova skenovať
 Reset	Resetovať
 Reset Chat Colors	Resetovať farby chatu
@@ -692,8 +685,6 @@ State map unavailable	Mapa regiónu nie je k dispozícii
 Stay on	Stále zapnuté
 Storage: %s %s	Úložisko: %s %s
 Storage: %s (not mounted)	Úložisko: %s (nepripojené)
-Store&Fwd Client: %s	Klient Store&Fwd: %s
-Store&Fwd client is off	Klient Store&Fwd je vypnutý
 Sun	ne
 Sweep	Prieskum
 Sweep already running	Prieskum už beží
@@ -875,7 +866,6 @@ sensor %.2f V    trim %s	senzor %.2f V    korekcia %s
 sensor: read failed	senzor: chyba čítania
 stay on	stále zapnuté
 tap Filter to change	na zmenu ťuknite na Filter
-unavailable	nedostupné
 unknown	neznámy
 unknown date	neznámy dátum
 unknown error	neznáma chyba

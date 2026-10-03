@@ -477,7 +477,6 @@ Next	Tālāk
 No %s - not saved	Nav %s - nav saglabāts
 No %s - not saving	Nav %s - netiek saglabāts
 No %s traffic yet\n(filter is on - %s)	Vēl nav %s datplūsmas\n(filtrs ieslēgts - %s)
-No S&F router heard yet	Vēl nav dzirdēts neviens S&F maršrutētājs
 No SD card is mounted.	SD karte nav pievienota.
 No WiFi network configured	Nav iestatīts WiFi tīkls
 No beacons heard yet.\n\nA beacon is only audible while its sender has retuned onto this channel, preset and region, and it repeats on that node's own schedule - minutes to hours apart. This list keeps what it hears until you clear it.	Vēl nav dzirdēta neviena bāka.\n\nBāka ir dzirdama tikai tad, kad tās sūtītājs pārslēdzies uz šo kanālu, priekšiestatījumu un reģionu, un tā atkārtojas pēc sava mezgla grafika - ar minūšu līdz stundu intervālu. Šis saraksts glabā dzirdēto, līdz to notīrāt.
@@ -596,18 +595,12 @@ Removed %u file%s. %u could not be deleted - the card may be write-protected.\n\
 Removed %u file%s.\n\nThis card looked clean afterwards, but the scan reads names and headers, not contents - it cannot promise the card is clean. Reformatting is the only answer that can.	Noņemti faili: %u%.0s\n\nPēc tam karte izskatījās tīra, bet pārbaude lasa nosaukumus un galvenes, nevis saturu - tā nevar garantēt, ka karte ir tīra. To var tikai atkārtota formatēšana.
 Removing Files	Noņem failus
 Removing legacy maps...	Noņem vecās kartes...
-Replay already requested	Atkārtošana jau pieprasīta
-Replay not sent: %s	Atkārtošana nav nosūtīta: %s
-Replay requested (last %lu min)	Atkārtošana pieprasīta (pēdējās %lu min)
 Reply	Atbildēt
 Reply from %s	Atbilde no %s
 Reply from %s (%lus)	Atbilde no %s (%lus)
 Request (P)osition	Pieprasīt (p)ozīciju
 Request Node	Pieprasīt mezglu
 Request Position	Pieprasīt pozīciju
-Request S&F Replay (%s)	Pieprasīt S&F atkārtošanu (%s)
-Request S&F Replay (no router)	Pieprasīt S&F atkārtošanu (nav maršrutētāja)
-Requested (last %lu min)	Pieprasīts (pēdējās %lu min)
 Rescan	Meklēt vēlreiz
 Reset	Atiestatīt
 Reset Chat Colors	Atiestatīt tērzēšanas krāsas
@@ -695,8 +688,6 @@ State map unavailable	Reģiona karte nav pieejama
 Stay on	Vienmēr ieslēgts
 Storage: %s %s	Krātuve: %s %s
 Storage: %s (not mounted)	Krātuve: %s (nav pievienota)
-Store&Fwd Client: %s	Store&Fwd klients: %s
-Store&Fwd client is off	Store&Fwd klients ir izslēgts
 Sun	sv
 Sweep	Pārmeklēšana
 Sweep already running	Pārmeklēšana jau notiek
@@ -879,7 +870,6 @@ sensor %.2f V    trim %s	sensors %.2f V    korekcija %s
 sensor: read failed	sensors: lasīšanas kļūda
 stay on	vienmēr ieslēgts
 tap Filter to change	lai mainītu, pieskarieties Filtrs
-unavailable	nav pieejams
 unknown	nezināms
 unknown date	nezināms datums
 unknown error	nezināma kļūda

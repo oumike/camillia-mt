@@ -478,7 +478,6 @@ Next	İleri
 No %s - not saved	%s yok - kaydedilmedi
 No %s - not saving	%s yok - kaydedilmiyor
 No %s traffic yet\n(filter is on - %s)	Henüz %s trafiği yok\n(filtre açık - %s)
-No S&F router heard yet	Henüz S&F yönlendiricisi duyulmadı
 No SD card is mounted.	Bağlı SD kart yok.
 No WiFi network configured	Yapılandırılmış WiFi ağı yok
 No beacons heard yet.\n\nA beacon is only audible while its sender has retuned onto this channel, preset and region, and it repeats on that node's own schedule - minutes to hours apart. This list keeps what it hears until you clear it.	Henüz işaretçi duyulmadı.\n\nBir işaretçi yalnızca göndericisi bu kanala, ön ayara ve bölgeye geçmişken duyulur ve o düğümün kendi takvimine göre tekrarlanır - dakikalar ile saatler arası aralıklarla. Bu liste, siz temizleyene kadar duyduklarını tutar.
@@ -597,18 +596,12 @@ Removed %u file%s. %u could not be deleted - the card may be write-protected.\n\
 Removed %u file%s.\n\nThis card looked clean afterwards, but the scan reads names and headers, not contents - it cannot promise the card is clean. Reformatting is the only answer that can.	%u dosya%.0s kaldırıldı.\n\nKart sonrasında temiz göründü, ancak tarama içerik değil ad ve başlık okur - kartın temiz olduğunu garanti edemez. Bunu yalnızca yeniden biçimlendirme sağlar.
 Removing Files	Dosyalar kaldırılıyor
 Removing legacy maps...	Eski haritalar kaldırılıyor...
-Replay already requested	Yeniden oynatma zaten istendi
-Replay not sent: %s	Yeniden oynatma gönderilmedi: %s
-Replay requested (last %lu min)	Yeniden oynatma istendi (son %lu dk)
 Reply	Yanıtla
 Reply from %s	%s kaynağından yanıt
 Reply from %s (%lus)	%s kaynağından yanıt (%lus)
 Request (P)osition	Konum iste (P)
 Request Node	Düğüm iste
 Request Position	Konum iste
-Request S&F Replay (%s)	S&F yeniden oynatma iste (%s)
-Request S&F Replay (no router)	S&F yeniden oynatma iste (yönlendirici yok)
-Requested (last %lu min)	İstendi (son %lu dk)
 Rescan	Yeniden tara
 Reset	Sıfırla
 Reset Chat Colors	Sohbet renklerini sıfırla
@@ -696,8 +689,6 @@ State map unavailable	Bölge haritası kullanılamıyor
 Stay on	Hep açık
 Storage: %s %s	Depolama: %s %s
 Storage: %s (not mounted)	Depolama: %s (bağlı değil)
-Store&Fwd Client: %s	Store&Fwd istemcisi: %s
-Store&Fwd client is off	Store&Fwd istemcisi kapalı
 Sun	Paz
 Sweep	Tarama
 Sweep already running	Tarama zaten çalışıyor
@@ -880,7 +871,6 @@ sensor %.2f V    trim %s	sensör %.2f V    düzeltme %s
 sensor: read failed	sensör: okuma hatası
 stay on	hep açık
 tap Filter to change	değiştirmek için Filtre'ye dokunun
-unavailable	kullanılamıyor
 unknown	bilinmiyor
 unknown date	bilinmeyen tarih
 unknown error	bilinmeyen hata

@@ -476,7 +476,6 @@ Next	Avançar
 No %s - not saved	Sem %s - não salvo
 No %s - not saving	Sem %s - não salvando
 No %s traffic yet\n(filter is on - %s)	Ainda sem tráfego %s\n(filtro ativo - %s)
-No S&F router heard yet	Nenhum roteador S&F ouvido ainda
 No SD card is mounted.	Nenhum cartão SD montado.
 No WiFi network configured	Nenhuma rede WiFi configurada
 No beacons heard yet.\n\nA beacon is only audible while its sender has retuned onto this channel, preset and region, and it repeats on that node's own schedule - minutes to hours apart. This list keeps what it hears until you clear it.	Nenhuma baliza ouvida ainda.\n\nUma baliza só é audível enquanto o emissor está sintonizado neste canal, preset e região, e se repete no cronograma daquele nó - de minutos a horas de intervalo. Esta lista guarda o que ouve até você limpá-la.
@@ -592,18 +591,12 @@ Removed %u file%s. %u could not be deleted - the card may be write-protected.\n\
 Removed %u file%s.\n\nThis card looked clean afterwards, but the scan reads names and headers, not contents - it cannot promise the card is clean. Reformatting is the only answer that can.	%u arquivo(s)%.0s removido(s).\n\nO cartão pareceu limpo depois, mas a verificação lê nomes e cabeçalhos, não o conteúdo - não dá para garantir que o cartão está limpo. Só reformatar garante.
 Removing Files	Removendo arquivos
 Removing legacy maps...	Removendo mapas antigos...
-Replay already requested	Reenvio já solicitado
-Replay not sent: %s	Reenvio não enviado: %s
-Replay requested (last %lu min)	Reenvio solicitado (últimos %lu min)
 Reply	Responder
 Reply from %s	Resposta de %s
 Reply from %s (%lus)	Resposta de %s (%lus)
 Request (P)osition	Solicitar (P)osição
 Request Node	Solicitar nó
 Request Position	Solicitar posição
-Request S&F Replay (%s)	Solicitar reenvio S&F (%s)
-Request S&F Replay (no router)	Solicitar reenvio S&F (sem roteador)
-Requested (last %lu min)	Solicitado (últimos %lu min)
 Rescan	Varrer de novo
 Reset	Redefinir
 Reset Chat Colors	Redefinir cores do chat
@@ -691,8 +684,6 @@ State map unavailable	Mapa regional indisponível
 Stay on	Sempre acesa
 Storage: %s %s	Armazenamento: %s %s
 Storage: %s (not mounted)	Armazenamento: %s (não montado)
-Store&Fwd Client: %s	Cliente Store&Fwd: %s
-Store&Fwd client is off	O cliente Store&Fwd está desligado
 Sun	dom
 Sweep	Varredura
 Sweep already running	Varredura já em andamento
@@ -872,7 +863,6 @@ sensor %.2f V    trim %s	sensor %.2f V    ajuste %s
 sensor: read failed	sensor: falha na leitura
 stay on	sempre acesa
 tap Filter to change	toque em Filtro para mudar
-unavailable	indisponível
 unknown	desconhecido
 unknown date	data desconhecida
 unknown error	erro desconhecido

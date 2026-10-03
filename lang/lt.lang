@@ -477,7 +477,6 @@ Next	Toliau
 No %s - not saved	Nėra %s - neįrašyta
 No %s - not saving	Nėra %s - neįrašoma
 No %s traffic yet\n(filter is on - %s)	Dar nėra %s srauto\n(filtras įjungtas - %s)
-No S&F router heard yet	Dar negirdėtas joks S&F maršrutizatorius
 No SD card is mounted.	SD kortelė neprijungta.
 No WiFi network configured	WiFi tinklas nenustatytas
 No beacons heard yet.\n\nA beacon is only audible while its sender has retuned onto this channel, preset and region, and it repeats on that node's own schedule - minutes to hours apart. This list keeps what it hears until you clear it.	Dar negirdėta jokių švyturių.\n\nŠvyturys girdimas tik tada, kai jo siuntėjas persijungęs į šį kanalą, išankstinę nuostatą ir regioną, ir kartojasi pagal to mazgo tvarkaraštį - kas kelias minutes ar valandas. Šis sąrašas saugo, ką girdi, kol jo neišvalysite.
@@ -596,18 +595,12 @@ Removed %u file%s. %u could not be deleted - the card may be write-protected.\n\
 Removed %u file%s.\n\nThis card looked clean afterwards, but the scan reads names and headers, not contents - it cannot promise the card is clean. Reformatting is the only answer that can.	Pašalinta failų: %u%.0s\n\nKortelė po to atrodė švari, bet patikra skaito pavadinimus ir antraštes, ne turinį - ji negali garantuoti, kad kortelė švari. Tai gali tik formatavimas iš naujo.
 Removing Files	Šalinami failai
 Removing legacy maps...	Šalinami seni žemėlapiai...
-Replay already requested	Pakartojimas jau užklaustas
-Replay not sent: %s	Pakartojimas neišsiųstas: %s
-Replay requested (last %lu min)	Pakartojimas užklaustas (paskutinės %lu min)
 Reply	Atsakyti
 Reply from %s	Atsakymas iš %s
 Reply from %s (%lus)	Atsakymas iš %s (%lus)
 Request (P)osition	Užklausti (p)adėties
 Request Node	Užklausti mazgo
 Request Position	Užklausti padėties
-Request S&F Replay (%s)	Užklausti S&F pakartojimo (%s)
-Request S&F Replay (no router)	Užklausti S&F pakartojimo (nėra maršrutizatoriaus)
-Requested (last %lu min)	Užklausta (paskutinės %lu min)
 Rescan	Ieškoti iš naujo
 Reset	Atstatyti
 Reset Chat Colors	Atstatyti pokalbio spalvas
@@ -695,8 +688,6 @@ State map unavailable	Regiono žemėlapis nepasiekiamas
 Stay on	Visada įjungta
 Storage: %s %s	Saugykla: %s %s
 Storage: %s (not mounted)	Saugykla: %s (neprijungta)
-Store&Fwd Client: %s	Store&Fwd klientas: %s
-Store&Fwd client is off	Store&Fwd klientas išjungtas
 Sun	s
 Sweep	Šukavimas
 Sweep already running	Šukavimas jau vyksta
@@ -879,7 +870,6 @@ sensor %.2f V    trim %s	jutiklis %.2f V    korekcija %s
 sensor: read failed	jutiklis: skaitymo klaida
 stay on	visada įjungta
 tap Filter to change	norėdami keisti, bakstelėkite Filtras
-unavailable	nepasiekiama
 unknown	nežinomas
 unknown date	nežinoma data
 unknown error	nežinoma klaida

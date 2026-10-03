@@ -478,7 +478,6 @@ No	Non
 No %s - not saved	Pas de %s - non enregistré
 No %s - not saving	Pas de %s - pas d'enregistrement
 No %s traffic yet\n(filter is on - %s)	Pas encore de trafic %s\n(filtre actif - %s)
-No S&F router heard yet	Aucun routeur S&F entendu
 No SD card is mounted.	Aucune carte SD montée.
 No WiFi network configured	Aucun réseau WiFi configuré
 No beacons heard yet.\n\nA beacon is only audible while its sender has retuned onto this channel, preset and region, and it repeats on that node's own schedule - minutes to hours apart. This list keeps what it hears until you clear it.	Aucune balise entendue.\n\nUne balise n'est audible que lorsque son émetteur s'est réglé sur ce canal, ce préréglage et cette région, et elle se répète selon le calendrier du nœud - de quelques minutes à quelques heures. Cette liste garde ce qu'elle entend jusqu'à ce que vous l'effaciez.
@@ -593,18 +592,12 @@ Removed %u file%s. %u could not be deleted - the card may be write-protected.\n\
 Removed %u file%s.\n\nThis card looked clean afterwards, but the scan reads names and headers, not contents - it cannot promise the card is clean. Reformatting is the only answer that can.	%u fichier(s)%.0s supprimé(s).\n\nLa carte semblait saine ensuite, mais l'analyse lit les noms et les en-têtes, pas le contenu - elle ne peut pas le garantir. Seul un formatage le peut.
 Removing Files	Suppression des fichiers
 Removing legacy maps...	Suppression des anciennes cartes...
-Replay already requested	Relecture déjà demandée
-Replay not sent: %s	Relecture non envoyée : %s
-Replay requested (last %lu min)	Relecture demandée (dernières %lu min)
 Reply	Répondre
 Reply from %s	Réponse de %s
 Reply from %s (%lus)	Réponse de %s (%lus)
 Request (P)osition	Demander la (P)osition
 Request Node	Demander le nœud
 Request Position	Demander la position
-Request S&F Replay (%s)	Demander la relecture S&F (%s)
-Request S&F Replay (no router)	Demander la relecture S&F (pas de routeur)
-Requested (last %lu min)	Demandé (dernières %lu min)
 Rescan	Rescanner
 Reset	Réinitialiser
 Reset Chat Colors	Réinitialiser les couleurs du chat
@@ -692,8 +685,6 @@ State map unavailable	Carte d'état indisponible
 Stay on	Toujours allumé
 Storage: %s %s	Stockage : %s %s
 Storage: %s (not mounted)	Stockage : %s (non monté)
-Store&Fwd Client: %s	Client Store&Fwd : %s
-Store&Fwd client is off	Le client Store&Fwd est désactivé
 Sun	dim
 Sweep	Balayage
 Sweep already running	Balayage déjà en cours
@@ -875,7 +866,6 @@ sensor %.2f V    trim %s	capteur %.2f V    corr. %s
 sensor: read failed	capteur : échec de lecture
 stay on	toujours allumé
 tap Filter to change	touchez Filtre pour changer
-unavailable	indisponible
 unknown	inconnu
 unknown date	date inconnue
 unknown error	erreur inconnue
