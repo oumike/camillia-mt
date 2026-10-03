@@ -20,6 +20,11 @@ constexpr uint32_t MORE_DELAY_MS         = 30UL * 1000;
 constexpr uint32_t CHECK_COOLDOWN_MS     = 5UL * 60 * 1000;
 constexpr uint32_t DISCOVERY_INTERVAL_MS = 60UL * 60 * 1000;
 constexpr uint32_t REPLY_TIMEOUT_MS      = 60UL * 1000;
+// After each DISCOVER/REQUEST the node holds its own routine broadcasts this
+// long: a full-size BATCH is ~2.2 s on air at SF11/BW250, and a node that
+// transmits over it (it cannot hear while sending) loses the reply.
+constexpr uint32_t HOLD_OWN_TX_MS        = 15UL * 1000;
+constexpr uint8_t  REQUEST_RETRIES       = 1;    // re-asks of a channel whose reply was missed
 constexpr int      UNANSWERED_NOTICE     = 3;
 constexpr int      MAX_LOCAL             = 10;
 constexpr uint8_t  DISCOVERY_HOPS        = 3;
@@ -69,6 +74,8 @@ public:
     const ChannelState &state(int chanIdx) const { return _state[chanIdx]; }
     bool     takeStatesDirty();
     Notice   takeNotice();
+    // True while a reply is expected soon: callers hold non-urgent transmissions.
+    bool     holdOwnTx(uint32_t nowMs) const;
 
 private:
     enum Waiting : uint8_t { WAIT_NONE, WAIT_DISCOVER, WAIT_REQUEST };
@@ -109,6 +116,7 @@ private:
     int      _waitingChan = -1;
     uint32_t _waitingSinceMs = 0;
     bool     _gapInBatch = false;
+    uint8_t  _retries = 0;                        // timeouts on the current request
 
     bool     _checkedOnce = false;
     uint32_t _lastCheckMs = 0;

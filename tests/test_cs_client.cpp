@@ -270,6 +270,42 @@ static void testDisplayEpochFromAge() {
     ok(displayEpoch(50, true, 100) == 0, "age beyond the epoch → 0");
 }
 
+static void testHoldOwnTxWhileAwaitingReply() {
+    Client c;
+    knownServer(c, MODE_AUTO);
+    Send s;
+    ok(!c.holdOwnTx(0), "nothing outstanding: no hold");
+    ok(c.poll(0, anchorFor, s) && typeOf(s) == csp::REQUEST, "request sent");
+    ok(c.holdOwnTx(1000), "hold just after the request");
+    ok(c.holdOwnTx(HOLD_OWN_TX_MS - 1), "hold until the window ends");
+    ok(!c.holdOwnTx(HOLD_OWN_TX_MS), "hold released after the window, reply or not");
+    ok(c.poll(2000, anchorFor, s) == false, "still waiting");
+    batch(c, SERVER, 0, 7, csp::FLAG_FIRST | csp::FLAG_LAST, {}, 2000);
+    ok(!c.holdOwnTx(2000), "reply in: hold released");
+}
+
+static void testRequestTimeoutRetriesSameChannelOnce() {
+    Client c;
+    knownServer(c, MODE_AUTO);
+    Send s;
+    ok(c.poll(0, anchorFor, s) && s.chanIdx == 0, "request channel 0");
+    uint32_t t = REPLY_TIMEOUT_MS;
+    c.poll(t, anchorFor, s);   // registers the timeout
+    ok(c.poll(t, anchorFor, s) && s.chanIdx == 0 && typeOf(s) == csp::REQUEST,
+       "first timeout: channel 0 asked again");
+    ok(c.takeNotice() == NOTICE_NONE, "a retried miss raises no notice");
+    batch(c, SERVER, 0, 7, csp::FLAG_FIRST | csp::FLAG_LAST, {41}, t + 1000);
+    ok(c.state(0).cursor == 41, "retry's reply accepted");
+    ok(c.poll(t + 1000, anchorFor, s) && s.chanIdx == 2, "round carries on to channel 2");
+
+    t += 1000 + REPLY_TIMEOUT_MS;
+    c.poll(t, anchorFor, s);   // channel 2 times out
+    ok(c.poll(t, anchorFor, s) && s.chanIdx == 2, "channel 2 retried");
+    t += REPLY_TIMEOUT_MS;
+    c.poll(t, anchorFor, s);   // the retry times out too
+    ok(!c.poll(t, anchorFor, s), "second miss on the same channel ends the round");
+}
+
 int main() {
     testOffModeSendsNothing();
     testNoServerDiscoversAtBootAndHourly();
@@ -287,6 +323,8 @@ int main() {
     testEmptyBatchCountsAsAnswered();
     testSetServerResetsStates();
     testDisplayEpochFromAge();
+    testHoldOwnTxWhileAwaitingReply();
+    testRequestTimeoutRetriesSameChannelOnce();
     printf("%s  %d checks, %d failed\n", g_fail ? "FAILED" : "ok", g_run, g_fail);
     return g_fail ? 1 : 0;
 }

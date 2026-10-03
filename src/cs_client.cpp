@@ -90,6 +90,14 @@ void Client::answered() {
 }
 
 void Client::timedOut(uint32_t nowMs) {
+    // A missed BATCH is usually a collision, not a dead server: ask the same
+    // channel again before giving up on the round.
+    if (_waiting == WAIT_REQUEST && _retries < REQUEST_RETRIES) {
+        _retries++;
+        _waiting = WAIT_NONE;
+        _waitUntilMs = nowMs;
+        return;
+    }
     _waiting = WAIT_NONE;
     _roundActive = false;
     if (++_unanswered >= UNANSWERED_NOTICE && !_unreachableNoticed) {
@@ -156,6 +164,7 @@ int Client::onBatch(uint32_t from, int chanIdx, const csp::BatchHeader &h, const
 
 void Client::finishRequest(bool more, uint32_t nowMs) {
     _waiting = WAIT_NONE;
+    _retries = 0;
     if (more) {
         _waitingMore = true;          // same channel again, outside the 15-minute limit
         _waitUntilMs = nowMs + MORE_DELAY_MS;
@@ -184,8 +193,13 @@ bool Client::checkNow(uint32_t nowMs, const char **why) {
     return true;
 }
 
+bool Client::holdOwnTx(uint32_t nowMs) const {
+    return _waiting != WAIT_NONE && !reached(nowMs, _waitingSinceMs + HOLD_OWN_TX_MS);
+}
+
 void Client::startRound(uint32_t nowMs) {
     _roundActive = true;
+    _retries = 0;
     _roundDue = false;
     _queueBuilt = false;
     _queuePos = _queueLen = 0;

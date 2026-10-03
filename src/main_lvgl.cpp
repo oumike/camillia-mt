@@ -56206,9 +56206,14 @@ void loop() {
     // to the broker under the scan's temporary channel name on the way out.
     // Nothing is lost: the announce is still due when the radio comes home.
     if (!holdAnnounceForLocate && !discoveryRadioParked()) {
-        LOOP_PHASE("ann:nodeinfo", serviceNodeInfoAnnounce(now));
-        LOOP_PHASE("ann:telemetry", serviceTelemetryAnnounce(now));
-        LOOP_PHASE("ann:neighbor", serviceNeighborInfoAnnounce(now));
+        // And for a few seconds after each chat server request: this node cannot
+        // hear the BATCH while it is transmitting, so a nodeinfo/position burst
+        // right after a REQUEST used to lose the reply.
+        if (!(s_csStarted && s_csClient.holdOwnTx(now))) {
+            LOOP_PHASE("ann:nodeinfo", serviceNodeInfoAnnounce(now));
+            LOOP_PHASE("ann:telemetry", serviceTelemetryAnnounce(now));
+            LOOP_PHASE("ann:neighbor", serviceNeighborInfoAnnounce(now));
+        }
         if (s_radioReady) LOOP_PHASE("cs", chatServerService(now));
     }
     LOOP_PHASE("ann:mapreport", serviceMapReport(now));
