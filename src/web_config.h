@@ -78,6 +78,17 @@ void webCfgQueueTelemetry();
 // non-zero marks a tapback reaction.
 void webCfgQueueChatSend(bool isDm, uint32_t targetId, const char *text,
                          uint32_t replyId, uint32_t emoji);
+// ── camillia chat server ─────────────────────────────────────────
+// The client lives in the main loop (it owns LoRa and the client state), so the
+// web UI queues "use this server" / "clear" / "check now" here and the loop
+// drains them, posting the check outcome back for the next page render.
+void webCfgQueueChatServerSet(uint32_t nodeId);          // 0 = clear
+bool webCfgTakeChatServerSet(uint32_t &nodeId);
+void webCfgQueueChatServerCheck();
+bool webCfgTakeChatServerCheck();
+void webCfgSetChatServerResult(const char *msg);
+const char *webCfgChatServerResult();                    // "" until a check has been tried
+
 // If a chat send is pending, copy it out (clearing the slot) and return true.
 bool webCfgTakeChatSend(bool &isDm, uint32_t &targetId,
                         char *text, size_t textLen,

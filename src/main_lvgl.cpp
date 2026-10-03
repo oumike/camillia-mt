@@ -1270,14 +1270,18 @@ static constexpr int kNodesActionDelete = kNodesActionBaseCount + 1;
 // Delete, which grey out, this row is not built at all unless the peer is
 // confirmed: a disabled "Admin" on a stranger's node is an invitation to try,
 // and trying means unauthorized admin packets across the mesh and the broker.
-static constexpr int kNodesActionAdmin = kNodesActionDelete + 1;
+// "Use as chat server" appends after Delete for the same reason, and before
+// Admin, which has to stay last.
+static constexpr int kNodesActionChatServer = kNodesActionDelete + 1;
+static constexpr int kNodesActionAdmin = kNodesActionChatServer + 1;
 static constexpr int kNodesActionCount = kNodesActionAdmin + 1;
 // Set when the menu opens, from AdminPeerList. The row exists only while true,
 // which is why activeActionCount() rather than kNodesActionCount is what every
 // navigation and shortcut path counts against.
 static bool s_nodesActionAdminEnabled = false;
 #else
-static constexpr int kNodesActionCount = kNodesActionDelete + 1;
+static constexpr int kNodesActionChatServer = kNodesActionDelete + 1;
+static constexpr int kNodesActionCount = kNodesActionChatServer + 1;
 #endif
 static lv_obj_t *s_nodesActionModal = nullptr;
 static int s_nodesActionSelection = 0;
@@ -1304,6 +1308,8 @@ static constexpr char kNodesActionShortcuts[kNodesActionCount] = {
     // destructive action, which is why it opens a confirmation rather than
     // doing anything.
     'E',
+    // 'C' for (C)hat Server: free in both menus.
+    'C',
 #if HAS_ADMIN_TERMINAL
     'A',
 #endif
@@ -1326,6 +1332,8 @@ static bool s_nodesActionDeleteEnabled = false;
 // Share needs something to share: a node in the table with a real name, and
 // not this one (its own NodeInfo has its own send).
 static bool s_nodesActionShareEnabled = false;
+// Any other node can be made the chat server; this one cannot.
+static bool s_nodesActionChatServerEnabled = false;
 #if HAS_NODE_LOCATE
 // Locate needs a position to show. The row is built either way — a menu whose
 // contents move around depending on the node is harder to learn than one with a
@@ -1476,6 +1484,7 @@ static inline bool nodesActionRowDisabled(int idx) {
 #endif
     if (idx == kNodesActionDelete && !s_nodesActionDeleteEnabled) return true;
     if (idx == kNodesActionShare && !s_nodesActionShareEnabled) return true;
+    if (idx == kNodesActionChatServer && !s_nodesActionChatServerEnabled) return true;
     return false;
 }
 
@@ -2760,6 +2769,7 @@ static void chatServerSetManual(uint32_t nodeId);
 static void chatServerClear();
 static void chatServerModeChanged();
 static void chatServerLabel(char *out, size_t outLen);
+static void csLive(const char *text, uint16_t color);
 static bool pagerSelectChatCursorIndex(int displayIndex);
 static void pagerExitChatCursorMode(bool clearSelection = true);
 static void setActiveChannel(int channelIdx);
@@ -3287,6 +3297,9 @@ enum CfgActionId {
     CFG_ACTION_BATT_CAL,
     CFG_ACTION_NEIGHBOR_INFO,
     CFG_ACTION_MESH_BEACON,
+    CFG_ACTION_CS_MODE,
+    CFG_ACTION_CS_SERVER,
+    CFG_ACTION_CS_CHECK,
     CFG_ACTION_MQTT_TOGGLE,
     #if HAS_VOLUME_CONTROL
     CFG_ACTION_VOLUME,
@@ -5243,6 +5256,21 @@ static const char *cfgActionLabel(int actionId, char *buf, size_t bufLen) {
         case CFG_ACTION_MESH_BEACON:
             snprintf(buf, bufLen, TR("Mesh Beacons: %s"), s_cfg.meshBeaconListen ? TR("On") : TR("Off"));
             break;
+        case CFG_ACTION_CS_MODE:
+            snprintf(buf, bufLen, TR("Chat Server: %s"),
+                     s_cfg.chatServerMode == CHAT_SERVER_MODE_OFF    ? TR("Off") :
+                     s_cfg.chatServerMode == CHAT_SERVER_MODE_MANUAL ? TR("Manual only")
+                                                                     : TR("Automatic"));
+            break;
+        case CFG_ACTION_CS_SERVER: {
+            char who[32];
+            chatServerLabel(who, sizeof(who));
+            snprintf(buf, bufLen, TR("Chat Server Node: %s"), who);
+            break;
+        }
+        case CFG_ACTION_CS_CHECK:
+            snprintf(buf, bufLen, "%s", TR("Check Chat Server Now"));
+            break;
         case CFG_ACTION_MQTT_TOGGLE:
             if (!s_cfg.wifiEnabled) {
                 snprintf(buf, bufLen, "%s", TR("MQTT Bridge: Off (WiFi off)"));
@@ -5381,6 +5409,7 @@ static const char *cfgActionLabel(int actionId, char *buf, size_t bufLen) {
 static bool cfgActionDisabled(int actionId) {
     switch (actionId) {
         case CFG_ACTION_MQTT_TOGGLE: return !s_cfg.wifiEnabled;
+        case CFG_ACTION_CS_CHECK:    return s_cfg.chatServerMode == CHAT_SERVER_MODE_OFF;
 #if HAS_SD_MALWARE_SCAN
         // Nothing to look at. The row stays visible rather than disappearing:
         // "no card" is the answer to the question someone opened this to ask.
@@ -13709,6 +13738,11 @@ static void initCfgActions() {
     // ── Mesh modules ─────────────────────────────────────────────────────────
     s_cfgActions[s_cfgActionCount++] = CFG_ACTION_NEIGHBOR_INFO;
     s_cfgActions[s_cfgActionCount++] = CFG_ACTION_MESH_BEACON;
+    // camillia chat server: mode, the node it uses (activating clears it; a node
+    // is set from Nodes -> Chat Server), and a manual catch-up.
+    s_cfgActions[s_cfgActionCount++] = CFG_ACTION_CS_MODE;
+    s_cfgActions[s_cfgActionCount++] = CFG_ACTION_CS_SERVER;
+    s_cfgActions[s_cfgActionCount++] = CFG_ACTION_CS_CHECK;
 
     // ── Done once, or rarely ─────────────────────────────────────────────────
     // Hardware trim: set once per unit rather than adjusted, which is why it is
@@ -28485,6 +28519,19 @@ static void executeNodesActionSelection() {
     }
 #endif
 
+    if (s_nodesActionSelection == kNodesActionChatServer) {
+        // Pins this node as the chat server: set manually, never replaced.
+        const uint32_t nodeId = s_nodesActionNodeId;
+        if (!s_nodesActionChatServerEnabled || nodeId == 0) return;
+        closeNodesActionMenu();
+        chatServerSetManual(nodeId);
+        char who[16], line[64];
+        liveNodeLabel(nodeId, who, sizeof(who), false);
+        snprintf(line, sizeof(line), TR("Chat server set to %s"), who);
+        csLive(line, TFT_GREEN);
+        return;
+    }
+
     if (s_nodesActionSelection == kNodesActionShare) {
         if (!s_nodesActionShareEnabled) return;
         const uint32_t shareId = s_nodesActionNodeId;
@@ -28749,6 +28796,7 @@ static void openNodesActionMenuFor(uint32_t nodeId, bool msgMode, uint32_t packe
     s_nodesActionDeleteEnabled = (actionNode != nullptr);
     s_nodesActionShareEnabled = actionNode && actionNode->hasName
                                 && nodeId != s_myNodeId;
+    s_nodesActionChatServerEnabled = (nodeId != s_myNodeId);
 #if HAS_NODE_LOCATE
     // A node the table has never had a position for has nothing to point at, so
     // Locate is greyed rather than opening an empty map. (0, 0) is a real place
@@ -28787,6 +28835,7 @@ static void openNodesActionMenuFor(uint32_t nodeId, bool msgMode, uint32_t packe
     #endif
         TR_NOOP("Share"),
         TR_NOOP("Delete"),
+        TR_NOOP("Chat Server"),
     #if HAS_ADMIN_TERMINAL
         TR_NOOP("Admin"),
     #endif
@@ -28807,6 +28856,7 @@ static void openNodesActionMenuFor(uint32_t nodeId, bool msgMode, uint32_t packe
 #endif
         TR_NOOP("S(h)are"),
         TR_NOOP("Del(e)te"),
+        TR_NOOP("(C)hat Server"),
 #if HAS_ADMIN_TERMINAL
         TR_NOOP("(A)dmin"),
 #endif
@@ -39785,6 +39835,40 @@ static void performCfgAction(int actionId) {
                      s_cfg.meshBeaconListen ? TR("On (listening)") : TR("Off"));
             break;
 
+        case CFG_ACTION_CS_MODE:
+            if (s_cfgDebugLog) Serial.println("[lvgl-cfg] exec CS_MODE");
+            showActionPopup = false;   // row reads the new mode
+            s_cfg.chatServerMode = (uint8_t)((s_cfg.chatServerMode + 1) % 3);   // Off -> Auto -> Manual -> Off
+            persistConfigToPrefs();
+            chatServerModeChanged();
+            break;
+
+        case CFG_ACTION_CS_SERVER: {
+            if (s_cfgDebugLog) Serial.println("[lvgl-cfg] exec CS_SERVER");
+            showActionPopup = false;
+            if (s_cfg.chatServerNodeId) {
+                chatServerClear();
+                persistConfigToPrefs();
+                snprintf(s_cfgStatus, sizeof(s_cfgStatus), "%s", TR("Chat server cleared"));
+            } else {
+                snprintf(s_cfgStatus, sizeof(s_cfgStatus), "%s",
+                         TR("Pick one in Nodes: Chat Server"));
+            }
+            break;
+        }
+
+        case CFG_ACTION_CS_CHECK: {
+            if (s_cfgDebugLog) Serial.println("[lvgl-cfg] exec CS_CHECK");
+            showActionPopup = false;
+            const char *why = nullptr;
+            if (chatServerCheckNow(&why)) {
+                snprintf(s_cfgStatus, sizeof(s_cfgStatus), "%s", TR("Checking chat server..."));
+            } else {
+                snprintf(s_cfgStatus, sizeof(s_cfgStatus), "%s", why ? why : TR("Already checking"));
+            }
+            break;
+        }
+
         case CFG_ACTION_WIFI_TOGGLE:
             if (s_cfgDebugLog) Serial.println("[lvgl-cfg] exec WIFI_TOGGLE");
             s_cfg.wifiEnabled = !s_cfg.wifiEnabled;
@@ -50543,6 +50627,18 @@ static bool chatServerHandleRx(const MeshPacket &pkt) {
 static void chatServerService(uint32_t now) {
     if (s_myNodeId == 0) return;
     if (!s_csStarted) csBegin(now);
+
+    // Requests from the web config (it cannot reach the client directly).
+    if (s_cfg.chatServerMode != (uint8_t)s_csClient.mode()) chatServerModeChanged();
+    uint32_t webNode = 0;
+    if (webCfgTakeChatServerSet(webNode)) {
+        if (webNode) chatServerSetManual(webNode);
+        else chatServerClear();
+    }
+    if (webCfgTakeChatServerCheck()) {
+        const char *why = nullptr;
+        webCfgSetChatServerResult(chatServerCheckNow(&why) ? TR("checking") : (why ? why : TR("unavailable")));
+    }
 
     uint32_t ids[MESH_CHANNELS];
     csComputeChanIds(ids);

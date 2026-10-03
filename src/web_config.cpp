@@ -4865,6 +4865,35 @@ static void sendConfigPage(const char *msg = "", bool lite = false) {
             "<option value='0'"; if (!gCfg->neighborInfoOverLora) html += " selected"; html += ">No</option>"
             "</select></label>";
 
+    // camillia chat server client
+    html += "<h3 style='font-size:.95em;margin:.8em 0 .3em'>Chat Server</h3>";
+    html += "<label>Catch-up<select name='cs_mode'>";
+    {
+        static const char *const kModes[3] = {"Off", "Automatic (boot + every 15 min)", "Manual only"};
+        for (int m = 0; m < 3; m++) {
+            html += "<option value='"; html += String(m); html += "'";
+            if (gCfg->chatServerMode == m) html += " selected";
+            html += ">"; html += kModes[m]; html += "</option>";
+        }
+    }
+    html += "</select></label>";
+    html += "<label>Chat Server Node<input name='cs_server' type='text' maxlength='16' placeholder='auto' value='";
+    if (gCfg->chatServerNodeId != 0) {
+        char idBuf[16];
+        snprintf(idBuf, sizeof(idBuf), "!%08lx", (unsigned long)gCfg->chatServerNodeId);
+        html += idBuf;
+    }
+    html += "'></label>"
+            "<p style='font-size:.82em;color:#888;margin:.1em 0 .6em'>"
+            "A camillia chat server keeps channel messages and replays the ones this node "
+            "missed. Leave blank to use the first one found nearby. Enter a short name or "
+            "<code>!aabbccdd</code> to always use that node: a server set here is never "
+            "replaced automatically. Replayed messages are marked in the chat.";
+    if (gCfg->chatServerNodeId != 0) {
+        html += (gCfg->chatServerFlags & CHAT_SERVER_FLAG_MANUAL) ? " Currently set manually." : " Currently found automatically.";
+    }
+    html += "</p>";
+
     sectionEnd(html, lite);
     sendChunk(html);
 
@@ -5213,6 +5242,20 @@ static void sendConfigPage(const char *msg = "", bool lite = false) {
         "</form>"
         "<p style='font-size:.82em;color:#888;margin:.3em 0 1em'>"
         "Forces immediate telemetry TX (device + environment when available).</p>";
+
+    html +=
+        "<form method='POST' action='/cs-check'>"
+        "<button type='submit' style='background:#6b4fa0'>"
+        "&#128260; Check Chat Server Now</button>"
+        "</form>"
+        "<p style='font-size:.82em;color:#888;margin:.3em 0 1em'>"
+        "Asks the chat server for messages missed on this node's channels. "
+        "At most once every 5 minutes.";
+    if (webCfgChatServerResult()[0]) {
+        html += "<br>Last attempt: ";
+        html += webCfgChatServerResult();
+    }
+    html += "</p>";
 
 
 #if HAS_SD_MALWARE_SCAN
@@ -8045,6 +8088,32 @@ static void handlePostSave() {
             otaRequestBootCheckOnce();
         }
     }
+    if (server.hasArg("cs_mode")) {
+        gCfg->chatServerMode = (uint8_t)constrain(server.arg("cs_mode").toInt(), 0, 2);
+    }
+    if (server.hasArg("cs_server")) {
+        // "!aabbccdd", a short name (most recently heard match wins) or blank.
+        // Applied through the main loop, which owns the client; unchanged leaves it.
+        String v = server.arg("cs_server");
+        v.trim();
+        uint32_t id = 0;
+        if (v.length()) {
+            id = parseNodeIdText(v.c_str());
+            if (id == 0) {
+                long bestHeard = -1;
+                for (int i = 0; i < Nodes.count(); i++) {
+                    NodeEntry *n = Nodes.at(i);
+                    if (n && n->nodeId && strcasecmp(n->shortName, v.c_str()) == 0 &&
+                        (long)n->lastHeardMs > bestHeard) {
+                        bestHeard = (long)n->lastHeardMs;
+                        id = n->nodeId;
+                    }
+                }
+            }
+        }
+        const bool unchanged = (id == gCfg->chatServerNodeId) && (id != 0 || v.length() == 0);
+        if (!unchanged && (id != 0 || v.length() == 0)) webCfgQueueChatServerSet(id);
+    }
 #if HAS_AUDIO_ALERTS
     if (server.hasArg("msg_alert_sound")) {   // same guard, same reason
         gCfg->msgAlertSound  = (uint8_t)constrain(server.arg("msg_alert_sound").toInt(), 0, 3);
@@ -8610,6 +8679,12 @@ static void handlePostAnnounce() {
     if (!isLoggedIn()) { redirect("/login"); return; }
     webCfgQueueAnnounce();
     redirectHomeWithFlash("NODEINFO broadcast queued.");
+}
+
+static void handlePostChatServerCheck() {
+    if (!isLoggedIn()) { redirect("/login"); return; }
+    webCfgQueueChatServerCheck();
+    redirectHomeWithFlash("Chat server check queued.");
 }
 
 static void handlePostTelemetry() {
@@ -9983,6 +10058,7 @@ static void registerCommonRoutes() {
     onRoute("/favicon.ico",       HTTP_GET,  handleGetFavicon);
     onRoute("/announce",          HTTP_POST, handlePostAnnounce);
     onRoute("/telemetry",         HTTP_POST, handlePostTelemetry);
+    onRoute("/cs-check",          HTTP_POST, handlePostChatServerCheck);
     if (gOnScreenshotPng) {
         onRoute("/screenshot",    HTTP_GET,  handleGetScreenshot);
     }
@@ -10490,6 +10566,35 @@ bool webCfgTakeChatSend(bool &isDm, uint32_t &targetId,
     if (text && textLen) strlcpy(text, gChatSendText, textLen);
     return true;
 }
+
+// ── camillia chat server bridge ───────────────────────────────────────────────
+static bool     gCsSetPending = false;
+static uint32_t gCsSetNode = 0;
+static bool     gCsCheckPending = false;
+static char     gCsResult[64] = "";
+
+void webCfgQueueChatServerSet(uint32_t nodeId) { gCsSetNode = nodeId; gCsSetPending = true; }
+
+bool webCfgTakeChatServerSet(uint32_t &nodeId) {
+    if (!gCsSetPending) return false;
+    gCsSetPending = false;
+    nodeId = gCsSetNode;
+    return true;
+}
+
+void webCfgQueueChatServerCheck() { gCsCheckPending = true; }
+
+bool webCfgTakeChatServerCheck() {
+    if (!gCsCheckPending) return false;
+    gCsCheckPending = false;
+    return true;
+}
+
+void webCfgSetChatServerResult(const char *msg) {
+    strlcpy(gCsResult, msg ? msg : "", sizeof(gCsResult));
+}
+
+const char *webCfgChatServerResult() { return gCsResult; }
 
 bool webCfgTakeManualTime(int &year, int &mon, int &day, int &hour, int &minute) {
     if (!gManualTimeReq) return false;
