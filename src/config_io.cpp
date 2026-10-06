@@ -1170,6 +1170,7 @@ void cfgInitDefaults(RhinoConfig &cfg) {
     cfg.otaAutoUpdatePeriod = MY_OTA_AUTOUPDATE;
     cfg.nodeArchiveEnabled = MY_NODE_ARCHIVE_EN;
     cfg.wardriveLogEnabled = MY_WARDRIVE_LOG_EN;
+    cfg.navSide            = kNavSideLeft;   // see cfgNavSideLeft()
     // Off regardless of whether archiving is on. The Nodes screen is a live-mesh
     // view by default on a fresh device exactly as it is on an upgraded one --
     // which also keeps this independent of any board that defines
@@ -1648,6 +1649,8 @@ void cfgToYaml(const RhinoConfig &cfg, String &out) {
     out += tmp;
     snprintf(tmp, sizeof(tmp), "    invertScroll: %s\n", cfg.invertScroll ? "true" : "false"); out += tmp;
     snprintf(tmp, sizeof(tmp), "    navBar: %s\n", cfg.navBarEnabled ? "true" : "false"); out += tmp;
+    // P4 landscape only; carried by every build so a backup moves between them.
+    snprintf(tmp, sizeof(tmp), "    navSide: %s\n", cfgNavSideLeft(cfg) ? "left" : "right"); out += tmp;
     snprintf(tmp, sizeof(tmp), "    messageAlertSound: %s\n",
              kMsgAlertSoundNames[constrain((int)cfg.msgAlertSound, 0, kNumMsgAlertSounds - 1)]);
     out += tmp;
@@ -2304,6 +2307,8 @@ bool cfgImportFromBuf(const char *buf, size_t len, RhinoConfig &cfg) {
                     cfg.notifyLightTimeoutS = cfgCoerceNotifyLightTimeout(atol(val));
                 else if (!strcmp(key, "invertScroll"))    cfg.invertScroll = parseBoolValue(val);
                 else if (!strcmp(key, "navBar"))         cfg.navBarEnabled = parseBoolValue(val);
+                else if (!strcmp(key, "navSide"))
+                    cfg.navSide = (!strcasecmp(val, "right")) ? kNavSideRight : kNavSideLeft;
                 else if (!strcmp(key, "messageAlertSound")) cfg.msgAlertSound = parseMsgAlertSound(val);
                 else if (!strcmp(key, "messageAlertBeep")) {
                     cfg.msgAlertSound = parseBoolValue(val)

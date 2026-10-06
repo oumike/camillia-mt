@@ -3361,6 +3361,9 @@ enum CfgActionId {
     #if HAS_NAV_BAR_TOGGLE
     CFG_ACTION_NAV_BAR,
     #endif
+    #if HAS_NAV_SIDE_SETTING
+    CFG_ACTION_NAV_SIDE,
+    #endif
     CFG_ACTION_BATT_CAL,
     CFG_ACTION_NEIGHBOR_INFO,
     CFG_ACTION_MESH_BEACON,
@@ -3595,6 +3598,11 @@ static uint8_t s_appliedFontSize = 0xFF;
 // telling "changed" from "unchanged" there — this is, the same way
 // s_appliedFontSize is for the font.
 static bool s_appliedNavBar = false;
+#endif
+#if HAS_NAV_SIDE_SETTING
+// The nav column's side the current screen was built with, so a web config save
+// can tell whether it moved (onWebCfgSaved()).
+static bool s_appliedNavSideLeft = false;
 #endif
 
 static const char *msgAlertSoundName(uint8_t mode) {
@@ -5308,6 +5316,12 @@ static const char *cfgActionLabel(int actionId, char *buf, size_t bufLen) {
             snprintf(buf, bufLen, TR("Nav Bar: %s"), s_cfg.navBarEnabled ? TR("On") : TR("Off"));
             break;
         #endif
+        #if HAS_NAV_SIDE_SETTING
+        case CFG_ACTION_NAV_SIDE:
+            snprintf(buf, bufLen, TR("Nav Bar Side: %s"),
+                     cfgNavSideLeft(s_cfg) ? TR("Left") : TR("Right"));
+            break;
+        #endif
         case CFG_ACTION_BATT_CAL:
             if (s_cfg.battCalTrim == 0) {
                 snprintf(buf, bufLen, "%s", TR("Battery Calibration: Off"));
@@ -5384,8 +5398,14 @@ static const char *cfgActionLabel(int actionId, char *buf, size_t bufLen) {
         #endif
         #if HAS_KB_BACKLIGHT_LEVEL
         case CFG_ACTION_KB_BACKLIGHT_LEVEL:
+#if defined(DEVICE_TDISPLAY_P4)
+            // No level shown: it did not match what the keyboard was actually
+            // doing, and F11 is where the brightness is changed on this board.
+            snprintf(buf, bufLen, "%s", TR("Keyboard Light"));
+#else
             snprintf(buf, bufLen, TR("Keyboard Light: %s"),
                      TR(kbBacklightLevelName(s_cfg.kbBacklightLevel)));
+#endif
             break;
         #endif
         case CFG_ACTION_SPLASH_MELODY:
@@ -7357,19 +7377,54 @@ static constexpr bool uiPortrait() { return DEVICE_UI_VERTICAL != 0; }
 static inline void loadBootOrientation() {}
 #endif
 
+// ── P4 landscape: the nav bar as a side column ──────────────────────────────
+// In landscape the pixel-doubled P4 is ~616 x ~228: wide and short, so a row of
+// buttons along the bottom spent the scarcest dimension. The bar becomes a
+// narrow column down one edge instead (left by default, RhinoConfig::navSide),
+// its cells reduced to the glyph and the F-key that reaches it, and every
+// screen gets the full height back at the cost of this much width.
+//
+// Decided per boot, like everything else that reads uiPortrait(); the side is
+// read live, since changing it only rebuilds the screen.
+static constexpr int kSideNavW = 34;
+// Where the column starts. Below the panel's rounded top corner, which clipped
+// the top cell when the column ran from y = 0 with only UI_CORNER_SAFE_X of
+// padding. The bottom needs nothing: the display stops short of that curve
+// (UI_BOTTOM_SAFE_H).
+static constexpr int kSideNavTopY = 22;
+
+static inline bool navIsSideColumn() {
+#if defined(DEVICE_TDISPLAY_P4) && !UI_LARGE_PANEL_PROFILE
+    return !uiPortrait();
+#else
+    return false;
+#endif
+}
+
+static inline bool navSideLeft() {
+    return navIsSideColumn() && cfgNavSideLeft(s_cfg);
+}
+
+// What the column takes off each side of the screen: 0 on the side it is not on.
+static inline int navSideInsetLeft()  { return navSideLeft() ? kSideNavW : 0; }
+static inline int navSideInsetRight() {
+    return (navIsSideColumn() && !navSideLeft()) ? kSideNavW : 0;
+}
+
 // Whether channels live in the overlay dropdown (true) or a list anchored
 // beside the chat, as on the Pager (false). A fixed property of every board
 // (UI_CHANNEL_LIST_DROPDOWN) except the T-Display P4, where it follows the
-// orientation chosen at boot: landscape has the Pager's width and takes its
-// list; portrait is 284 px wide and keeps the dropdown.
+// orientation chosen at boot: portrait is 284 px wide and keeps the dropdown;
+// landscape with the side nav column slides the same drawer in, and only the
+// large-panel landscape layout keeps the Pager's anchored column.
 //
 // The P4 compiles the dropdown code (UI_CHANNEL_LIST_DROPDOWN is 1 there), and
-// in landscape buildUi() turns that same list into the anchored column. So the
-// dropdown's open/close/measure paths are what have to stand down in
-// landscape, and they ask this.
+// where it is anchored buildUi() turns that same list into the column. So the
+// dropdown's open/close/measure paths are what have to stand down there, and
+// they ask this.
 static inline bool channelListIsDropdown() {
 #if defined(DEVICE_TDISPLAY_P4)
-    return uiPortrait();
+    return uiPortrait() || navIsSideColumn();
 #else
     return UI_CHANNEL_LIST_DROPDOWN != 0;
 #endif
@@ -8451,7 +8506,11 @@ static void buildGlanceHeader(lv_obj_t *parent, GlanceHeader &w,
         if (ruleY <= titleBottom) ruleY = titleBottom;   // no gap: sit flush
 
         lv_obj_t *sleepRule = lv_obj_create(parent);
-        lv_obj_set_width(sleepRule, lv_pct(80));
+        // Edge to edge. The lock screen and the home dashboard both hand this
+        // a full-width, unpadded parent, so 100% is the panel. The one
+        // exception is P4 landscape, whose header lives in a left column; there
+        // it spans that column rather than cutting across the widgets beside it.
+        lv_obj_set_width(sleepRule, lv_pct(100));
         lv_obj_set_height(sleepRule, 1);
         lv_obj_clear_flag(sleepRule, LV_OBJ_FLAG_SCROLLABLE);
         lv_obj_set_style_border_width(sleepRule, 0, 0);
@@ -13763,11 +13822,23 @@ static void initCfgActions() {
     #if HAS_KB_BACKLIGHT_LEVEL
     // Next to the screen brightness, because they are the same question asked
     // about the two lit surfaces this board has.
+    #if defined(DEVICE_TDISPLAY_P4)
+    // The P4's keyboard is an expansion that comes and goes; with it off there
+    // is no light to ask about. Read when the list is built, i.e. each time
+    // Settings opens.
+    if (keyboardAttached())
+    #endif
     s_cfgActions[s_cfgActionCount++] = CFG_ACTION_KB_BACKLIGHT_LEVEL;
     #endif
     // Decides what the bottom of every screen looks like; set once to taste.
     #if HAS_NAV_BAR_TOGGLE
     s_cfgActions[s_cfgActionCount++] = CFG_ACTION_NAV_BAR;
+    #endif
+    #if HAS_NAV_SIDE_SETTING
+    // Landscape only, the one shape where the bar is a side column; portrait's
+    // bar runs along the bottom and has no side. The web config offers it
+    // either way, so it can be set ahead of a turn.
+    if (navIsSideColumn()) s_cfgActions[s_cfgActionCount++] = CFG_ACTION_NAV_SIDE;
     #endif
     // With Brightness rather than the maintenance actions: both are about the
     // backlight, and the pair is the usual reason someone opens this screen on
@@ -16060,10 +16131,12 @@ static void openCfgLightTimeoutModal() {
 #endif  // HAS_LIGHT_NOTIFY
 
 #if HAS_KB_BACKLIGHT_LEVEL
+#if !defined(DEVICE_TDISPLAY_P4)   // the P4 sends its row to F11, not a picker
 static const char *cfgKbBacklightLabelFor(int idx) {
     if (idx < 0 || idx >= kKbBacklightLevelCount) idx = 0;
     return TR(kKbBacklightLevels[idx].label);
 }
+#endif
 
 // Pushes the stored level at the hardware, by whatever route this board takes.
 // The Pro is the one that cannot simply be told a number: Alt+B owns whether the
@@ -16081,15 +16154,11 @@ static void applyKbBacklightSetting() {
 #endif
 }
 
+#if !defined(DEVICE_TDISPLAY_P4)
 static void cfgKbBacklightApply(int idx) {
     if (idx < 0 || idx >= kKbBacklightLevelCount) idx = 0;
     const uint8_t was = s_cfg.kbBacklightLevel;
     s_cfg.kbBacklightLevel = kKbBacklightLevels[idx].level;
-#if defined(DEVICE_TDISPLAY_P4)
-    // Picking a level means wanting to see it, as F11 does: one F7 had
-    // switched dark comes back on. Off is a level of its own for dark.
-    s_cfg.kbBacklightEnabled = true;
-#endif
     persistConfigToPrefs();
     applyKbBacklightSetting();
 
@@ -16130,6 +16199,7 @@ static void openCfgKbBacklightModal() {
     };
     openCfgSliderModal(&kSpec, startIdx);
 }
+#endif  // !DEVICE_TDISPLAY_P4
 #endif  // HAS_KB_BACKLIGHT_LEVEL
 
 
@@ -23189,12 +23259,27 @@ static void populateHeltecBottomNav(lv_obj_t *bar, int activeTarget) {
     const int barPadCol = uiPortrait() ? 1 : 2;
     const int btnPad    = uiPortrait() ? 0 : 1;
 
-    lv_obj_set_style_pad_left(bar, barPadX, 0);
-    lv_obj_set_style_pad_right(bar, barPadX, 0);
-    lv_obj_set_style_pad_top(bar, barPadY, 0);
-    lv_obj_set_style_pad_bottom(bar, barPadY, 0);
-    lv_obj_set_style_pad_column(bar, barPadCol, 0);
-    lv_obj_set_flex_flow(bar, LV_FLEX_FLOW_ROW);
+    // P4 landscape: the same cells stacked down a narrow column (see
+    // navIsSideColumn()). The column is placed below the rounded top corner
+    // (kSideNavTopY); the bottom is already clear, the display stopping short
+    // of it (UI_BOTTOM_SAFE_H).
+    const bool sideColumn = navIsSideColumn();
+
+    if (sideColumn) {
+        lv_obj_set_style_pad_left(bar, 1, 0);
+        lv_obj_set_style_pad_right(bar, 1, 0);
+        lv_obj_set_style_pad_top(bar, 1, 0);   // the column itself starts low (kSideNavTopY)
+        lv_obj_set_style_pad_bottom(bar, 1, 0);
+        lv_obj_set_style_pad_row(bar, 1, 0);
+        lv_obj_set_flex_flow(bar, LV_FLEX_FLOW_COLUMN);
+    } else {
+        lv_obj_set_style_pad_left(bar, barPadX, 0);
+        lv_obj_set_style_pad_right(bar, barPadX, 0);
+        lv_obj_set_style_pad_top(bar, barPadY, 0);
+        lv_obj_set_style_pad_bottom(bar, barPadY, 0);
+        lv_obj_set_style_pad_column(bar, barPadCol, 0);
+        lv_obj_set_flex_flow(bar, LV_FLEX_FLOW_ROW);
+    }
     lv_obj_set_flex_align(bar, LV_FLEX_ALIGN_SPACE_BETWEEN, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
 
     const lv_color_t navTextColor = lv_color_hex(0xD9E8FF);
@@ -23210,9 +23295,13 @@ static void populateHeltecBottomNav(lv_obj_t *bar, int activeTarget) {
         lv_obj_add_flag(btn, LV_OBJ_FLAG_CLICKABLE);
 #endif
         lv_obj_set_flex_grow(btn, 1);
-        lv_obj_set_height(btn, lv_pct(100));
+        if (sideColumn) {
+            lv_obj_set_width(btn, lv_pct(100));   // grows down the column instead
+        } else {
+            lv_obj_set_height(btn, lv_pct(100));
+        }
         lv_obj_set_style_radius(btn, 4, 0);
-        lv_obj_set_style_pad_all(btn, btnPad, 0);
+        lv_obj_set_style_pad_all(btn, sideColumn ? 0 : btnPad, 0);
         lv_obj_set_style_shadow_width(btn, 0, 0);
 
         navBarStyleCell(btn, activeTarget == kItems[i].target);
@@ -23262,11 +23351,18 @@ static void populateHeltecBottomNav(lv_obj_t *bar, int activeTarget) {
                 default: break;
             }
             if (fkey) {
-                // Glyph and key side by side, the pair centred in the cell.
-                lv_obj_set_flex_flow(btn, LV_FLEX_FLOW_ROW);
+                // Glyph and key side by side, the pair centred in the cell --
+                // or, in the side column, the key under the glyph, since the
+                // column has height to give and no width.
+                lv_obj_set_flex_flow(btn, sideColumn ? LV_FLEX_FLOW_COLUMN
+                                                     : LV_FLEX_FLOW_ROW);
                 lv_obj_set_flex_align(btn, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER,
                                       LV_FLEX_ALIGN_CENTER);
-                lv_obj_set_style_pad_column(btn, 3, 0);
+                if (sideColumn) {
+                    lv_obj_set_style_pad_row(btn, 0, 0);
+                } else {
+                    lv_obj_set_style_pad_column(btn, 3, 0);
+                }
                 lv_obj_t *hint = lv_label_create(btn);
                 lv_obj_set_style_text_font(hint, &lv_font_montserrat_10, 0);
                 lv_obj_set_style_text_color(hint, lv_color_hex(0x8FB5E6), 0);
@@ -23394,6 +23490,37 @@ static void appendHeltecBottomNav(lv_obj_t *parent, int activeTarget) {
     const int padInset = 4;
     const int borderInset = 1;
     const int contentReserve = navBarHeight - padInset - borderInset;
+
+    if (navIsSideColumn()) {
+        // P4 landscape: a column down one edge, the full height of the display,
+        // in the same place and size as the chat screen's copy. No spacer: the
+        // room is reserved by widening the parent's padding on that side, so
+        // the flex column lays its content out beside the bar and keeps the
+        // whole height. The offsets cancel the parent's pad and border the
+        // same way the bottom placement below does.
+        const bool left = navSideLeft();
+        const int padSide = kSideNavW + padInset;
+        if (left) {
+            lv_obj_set_style_pad_left(parent, padSide, 0);
+        } else {
+            lv_obj_set_style_pad_right(parent, padSide, 0);
+        }
+
+        lv_obj_t *bar = lv_obj_create(parent);
+        lv_obj_add_flag(bar, LV_OBJ_FLAG_IGNORE_LAYOUT);
+        lv_obj_add_flag(bar, LV_OBJ_FLAG_FLOATING);
+        lv_obj_set_size(bar, kSideNavW, lv_disp_get_ver_res(NULL) - kSideNavTopY);
+        lv_obj_align(bar, left ? LV_ALIGN_TOP_LEFT : LV_ALIGN_TOP_RIGHT,
+                     left ? -(padSide + borderInset) : (padSide + borderInset),
+                     kSideNavTopY - (padInset + borderInset));
+        lv_obj_clear_flag(bar, LV_OBJ_FLAG_SCROLLABLE);
+        lv_obj_set_style_bg_color(bar, lv_color_hex(0x0E285B), 0);
+        lv_obj_set_style_bg_opa(bar, LV_OPA_60, 0);
+        lv_obj_set_style_border_width(bar, 1, 0);
+        lv_obj_set_style_border_color(bar, lv_color_hex(0x335D9D), 0);
+        populateHeltecBottomNav(bar, activeTarget);
+        return;
+    }
 
     lv_obj_t *spacer = lv_obj_create(parent);
     lv_obj_set_width(spacer, lv_pct(100));
@@ -31200,6 +31327,8 @@ static void closeHomeDashboard() {
 // panel and the bar is drawn over it. See openHomeDashboard().
 static int homeDashboardHeight() {
     const int screenH = lv_disp_get_ver_res(NULL);
+    // A side column (P4 landscape) runs top to bottom and takes width instead.
+    if (navIsSideColumn()) return screenH;
     if (lvObjValid(s_chatShortcutBar) && lvObjValid(s_rootScreen)) {
         lv_obj_update_layout(s_rootScreen);
         const int barY = lv_obj_get_y(s_chatShortcutBar);
@@ -32325,10 +32454,13 @@ static void openHomeDashboard() {
     // nothing on the boards whose bar already spans the display.
     const int contentH = homeDashboardHeight();
 
+    // Everything but the nav column, where the bar is one (P4 landscape): the
+    // column covers the rest, so nothing of the chat shows past either edge.
+    const int dashW = (int)lv_disp_get_hor_res(NULL) - navSideInsetLeft() - navSideInsetRight();
     s_homeDash = lv_obj_create(s_rootScreen);
     lv_obj_remove_style_all(s_homeDash);
-    lv_obj_set_size(s_homeDash, lv_disp_get_hor_res(NULL), lv_disp_get_ver_res(NULL));
-    lv_obj_align(s_homeDash, LV_ALIGN_TOP_LEFT, 0, 0);
+    lv_obj_set_size(s_homeDash, dashW, lv_disp_get_ver_res(NULL));
+    lv_obj_align(s_homeDash, LV_ALIGN_TOP_LEFT, navSideInsetLeft(), 0);
     lv_obj_clear_flag(s_homeDash, LV_OBJ_FLAG_SCROLLABLE);
     // The theme's own background, and the header above draws in inks chosen
     // against it — see glancePalette(). This used to be the lock screen's fixed
@@ -32357,7 +32489,7 @@ static void openHomeDashboard() {
     // header across the top, widgets under it -- except P4 landscape, below.
     lv_obj_t *headerParent = s_homeDash;
     int widgetsX = 0;
-    int widgetsW = (int)lv_disp_get_hor_res(NULL);
+    int widgetsW = dashW;
     bool twoColumns = false;
 #if defined(DEVICE_TDISPLAY_P4)
     // Landscape on the P4 is 616 x ~256: stacked, the header spent the top of a
@@ -37763,7 +37895,9 @@ static void openDmModal() {
     int modalW = lv_disp_get_hor_res(NULL);
     int modalH = lv_disp_get_ver_res(NULL);
     // s_dmModal has border=1 + pad_all=4, so usable content width is modalW - 2*1 - 2*4.
-    int contentW = modalW - 10;
+    // Less the nav column where the bar is one (P4 landscape): the panes are
+    // sized absolutely, and appendHeltecBottomNav() reserves it as padding.
+    int contentW = modalW - 10 - (navIsSideColumn() ? kSideNavW : 0);
     // Conversations over messages, both full width, instead of side by side:
     // the P4 held upright is 284 px wide -- too narrow to split -- and has the
     // height to stack into, the same way its Nodes screen does.
@@ -38036,6 +38170,9 @@ static void openNodesModal() {
     const int contentGap = 3;
     int contentW = modalW - (modalPad * 2);
     if (contentW < 120) contentW = modalW;
+    // Less the nav column where the bar is one (P4 landscape), as on DMs: the
+    // panes are sized absolutely and appendHeltecBottomNav() pads it off.
+    if (navIsSideColumn()) contentW -= kSideNavW;
 
     // List over details, both full width, rather than side by side: the T-Deck
     // Pro's portrait paper, and the T-Display P4 held upright, where 284 px is
@@ -38562,8 +38699,8 @@ static const char *legendTransportText() {
 }
 
 // How to reach the channel list on this board, for Help. Empty where there is
-// nothing to reach it for: the Pager and the P4 in landscape keep the list
-// anchored beside the chat, always in view. Everywhere else it is the drawer
+// nothing to reach it for: the Pager and the large-panel P4 in landscape keep
+// the list anchored beside the chat, always in view. Everywhere else it is the drawer
 // (channelDrawerSlide()), and what opens it differs by what the board has --
 // a swipe where there is touch, the chat key where there is a keyboard, the
 // Messages button on the M9.
@@ -39972,6 +40109,20 @@ static void performCfgAction(int actionId) {
             break;
 #endif
 
+#if HAS_NAV_SIDE_SETTING
+        case CFG_ACTION_NAV_SIDE:
+            if (s_cfgDebugLog) Serial.println("[lvgl-cfg] exec NAV_SIDE");
+            showActionPopup = false;   // row already reads Left/Right
+            s_cfg.navSide = cfgNavSideLeft(s_cfg) ? kNavSideRight : kNavSideLeft;
+            persistConfigToPrefs();
+            snprintf(s_cfgStatus, sizeof(s_cfgStatus), TR("Nav Bar Side: %s"),
+                     cfgNavSideLeft(s_cfg) ? TR("Left") : TR("Right"));
+            // Every screen is laid out around the column, so a rebuild, as for
+            // the nav bar toggle above -- deferred for the same reason.
+            scheduleUiRebuild(true);
+            break;
+#endif
+
         case CFG_ACTION_BATT_CAL:
             if (s_cfgDebugLog) Serial.println("[lvgl-cfg] exec BATT_CAL");
             showActionPopup = false;
@@ -40166,7 +40317,13 @@ static void performCfgAction(int actionId) {
         case CFG_ACTION_KB_BACKLIGHT_LEVEL: {
             if (s_cfgDebugLog) Serial.println("[lvgl-cfg] exec KB_BACKLIGHT_LEVEL");
             showActionPopup = false;   // the picker is the feedback
+#if defined(DEVICE_TDISPLAY_P4)
+            openCfgActionMessageModal(
+                TR("Press F11 on the keyboard to change its brightness."),
+                TR("Keyboard Light"));
+#else
             openCfgKbBacklightModal();
+#endif
         } break;
 #endif
 
@@ -45964,6 +46121,9 @@ static void onWebCfgSaved() {
 #if HAS_NAV_BAR_TOGGLE
     const bool prevNavBar = s_appliedNavBar;
 #endif
+#if HAS_NAV_SIDE_SETTING
+    const bool prevNavSideLeft = s_appliedNavSideLeft;
+#endif
 
 #if !HAS_ENV_SENSOR_TELEMETRY
     s_cfg.telEnvEnabled = false;
@@ -46032,6 +46192,13 @@ static void onWebCfgSaved() {
     // Turned on or off from the browser: same rebuild the on-device row asks
     // for, so the screen matches the setting without waiting for a reboot.
     if (prevNavBar != s_cfg.navBarEnabled && s_rootScreen) {
+        scheduleUiRebuild(s_cfgModal != nullptr);
+    }
+#endif
+#if HAS_NAV_SIDE_SETTING
+    // The nav column moved sides. Only landscape draws one, but the rebuild is
+    // harmless in portrait and keeps the check simple.
+    if (prevNavSideLeft != cfgNavSideLeft(s_cfg) && s_rootScreen) {
         scheduleUiRebuild(s_cfgModal != nullptr);
     }
 #endif
@@ -48206,7 +48373,9 @@ static void channelDrawerSlide(bool open) {
     // read now rather than at build: fitChannelDropdownToButtonContent() sets
     // the width after the first channel names are known.
     lv_obj_update_layout(s_channelList);
-    const int32_t shownX = 0;
+    // Open, it sits against the nav column when that is on the left (P4
+    // landscape); it still slides in from beyond the screen's edge.
+    const int32_t shownX = navSideInsetLeft();
     const int32_t hiddenX = -lv_obj_get_width(s_channelList) - 2;
 
     if (lvObjValid(s_channelDrawerScrim)) {
@@ -48295,7 +48464,10 @@ static void channelDrawerIndevCb(lv_event_t *e) {
     if (code == LV_EVENT_PRESSED) {
         lv_point_t p;
         lv_indev_get_point(indev, &p);
-        s_channelDrawerEdgePress = (p.x <= kChannelDrawerEdgePx);
+        // The edge is the nav column's inner edge when it is on the left: a
+        // press on the column is a nav tap, not the start of a swipe.
+        const int32_t edge = navSideInsetLeft();
+        s_channelDrawerEdgePress = (p.x >= edge && p.x <= edge + kChannelDrawerEdgePx);
         return;
     }
     if (code != LV_EVENT_GESTURE) return;
@@ -53563,6 +53735,9 @@ static void buildUi() {
 #if HAS_NAV_BAR_TOGGLE
     s_appliedNavBar = bottomNavEnabled();
 #endif
+#if HAS_NAV_SIDE_SETTING
+    s_appliedNavSideLeft = cfgNavSideLeft(s_cfg);
+#endif
     lv_obj_t *screen = lv_obj_create(NULL);
     s_rootScreen = screen;
     s_channelSelectorFixedBtnW = 0;
@@ -53611,13 +53786,19 @@ static void buildUi() {
     const int screenW = lv_disp_get_hor_res(NULL);
     const int screenH = lv_disp_get_ver_res(NULL);
 #if defined(DEVICE_TDISPLAY_P4)
-    // Landscape: the Pager's anchored channel column down the left, and the
-    // chat and its header beside it. 120 px against the Pager's 89, for this
+    // Large-panel landscape: the Pager's anchored channel column down the left,
+    // and the chat and its header beside it. The pixel-doubled landscape slides
+    // the list in instead (channelListIsDropdown()), so this is 0 there. 120 px against the Pager's 89, for this
     // panel's longer names and its 616 px. The column itself is the dropdown
     // list, re-dressed once the buttons are in it (see the end of buildUi()).
     const int p4ChannelColW = channelListIsDropdown() ? 0 : 120;
-    const int chatX = panelMargin + (p4ChannelColW > 0 ? p4ChannelColW + 4 : 0);
-    const int chatW = screenW - chatX - panelMargin;
+    // With the nav as a side column (navIsSideColumn()), the chat and its header
+    // stop short of it, a couple of pixels clear, on whichever side it is.
+    const int navGap = navIsSideColumn() ? 2 : 0;
+    const int chatX = panelMargin + (navSideInsetLeft() ? navSideInsetLeft() + navGap : 0)
+                    + (p4ChannelColW > 0 ? p4ChannelColW + 4 : 0);
+    const int chatW = screenW - chatX - panelMargin
+                    - (navSideInsetRight() ? navSideInsetRight() + navGap : 0);
 #else
     const int chatX = panelMargin;
     const int chatW = screenW - panelMargin * 2;
@@ -53633,8 +53814,9 @@ static void buildUi() {
     // On a touch-only board this is what the arithmetic already worked out to
     // (panelMargin 0, chatLegendH 28 == kBottomNavHeight); spelling it out is
     // what makes it true on the boards where the margin is 6.
+    // A side column (P4 landscape) takes no height: the chat runs to the bottom.
     const int chatH = bottomNavEnabled()
-                      ? (screenH - chatY - kBottomNavHeight - 3)
+                      ? (screenH - chatY - (navIsSideColumn() ? 0 : kBottomNavHeight) - 3)
                       : (screenH - panelMargin - chatY - chatLegendH - 3);
 #else
     const int chatH = screenH - panelMargin - chatY - chatLegendH - 3;
@@ -54107,7 +54289,8 @@ static void buildUi() {
         lv_obj_set_pos(s_channelList, 0, 0);
 #else
         lv_obj_set_size(s_channelList, dropdownW, chatH);
-        lv_obj_set_pos(s_channelList, 0, chatY);
+        // Beside a nav column on the left, not under it (channelDrawerSlide()).
+        lv_obj_set_pos(s_channelList, navSideInsetLeft(), chatY);
 #endif
         // v9 made lv_obj_flag_t a real enum, so an OR of two flags is an int in
         // C++ and needs the cast back.
@@ -54249,9 +54432,20 @@ static void buildUi() {
         // copy exactly. Anything else and the same six buttons are a different
         // width here than they are one screen in, which reads as the bar
         // jumping every time you navigate.
-        legendBarW = lv_disp_get_hor_res(NULL);
-        lv_obj_set_size(s_chatShortcutBar, legendBarW, kBottomNavHeight);
-        lv_obj_align(s_chatShortcutBar, LV_ALIGN_BOTTOM_LEFT, 0, 0);
+        if (navIsSideColumn()) {
+            // P4 landscape: down one edge, the full height, where every
+            // screen's copy of it sits (appendHeltecBottomNav()).
+            legendBarW = kSideNavW;
+            lv_obj_set_size(s_chatShortcutBar, kSideNavW,
+                            lv_disp_get_ver_res(NULL) - kSideNavTopY);
+            lv_obj_align(s_chatShortcutBar,
+                         navSideLeft() ? LV_ALIGN_TOP_LEFT : LV_ALIGN_TOP_RIGHT,
+                         0, kSideNavTopY);
+        } else {
+            legendBarW = lv_disp_get_hor_res(NULL);
+            lv_obj_set_size(s_chatShortcutBar, legendBarW, kBottomNavHeight);
+            lv_obj_align(s_chatShortcutBar, LV_ALIGN_BOTTOM_LEFT, 0, 0);
+        }
     } else {
 #if defined(DEVICE_TLORA_PAGER_TFT)
         // Edge to edge. The chat column is only part of this display's width,

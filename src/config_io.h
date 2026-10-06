@@ -698,7 +698,16 @@ struct RhinoConfig {
     // padding, so this starts at exactly the previous sizeof(RhinoConfig) and an
     // upgrading device keeps the compiled default.
     bool     wardriveLogEnabled;
-    uint8_t  _reservedPad17[3];
+    // ── T-Display P4 landscape nav column side ───────────────────────────────
+    // Which edge the nav column runs down in P4 landscape, where the bar is a
+    // column rather than a row along the bottom. Only kNavSideRight means right;
+    // every other value -- including whatever an older build left in this pad
+    // byte -- is the left, which is the default. Ignored off the P4 and in
+    // portrait.
+    uint8_t  navSide;
+    // For whoever appends next: two pad bytes remain, carrying whatever older
+    // builds wrote into them. Past them is the old sizeof(RhinoConfig).
+    uint8_t  _reservedPad17[2];
 };
 
 #define CHAT_SERVER_MODE_OFF     0
@@ -710,6 +719,13 @@ struct RhinoConfig {
 static constexpr uint8_t kP4AntennaExternal = 0x5A;
 inline bool cfgP4AntennaExternal(const RhinoConfig &c) {
     return c.p4Antenna == kP4AntennaExternal;
+}
+
+// Not 1 or 0: an old pad byte must read as the default (left).
+static constexpr uint8_t kNavSideRight = 0x52;   // 'R'
+static constexpr uint8_t kNavSideLeft  = 0;
+inline bool cfgNavSideLeft(const RhinoConfig &c) {
+    return c.navSide != kNavSideRight;
 }
 
 // Not 1: a pad byte left at 1 by some older write must not open the Files tab.

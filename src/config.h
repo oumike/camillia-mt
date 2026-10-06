@@ -610,6 +610,15 @@
 #else
 #define HAS_NAV_BAR_TOGGLE 0
 #endif
+// P4 landscape draws the nav bar as a column down one side (navIsSideColumn()
+// in main_lvgl.cpp), and which side is a setting: Config -> Nav Bar Side and
+// the web config's Display section. The pixel-doubled P4 only; the large-panel
+// build keeps its bottom bar.
+#if defined(DEVICE_TDISPLAY_P4) && !UI_LARGE_PANEL_PROFILE
+#define HAS_NAV_SIDE_SETTING 1
+#else
+#define HAS_NAV_SIDE_SETTING 0
+#endif
 // The default splits on whether the board has ever drawn the bar.
 //
 // On where it has (T-Deck, T-Deck Pro, Mesh Deck): the bar shipped on before it
@@ -731,8 +740,8 @@
 //
 // T-Display P4: the keyboard expansion's SY7200A backlight, on LEDC like the
 // Pro's and gated the same way -- F7 decides lit or dark, the level is how
-// bright lit is. F11 steps the same levels; this row is where they are for
-// everyone else, since function keys are that keyboard's alone.
+// bright lit is. F11 steps the same levels. Its Settings row only appears with
+// the keyboard attached, and points at F11 rather than opening a picker.
 #if defined(DEVICE_M9) || defined(DEVICE_TDECK) || defined(DEVICE_TDECK_PRO) \
     || defined(DEVICE_TDISPLAY_P4)
 #define HAS_KB_BACKLIGHT_LEVEL 1
