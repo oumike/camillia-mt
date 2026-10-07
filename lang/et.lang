@@ -239,6 +239,7 @@ Custom	Kohandatud
 Custom (%u B)	Kohandatud (%u B)
 Cyan	Tsüaan
 DIRECT MESSAGES	OTSESÕNUMID
+Direct Messages	Otsesõnumid
 DISTANCE UNKNOWN	KAUGUS TEADMATA
 DM blink: %u flash%s	DM vilkumine: %u korda%.0s
 DMs	DM-id
@@ -466,7 +467,9 @@ No GPS fix	GPS-fiks puudub
 Send NODEINFO and telemetry to the mesh now?	Kas saata NODEINFO ja telemeetria kohe võrku?
 NODES	SÕLMED
 NODES (%d%s)	SÕLMED (%d%s)
+Nodes (%d%s)	Sõlmed (%d%s)
 NODES [%s] (%d%s)	SÕLMED [%s] (%d%s)
+Nodes [%s] (%d%s)	Sõlmed [%s] (%d%s)
 Name	Nimi
 Name: %s\nShort: %s\nID: !%08X\nLast heard: %s\nSNR: %.1f dB\nHops: %u\nChannel: %d\n\nPosition:\n%s\n\nTelemetry:\n%s	Nimi: %s\nLühike: %s\nID: !%08X\nViimati kuuldud: %s\nSNR: %.1f dB\nHüpped: %u\nKanal: %d\n\nAsend:\n%s\n\nTelemeetria:\n%s
 Name\nShort\nID	Nimi\nLühike\nID

@@ -240,6 +240,7 @@ Custom	Mukautettu
 Custom (%u B)	Mukautettu (%u B)
 Cyan	Syaani
 DIRECT MESSAGES	YKSITYISVIESTIT
+Direct Messages	Yksityisviestit
 DISTANCE UNKNOWN	ETÄISYYS TUNTEMATON
 DM blink: %u flash%s	DM-vilkutus: %u kertaa%.0s
 DMs	DM
@@ -468,7 +469,9 @@ No GPS fix	Ei GPS-paikannusta
 Send NODEINFO and telemetry to the mesh now?	Lähetetäänkö NODEINFO ja telemetria verkkoon nyt?
 NODES	SOLMUT
 NODES (%d%s)	SOLMUT (%d%s)
+Nodes (%d%s)	Solmut (%d%s)
 NODES [%s] (%d%s)	SOLMUT [%s] (%d%s)
+Nodes [%s] (%d%s)	Solmut [%s] (%d%s)
 Name	Nimi
 Name: %s\nShort: %s\nID: !%08X\nLast heard: %s\nSNR: %.1f dB\nHops: %u\nChannel: %d\n\nPosition:\n%s\n\nTelemetry:\n%s	Nimi: %s\nLyhyt: %s\nID: !%08X\nViimeksi kuultu: %s\nSNR: %.1f dB\nHypyt: %u\nKanava: %d\n\nSijainti:\n%s\n\nTelemetria:\n%s
 Name\nShort\nID	Nimi\nLyhyt\nID

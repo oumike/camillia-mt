@@ -293,6 +293,7 @@ static float batteryReadCardputerVolts() {
 
 #if defined(DEVICE_TDISPLAY_P4)
 #include <Wire.h>
+#include "keyboard.h"   // keyboardAttached(): the expansion carries its own cells
 namespace {
 constexpr uint8_t kBq27220RegControl = 0x00;
 constexpr uint8_t kBq27220RegVoltage = 0x08;
@@ -755,8 +756,23 @@ uint8_t batteryReadPercent() {
     if (gaugePct >= 0) return (uint8_t)gaugePct;
     // Gauge silent: fall through to the shared voltage-curve estimate.
 #elif defined(DEVICE_TDISPLAY_P4)
-    const int gaugePct = batteryReadP4GaugePct();
-    if (gaugePct >= 0) return (uint8_t)gaugePct;
+    // The keyboard expansion holds a 21700 battery board (two cells behind
+    // their own protection), and its pack reaches the main board through the
+    // expansion header on Baaty_A -- the cell side of the BQ27220's sense
+    // resistor, in parallel with the board's own cell (LilyGO schematics
+    // T-Display-P4 V1.0 sheet 6, T-Display-P4-Keyboard V1.1, Battery V1.2).
+    // The gauge's voltage is the voltage of all of it. Its state of charge is
+    // not: that is coulombs counted against the capacity it was configured
+    // with, and a pack several times that size makes the percentage run down
+    // several times too fast, then jump when the end-of-discharge voltage
+    // corrects it. So with the expansion on, the percentage comes from the
+    // shared voltage through the same Li-ion curve every ADC board uses, which
+    // counts every cell on the rail whatever their capacity. Without it, the
+    // gauge's own figure, as before.
+    if (!keyboardAttached()) {
+        const int gaugePct = batteryReadP4GaugePct();
+        if (gaugePct >= 0) return (uint8_t)gaugePct;
+    }
 #endif
     batteryRefreshFilter(false);
     return sBatteryFilter.initialized ? sBatteryFilter.displayPct : 0;
@@ -787,10 +803,13 @@ void batteryDebugSnapshot(char *out, size_t outLen) {
              batteryVoltageToPct(filtered));
 #elif defined(DEVICE_TDISPLAY_P4)
     const int gaugePct = batteryReadP4GaugePct();
+    // shown= is the voltage-curve figure; the header shows that one only while
+    // the keyboard expansion (and its cells) is on -- otherwise soc=.
     snprintf(out, outLen,
-             "[batt] BQ27220 present=%d soc=%d%% | trim=x%.3f filtered=%.3fV shown=%d%%",
+             "[batt] BQ27220 present=%d soc=%d%% kbd=%d | trim=x%.3f filtered=%.3fV shown=%d%%",
              sP4GaugePresent ? 1 : 0,
              gaugePct,
+             keyboardAttached() ? 1 : 0,
              (double)sBatteryCalTrimScale,
              (double)filtered,
              shown);

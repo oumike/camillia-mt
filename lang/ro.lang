@@ -237,6 +237,7 @@ Counting files... %u found	Se numără fișierele... %u găsite
 Custom	Personalizat
 Custom (%u B)	Personalizată (%u B)
 DIRECT MESSAGES	MESAJE DIRECTE
+Direct Messages	Mesaje directe
 DISTANCE UNKNOWN	DISTANȚĂ NECUNOSCUTĂ
 DM blink: %u flash%s	Clipire MD: %u clipiri%.0s
 DMs	MD
@@ -462,7 +463,9 @@ No GPS fix	Fără fix GPS
 Send NODEINFO and telemetry to the mesh now?	Trimiți acum NODEINFO și telemetria în rețea?
 NODES	NODURI
 NODES (%d%s)	NODURI (%d%s)
+Nodes (%d%s)	Noduri (%d%s)
 NODES [%s] (%d%s)	NODURI [%s] (%d%s)
+Nodes [%s] (%d%s)	Noduri [%s] (%d%s)
 Name	Nume
 Name: %s\nShort: %s\nID: !%08X\nLast heard: %s\nSNR: %.1f dB\nHops: %u\nChannel: %d\n\nPosition:\n%s\n\nTelemetry:\n%s	Nume: %s\nScurt: %s\nID: !%08X\nUltima dată: %s\nSNR: %.1f dB\nSalturi: %u\nCanal: %d\n\nPoziție:\n%s\n\nTelemetrie:\n%s
 Name\nShort\nID	Nume\nScurt\nID

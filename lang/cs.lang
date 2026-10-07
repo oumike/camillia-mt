@@ -240,6 +240,7 @@ Custom	Vlastní
 Custom (%u B)	Vlastní (%u B)
 Cyan	Azurová
 DIRECT MESSAGES	PŘÍMÉ ZPRÁVY
+Direct Messages	Přímé zprávy
 DISTANCE UNKNOWN	VZDÁLENOST NEZNÁMÁ
 DM blink: %u flash%s	Blikání DM: %u×%.0s
 DMs	DM
@@ -470,7 +471,9 @@ No GPS fix	Bez fixu GPS
 Send NODEINFO and telemetry to the mesh now?	Odeslat nyní NODEINFO a telemetrii do sítě?
 NODES	UZLY
 NODES (%d%s)	UZLY (%d%s)
+Nodes (%d%s)	Uzly (%d%s)
 NODES [%s] (%d%s)	UZLY [%s] (%d%s)
+Nodes [%s] (%d%s)	Uzly [%s] (%d%s)
 Name	Jméno
 Name: %s\nShort: %s\nID: !%08X\nLast heard: %s\nSNR: %.1f dB\nHops: %u\nChannel: %d\n\nPosition:\n%s\n\nTelemetry:\n%s	Jméno: %s\nKrátké: %s\nID: !%08X\nNaposledy slyšen: %s\nSNR: %.1f dB\nSkoky: %u\nKanál: %d\n\nPoloha:\n%s\n\nTelemetrie:\n%s
 Name\nShort\nID	Jméno\nKrátké\nID

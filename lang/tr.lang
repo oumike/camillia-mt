@@ -240,6 +240,7 @@ Custom	Özel
 Custom (%u B)	Özel (%u B)
 Cyan	Camgöbeği
 DIRECT MESSAGES	DOĞRUDAN MESAJLAR
+Direct Messages	Doğrudan mesajlar
 DISTANCE UNKNOWN	MESAFE BİLİNMİYOR
 DM blink: %u flash%s	DM yanıp sönme: %u kez%.0s
 DMs	DM'ler
@@ -469,7 +470,9 @@ No GPS fix	GPS konumu yok
 Send NODEINFO and telemetry to the mesh now?	NODEINFO ve telemetri şimdi ağa gönderilsin mi?
 NODES	DÜĞÜMLER
 NODES (%d%s)	DÜĞÜMLER (%d%s)
+Nodes (%d%s)	Düğümler (%d%s)
 NODES [%s] (%d%s)	DÜĞÜMLER [%s] (%d%s)
+Nodes [%s] (%d%s)	Düğümler [%s] (%d%s)
 Name	Ad
 Name: %s\nShort: %s\nID: !%08X\nLast heard: %s\nSNR: %.1f dB\nHops: %u\nChannel: %d\n\nPosition:\n%s\n\nTelemetry:\n%s	Ad: %s\nKısa: %s\nID: !%08X\nSon duyulma: %s\nSNR: %.1f dB\nAtlamalar: %u\nKanal: %d\n\nKonum:\n%s\n\nTelemetri:\n%s
 Name\nShort\nID	Ad\nKısa\nID

@@ -236,6 +236,7 @@ Custom	Personalizzato
 Custom (%u B)	Personalizzata (%u B)
 Cyan	Ciano
 DIRECT MESSAGES	MESSAGGI DIRETTI
+Direct Messages	Messaggi diretti
 DISTANCE UNKNOWN	DISTANZA SCONOSCIUTA
 DM blink: %u flash%s	Lampeggio MD: %u lampi%.0s
 DMs	MD
@@ -464,7 +465,9 @@ No GPS fix	Nessun fix GPS
 Send NODEINFO and telemetry to the mesh now?	Inviare ora NODEINFO e telemetria alla mesh?
 NODES	NODI
 NODES (%d%s)	NODI (%d%s)
+Nodes (%d%s)	Nodi (%d%s)
 NODES [%s] (%d%s)	NODI [%s] (%d%s)
+Nodes [%s] (%d%s)	Nodi [%s] (%d%s)
 Name	Nome
 Name: %s\nShort: %s\nID: !%08X\nLast heard: %s\nSNR: %.1f dB\nHops: %u\nChannel: %d\n\nPosition:\n%s\n\nTelemetry:\n%s	Nome: %s\nBreve: %s\nID: !%08X\nUltimo contatto: %s\nSNR: %.1f dB\nSalti: %u\nCanale: %d\n\nPosizione:\n%s\n\nTelemetria:\n%s
 Name\nShort\nID	Nome\nBreve\nID

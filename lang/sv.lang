@@ -235,6 +235,7 @@ Counting files... %u found	Räknar filer... %u hittade
 Custom	Anpassad
 Custom (%u B)	Anpassad (%u B)
 DIRECT MESSAGES	DIREKTMEDDELANDEN
+Direct Messages	Direktmeddelanden
 DISTANCE UNKNOWN	OKÄNT AVSTÅND
 DM blink: %u flash%s	DM-blink: %u gång(er)%.0s
 DMs	DM
@@ -459,7 +460,9 @@ No GPS fix	Ingen GPS-fix
 Send NODEINFO and telemetry to the mesh now?	Skicka NODEINFO och telemetri till nätet nu?
 NODES	NODER
 NODES (%d%s)	NODER (%d%s)
+Nodes (%d%s)	Noder (%d%s)
 NODES [%s] (%d%s)	NODER [%s] (%d%s)
+Nodes [%s] (%d%s)	Noder [%s] (%d%s)
 Name	Namn
 Name: %s\nShort: %s\nID: !%08X\nLast heard: %s\nSNR: %.1f dB\nHops: %u\nChannel: %d\n\nPosition:\n%s\n\nTelemetry:\n%s	Namn: %s\nKort: %s\nID: !%08X\nSenast hörd: %s\nSNR: %.1f dB\nHopp: %u\nKanal: %d\n\nPosition:\n%s\n\nTelemetri:\n%s
 Name\nShort\nID	Namn\nKort\nID

@@ -233,6 +233,7 @@ Counting files... %u found	Zähle Dateien... %u gefunden
 Custom	Benutzerdefiniert
 Custom (%u B)	Benutzerdef. (%u B)
 DIRECT MESSAGES	DIREKTNACHRICHTEN
+Direct Messages	Direktnachrichten
 DISTANCE UNKNOWN	ENTFERNUNG UNBEKANNT
 DM blink: %u flash%s	DM-Blinken: %u Mal%.0s
 Date unavailable	Datum nicht verfügbar
@@ -449,7 +450,9 @@ No GPS fix	Kein GPS-Fix
 Send NODEINFO and telemetry to the mesh now?	NODEINFO und Telemetrie jetzt ans Mesh senden?
 NODES	KNOTEN
 NODES (%d%s)	KNOTEN (%d%s)
+Nodes (%d%s)	Knoten (%d%s)
 NODES [%s] (%d%s)	KNOTEN [%s] (%d%s)
+Nodes [%s] (%d%s)	Knoten [%s] (%d%s)
 Name: %s\nShort: %s\nID: !%08X\nLast heard: %s\nSNR: %.1f dB\nHops: %u\nChannel: %d\n\nPosition:\n%s\n\nTelemetry:\n%s	Name: %s\nKurz: %s\nID: !%08X\nZuletzt gehört: %s\nSNR: %.1f dB\nHops: %u\nKanal: %d\n\nPosition:\n%s\n\nTelemetrie:\n%s
 Name\nShort\nID	Name\nKurz\nID
 Nav Bar: %s	Navigationsleiste: %s

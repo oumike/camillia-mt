@@ -288,6 +288,43 @@ static lv_obj_t *s_chatDmAlert = nullptr;
 static lv_obj_t *s_chatChanAlert = nullptr;
 static lv_obj_t *s_chatHeaderBattText = nullptr;
 static lv_obj_t *s_chatHeaderBattBar = nullptr;
+
+// The chat header's measurements, recorded by buildUi() so that DMs, Nodes,
+// Config and Tools can draw the same bar (buildScreenHeader()): same height and
+// margin, same faces, the screen's name where the channel name goes. Rebuilt
+// with the UI, so a font or orientation change reaches both.
+struct ChatHeaderGeom {
+    int margin;                 // panelMargin: the bar's inset from the panel edges
+    int h;                      // chatHeaderH
+    int titleX;                 // where the channel name starts, inside the bar
+    int padX;                   // the battery's inset from the bar's right end
+    lv_coord_t textYOffset;     // the name's nudge down from centre
+    int battDotW, battDotH;
+    const lv_font_t *clockFont; // the clock, and the channel name
+    const lv_font_t *textFont;  // battery reading and GPS
+    const lv_font_t *iconFont;  // Wi-Fi (touch boards)
+};
+static ChatHeaderGeom s_chatHdrGeom = {};
+
+// One copy of the header per open screen. A slot frees itself when its bar is
+// deleted (onScreenHeaderDeleted()), so a screen closing without a word to the
+// header code cannot leave a dangling pointer for refreshHeaderStatus().
+struct ScreenHeader {
+    lv_obj_t *bar;
+    lv_obj_t *title;
+    lv_obj_t *time;
+    lv_obj_t *gps;
+    lv_obj_t *wifi;
+    lv_obj_t *battDot;
+    lv_obj_t *battText;
+    int barX;                   // the bar's left edge on the display
+    int barW;
+    // Kept here, not read back from the label: LONG_DOT can leave the label
+    // holding a shortened copy, and the fit is measured on the whole name.
+    char titleText[96];
+};
+static constexpr int kScreenHeaderSlots = 4;
+static ScreenHeader s_screenHeaders[kScreenHeaderSlots] = {};
 static lv_obj_t *s_chatPanel = nullptr;
 static lv_obj_t *s_chatList = nullptr;
 static lv_obj_t *s_chatNewMsgBtn = nullptr;
@@ -320,6 +357,14 @@ struct GlanceHeader {
     bool      wxBelow;
     lv_obj_t *wxBelowRule;
     lv_obj_t *wxBelowText;
+    // Set by the caller before building, like wxBelow: the hero as two cells
+    // across a wide panel, each with its reading on the left and the detail on
+    // the right in a smaller face -- node name and clock beside this node's
+    // ID, short name, firmware and role; conditions and temperature beside the
+    // fuller weather. Only the P4's landscape Home asks for it (alignGlanceWide()).
+    bool      wideHero;
+    lv_obj_t *nodeInfo;   // wideHero: this node's particulars, right of the clock
+    lv_obj_t *wxDetail;   // wideHero: feels-like, wind, where and when
     // The Home dashboard's way into the Weather screen: a box over whichever
     // labels above are carrying the reading, tapped, or focused with Up and
     // opened with Enter. Built and placed by the dashboard (buildHomeDashWxHit,
@@ -520,6 +565,7 @@ static bool      s_composeEmojiFocused = false;
 static lv_obj_t *s_cfgModal = nullptr;
 static lv_obj_t *s_cfgActionList = nullptr;
 static lv_obj_t *s_cfgInfoList = nullptr;
+// The title in Config's screen header, which also shows the armed filter.
 static lv_obj_t *s_cfgHeaderStatus = nullptr;
 // Config row filter, driven exactly like the Nodes one: the spacebar arms it,
 // printable keys narrow it, backspace edits and then disarms it. Rows are
@@ -917,6 +963,9 @@ static char s_onboardingWifiSsidScratch[sizeof(RhinoConfig::wifiSsid)] = {0};
 static char s_onboardingWifiPassScratch[sizeof(RhinoConfig::wifiPass)] = {0};
 static int s_onboardingPickIndex = 0;  // current option index on region/role stages
 static lv_obj_t *s_legendModal = nullptr;
+// What scrolls on Help: everything between its header and its nav bar. The
+// screen itself stays put, so its header does too.
+static lv_obj_t *s_legendScroll = nullptr;
 
 // Release notes for the running build, baked in at build time from
 // RELEASE_NOTES.md. Layered over the CFG modal, scrolled rather than selected.
@@ -1012,6 +1061,10 @@ static lv_obj_t *s_dmConvPanel = nullptr;
 static lv_obj_t *s_dmConvList = nullptr;
 static lv_obj_t *s_dmMsgPanel = nullptr;
 static lv_obj_t *s_dmMsgList = nullptr;
+// The two panes' titles. With no frame round the panes, these are what show
+// which one has the keys (refreshDmPanelFocusStyles()).
+static lv_obj_t *s_dmConvTitle = nullptr;
+static lv_obj_t *s_dmMsgTitle = nullptr;
 static lv_obj_t *s_dmHintLabel = nullptr;
 static lv_obj_t *s_dmNodePickerModal = nullptr;
 static lv_obj_t *s_dmNodePickerList = nullptr;
@@ -2306,6 +2359,14 @@ static void refreshHeaderStatus(bool force = false);
 static void refreshDmAlertIndicator();
 static void refreshChatAlertIndicator();
 static void layoutHeaderInlineItems();
+static lv_obj_t *buildScreenHeader(lv_obj_t *modal, const char *text);
+static void layoutScreenHeader(ScreenHeader &h);
+static void labelSingleLine(lv_obj_t *label);
+static void screenHeaderSetTitle(lv_obj_t *title, const char *text);
+#if UI_TOUCH_ONLY_PROFILE
+static lv_obj_t *buildSecondaryHeader(lv_obj_t *modal);
+static lv_obj_t *secondaryHeaderBtn(lv_obj_t *row, const char *text, lv_event_cb_t cb);
+#endif
 static void refreshChannelGlow(bool force = false);
 static void pumpKeyboardInput();
 #if HAS_ADMIN_TERMINAL
@@ -2469,7 +2530,6 @@ static void closeMsgSenderInfoModal();
 #endif
 static void openLegendModal();
 static void closeLegendModal();
-static void onLegendClosePressed(lv_event_t *e);
 static void openReleaseNotesModal();
 static void closeReleaseNotesModal();
 // Clock plumbing lives down with the NTP code, but the Time and Date modal sits
@@ -8218,8 +8278,78 @@ static void paintGlanceStatusIcons(GlanceHeader &w) {
 // Both offsets are the ones buildGlanceHeader() would have used, kept here
 // rather than duplicated at the two call sites: this is the only code that
 // decides where these two labels go.
+// Size of a label's text as it will wrap at `maxW`: newlines are honoured, so a
+// multi-line detail block measures as its widest line by its line count.
+static lv_point_t glanceTextSize(lv_obj_t *label, int maxW) {
+    lv_point_t sz = {0, 0};
+    if (!lvObjValid(label)) return sz;
+    lv_text_get_size(&sz, lv_label_get_text(label),
+                     lv_obj_get_style_text_font(label, LV_PART_MAIN),
+                     0, lv_obj_get_style_text_line_space(label, LV_PART_MAIN),
+                     maxW, LV_TEXT_FLAG_NONE);
+    return sz;
+}
+
+// The wide hero (GlanceHeader::wideHero): two cells, the rule between them.
+// In each, the reading is left-aligned at the cell's left edge -- node name over
+// the clock, conditions over the temperature -- and the detail block is right-
+// aligned at the cell's right edge, centred on the two rows it sits beside. The
+// reading gets whatever width the detail leaves it, and is cut short before it
+// can run under it.
+static void alignGlanceWide(GlanceHeader &w, bool wxShown) {
+    lv_obj_t *parent = lv_obj_get_parent(w.node);
+    lv_obj_update_layout(parent);
+    const int fullW = (int)lv_obj_get_content_width(parent);
+    const int halfW = fullW / 2;
+    const int inset = kTdeckProBandInset;
+    const int cellW = halfW - (2 * inset);
+    const int heroH = (kTdeckProTimeTop - kTdeckProNodeTop)
+                    + (int)lv_font_get_line_height(kSleepOverlayTimeFont);
+    constexpr int kGap = 10;   // between a reading and its detail block
+
+    if (lvObjValid(w.wxRule)) {
+        if (wxShown) lv_obj_clear_flag(w.wxRule, LV_OBJ_FLAG_HIDDEN);
+        else         lv_obj_add_flag(w.wxRule, LV_OBJ_FLAG_HIDDEN);
+    }
+
+    // One cell: reading labels `top` and `bottom` from x, detail block at the
+    // cell's right edge. Returns nothing; positions are all it decides.
+    auto placeCell = [&](int x, lv_obj_t *top, lv_obj_t *bottom, lv_obj_t *detail) {
+        const int bottomW = glanceTextSize(bottom, LV_COORD_MAX).x;
+        int detailW = 0;
+        if (lvObjValid(detail) && !lv_obj_has_flag(detail, LV_OBJ_FLAG_HIDDEN)) {
+            // Never wider than the cell leaves beside the large reading under
+            // it; past that it wraps rather than running underneath.
+            const int room = max(40, cellW - bottomW - kGap);
+            const lv_point_t sz = glanceTextSize(detail, room);
+            // +1: a label exactly as wide as its measured text can still wrap
+            // its longest line on rounding.
+            detailW = sz.x + 1;
+            lv_obj_set_width(detail, detailW);
+            lv_obj_set_style_text_align(detail, LV_TEXT_ALIGN_RIGHT, 0);
+            lv_obj_align(detail, LV_ALIGN_TOP_LEFT, x + cellW - detailW,
+                         kTdeckProNodeTop + max(0, (heroH - (int)sz.y) / 2));
+        }
+        const int readingW = max(20, cellW - (detailW ? detailW + kGap : 0));
+        lv_obj_set_width(top, readingW);
+        lv_obj_set_style_text_align(top, LV_TEXT_ALIGN_LEFT, 0);
+        lv_obj_align(top, LV_ALIGN_TOP_LEFT, x, kTdeckProNodeTop);
+        lv_obj_set_style_text_align(bottom, LV_TEXT_ALIGN_LEFT, 0);
+        lv_obj_align(bottom, LV_ALIGN_TOP_LEFT, x, kTdeckProTimeTop);
+    };
+
+    placeCell(inset, w.node, w.time, w.nodeInfo);
+    if (wxShown && lvObjValid(w.wxDesc) && lvObjValid(w.wxTemp)) {
+        placeCell(halfW + inset, w.wxDesc, w.wxTemp, w.wxDetail);
+    }
+}
+
 static void alignGlanceHero(GlanceHeader &w, bool wxShown) {
     if (!lvObjValid(w.node) || !lvObjValid(w.time)) return;
+    if (w.wideHero) {
+        alignGlanceWide(w, wxShown);
+        return;
+    }
     // The divider only means something while there are two columns to divide.
     // Centred with nothing to its right it would read as the panel being split
     // down the middle for no reason.
@@ -8254,6 +8384,53 @@ static void alignGlanceHero(GlanceHeader &w, bool wxShown) {
     lv_obj_align(w.time, LV_ALIGN_TOP_MID, 0, kTdeckProTimeTop);
 }
 #endif
+
+#if HAS_WEATHER
+// The fuller reading, one fact per line: conditions, how it feels, the wind,
+// and where and how old. No degree sign -- it is not in the built-in faces --
+// so units read as the hero's do ("72F"). The first line repeats the hero's
+// temperature and conditions; the wide hero, which shows those beside it,
+// takes the lines after it (glanceWeatherDetail()).
+static void glanceWeatherText(const WeatherReading &wx, char *text, size_t cap) {
+    static const char *const kCompass[] = {
+        "N", "NE", "E", "SE", "S", "SW", "W", "NW"
+    };
+    const char *dir = kCompass[((wx.dirDeg % 360 + 360) % 360 + 22) / 45 % 8];
+    char gust[24] = "";
+    if (wx.gust > wx.wind) snprintf(gust, sizeof(gust), TR(", gusts %d"), wx.gust);
+    char where[64] = "";
+    const uint32_t ageMin = weatherAgeMs() / 60000UL;
+    if (wx.place[0]) {
+        snprintf(where, sizeof(where), TR("\n%s, %lu min ago"),
+                 wx.place, (unsigned long)ageMin);
+    } else {
+        snprintf(where, sizeof(where), TR("\n%lu min ago"), (unsigned long)ageMin);
+    }
+    snprintf(text, cap,
+             TR("%d%s  %s\nFeels %d%s, humidity %d%%\nWind %s %d %s%s%s"),
+             wx.temp, wx.tempUnit, wx.desc,
+             wx.feels, wx.tempUnit, wx.humidityPct,
+             dir, wx.wind, wx.windUnit, gust, where);
+}
+
+// Everything after the first line of glanceWeatherText(): the details only.
+// The same translated string, so a translation's line order carries over.
+static const char *glanceWeatherDetail(const WeatherReading &wx, char *text, size_t cap) {
+    glanceWeatherText(wx, text, cap);
+    const char *nl = strchr(text, '\n');
+    return nl ? nl + 1 : text;
+}
+#endif
+
+// This node's particulars for the wide hero, one per line: ID, short name,
+// firmware, role.
+static void glanceNodeInfoText(char *out, size_t cap) {
+    snprintf(out, cap, "!%08lx\n%s\n%s\n%s",
+             (unsigned long)s_myNodeId,
+             s_cfg.nodeShort[0] ? s_cfg.nodeShort : "-",
+             APP_VERSION,
+             cfgDeviceRoleName(s_cfg.deviceRole));
+}
 
 static void updateGlanceHeader(GlanceHeader &w) {
     if (!w.node || !w.time || !w.date) return;
@@ -8345,29 +8522,8 @@ static void updateGlanceHeader(GlanceHeader &w) {
     }
     if (w.wxBelow && lvObjValid(w.wxBelowText)) {
         if (wxFresh) {
-            // The fuller reading, one fact per line: conditions, how it feels,
-            // the wind, and where and how old. No degree sign -- it is not in
-            // the built-in faces -- so units read as the hero's do ("72F").
-            static const char *const kCompass[] = {
-                "N", "NE", "E", "SE", "S", "SW", "W", "NW"
-            };
-            const char *dir = kCompass[((wx.dirDeg % 360 + 360) % 360 + 22) / 45 % 8];
-            char gust[24] = "";
-            if (wx.gust > wx.wind) snprintf(gust, sizeof(gust), TR(", gusts %d"), wx.gust);
-            char where[64] = "";
-            const uint32_t ageMin = weatherAgeMs() / 60000UL;
-            if (wx.place[0]) {
-                snprintf(where, sizeof(where), TR("\n%s, %lu min ago"),
-                         wx.place, (unsigned long)ageMin);
-            } else {
-                snprintf(where, sizeof(where), TR("\n%lu min ago"), (unsigned long)ageMin);
-            }
             char text[224];
-            snprintf(text, sizeof(text),
-                     TR("%d%s  %s\nFeels %d%s, humidity %d%%\nWind %s %d %s%s%s"),
-                     wx.temp, wx.tempUnit, wx.desc,
-                     wx.feels, wx.tempUnit, wx.humidityPct,
-                     dir, wx.wind, wx.windUnit, gust, where);
+            glanceWeatherText(wx, text, sizeof(text));
             lv_label_set_text(w.wxBelowText, text);
             lv_obj_clear_flag(w.wxBelowText, LV_OBJ_FLAG_HIDDEN);
             if (lvObjValid(w.wxBelowRule)) lv_obj_clear_flag(w.wxBelowRule, LV_OBJ_FLAG_HIDDEN);
@@ -8376,6 +8532,26 @@ static void updateGlanceHeader(GlanceHeader &w) {
             lv_obj_add_flag(w.wxBelowText, LV_OBJ_FLAG_HIDDEN);
             if (lvObjValid(w.wxBelowRule)) lv_obj_add_flag(w.wxBelowRule, LV_OBJ_FLAG_HIDDEN);
         }
+    }
+    if (w.wideHero) {
+        if (lvObjValid(w.nodeInfo)) {
+            char info[96];
+            glanceNodeInfoText(info, sizeof(info));
+            lv_label_set_text(w.nodeInfo, info);
+        }
+        if (lvObjValid(w.wxDetail)) {
+            if (wxFresh) {
+                char text[224];
+                lv_label_set_text(w.wxDetail, glanceWeatherDetail(wx, text, sizeof(text)));
+                lv_obj_clear_flag(w.wxDetail, LV_OBJ_FLAG_HIDDEN);
+            } else {
+                lv_obj_add_flag(w.wxDetail, LV_OBJ_FLAG_HIDDEN);
+            }
+        }
+        // Every repaint, not only when the reading comes or goes: the widths
+        // the cells are divided by are the texts', and they change by the
+        // minute ("9:59" to "10:00", a new wind reading).
+        alignGlanceHero(w, wxFresh);
     }
 #endif
 
@@ -8507,9 +8683,7 @@ static void buildGlanceHeader(lv_obj_t *parent, GlanceHeader &w,
 
         lv_obj_t *sleepRule = lv_obj_create(parent);
         // Edge to edge. The lock screen and the home dashboard both hand this
-        // a full-width, unpadded parent, so 100% is the panel. The one
-        // exception is P4 landscape, whose header lives in a left column; there
-        // it spans that column rather than cutting across the widgets beside it.
+        // a full-width, unpadded parent, so 100% is the panel.
         lv_obj_set_width(sleepRule, lv_pct(100));
         lv_obj_set_height(sleepRule, 1);
         lv_obj_clear_flag(sleepRule, LV_OBJ_FLAG_SCROLLABLE);
@@ -8554,6 +8728,17 @@ static void buildGlanceHeader(lv_obj_t *parent, GlanceHeader &w,
     // Assigned on every path, for the reason given at w.wxRule below.
     w.wxBelowRule = nullptr;
     w.wxBelowText = nullptr;
+    w.nodeInfo = nullptr;
+    w.wxDetail = nullptr;
+    if (w.wideHero) {
+        // The detail blocks share one face, a size under the node name, so
+        // four short lines sit comfortably beside the two hero rows.
+        w.nodeInfo = lv_label_create(parent);
+        lv_obj_set_style_text_font(w.nodeInfo, &lv_font_montserrat_10, 0);
+        lv_obj_set_style_text_color(w.nodeInfo, pal.nodeInk, 0);
+        lv_label_set_long_mode(w.nodeInfo, LV_LABEL_LONG_WRAP);
+        lv_label_set_text(w.nodeInfo, "");
+    }
     if (w.wxBelow) {
         // Weather under the clock rather than beside it: a rule across the
         // column, and the fuller reading left-aligned beneath. The side column is
@@ -8605,6 +8790,15 @@ static void buildGlanceHeader(lv_obj_t *parent, GlanceHeader &w,
     lv_obj_align(w.wxTemp, LV_ALIGN_TOP_RIGHT,
                  -kTdeckProBandInset, kTdeckProTimeTop);
     lv_obj_add_flag(w.wxTemp, LV_OBJ_FLAG_HIDDEN);
+
+    if (w.wideHero) {
+        w.wxDetail = lv_label_create(parent);
+        lv_obj_set_style_text_font(w.wxDetail, &lv_font_montserrat_10, 0);
+        lv_obj_set_style_text_color(w.wxDetail, pal.nodeInk, 0);
+        lv_label_set_long_mode(w.wxDetail, LV_LABEL_LONG_WRAP);
+        lv_label_set_text(w.wxDetail, "");
+        lv_obj_add_flag(w.wxDetail, LV_OBJ_FLAG_HIDDEN);
+    }
 
     // The seam between the two columns. Same ink, same weight and the same
     // e-paper exemption as the rule under the wordmark above -- one divider
@@ -8660,6 +8854,15 @@ static void buildGlanceHeader(lv_obj_t *parent, GlanceHeader &w,
     lv_obj_set_style_text_align(w.date, LV_TEXT_ALIGN_LEFT, 0);
     // This band is the only row of the glance that reaches the top corners,
     // so it alone takes the rounded-panel inset (board.h).
+#if defined(DEVICE_TDISPLAY_P4)
+    // P4 landscape: centred, with GPS, Wi-Fi and the battery together at the
+    // right-hand end. The band is 616 px across there, and a date pinned to
+    // the far corner read as unrelated to the readings at the other.
+    if (!uiPortrait()) {
+        lv_obj_set_style_text_align(w.date, LV_TEXT_ALIGN_CENTER, 0);
+        lv_obj_align(w.date, LV_ALIGN_TOP_MID, 0, kTdeckProBandTop);
+    } else
+#endif
     lv_obj_align(w.date, LV_ALIGN_TOP_LEFT,
                  kTdeckProBandInset + UI_CORNER_SAFE_X, kTdeckProBandTop);
 
@@ -14325,16 +14528,19 @@ static void refreshCfgModal() {
 
     if (s_cfgFilterOpen) {
         // Brackets show as soon as the filter is armed, even while empty, so
-        // there is a visible reason the list just changed. Same cue as Nodes.
-        char headerText[48];
+        // there is a visible reason the list just changed. Same cue as Nodes,
+        // and in the same place: after the screen's name in its header.
+        char filterText[48];
         if (s_cfgActionCount == 0) {
-            snprintf(headerText, sizeof(headerText), TR("[%s] no match"), s_cfgFilter);
+            snprintf(filterText, sizeof(filterText), TR("[%s] no match"), s_cfgFilter);
         } else {
-            snprintf(headerText, sizeof(headerText), "[%s] %d", s_cfgFilter, s_cfgActionCount);
+            snprintf(filterText, sizeof(filterText), "[%s] %d", s_cfgFilter, s_cfgActionCount);
         }
-        lv_label_set_text(s_cfgHeaderStatus, headerText);
+        char headerText[96];
+        snprintf(headerText, sizeof(headerText), "%s %s", TR("Configuration"), filterText);
+        screenHeaderSetTitle(s_cfgHeaderStatus, headerText);
     } else {
-        lv_label_set_text(s_cfgHeaderStatus, TR("Ready"));
+        screenHeaderSetTitle(s_cfgHeaderStatus, TR("Configuration"));
     }
 
     lv_obj_clean(s_cfgActionList);
@@ -22779,15 +22985,11 @@ static void openSysStatsModal() {
 
 static void closeLegendModal() {
     lvObjDeleteSafe(s_legendModal);
+    s_legendScroll = nullptr;
     // As above: Help carries a bar since issue #95, so it owns a status cluster
     // that dies with it.
     clearNavBarStatusIcons();
     refreshChatComposeButtonState();
-}
-
-static void onLegendClosePressed(lv_event_t *e) {
-    LV_UNUSED(e);
-    closeLegendModal();
 }
 
 static void onHeltecBottomNavPressed(lv_event_t *e) {
@@ -23482,13 +23684,15 @@ static void appendHeltecBottomNav(lv_obj_t *parent, int activeTarget) {
     // inside DM/Cfg/Nodes/Live as on the home screen.
     const int navBarHeight = kBottomNavHeight;
 
-    // Modal containers all use border_width=1 + pad_all=4. The bar needs to
-    // span the full display width and sit flush with the bottom edge, so it
-    // is placed with IGNORE_LAYOUT and offset back through the parent pad +
-    // border. A transparent spacer keeps the flex column reserving the same
-    // vertical room the bar would otherwise occupy.
+    // Modal containers all use pad_all=4, and a 1 px border -- except DMs,
+    // Nodes, Config and Tools, which have none (the border was a frame round a
+    // screen that already fills the display). The bar needs to span the full
+    // display width and sit flush with the bottom edge, so it is placed with
+    // IGNORE_LAYOUT and offset back through the parent pad + border, the border
+    // read rather than assumed. A transparent spacer keeps the flex column
+    // reserving the same vertical room the bar would otherwise occupy.
     const int padInset = 4;
-    const int borderInset = 1;
+    const int borderInset = (int)lv_obj_get_style_border_width(parent, LV_PART_MAIN);
     const int contentReserve = navBarHeight - padInset - borderInset;
 
     if (navIsSideColumn()) {
@@ -24255,6 +24459,8 @@ static void closeDmModal() {
     s_dmConvList = nullptr;
     s_dmMsgPanel = nullptr;
     s_dmMsgList = nullptr;
+    s_dmConvTitle = nullptr;
+    s_dmMsgTitle = nullptr;
     s_dmHintLabel = nullptr;
     s_dmConvCount = 0;
     s_dmSelection = -1;
@@ -27486,6 +27692,13 @@ static void refreshNodesListRows() {
     const lv_font_t *nodesListFont = emojiFont(nodesBig ? &lv_font_montserrat_14
                                                         : &lv_font_montserrat_10);
     const int nodesListRowH = nodesBig ? 30 : 22;
+#elif defined(DEVICE_HELTEC_V4_EXPANSION) || defined(DEVICE_WIO_TRACKER_L2)
+    // Upright the list is stacked full width over the details (openNodesModal),
+    // and takes the details' face, a size up from landscape's.
+    const bool nodesBig = uiPortrait();
+    const lv_font_t *nodesListFont = emojiFont(nodesBig ? &lv_font_montserrat_12
+                                                        : &lv_font_montserrat_10);
+    const int nodesListRowH = nodesBig ? 26 : 22;
 #else
     const lv_font_t *nodesListFont = emojiFont(&lv_font_montserrat_10);
     const int nodesListRowH = 22;
@@ -27506,12 +27719,12 @@ static void refreshNodesListRows() {
         if (s_nodesFilterOpen) {
             // Brackets appear as soon as the filter is armed (even empty) so the
             // user has a visual cue that filtering is on; text fills in as typed.
-            snprintf(titleText, sizeof(titleText), TR("NODES [%s] (%d%s)"),
+            snprintf(titleText, sizeof(titleText), TR("Nodes [%s] (%d%s)"),
                      s_nodesFilter, nodeCount, more);
         } else {
-            snprintf(titleText, sizeof(titleText), TR("NODES (%d%s)"), nodeCount, more);
+            snprintf(titleText, sizeof(titleText), TR("Nodes (%d%s)"), nodeCount, more);
         }
-        lv_label_set_text(s_nodesTitleLabel, titleText);
+        screenHeaderSetTitle(s_nodesTitleLabel, titleText);
     }
 
     refreshNodesHint();
@@ -27697,26 +27910,43 @@ static void refreshNodesListSelection() {
 // Which panel has the keys, drawn the way DM draws the same idea: the focused
 // panel takes the bright 2px border, the other drops to the dim hairline. Touch
 // builds never enter info focus, so both keep their resting look there.
+// The rule between a screen's two panes (DMs: conversations and messages;
+// Nodes: the list and the details), which stand unframed either side of it.
+// Stacked, it is horizontal and runs the full width of the display, out through
+// the screen's 4 px padding (the parent needs LV_OBJ_FLAG_OVERFLOW_VISIBLE);
+// side by side it is vertical and runs the panes' full height. The divider's
+// brighter ink, so one rule reads as clearly as the frames it replaces.
+static lv_obj_t *buildPaneRule(lv_obj_t *parent, bool stacked) {
+    lv_obj_t *rule = lv_obj_create(parent);
+    lv_obj_remove_style_all(rule);
+    lv_obj_clear_flag(rule, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_clear_flag(rule, LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_set_style_bg_opa(rule, LV_OPA_COVER, 0);
+#if defined(DEVICE_TDECK_PRO)
+    lv_obj_set_style_bg_color(rule, lv_color_make(0, 0, 0), 0);
+#else
+    lv_obj_set_style_bg_color(rule, lv_color_hex(0x5C86C6), 0);
+#endif
+    if (stacked) {
+        lv_obj_set_size(rule, lv_disp_get_hor_res(NULL), 1);
+        lv_obj_set_style_translate_x(rule, -4, 0);
+    } else {
+        lv_obj_set_size(rule, 1, lv_pct(100));
+    }
+    return rule;
+}
+
 static void refreshNodesPanelFocusStyles() {
     if (!lvObjValid(s_nodesInfoPanel) || !lvObjValid(s_nodesListPanel)) return;
     const bool infoFocused = s_nodesInfoFocused;
 
-#if defined(DEVICE_TDECK_PRO)
-    lv_obj_set_style_border_width(s_nodesListPanel, infoFocused ? 1 : 2, 0);
-    lv_obj_set_style_border_color(s_nodesListPanel, lv_color_make(0, 0, 0), 0);
-    lv_obj_set_style_border_width(s_nodesInfoPanel, infoFocused ? 2 : 1, 0);
-    lv_obj_set_style_border_color(s_nodesInfoPanel, lv_color_make(0, 0, 0), 0);
-#else
-    lv_obj_set_style_border_width(s_nodesListPanel, infoFocused ? 1 : 2, 0);
-    lv_obj_set_style_border_color(
-        s_nodesListPanel,
-        infoFocused ? lv_color_hex(0x335D9D) : lv_color_hex(0x90B4FF), 0);
-
-    lv_obj_set_style_border_width(s_nodesInfoPanel, infoFocused ? 2 : 1, 0);
-    lv_obj_set_style_border_color(
-        s_nodesInfoPanel,
-        infoFocused ? lv_color_hex(0x90B4FF) : lv_color_hex(0x335D9D), 0);
-#endif
+    // The panes have no frame now -- one rule divides them (buildPaneRule())
+    // -- so the pane with the keys is the one with the faint fill both used to
+    // carry, and the other is left bare.
+    lv_obj_set_style_bg_color(s_nodesListPanel, lv_color_hex(0x0F2A5C), 0);
+    lv_obj_set_style_bg_color(s_nodesInfoPanel, lv_color_hex(0x0F2A5C), 0);
+    lv_obj_set_style_bg_opa(s_nodesListPanel, infoFocused ? LV_OPA_TRANSP : LV_OPA_40, 0);
+    lv_obj_set_style_bg_opa(s_nodesInfoPanel, infoFocused ? LV_OPA_40 : LV_OPA_TRANSP, 0);
 }
 
 // Writes one section's two labels. `keys` and `vals` are newline-separated and
@@ -30021,9 +30251,9 @@ static void openLiveToolsModal() {
     // have been lighting and swallowed taps aimed at it — a tap on Nodes closed
     // Tools instead of opening Nodes.
     //
-    // border_width 1 and pad_all 4 are not cosmetic here: appendHeltecBottomNav()
-    // measures its offsets against exactly those two numbers to put the bar on
-    // the display edges. See the padInset/borderInset pair there.
+    // pad_all 4 is not cosmetic here: appendHeltecBottomNav() measures its
+    // offsets against it (and the border, which this screen does without) to put
+    // the bar on the display edges. See the padInset/borderInset pair there.
     //
     // Losing tap-outside-to-close goes with the backdrop and is the point rather
     // than a regression: Tools now closes the three ways its neighbours do — the
@@ -30035,10 +30265,11 @@ static void openLiveToolsModal() {
     lv_obj_add_flag(s_liveToolsModal, LV_OBJ_FLAG_CLICKABLE);
     lv_obj_set_style_bg_color(s_liveToolsModal, lv_color_hex(0x0E285B), 0);
     lv_obj_set_style_bg_opa(s_liveToolsModal, LV_OPA_COVER, 0);
-    lv_obj_set_style_border_width(s_liveToolsModal, 1, 0);
-    lv_obj_set_style_border_color(s_liveToolsModal, lv_color_hex(0x5C86C6), 0);
-    // 4, not kChanModalPad. appendHeltecBottomNav() cancels exactly pad 4 plus a
-    // 1 px border to put its bar on the display edges, and kChanModalPad is 3 on
+    // No border: this screen fills the display, and the 1 px frame only took
+    // room from it. The headers and nav bar read the width, so they follow.
+    lv_obj_set_style_border_width(s_liveToolsModal, 0, 0);
+    // 4, not kChanModalPad. appendHeltecBottomNav() cancels exactly pad 4 plus
+    // the border to put its bar on the display edges, and kChanModalPad is 3 on
     // the Cardputer and 8 on the Pager and the 320 px boards — either would
     // leave the bar inset or overhanging by the difference. The grid does not
     // care: it is a fixed-width centered block, so the panel's own padding no
@@ -30048,23 +30279,21 @@ static void openLiveToolsModal() {
     lv_obj_set_flex_flow(s_liveToolsModal, LV_FLEX_FLOW_COLUMN);
 
     // P4 portrait: on a tall panel a grid floating mid-screen read as a popup.
-    // There the title goes to the top and the tools stack one per row, as
+    // There the tools run from the top and stack one per row, as
     // full-width buttons with room between them, two font sizes up.
 #if defined(DEVICE_TDISPLAY_P4)
     const bool toolsStacked = uiPortrait();
 #else
     constexpr bool toolsStacked = false;
 #endif
-    // The title at the top, as on the screens Tools opens, on both portrait
-    // boards; the Heltec keeps its two-column grid under it, the height not
-    // being there for a list of eight.
+    // The tools straight under the header on both portrait boards; the Heltec
+    // keeps its two-column grid there, the height not being there for a list
+    // of eight.
     const bool toolsTop = toolStackLayout();
-    const lv_font_t *toolsTitleFont = toolsStacked ? &lv_font_montserrat_18 : kChanModalTitleFont;
     const lv_font_t *toolsRowFont   = toolsStacked ? &lv_font_montserrat_14 : kChanModalRowFont;
     const int toolsRowH   = toolsStacked ? 44 : kChanModalRowH;
     const int toolsRowGap = toolsStacked ? 10 : kChanModalGap;
-    lv_obj_set_flex_align(s_liveToolsModal,
-                          toolsTop ? LV_FLEX_ALIGN_START : LV_FLEX_ALIGN_CENTER,
+    lv_obj_set_flex_align(s_liveToolsModal, LV_FLEX_ALIGN_START,
                           LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
 
     // The panel went full bleed; the grid did not. This is the content width the
@@ -30074,12 +30303,23 @@ static void openLiveToolsModal() {
     const int toolsContentW =
         min(kChanModalMaxW, (int)lv_disp_get_hor_res(NULL) - 14) - 2 * kChanModalPad;
 
-    lv_obj_t *title = lv_label_create(s_liveToolsModal);
-    lv_obj_set_width(title, toolsContentW);
-    lv_obj_set_style_text_font(title, toolsTitleFont, 0);
-    lv_obj_set_style_text_color(title, lv_color_hex(0xD9E8FF), 0);
-    lv_obj_set_style_text_align(title, LV_TEXT_ALIGN_CENTER, 0);
-    lv_label_set_text(title, TR("Tools"));
+    // The chat screen's header, named for this screen, as on DMs, Nodes and
+    // Config.
+    buildScreenHeader(s_liveToolsModal, TR("Tools"));
+
+    // Everything under the header. Upright the list runs from the top; in
+    // landscape the grid stays centred in the room left between the header and
+    // the nav bar, where it has always floated.
+    lv_obj_t *body = lv_obj_create(s_liveToolsModal);
+    lv_obj_remove_style_all(body);
+    lv_obj_set_width(body, lv_pct(100));
+    lv_obj_set_flex_grow(body, 1);
+    lv_obj_clear_flag(body, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_set_style_pad_row(body, kChanModalGap, 0);
+    lv_obj_set_flex_flow(body, LV_FLEX_FLOW_COLUMN);
+    lv_obj_set_flex_align(body,
+                          toolsTop ? LV_FLEX_ALIGN_START : LV_FLEX_ALIGN_CENTER,
+                          LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
 
 #if UI_TOUCH_ONLY_PROFILE
     static const char *kToolLabels[LIVE_TOOL_COUNT] = {
@@ -30097,7 +30337,7 @@ static void openLiveToolsModal() {
         TR_NOOP("Announce"),
     };
 #else
-    lv_obj_t *hint = lv_label_create(s_liveToolsModal);
+    lv_obj_t *hint = lv_label_create(body);
     lv_obj_set_width(hint, toolsContentW);
     lv_obj_set_style_text_font(hint, &lv_font_montserrat_10, 0);
     lv_obj_set_style_text_color(hint, lv_color_hex(0xA7C7FF), 0);
@@ -30123,7 +30363,7 @@ static void openLiveToolsModal() {
     const lv_color_t rowTextColor = (s_cfg.uiMode == UI_MODE_LIGHT)
                                         ? lv_color_hex(0x13233D) : lv_color_hex(0xD9E8FF);
 
-    lv_obj_t *grid = lv_obj_create(s_liveToolsModal);
+    lv_obj_t *grid = lv_obj_create(body);
     lv_obj_set_width(grid, toolsContentW);
     lv_obj_set_height(grid, LV_SIZE_CONTENT);
     lv_obj_clear_flag(grid, LV_OBJ_FLAG_SCROLLABLE);
@@ -30189,10 +30429,6 @@ static void openLiveToolsModal() {
 
     // No X on any build: the nav bar is the way out (its Tools cell closes
     // this, any other cell goes there), as on every screen listed here.
-    // Upright the title matches theirs, so it stays put moving between them.
-#if HAS_TOOL_STACK_LAYOUT
-    if (toolsTop) stackTitleOnXLine(title, /*reserveX=*/false);
-#endif
 
     // Last, so the bar's layout spacer is the final child of the flex column and
     // the grid above is not pushed under the bar. Same ordering rule Nodes, DM
@@ -32207,6 +32443,15 @@ static void homeDashPlaceWxHit() {
         box.y1 = min(box.y1, temp.y1);
         box.x2 = max(box.x2, temp.x2);
         box.y2 = max(box.y2, temp.y2);
+        // The wide hero's detail block is part of the same reading.
+        if (lvObjValid(w.wxDetail) && !lv_obj_has_flag(w.wxDetail, LV_OBJ_FLAG_HIDDEN)) {
+            lv_area_t det;
+            lv_obj_get_coords(w.wxDetail, &det);
+            box.x1 = min(box.x1, det.x1);
+            box.y1 = min(box.y1, det.y1);
+            box.x2 = max(box.x2, det.x2);
+            box.y2 = max(box.y2, det.y2);
+        }
     }
     // Relative to the header's parent, which has no padding of its own (both
     // candidates are lv_obj_remove_style_all()'d), so coords map straight across.
@@ -32485,42 +32730,24 @@ static void openHomeDashboard() {
     lv_obj_clear_flag(s_homeDash, LV_OBJ_FLAG_GESTURE_BUBBLE);
     lv_obj_add_event_cb(s_homeDash, homeDashGestureCb, LV_EVENT_GESTURE, nullptr);
 
-    // Where the header goes and where the widgets go. Stacked everywhere --
-    // header across the top, widgets under it -- except P4 landscape, below.
+    // The header across the top, the widgets under it, on every board. P4
+    // landscape used to put the header in a left column and the widgets beside
+    // it; the header now spans the screen there too, and the widgets take the
+    // height left under it -- less than the column gave them, which is the
+    // trade asked for. With the full width, the weather goes beside the clock
+    // (the hero's right half) rather than under it.
     lv_obj_t *headerParent = s_homeDash;
-    int widgetsX = 0;
-    int widgetsW = dashW;
-    bool twoColumns = false;
-#if defined(DEVICE_TDISPLAY_P4)
-    // Landscape on the P4 is 616 x ~256: stacked, the header spent the top of a
-    // very wide screen on a few words and left the widgets a letterbox. Side by
-    // side instead: the header block on the left, laid out as it is on a
-    // 240-wide portrait panel (this column is a little wider), and the widgets
-    // the full height of the right. Both start at one height, just under the
-    // rounded top corners (UI_CORNER_SAFE_X), so the two columns share a top
-    // edge; the header's band sits inside that already, clear of the curve.
-    if (!uiPortrait()) {
-        twoColumns = true;
-        const int leftW = widgetsW * 42 / 100;
-        const int blockH = kTdeckProTimeTop
-                         + (int)lv_font_get_line_height(kSleepOverlayTimeFont) + 6;
-        headerParent = lv_obj_create(s_homeDash);
-        lv_obj_remove_style_all(headerParent);
-        // Presses fall through to the dashboard, where the gesture handler is.
-        lv_obj_clear_flag(headerParent,
-                          (lv_obj_flag_t)(LV_OBJ_FLAG_CLICKABLE | LV_OBJ_FLAG_SCROLLABLE));
-        const int columnsTop = max(4, UI_CORNER_SAFE_X);   // chartsTop below
-        // The full column, not just the header block: the weather goes under
-        // the clock here (GlanceHeader::wxBelow) and needs the room below it.
-        (void)blockH;
-        lv_obj_set_size(headerParent, leftW, contentH - columnsTop);
+    const int widgetsX = 0;
+    const int widgetsW = dashW;
 #if HAS_WEATHER
-        s_homeGlance.wxBelow = true;
+    s_homeGlance.wxBelow = false;
+    // P4 landscape: 616 px across is room for each hero cell to carry its
+    // detail beside it (alignGlanceWide()).
+#if defined(DEVICE_TDISPLAY_P4)
+    s_homeGlance.wideHero = !uiPortrait();
+#else
+    s_homeGlance.wideHero = false;
 #endif
-        lv_obj_align(headerParent, LV_ALIGN_TOP_LEFT, 0, columnsTop);
-        widgetsX = leftW;
-        widgetsW -= leftW;
-    }
 #endif
     buildGlanceHeader(headerParent, s_homeGlance, !homeDashFooterShowsStatus(),
                       /*themed=*/true);
@@ -32535,11 +32762,8 @@ static void openHomeDashboard() {
     // the bottom of the clock — computed from the font rather than hardcoded,
     // because the six layouts do not share one.
     //
-    // Side by side there is no header above them: they start at the top, below
-    // the rounded corner (UI_CORNER_SAFE_X, board.h).
-    const int chartsTop = twoColumns
-        ? max(4, UI_CORNER_SAFE_X)
-        : kTdeckProTimeTop + (int)lv_font_get_line_height(kSleepOverlayTimeFont) + 6;
+    const int chartsTop =
+        kTdeckProTimeTop + (int)lv_font_get_line_height(kSleepOverlayTimeFont) + 6;
 
     // Defensive floor. Every panel this builds on clears 90 px here, but the
     // header's height comes from a font and the dashboard's from a widget it
@@ -36827,27 +37051,27 @@ static bool dmTakeDeferredRefresh() {
 #endif
 
 static void refreshDmPanelFocusStyles() {
-    if (!s_dmConvPanel || !s_dmMsgPanel) return;
+    if (!s_dmConvTitle || !s_dmMsgTitle) return;
 
-    bool msgFocused = s_dmMsgPanelFocused && (s_dmSelection > 0);
-#if defined(DEVICE_TDECK_PRO)
-    lv_obj_set_style_border_width(s_dmConvPanel, msgFocused ? 1 : 2, 0);
-    lv_obj_set_style_border_color(s_dmConvPanel, lv_color_make(0, 0, 0), 0);
-    lv_obj_set_style_border_width(s_dmMsgPanel, msgFocused ? 2 : 1, 0);
-    lv_obj_set_style_border_color(s_dmMsgPanel, lv_color_make(0, 0, 0), 0);
-#else
-    lv_obj_set_style_border_width(s_dmConvPanel, msgFocused ? 1 : 2, 0);
-    lv_obj_set_style_border_color(
-        s_dmConvPanel,
-        msgFocused ? lv_color_hex(0x335D9D) : lv_color_hex(0x90B4FF),
-        0);
-
-    lv_obj_set_style_border_width(s_dmMsgPanel, msgFocused ? 2 : 1, 0);
-    lv_obj_set_style_border_color(
-        s_dmMsgPanel,
-        msgFocused ? lv_color_hex(0x90B4FF) : lv_color_hex(0x335D9D),
-        0);
-    #endif
+    // The panes have no frame now -- one rule divides them -- so the pane with
+    // the keys is marked on its title: underlined, and in the brighter ink. The
+    // underline is what carries it on the Pro's 1-bit e-paper, where the two
+    // inks come out the same.
+    const bool msgFocused = s_dmMsgPanelFocused && (s_dmSelection > 0);
+    auto mark = [](lv_obj_t *title, bool focused) {
+        lv_obj_set_style_text_decor(title,
+                                    focused ? LV_TEXT_DECOR_UNDERLINE : LV_TEXT_DECOR_NONE, 0);
+#if !defined(DEVICE_TDECK_PRO)
+        lv_obj_set_style_text_color(
+            title,
+            focused ? lv_color_hex(0x90B4FF)
+                    : ((s_cfg.uiMode == UI_MODE_LIGHT) ? lv_color_hex(0x1B243D)
+                                                       : lv_color_hex(0xD9E8FF)),
+            0);
+#endif
+    };
+    mark(s_dmConvTitle, !msgFocused);
+    mark(s_dmMsgTitle, msgFocused);
 }
 
 static void onDmConversationPressed(lv_event_t *e) {
@@ -37876,6 +38100,8 @@ static void openDmModal() {
         s_dmConvList = nullptr;
         s_dmMsgPanel = nullptr;
         s_dmMsgList = nullptr;
+        s_dmConvTitle = nullptr;
+        s_dmMsgTitle = nullptr;
         s_dmHintLabel = nullptr;
     }
     if (!s_rootScreen || s_dmModal) return;
@@ -37894,20 +38120,23 @@ static void openDmModal() {
 
     int modalW = lv_disp_get_hor_res(NULL);
     int modalH = lv_disp_get_ver_res(NULL);
-    // s_dmModal has border=1 + pad_all=4, so usable content width is modalW - 2*1 - 2*4.
+    // s_dmModal has no border and pad_all=4, so usable content width is modalW - 2*4.
     // Less the nav column where the bar is one (P4 landscape): the panes are
     // sized absolutely, and appendHeltecBottomNav() reserves it as padding.
-    int contentW = modalW - 10 - (navIsSideColumn() ? kSideNavW : 0);
+    int contentW = modalW - 8 - (navIsSideColumn() ? kSideNavW : 0);
     // Conversations over messages, both full width, instead of side by side:
     // the P4 held upright is 284 px wide -- too narrow to split -- and has the
-    // height to stack into, the same way its Nodes screen does.
-#if defined(DEVICE_TDISPLAY_P4)
+    // height to stack into, the same way its Nodes screen does. The Heltec V4
+    // and the Wio Tracker upright (240 px) take the same layout.
+#if defined(DEVICE_TDISPLAY_P4) || defined(DEVICE_HELTEC_V4_EXPANSION) \
+    || defined(DEVICE_WIO_TRACKER_L2)
     const bool dmStacked = uiPortrait();
 #else
     const bool dmStacked = false;
 #endif
     int leftW = dmStacked ? contentW : max(96, (contentW * 38) / 100);
-    int rightW = dmStacked ? contentW : (contentW - leftW - 3);
+    // Side by side: a 3 px gap either side of the 1 px rule between the panes.
+    int rightW = dmStacked ? contentW : (contentW - leftW - 7);
 
     s_dmModal = lv_obj_create(s_rootScreen);
     lv_obj_set_size(s_dmModal, modalW, modalH);
@@ -37915,31 +38144,15 @@ static void openDmModal() {
     lv_obj_clear_flag(s_dmModal, LV_OBJ_FLAG_SCROLLABLE);
     lv_obj_set_style_bg_color(s_dmModal, lv_color_hex(0x0E285B), 0);
     lv_obj_set_style_bg_opa(s_dmModal, LV_OPA_COVER, 0);
-    lv_obj_set_style_border_width(s_dmModal, 1, 0);
-    lv_obj_set_style_border_color(s_dmModal, lv_color_hex(0x5C86C6), 0);
+    // No border: this screen fills the display, and the 1 px frame only took
+    // room from it. The headers and nav bar read the width, so they follow.
+    lv_obj_set_style_border_width(s_dmModal, 0, 0);
     lv_obj_set_style_pad_all(s_dmModal, 4, 0);
     lv_obj_set_style_pad_row(s_dmModal, 4, 0);
     lv_obj_set_flex_flow(s_dmModal, LV_FLEX_FLOW_COLUMN);
     lv_obj_set_flex_align(s_dmModal, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_START);
 
-    lv_obj_t *header = lv_obj_create(s_dmModal);
-    lv_obj_set_width(header, lv_pct(100));
-    lv_obj_set_height(header, 26);
-    lv_obj_clear_flag(header, LV_OBJ_FLAG_SCROLLABLE);
-    lv_obj_set_style_bg_color(header, lv_color_hex(0x123266), 0);
-    lv_obj_set_style_bg_opa(header, LV_OPA_70, 0);
-    lv_obj_set_style_border_width(header, 1, 0);
-    lv_obj_set_style_border_color(header, lv_color_hex(0x335D9D), 0);
-
-    cornerSafeHeader(header);
-    lv_obj_t *title = lv_label_create(header);
-    lv_obj_set_style_text_font(title, &lv_font_montserrat_12, 0);
-    lv_obj_set_style_text_color(
-        title,
-        (s_cfg.uiMode == UI_MODE_LIGHT) ? lv_color_hex(0x1B243D) : lv_color_hex(0xD9E8FF),
-        0);
-    lv_label_set_text(title, TR("DIRECT MESSAGES"));
-    lv_obj_center(title);
+    buildScreenHeader(s_dmModal, TR("Direct Messages"));
 
     lv_obj_t *content = lv_obj_create(s_dmModal);
     lv_obj_set_width(content, lv_pct(100));
@@ -37948,6 +38161,9 @@ static void openDmModal() {
     lv_obj_set_style_bg_opa(content, LV_OPA_TRANSP, 0);
     lv_obj_set_style_border_width(content, 0, 0);
     lv_obj_set_style_pad_all(content, 0, 0);
+    // The rule between the panes reaches past this box to the display edges
+    // when they are stacked (see below).
+    lv_obj_add_flag(content, LV_OBJ_FLAG_OVERFLOW_VISIBLE);
     if (dmStacked) {
         lv_obj_set_style_pad_row(content, 3, 0);
         lv_obj_set_flex_flow(content, LV_FLEX_FLOW_COLUMN);
@@ -37963,10 +38179,9 @@ static void openDmModal() {
     // Stacked: the conversation list takes the top 40%, the messages the rest.
     lv_obj_set_height(leftPanel, dmStacked ? lv_pct(40) : lv_pct(100));
     lv_obj_clear_flag(leftPanel, LV_OBJ_FLAG_SCROLLABLE);
-    lv_obj_set_style_bg_color(leftPanel, lv_color_hex(0x0F2A5C), 0);
-    lv_obj_set_style_bg_opa(leftPanel, LV_OPA_40, 0);
-    lv_obj_set_style_border_width(leftPanel, 1, 0);
-    lv_obj_set_style_border_color(leftPanel, lv_color_hex(0x335D9D), 0);
+    // No box round either pane: a single rule between them does the dividing.
+    lv_obj_set_style_bg_opa(leftPanel, LV_OPA_TRANSP, 0);
+    lv_obj_set_style_border_width(leftPanel, 0, 0);
     lv_obj_set_style_pad_all(leftPanel, 2, 0);
     lv_obj_set_style_pad_row(leftPanel, 2, 0);
     lv_obj_set_flex_flow(leftPanel, LV_FLEX_FLOW_COLUMN);
@@ -37980,6 +38195,7 @@ static void openDmModal() {
         (s_cfg.uiMode == UI_MODE_LIGHT) ? lv_color_hex(0x1B243D) : lv_color_hex(0xD9E8FF),
         0);
     lv_label_set_text(leftTitle, TR("Conversations"));
+    s_dmConvTitle = leftTitle;
 
     s_dmConvList = lv_obj_create(leftPanel);
     lv_obj_set_width(s_dmConvList, lv_pct(100));
@@ -37999,6 +38215,8 @@ static void openDmModal() {
     lv_obj_set_flex_flow(s_dmConvList, LV_FLEX_FLOW_COLUMN);
     lv_obj_set_flex_align(s_dmConvList, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_START);
 
+    buildPaneRule(content, dmStacked);
+
     lv_obj_t *rightPanel = lv_obj_create(content);
     s_dmMsgPanel = rightPanel;
     lv_obj_set_width(rightPanel, rightW);
@@ -38008,10 +38226,8 @@ static void openDmModal() {
         lv_obj_set_height(rightPanel, lv_pct(100));
     }
     lv_obj_clear_flag(rightPanel, LV_OBJ_FLAG_SCROLLABLE);
-    lv_obj_set_style_bg_color(rightPanel, lv_color_hex(0x0F2A5C), 0);
-    lv_obj_set_style_bg_opa(rightPanel, LV_OPA_40, 0);
-    lv_obj_set_style_border_width(rightPanel, 1, 0);
-    lv_obj_set_style_border_color(rightPanel, lv_color_hex(0x335D9D), 0);
+    lv_obj_set_style_bg_opa(rightPanel, LV_OPA_TRANSP, 0);
+    lv_obj_set_style_border_width(rightPanel, 0, 0);
     lv_obj_set_style_pad_all(rightPanel, 2, 0);
     lv_obj_set_style_pad_row(rightPanel, 2, 0);
     lv_obj_set_flex_flow(rightPanel, LV_FLEX_FLOW_COLUMN);
@@ -38025,6 +38241,7 @@ static void openDmModal() {
         (s_cfg.uiMode == UI_MODE_LIGHT) ? lv_color_hex(0x1B243D) : lv_color_hex(0xD9E8FF),
         0);
     lv_label_set_text(rightTitle, TR("Messages"));
+    s_dmMsgTitle = rightTitle;
 
     s_dmMsgList = lv_obj_create(rightPanel);
     lv_obj_set_width(s_dmMsgList, lv_pct(100));
@@ -38179,7 +38396,9 @@ static void openNodesModal() {
     // too narrow to split and there is height to stack into.
 #if defined(DEVICE_TDECK_PRO)
     const bool nodesStacked = true;
-#elif defined(DEVICE_TDISPLAY_P4)
+#elif defined(DEVICE_TDISPLAY_P4) || defined(DEVICE_HELTEC_V4_EXPANSION) \
+    || defined(DEVICE_WIO_TRACKER_L2)
+    // The Heltec V4 and the Wio Tracker upright too: 240 px is narrower still.
     const bool nodesStacked = uiPortrait();
 #else
     const bool nodesStacked = false;
@@ -38198,6 +38417,11 @@ static void openNodesModal() {
     // they take the list's larger face (refreshNodesListRows).
     const lv_font_t *nodesDetailFont =
         emojiFont(nodesStacked ? &lv_font_montserrat_14 : &lv_font_montserrat_10);
+#elif defined(DEVICE_HELTEC_V4_EXPANSION) || defined(DEVICE_WIO_TRACKER_L2)
+    // Stacked upright, as on the P4, the details have the full width -- a size
+    // up rather than the P4's two, for a panel a third of its height.
+    const lv_font_t *nodesDetailFont =
+        emojiFont(nodesStacked ? &lv_font_montserrat_12 : &lv_font_montserrat_10);
 #else
     const lv_font_t *nodesDetailFont = emojiFont(&lv_font_montserrat_10);
 #endif
@@ -38217,18 +38441,20 @@ static void openNodesModal() {
         // Pathologically narrow panel: give the list something rather than a
         // negative width, and let the detail panel scroll for the rest.
         if (listW < 60) listW = 60;
-        detailW = contentW - listW - contentGap;
+        // Less the 1 px rule between them and the second gap it brings.
+        detailW = contentW - listW - 2 * contentGap - 1;
         if (detailW < 60) detailW = 60;
     }
 #else
     // Cardputer: unchanged from before the wide layout — a narrow list of short
     // names on the right, details taking the rest on the left.
     int listW = max(68, min(96, (contentW * 24) / 100));
-    int detailW = contentW - listW - contentGap;
+    // Less the 1 px rule between them and the second gap it brings.
+    int detailW = contentW - listW - 2 * contentGap - 1;
     if (detailW < 120) {
         int deficit = 120 - detailW;
         listW = max(52, listW - deficit);
-        detailW = contentW - listW - contentGap;
+        detailW = contentW - listW - 2 * contentGap - 1;
     }
 #endif
 
@@ -38238,51 +38464,21 @@ static void openNodesModal() {
     lv_obj_clear_flag(s_nodesModal, LV_OBJ_FLAG_SCROLLABLE);
     lv_obj_set_style_bg_color(s_nodesModal, lv_color_hex(0x0E285B), 0);
     lv_obj_set_style_bg_opa(s_nodesModal, LV_OPA_COVER, 0);
-    lv_obj_set_style_border_width(s_nodesModal, 1, 0);
-    lv_obj_set_style_border_color(s_nodesModal, lv_color_hex(0x5C86C6), 0);
+    // No border: this screen fills the display, and the 1 px frame only took
+    // room from it. The headers and nav bar read the width, so they follow.
+    lv_obj_set_style_border_width(s_nodesModal, 0, 0);
     lv_obj_set_style_pad_all(s_nodesModal, 4, 0);
     lv_obj_set_style_pad_row(s_nodesModal, 4, 0);
     lv_obj_set_flex_flow(s_nodesModal, LV_FLEX_FLOW_COLUMN);
     lv_obj_set_flex_align(s_nodesModal, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_START);
 
-    lv_obj_t *header = lv_obj_create(s_nodesModal);
-    lv_obj_set_width(header, lv_pct(100));
-    lv_obj_set_height(header, 26);
-    lv_obj_clear_flag(header, LV_OBJ_FLAG_SCROLLABLE);
-    lv_obj_set_style_bg_color(header, lv_color_hex(0x123266), 0);
-    lv_obj_set_style_bg_opa(header, LV_OPA_70, 0);
-    lv_obj_set_style_border_width(header, 1, 0);
-    lv_obj_set_style_border_color(header, lv_color_hex(0x335D9D), 0);
-
-    cornerSafeHeader(header);
-    lv_obj_t *title = lv_label_create(header);
-    s_nodesTitleLabel = title;
-    lv_obj_set_style_text_font(title, &lv_font_montserrat_12, 0);
-    lv_obj_set_style_text_color(title, lv_color_hex(0xD9E8FF), 0);
-    lv_label_set_text(title, TR("NODES"));
-    lv_obj_center(title);
+    // Retitled with the count (and the filter, while one is armed) by
+    // refreshNodesModal(), through screenHeaderSetTitle().
+    s_nodesTitleLabel = buildScreenHeader(s_nodesModal, "");
 
 #if UI_TOUCH_ONLY_PROFILE
-    s_nodesFilterBtn = lv_btn_create(header);
-    lv_obj_set_size(s_nodesFilterBtn, 58, 20);
-    lv_obj_align(s_nodesFilterBtn, LV_ALIGN_RIGHT_MID, -4, 0);
-    lv_obj_set_style_radius(s_nodesFilterBtn, 4, 0);
-    lv_obj_set_style_pad_left(s_nodesFilterBtn, 6, 0);
-    lv_obj_set_style_pad_right(s_nodesFilterBtn, 6, 0);
-    lv_obj_set_style_pad_top(s_nodesFilterBtn, 1, 0);
-    lv_obj_set_style_pad_bottom(s_nodesFilterBtn, 1, 0);
-    lv_obj_set_style_shadow_width(s_nodesFilterBtn, 0, 0);
-    lv_obj_set_style_bg_color(s_nodesFilterBtn, lv_color_hex(0x16386F), 0);
-    lv_obj_set_style_bg_opa(s_nodesFilterBtn, LV_OPA_70, 0);
-    lv_obj_set_style_border_width(s_nodesFilterBtn, 1, 0);
-    lv_obj_set_style_border_color(s_nodesFilterBtn, lv_color_hex(0x335D9D), 0);
-    lv_obj_add_event_cb(s_nodesFilterBtn, onNodesFilterButtonPressed, LV_EVENT_CLICKED, nullptr);
-
-    lv_obj_t *filterLabel = lv_label_create(s_nodesFilterBtn);
-    lv_obj_set_style_text_font(filterLabel, &lv_font_montserrat_10, 0);
-    lv_obj_set_style_text_color(filterLabel, lv_color_hex(0xD9E8FF), 0);
-    lv_label_set_text(filterLabel, TR("Filter"));
-    lv_obj_center(filterLabel);
+    s_nodesFilterBtn = secondaryHeaderBtn(buildSecondaryHeader(s_nodesModal),
+                                          TR("Filter"), onNodesFilterButtonPressed);
 #endif
 
     lv_obj_t *content = lv_obj_create(s_nodesModal);
@@ -38292,6 +38488,9 @@ static void openNodesModal() {
     lv_obj_set_style_bg_opa(content, LV_OPA_TRANSP, 0);
     lv_obj_set_style_border_width(content, 0, 0);
     lv_obj_set_style_pad_all(content, 0, 0);
+    // The rule between the panes reaches past this box to the display edges
+    // when they are stacked (buildPaneRule()).
+    lv_obj_add_flag(content, LV_OBJ_FLAG_OVERFLOW_VISIBLE);
     if (nodesStacked) {
         lv_obj_set_style_pad_row(content, contentGap, 0);
         lv_obj_set_flex_flow(content, LV_FLEX_FLOW_COLUMN);
@@ -38317,10 +38516,10 @@ static void openNodesModal() {
     lv_obj_set_height(listPanel, nodesStacked ? lv_pct(45) : lv_pct(100));
 #endif
     lv_obj_clear_flag(listPanel, LV_OBJ_FLAG_SCROLLABLE);
-    lv_obj_set_style_bg_color(listPanel, lv_color_hex(0x0F2A5C), 0);
-    lv_obj_set_style_bg_opa(listPanel, LV_OPA_40, 0);
-    lv_obj_set_style_border_width(listPanel, 1, 0);
-    lv_obj_set_style_border_color(listPanel, lv_color_hex(0x335D9D), 0);
+    // No frame: a rule divides the panes, and the fill marks the focused one
+    // (refreshNodesPanelFocusStyles()).
+    lv_obj_set_style_bg_opa(listPanel, LV_OPA_TRANSP, 0);
+    lv_obj_set_style_border_width(listPanel, 0, 0);
     lv_obj_set_style_pad_left(listPanel, 2, 0);
     lv_obj_set_style_pad_right(listPanel, 1, 0);
     lv_obj_set_style_pad_top(listPanel, 2, 0);
@@ -38346,6 +38545,8 @@ static void openNodesModal() {
     lv_obj_set_flex_flow(s_nodesList, LV_FLEX_FLOW_COLUMN);
     lv_obj_set_flex_align(s_nodesList, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_START);
 
+    buildPaneRule(content, nodesStacked);
+
     // Detail panel, on the right.
     lv_obj_t *infoPanel = lv_obj_create(content);
     s_nodesInfoPanel = infoPanel;
@@ -38358,10 +38559,8 @@ static void openNodesModal() {
     lv_obj_add_flag(infoPanel, LV_OBJ_FLAG_SCROLLABLE);
     setupVScroll(infoPanel);
     lv_obj_set_scrollbar_mode(infoPanel, LV_SCROLLBAR_MODE_AUTO);
-    lv_obj_set_style_bg_color(infoPanel, lv_color_hex(0x0F2A5C), 0);
-    lv_obj_set_style_bg_opa(infoPanel, LV_OPA_40, 0);
-    lv_obj_set_style_border_width(infoPanel, 1, 0);
-    lv_obj_set_style_border_color(infoPanel, lv_color_hex(0x335D9D), 0);
+    lv_obj_set_style_bg_opa(infoPanel, LV_OPA_TRANSP, 0);
+    lv_obj_set_style_border_width(infoPanel, 0, 0);
     lv_obj_set_style_pad_all(infoPanel, 4, 0);
     lv_obj_set_style_pad_row(infoPanel, 3, 0);
     lv_obj_set_style_width(infoPanel, 2, LV_PART_SCROLLBAR);
@@ -38477,10 +38676,8 @@ static void openNodesModal() {
     lv_obj_add_flag(infoPanel, LV_OBJ_FLAG_SCROLLABLE);
     setupVScroll(infoPanel);
     lv_obj_set_scrollbar_mode(infoPanel, LV_SCROLLBAR_MODE_AUTO);
-    lv_obj_set_style_bg_color(infoPanel, lv_color_hex(0x0F2A5C), 0);
-    lv_obj_set_style_bg_opa(infoPanel, LV_OPA_40, 0);
-    lv_obj_set_style_border_width(infoPanel, 1, 0);
-    lv_obj_set_style_border_color(infoPanel, lv_color_hex(0x335D9D), 0);
+    lv_obj_set_style_bg_opa(infoPanel, LV_OPA_TRANSP, 0);
+    lv_obj_set_style_border_width(infoPanel, 0, 0);
     lv_obj_set_style_pad_all(infoPanel, 4, 0);
     lv_obj_set_style_width(infoPanel, 2, LV_PART_SCROLLBAR);
     lv_obj_set_style_bg_color(infoPanel, lv_color_hex(0x8FB5E6), LV_PART_SCROLLBAR);
@@ -38494,15 +38691,17 @@ static void openNodesModal() {
     lv_label_set_long_mode(s_nodesDetail, LV_LABEL_LONG_WRAP);
     lv_label_set_text(s_nodesDetail, "");
 
+    buildPaneRule(content, false);
+
     lv_obj_t *listPanel = lv_obj_create(content);
     s_nodesListPanel = listPanel;
     lv_obj_set_width(listPanel, listW);
     lv_obj_set_height(listPanel, lv_pct(100));
     lv_obj_clear_flag(listPanel, LV_OBJ_FLAG_SCROLLABLE);
-    lv_obj_set_style_bg_color(listPanel, lv_color_hex(0x0F2A5C), 0);
-    lv_obj_set_style_bg_opa(listPanel, LV_OPA_40, 0);
-    lv_obj_set_style_border_width(listPanel, 1, 0);
-    lv_obj_set_style_border_color(listPanel, lv_color_hex(0x335D9D), 0);
+    // No frame: a rule divides the panes, and the fill marks the focused one
+    // (refreshNodesPanelFocusStyles()).
+    lv_obj_set_style_bg_opa(listPanel, LV_OPA_TRANSP, 0);
+    lv_obj_set_style_border_width(listPanel, 0, 0);
     lv_obj_set_style_pad_left(listPanel, 2, 0);
     lv_obj_set_style_pad_right(listPanel, 1, 0);
     lv_obj_set_style_pad_top(listPanel, 2, 0);
@@ -38688,6 +38887,18 @@ static void openReleaseNotesModal() {
 #endif
 }
 
+// Help's prose was written with its line breaks in, sized to the old 10 px
+// face. At the larger one those breaks land mid-line and leave every line
+// ragged, so a paragraph is run back together and the label wraps it to the
+// width it actually has. Only prose goes through here: the key lists and the
+// transport key are one item per line on purpose.
+static const char *legendReflow(const char *text, char *buf, size_t bufLen) {
+    size_t n = 0;
+    for (const char *p = text; *p && n + 1 < bufLen; p++) buf[n++] = (*p == '\n') ? ' ' : *p;
+    buf[n] = '\0';
+    return buf;
+}
+
 // The Help screen's transport-icon key, shared by every board's layout. The
 // icons go in as arguments so the translated text keeps them.
 static const char *legendTransportText() {
@@ -38704,7 +38915,7 @@ static const char *legendTransportText() {
 // (channelDrawerSlide()), and what opens it differs by what the board has --
 // a swipe where there is touch, the chat key where there is a keyboard, the
 // Messages button on the M9.
-static const char *legendChannelListText() {
+static const char *legendChannelListTextRaw() {
 #if UI_CHANNEL_LIST_DROPDOWN
     if (!channelListIsDropdown()) return "";
 #if defined(DEVICE_M9)
@@ -38726,9 +38937,15 @@ static const char *legendChannelListText() {
 #endif
 }
 
+static const char *legendChannelListText() {
+    static char buf[200];
+    return legendReflow(legendChannelListTextRaw(), buf, sizeof(buf));
+}
+
 static void openLegendModal() {
     if (s_legendModal && !lvObjAlive(s_legendModal)) {
         s_legendModal = nullptr;
+        s_legendScroll = nullptr;
     }
     if (!s_rootScreen || s_legendModal) return;
 
@@ -38768,12 +38985,26 @@ static void openLegendModal() {
         }
     }
 
-#if defined(DEVICE_TDECK)
+    // Sized to be read, not to fit: the body scrolls where it runs long, so
+    // the face no longer has to shrink until the whole list squeezes onto the
+    // panel. The Cardputer's 240x135 stays at 10 -- one line of 14 there is a
+    // tenth of the screen.
+#if defined(DEVICE_CARDPUTER_LORA_HAT)
     const lv_font_t *legendBodyFont = &lv_font_montserrat_10;
-#elif defined(DEVICE_TLORA_PAGER_TFT)
+#elif defined(DEVICE_TDECK)
+    // Two columns in 320 px: 12 is as large as the key list goes and still
+    // keeps one key to a line.
     const lv_font_t *legendBodyFont = &lv_font_montserrat_12;
+#elif defined(DEVICE_TDISPLAY_P4)
+    const lv_font_t *legendBodyFont =
+        uiPortrait() ? &lv_font_montserrat_16 : &lv_font_montserrat_14;
+#elif defined(DEVICE_HELTEC_V4_EXPANSION) || defined(DEVICE_WIO_TRACKER_L2)
+    // Upright as on the P4: the column is narrow, the prose reflows, and the
+    // body scrolls, so the larger face costs nothing but scrolling.
+    const lv_font_t *legendBodyFont =
+        uiPortrait() ? &lv_font_montserrat_16 : &lv_font_montserrat_14;
 #else
-    const lv_font_t *legendBodyFont = &lv_font_montserrat_10;
+    const lv_font_t *legendBodyFont = &lv_font_montserrat_14;
 #endif
 
     // A screen, not a card. Help owns the last cell on the nav bar, so it has to
@@ -38792,44 +39023,47 @@ static void openLegendModal() {
     // therefore no ? cell to light. One layout is the whole point — the ladder
     // above existed regardless of the bar, and so did the content that outgrew it.
     //
-    // border_width 1 and pad_all 4 are load-bearing: appendHeltecBottomNav()
-    // cancels exactly those two to put its bar on the display edges.
+    // pad_all 4 is load-bearing: appendHeltecBottomNav() and the screen header
+    // cancel it (and the border, which this screen does without, as DMs,
+    // Nodes, Config and Tools do) to reach the display edges.
     s_legendModal = lv_obj_create(s_rootScreen);
     lv_obj_set_size(s_legendModal, lv_disp_get_hor_res(NULL), lv_disp_get_ver_res(NULL));
     lv_obj_align(s_legendModal, LV_ALIGN_CENTER, 0, 0);
-    // Kept scrollable as insurance rather than because it is expected to scroll:
-    // the full screen is taller than the card it replaces on every board, so the
-    // body should now fit outright. Clipping a key list is a worse failure than
-    // an unused scrollbar, and LV_SCROLLBAR_MODE_AUTO draws nothing when the
-    // content fits.
-    lv_obj_add_flag(s_legendModal, LV_OBJ_FLAG_SCROLLABLE);
-    setupVScroll(s_legendModal);
-    lv_obj_set_scrollbar_mode(s_legendModal, LV_SCROLLBAR_MODE_AUTO);
+    lv_obj_clear_flag(s_legendModal, LV_OBJ_FLAG_SCROLLABLE);
     lv_obj_set_style_bg_color(s_legendModal, lv_color_hex(0x0E285B), 0);
     lv_obj_set_style_bg_opa(s_legendModal, LV_OPA_COVER, 0);
-    lv_obj_set_style_border_width(s_legendModal, 1, 0);
-    lv_obj_set_style_border_color(s_legendModal, lv_color_hex(0x5C86C6), 0);
+    lv_obj_set_style_border_width(s_legendModal, 0, 0);
     lv_obj_set_style_pad_all(s_legendModal, 4, 0);
-#if UI_CORNER_SAFE_X > 0
-    // Down out of the rounded top corners (board.h), title and floating close X
-    // together -- the same move the Weather screen makes.
-    lv_obj_set_style_pad_top(s_legendModal, 4 + UI_CORNER_SAFE_X, 0);
-#endif
     lv_obj_set_style_pad_row(s_legendModal, 4, 0);
-#if UI_TOUCH_ONLY_PROFILE
-    lv_obj_set_style_pad_row(s_legendModal, 5, 0);
-#endif
     lv_obj_set_flex_flow(s_legendModal, LV_FLEX_FLOW_COLUMN);
     lv_obj_set_flex_align(s_legendModal, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_START);
 
-    lv_obj_t *title = lv_label_create(s_legendModal);
-    lv_obj_set_width(title, lv_pct(100));
-    lv_obj_set_style_text_font(title, &lv_font_montserrat_12, 0);
-    lv_obj_set_style_text_color(title, lv_color_hex(0xD9E8FF), 0);
-    lv_label_set_text(title, TR("Help"));
+    // The chat screen's header, named for this screen, as on DMs, Nodes, Config
+    // and Tools. No close X under it on any build: the nav bar is the way out,
+    // as it is from those.
+    buildScreenHeader(s_legendModal, TR("Help"));
+
+    // The body scrolls, not the screen. With the larger face the key list runs
+    // past the bottom on the smaller panels, and scrolling the whole screen
+    // would carry it up over the header, which floats in place.
+    s_legendScroll = lv_obj_create(s_legendModal);
+    lv_obj_remove_style_all(s_legendScroll);
+    lv_obj_set_width(s_legendScroll, lv_pct(100));
+    lv_obj_set_flex_grow(s_legendScroll, 1);
+    lv_obj_add_flag(s_legendScroll, LV_OBJ_FLAG_SCROLLABLE);
+    setupVScroll(s_legendScroll);
+    lv_obj_set_scrollbar_mode(s_legendScroll, LV_SCROLLBAR_MODE_AUTO);
+    lv_obj_set_style_pad_right(s_legendScroll, 6, 0);   // clear of the scrollbar
+    lv_obj_set_style_width(s_legendScroll, 2, LV_PART_SCROLLBAR);
+    lv_obj_set_style_bg_color(s_legendScroll, lv_color_hex(0x8FB5E6), LV_PART_SCROLLBAR);
+    lv_obj_set_style_bg_opa(s_legendScroll, LV_OPA_70, LV_PART_SCROLLBAR);
+    lv_obj_set_style_radius(s_legendScroll, 2, LV_PART_SCROLLBAR);
+    lv_obj_set_style_pad_row(s_legendScroll, 4, 0);
+    lv_obj_set_flex_flow(s_legendScroll, LV_FLEX_FLOW_COLUMN);
+    lv_obj_set_flex_align(s_legendScroll, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_START);
 
 #if UI_TOUCH_ONLY_PROFILE
-    lv_obj_t *body = lv_label_create(s_legendModal);
+    lv_obj_t *body = lv_label_create(s_legendScroll);
     lv_obj_set_width(body, lv_pct(100));
     lv_obj_set_style_text_font(body, legendBodyFont, 0);
     lv_obj_set_style_text_color(body, lv_color_hex(0xD9E8FF), 0);
@@ -38837,10 +39071,8 @@ static void openLegendModal() {
     // One TR() key per paragraph: a single literal cannot span the #if, so
     // the pieces are translated separately and joined here.
     const char *channelsHelp = legendChannelListText();
-    lv_label_set_text_fmt(
-        body,
-        "%s\n%s%s%s\n\n%s",
-        TR("Touch Navigation:"),
+    char navHelp[320];
+    legendReflow(
 #if HAS_HOME_DASHBOARD
         TR("Bottom buttons: Home, Chats, DM, Nodes, Tools, Config, Help.\n"
            "Home is the dashboard; Chats is the messages, and its icon\n"
@@ -38851,12 +39083,18 @@ static void openLegendModal() {
         // changes ago: Live left the bar for Tools, and Chats joined it.
         TR("Bottom buttons: Chats, DM, Nodes, Tools, Config, Help."),
 #endif
+        navHelp, sizeof(navHelp));
+    lv_label_set_text_fmt(
+        body,
+        "%s\n%s%s%s\n\n%s",
+        TR("Touch Navigation:"),
+        navHelp,
         channelsHelp[0] ? "\n\n" : "", channelsHelp,
         legendTransportText());
 #elif defined(DEVICE_TLORA_PAGER_TFT) || defined(DEVICE_TDECK)
-    lv_obj_t *bodyRow = lv_obj_create(s_legendModal);
+    lv_obj_t *bodyRow = lv_obj_create(s_legendScroll);
     lv_obj_set_width(bodyRow, lv_pct(100));
-    lv_obj_set_flex_grow(bodyRow, 1);
+    lv_obj_set_height(bodyRow, LV_SIZE_CONTENT);
     lv_obj_clear_flag(bodyRow, LV_OBJ_FLAG_SCROLLABLE);
     lv_obj_set_style_bg_opa(bodyRow, LV_OPA_TRANSP, 0);
     lv_obj_set_style_border_width(bodyRow, 0, 0);
@@ -38899,6 +39137,7 @@ static void openLegendModal() {
 
     lv_obj_t *rightCol = lv_obj_create(bodyRow);
     lv_obj_set_width(rightCol, lv_pct(50));
+    lv_obj_set_height(rightCol, LV_SIZE_CONTENT);
     lv_obj_set_flex_grow(rightCol, 1);
     lv_obj_clear_flag(rightCol, LV_OBJ_FLAG_SCROLLABLE);
     lv_obj_set_style_bg_opa(rightCol, LV_OPA_TRANSP, 0);
@@ -38935,7 +39174,7 @@ static void openLegendModal() {
     lv_label_set_text(rightNote, TR("\nT-Deck trackball: hold click 2s to sleep"));
 #endif
 #else
-    lv_obj_t *body = lv_label_create(s_legendModal);
+    lv_obj_t *body = lv_label_create(s_legendScroll);
     lv_obj_set_width(body, lv_pct(100));
     lv_obj_set_style_text_font(body, legendBodyFont, 0);
     lv_obj_set_style_text_color(body, lv_color_hex(0xD9E8FF), 0);
@@ -38972,10 +39211,7 @@ static void openLegendModal() {
         legendTransportText());
 #endif
 
-#if UI_TOUCH_ONLY_PROFILE
-    reserveHeltecCloseXRow(title);
-    appendHeltecCloseX(s_legendModal, onLegendClosePressed);
-#else
+#if !UI_TOUCH_ONLY_PROFILE
     lv_obj_t *hint = lv_label_create(s_legendModal);
     lv_obj_set_width(hint, lv_pct(100));
     lv_obj_set_style_text_font(hint, legendBodyFont, 0);
@@ -39044,96 +39280,21 @@ static void openCfgModal() {
     lv_obj_clear_flag(s_cfgModal, LV_OBJ_FLAG_SCROLLABLE);
     lv_obj_set_style_bg_color(s_cfgModal, lv_color_hex(0x0E285B), 0);
     lv_obj_set_style_bg_opa(s_cfgModal, LV_OPA_COVER, 0);
-    lv_obj_set_style_border_width(s_cfgModal, 1, 0);
-    lv_obj_set_style_border_color(s_cfgModal, lv_color_hex(0x5C86C6), 0);
+    // No border: this screen fills the display, and the 1 px frame only took
+    // room from it. The headers and nav bar read the width, so they follow.
+    lv_obj_set_style_border_width(s_cfgModal, 0, 0);
     lv_obj_set_style_pad_all(s_cfgModal, 4, 0);
     lv_obj_set_style_pad_row(s_cfgModal, 4, 0);
     lv_obj_set_flex_flow(s_cfgModal, LV_FLEX_FLOW_COLUMN);
     lv_obj_set_flex_align(s_cfgModal, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_START);
 
-    lv_obj_t *header = lv_obj_create(s_cfgModal);
-    lv_obj_set_width(header, lv_pct(100));
-    lv_obj_set_height(header, 30);
-    lv_obj_clear_flag(header, LV_OBJ_FLAG_SCROLLABLE);
-    lv_obj_set_style_bg_color(header, lv_color_hex(0x123266), 0);
-    lv_obj_set_style_bg_opa(header, LV_OPA_70, 0);
-    lv_obj_set_style_border_width(header, 1, 0);
-    lv_obj_set_style_border_color(header, lv_color_hex(0x335D9D), 0);
-    lv_obj_set_style_pad_left(header, 4, 0);
-    lv_obj_set_style_pad_right(header, 4, 0);
-    lv_obj_set_style_pad_top(header, 2, 0);
-    lv_obj_set_style_pad_bottom(header, 2, 0);
-    lv_obj_set_flex_flow(header, LV_FLEX_FLOW_ROW);
-    lv_obj_set_flex_align(header, LV_FLEX_ALIGN_SPACE_BETWEEN, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
-
-#if defined(DEVICE_CROWPANEL_35)
-    lv_obj_set_style_pad_column(header, 4, 0);
-#endif
-    cornerSafeHeader(header);
-    lv_obj_t *title = lv_label_create(header);
-#if defined(DEVICE_TLORA_PAGER_TFT)
-    lv_obj_set_style_text_font(title, &lv_font_montserrat_14, 0);
-#elif defined(DEVICE_TDECK) || defined(DEVICE_TDECK_PRO) || defined(DEVICE_MESH_DECK) \
-    || defined(DEVICE_CROWPANEL_35)
-    lv_obj_set_style_text_font(title, &lv_font_montserrat_16, 0);
-#elif defined(DEVICE_TDISPLAY_P4)
-    // Up with the rows (refreshCfgModal()), but not to 16: the bar also carries
-    // the status and the Info button in ~248 px between the corner insets.
-    lv_obj_set_style_text_font(title, &lv_font_montserrat_14, 0);
-#else
-    lv_obj_set_style_text_font(title, &lv_font_montserrat_12, 0);
-#endif
-    lv_obj_set_style_text_color(title, lv_color_hex(0xD9E8FF), 0);
-    lv_label_set_text(title, TR("Configuration"));
-
-    s_cfgHeaderStatus = lv_label_create(header);
-#if defined(DEVICE_CROWPANEL_35)
-    lv_obj_set_width(s_cfgHeaderStatus, 0);
-    lv_obj_set_flex_grow(s_cfgHeaderStatus, 1);
-#elif UI_TOUCH_ONLY_PROFILE
-    lv_obj_set_width(s_cfgHeaderStatus, lv_pct(40));
-#else
-    lv_obj_set_width(s_cfgHeaderStatus, lv_pct(58));
-#endif
-#if defined(DEVICE_TLORA_PAGER_TFT)
-    lv_obj_set_style_text_font(s_cfgHeaderStatus, &lv_font_montserrat_12, 0);
-#elif defined(DEVICE_TDECK) || defined(DEVICE_TDECK_PRO) || defined(DEVICE_MESH_DECK) \
-    || defined(DEVICE_CROWPANEL_35)
-    lv_obj_set_style_text_font(s_cfgHeaderStatus, &lv_font_montserrat_14, 0);
-#elif defined(DEVICE_TDISPLAY_P4)
-    lv_obj_set_style_text_font(s_cfgHeaderStatus, &lv_font_montserrat_12, 0);
-#else
-    lv_obj_set_style_text_font(s_cfgHeaderStatus, &lv_font_montserrat_10, 0);
-#endif
-    lv_obj_set_style_text_align(s_cfgHeaderStatus, LV_TEXT_ALIGN_RIGHT, 0);
-    lv_obj_set_style_text_color(s_cfgHeaderStatus, lv_color_hex(0x79DDB8), 0);
-    lv_label_set_long_mode(s_cfgHeaderStatus, LV_LABEL_LONG_DOT);
-    lv_label_set_text(s_cfgHeaderStatus, TR("Ready"));
+    // The status this bar used to carry beside the title ("Ready", or the
+    // armed filter) is in the title now -- refreshCfgModal() -- and Info is in
+    // the secondary header under it, as Nodes' Filter is.
+    s_cfgHeaderStatus = buildScreenHeader(s_cfgModal, TR("Configuration"));
 
 #if UI_TOUCH_ONLY_PROFILE
-    lv_obj_t *infoBtn = lv_btn_create(header);
-    lv_obj_set_height(infoBtn, 22);
-    lv_obj_set_style_min_width(infoBtn, 48, 0);
-#if defined(DEVICE_CROWPANEL_35)
-    lv_obj_set_style_pad_all(infoBtn, 2, 0);
-#endif
-    lv_obj_set_style_radius(infoBtn, 4, 0);
-    lv_obj_set_style_shadow_width(infoBtn, 0, 0);
-    lv_obj_set_style_bg_color(infoBtn, lv_color_hex(0x16386F), 0);
-    lv_obj_set_style_bg_opa(infoBtn, LV_OPA_70, 0);
-    lv_obj_set_style_border_width(infoBtn, 1, 0);
-    lv_obj_set_style_border_color(infoBtn, lv_color_hex(0x335D9D), 0);
-    lv_obj_add_event_cb(infoBtn, onCfgHeaderInfoPressed, LV_EVENT_CLICKED, nullptr);
-
-    lv_obj_t *infoLbl = lv_label_create(infoBtn);
-#if defined(DEVICE_CROWPANEL_35)
-    lv_obj_set_style_text_font(infoLbl, &lv_font_montserrat_12, 0);
-#else
-    lv_obj_set_style_text_font(infoLbl, &lv_font_montserrat_10, 0);
-#endif
-    lv_obj_set_style_text_color(infoLbl, lv_color_hex(0xD9E8FF), 0);
-    lv_label_set_text(infoLbl, TR("Info"));
-    lv_obj_center(infoLbl);
+    secondaryHeaderBtn(buildSecondaryHeader(s_cfgModal), TR("Info"), onCfgHeaderInfoPressed);
 #endif
 
 #if defined(DEVICE_TLORA_PAGER_TFT)
@@ -45435,16 +45596,17 @@ static void pumpKeyboardInput() {
         }
 
         if (s_legendModal) {
-#if defined(DEVICE_CARDPUTER_LORA_HAT)
-            if (k == KEY_SCROLL_UP) {
-                scrollListClamped(s_legendModal, 18);
+            // Every board now, not only the Cardputer: at the larger face the
+            // key list runs past the bottom of the 240 px panels too. The same
+            // keys Release Notes scrolls on.
+            if (k == KEY_SCROLL_UP || k == KEY_PAGE_UP || k == KEY_PREV_CHAN) {
+                scrollListClamped(s_legendScroll ? s_legendScroll : s_legendModal, 18);
                 continue;
             }
-            if (k == KEY_SCROLL_DN) {
-                scrollListClamped(s_legendModal, -18);
+            if (k == KEY_SCROLL_DN || k == KEY_PAGE_DN || k == KEY_NEXT_CHAN) {
+                scrollListClamped(s_legendScroll ? s_legendScroll : s_legendModal, -18);
                 continue;
             }
-#endif
             if (isModalCloseKey(k)
                 || k == 'h' || k == 'H') {
                 closeLegendModal();
@@ -48312,6 +48474,7 @@ static void refreshChannelSelectorLabel() {
         lv_label_set_text(s_channelSelectorLabel, name);
         lv_obj_set_width(s_channelSelectorBtn, s_channelSelectorFixedBtnW);
         lv_label_set_long_mode(s_channelSelectorLabel, LV_LABEL_LONG_DOT);
+        labelSingleLine(s_channelSelectorLabel);
 
         if (showSelectorCaret) {
             lv_obj_set_style_text_align(s_channelSelectorLabel, LV_TEXT_ALIGN_LEFT, 0);
@@ -48826,8 +48989,87 @@ static void refreshHeaderTime(bool force) {
 #if UI_CHANNEL_LIST_DROPDOWN
     layoutHeaderInlineItems();
 #endif
+    for (ScreenHeader &h : s_screenHeaders) {
+        if (!lvObjValid(h.bar) || !h.time) continue;
+        lv_label_set_text(h.time, buf);
+        layoutScreenHeader(h);
+    }
     strncpy(s_lastHeaderTime, buf, sizeof(s_lastHeaderTime) - 1);
     s_lastHeaderTime[sizeof(s_lastHeaderTime) - 1] = '\0';
+}
+
+// Whether the header puts the battery reading beside its dot. Not on the Wio
+// Tracker held upright: 240 px across has the name, the clock, GPS and Wi-Fi to
+// fit as well, and the dot's colour already says how full it is -- so the
+// reading goes and the icons close up on the dot.
+static inline bool headerBattTextShown() {
+#if defined(DEVICE_WIO_TRACKER_L2)
+    return !uiPortrait();
+#else
+    return true;
+#endif
+}
+
+// Width of a label's text as it will draw, measured rather than read back with
+// lv_obj_get_width(): that is only right after a layout pass, and these are
+// asked mid-build, before one has happened.
+static lv_coord_t headerLabelTextW(lv_obj_t *label) {
+    if (!label) return 0;
+    lv_point_t sz = {0, 0};
+    lv_text_get_size(&sz, lv_label_get_text(label),
+                     lv_obj_get_style_text_font(label, LV_PART_MAIN),
+                     lv_obj_get_style_text_letter_space(label, LV_PART_MAIN), 0,
+                     LV_COORD_MAX, LV_TEXT_FLAG_NONE);
+    return sz.x;
+}
+
+// Puts a header clock on the centre line of the display -- not of its bar, and
+// not of the gap between whatever sits at the bar's two ends, which is where it
+// used to go and why it read as off centre. Only where the gap is too narrow for
+// that does it move, the least it has to, to stay clear of both ends.
+//
+// contentL is where the bar's content area starts on the display (LEFT_MID
+// offsets count from there); slotL and slotR are the display x the clock has to
+// stay between.
+//
+// Except held upright on the P4, the Heltec V4 and the Wio Tracker, where the
+// clock goes to the right-hand end and the name, not the clock, gives way when
+// the two meet. On the P4 that end is otherwise empty -- its battery, GPS and
+// Wi-Fi are in the status strip under the nav bar -- so the clock is inset as
+// far as the name is from the left. On the other two that end is the status
+// cluster, and the clock sits just inside it, the same gap from its first icon.
+static inline bool headerClockAtRight() {
+#if HAS_STATUS_STRIP || defined(DEVICE_HELTEC_V4_EXPANSION) || defined(DEVICE_WIO_TRACKER_L2)
+    return uiPortrait();
+#else
+    return false;
+#endif
+}
+
+// Where the clock goes, before it is kept clear of whatever is on its left.
+static lv_coord_t headerClockX(lv_coord_t clockW, lv_coord_t slotR) {
+    if (headerClockAtRight()) return slotR - s_chatHdrGeom.padX - clockW;
+    lv_coord_t x = ((lv_coord_t)lv_disp_get_hor_res(NULL) - clockW) / 2;
+    if (x + clockW > slotR) x = slotR - clockW;
+    return x;
+}
+
+static void centreHeaderClock(lv_obj_t *clock, lv_coord_t contentL,
+                              lv_coord_t slotL, lv_coord_t slotR, lv_coord_t yOffset) {
+    if (!clock) return;
+    const lv_coord_t w = headerLabelTextW(clock);
+    lv_coord_t x = headerClockX(w, slotR);
+    if (!headerClockAtRight() && x < slotL) x = slotL;
+    lv_obj_align(clock, LV_ALIGN_LEFT_MID, x - contentL, yOffset);
+}
+
+// Holds a LONG_DOT label to one line. Dots only stand in for the overflow when
+// the label's height is fixed; left to size itself, a name too long for its
+// width wraps onto a second line instead.
+static void labelSingleLine(lv_obj_t *label) {
+    if (!label) return;
+    lv_obj_set_height(label,
+                      lv_font_get_line_height(lv_obj_get_style_text_font(label, LV_PART_MAIN)));
 }
 
 static void layoutHeaderInlineItems() {
@@ -48836,102 +49078,344 @@ static void layoutHeaderInlineItems() {
     if (!s_channelSelectorBtn || !s_chatHeaderBattText || !s_chatHeaderBar) return;
 
     const lv_coord_t headerTextYOffset = 1;
+    bool rightClusterShown = true;
 
 #if HAS_STATUS_STRIP
     if (uiPortrait()) {
         // Battery, GPS and Wi-Fi are in the status strip under the nav bar
-        // (statusStripInit()), so the right end of the header is the clock's.
-        // RIGHT_MID is inside the header's padding, which already carries the
-        // rounded-corner inset (cornerSafeHeader()), so it stays off the curve.
+        // (statusStripInit()), so the right end of the header is the clock's
+        // (headerClockAtRight()).
         lv_obj_add_flag(s_chatHeaderBattBar, LV_OBJ_FLAG_HIDDEN);
         lv_obj_add_flag(s_chatHeaderBattText, LV_OBJ_FLAG_HIDDEN);
         // The touch-only chat screen keeps GPS and Wi-Fi in this bar too (only
         // the keyboard boards move them onto the nav bar). They are in the
-        // strip as well, so here they go, and the clock has the end to itself.
+        // strip as well, so here they go.
         if (s_chatHeaderGps && lv_obj_get_parent(s_chatHeaderGps) == s_chatHeaderBar) {
             lv_obj_add_flag(s_chatHeaderGps, LV_OBJ_FLAG_HIDDEN);
         }
         if (s_chatHeaderWifi && lv_obj_get_parent(s_chatHeaderWifi) == s_chatHeaderBar) {
             lv_obj_add_flag(s_chatHeaderWifi, LV_OBJ_FLAG_HIDDEN);
         }
-        lv_obj_align(s_chatHeaderTime, LV_ALIGN_RIGHT_MID, -4, headerTextYOffset);
-        return;
+        rightClusterShown = false;
     }
 #endif
 
-    // Keep battery icon at the far right, with percent text close to it.
-    lv_obj_align(s_chatHeaderBattBar, LV_ALIGN_RIGHT_MID, -4, 0);
-    lv_obj_align_to(s_chatHeaderBattText, s_chatHeaderBattBar, LV_ALIGN_OUT_LEFT_MID, -3, headerTextYOffset);
+    // The battery reading, or the dot alone (headerBattTextShown()), is what
+    // the icons pack in against.
+    lv_obj_t *battAnchor = s_chatHeaderBattText;
+    if (rightClusterShown) {
+        // Keep battery icon at the far right, with percent text close to it.
+        lv_obj_align(s_chatHeaderBattBar, LV_ALIGN_RIGHT_MID, -4, 0);
+        if (headerBattTextShown()) {
+            lv_obj_clear_flag(s_chatHeaderBattText, LV_OBJ_FLAG_HIDDEN);
+            lv_obj_align_to(s_chatHeaderBattText, s_chatHeaderBattBar, LV_ALIGN_OUT_LEFT_MID, -3, headerTextYOffset);
+        } else {
+            lv_obj_add_flag(s_chatHeaderBattText, LV_OBJ_FLAG_HIDDEN);
+            battAnchor = s_chatHeaderBattBar;
+        }
 
-    // Keep optional status icons near the battery cluster so clock centering
-    // depends only on selector (left) and battery info (right).
-    if (s_chatHeaderGps && s_chatHeaderWifi
-        && lv_obj_get_parent(s_chatHeaderGps) == s_chatHeaderBar
-        && lv_obj_get_parent(s_chatHeaderWifi) == s_chatHeaderBar) {
-        lv_obj_align_to(s_chatHeaderWifi, s_chatHeaderBattText, LV_ALIGN_OUT_LEFT_MID, -6, 0);
-        lv_obj_align_to(s_chatHeaderGps, s_chatHeaderWifi, LV_ALIGN_OUT_LEFT_MID, -7, 0);
+        // Optional status icons packed in beside the battery, so the right end
+        // of the bar is one cluster the clock keeps clear of.
+        if (s_chatHeaderGps && s_chatHeaderWifi
+            && lv_obj_get_parent(s_chatHeaderGps) == s_chatHeaderBar
+            && lv_obj_get_parent(s_chatHeaderWifi) == s_chatHeaderBar) {
+            lv_obj_align_to(s_chatHeaderWifi, battAnchor, LV_ALIGN_OUT_LEFT_MID, -6, 0);
+            lv_obj_align_to(s_chatHeaderGps, s_chatHeaderWifi, LV_ALIGN_OUT_LEFT_MID, -7, 0);
 
-        if (s_chatDmAlert && lv_obj_is_valid(s_chatDmAlert)
-            && lv_obj_get_parent(s_chatDmAlert) == s_chatHeaderBar) {
-            lv_obj_align_to(s_chatDmAlert, s_chatHeaderWifi, LV_ALIGN_OUT_LEFT_MID, -5, 0);
-            if (lvObjValid(s_chatChanAlert)
-                && lv_obj_get_parent(s_chatChanAlert) == s_chatHeaderBar) {
-                lv_obj_align_to(s_chatChanAlert, s_chatDmAlert, LV_ALIGN_OUT_LEFT_MID, -4, 0);
+            if (s_chatDmAlert && lv_obj_is_valid(s_chatDmAlert)
+                && lv_obj_get_parent(s_chatDmAlert) == s_chatHeaderBar) {
+                lv_obj_align_to(s_chatDmAlert, s_chatHeaderWifi, LV_ALIGN_OUT_LEFT_MID, -5, 0);
+                if (lvObjValid(s_chatChanAlert)
+                    && lv_obj_get_parent(s_chatChanAlert) == s_chatHeaderBar) {
+                    lv_obj_align_to(s_chatChanAlert, s_chatDmAlert, LV_ALIGN_OUT_LEFT_MID, -4, 0);
+                }
             }
         }
     }
 
-#if defined(DEVICE_TDECK_PRO)
-    lv_obj_align_to(s_chatHeaderTime, s_channelSelectorBtn,
-                    LV_ALIGN_OUT_RIGHT_MID, 8, headerTextYOffset);
-    return;
-#endif
-
-    // No selector with an anchored channel list (P4 landscape): the hidden
-    // button still has a position, and centring between it and the battery
-    // would push the clock off centre for nothing. Centre it on the bar.
-    if (!channelListIsDropdown()) {
-        lv_obj_align(s_chatHeaderTime, LV_ALIGN_CENTER, 0, headerTextYOffset);
-        return;
-    }
-
-    // Keep time centered between selector button and battery info.
     lv_obj_update_layout(s_chatHeaderBar);
-    lv_area_t selectorArea;
-    lv_area_t battTextArea;
-    lv_obj_get_coords(s_channelSelectorBtn, &selectorArea);
-    lv_obj_get_coords(s_chatHeaderBattText, &battTextArea);
-    lv_coord_t selectorRight = selectorArea.x2 + 1;
-    lv_coord_t battLeft = battTextArea.x1;
-#if UI_TOUCH_ONLY_PROFILE
-    lv_coord_t rightBoundLeft = battLeft;
-    if (s_chatHeaderGps && lv_obj_get_parent(s_chatHeaderGps) == s_chatHeaderBar) {
-        lv_area_t gpsArea;
-        lv_obj_get_coords(s_chatHeaderGps, &gpsArea);
-        rightBoundLeft = gpsArea.x1;
-    }
-#else
-    lv_coord_t rightBoundLeft = battLeft;
-#endif
-    lv_coord_t timeW = lv_obj_get_width(s_chatHeaderTime);
-    lv_coord_t slotStart = selectorRight + 4;
-    lv_coord_t slotEnd = rightBoundLeft - 2;
+    lv_area_t barArea;
+    lv_obj_get_coords(s_chatHeaderBar, &barArea);
+    const lv_coord_t border = lv_obj_get_style_border_width(s_chatHeaderBar, LV_PART_MAIN);
+    const lv_coord_t contentL = barArea.x1 + border
+                              + lv_obj_get_style_pad_left(s_chatHeaderBar, LV_PART_MAIN);
+    const lv_coord_t contentR = barArea.x2 + 1 - border
+                              - lv_obj_get_style_pad_right(s_chatHeaderBar, LV_PART_MAIN);
 
-    if (slotEnd <= slotStart || timeW <= 0) {
-        lv_obj_align(s_chatHeaderTime, LV_ALIGN_CENTER, 0, headerTextYOffset);
-    } else {
-        lv_coord_t x = ((slotStart + slotEnd) - timeW) / 2;
-        if (x < slotStart) x = slotStart;
-        lv_coord_t maxX = slotEnd - timeW;
-        if (x > maxX) x = maxX;
-        // x is a screen coordinate, but LEFT_MID offsets from inside the bar's
-        // padding. cornerSafeHeader() widened that padding; take it back out
-        // so the clock stays centred in its slot rather than pushed right.
-        lv_obj_align(s_chatHeaderTime, LV_ALIGN_LEFT_MID, x - UI_CORNER_SAFE_X,
-                     headerTextYOffset);
+    // Left bound: the channel name, where there is one. With an anchored
+    // channel list (P4 landscape) the selector is hidden but still has a
+    // position, which must not count.
+    lv_coord_t slotL = contentL;
+    if (channelListIsDropdown() && !lv_obj_has_flag(s_channelSelectorBtn, LV_OBJ_FLAG_HIDDEN)) {
+        lv_area_t selectorArea;
+        lv_obj_get_coords(s_channelSelectorBtn, &selectorArea);
+        slotL = selectorArea.x2 + 1 + 4;
     }
+
+    // Right bound: the leftmost thing in the status cluster.
+    lv_coord_t slotR = contentR;
+    if (rightClusterShown) {
+        lv_obj_t *leftmost = battAnchor;
+        if (s_chatHeaderGps && lv_obj_get_parent(s_chatHeaderGps) == s_chatHeaderBar
+            && !lv_obj_has_flag(s_chatHeaderGps, LV_OBJ_FLAG_HIDDEN)) {
+            leftmost = s_chatHeaderGps;
+        }
+        lv_area_t a;
+        lv_obj_get_coords(leftmost, &a);
+        slotR = a.x1 - 2;
+    }
+
+    centreHeaderClock(s_chatHeaderTime, contentL, slotL, slotR, headerTextYOffset);
 #endif
 }
+
+// ── Screen header ────────────────────────────────────────────────────────────
+// DMs, Nodes, Config and Tools open with the chat screen's header bar rather
+// than one of their own: the same bar in the same place, the screen's name where
+// the channel name goes, the clock on the centre line, and whatever that board's
+// chat header carries at the right-hand end (battery everywhere; GPS and Wi-Fi
+// too on the touch boards; nothing upright on the P4, whose status strip under
+// the nav bar has them). Moving between the screens, only the name changes.
+//
+// Painted from refreshHeaderTime() and refreshHeaderStatus(), from the same
+// readings as the chat header, so the two can never disagree.
+
+static void onScreenHeaderDeleted(lv_event_t *e) {
+    lv_obj_t *bar = lv_event_get_target_obj(e);
+    for (ScreenHeader &h : s_screenHeaders) {
+        if (h.bar == bar) h = ScreenHeader{};
+    }
+}
+
+static void layoutScreenHeader(ScreenHeader &h) {
+    if (!lvObjValid(h.bar) || !h.title || !h.time) return;
+    const ChatHeaderGeom &g = s_chatHdrGeom;
+
+    // Worked out from where the bar was put rather than read from its coords:
+    // a side nav column widens the screen's padding after this is built, and
+    // the bar only moves on the next layout pass.
+    const lv_coord_t border = lv_obj_get_style_border_width(h.bar, LV_PART_MAIN);
+    const lv_coord_t contentL = h.barX + border + lv_obj_get_style_pad_left(h.bar, LV_PART_MAIN);
+    const lv_coord_t contentR = h.barX + h.barW - border
+                              - lv_obj_get_style_pad_right(h.bar, LV_PART_MAIN);
+
+    // The right-hand cluster, packed exactly as layoutHeaderInlineItems() packs
+    // the chat header's.
+    lv_coord_t slotR = contentR;
+    if (h.battDot && h.battText) {
+        lv_obj_align(h.battDot, LV_ALIGN_RIGHT_MID, -4, 0);
+        lv_obj_t *battAnchor = h.battText;
+        slotR = contentR - 4 - g.battDotW;
+        if (headerBattTextShown()) {
+            lv_obj_align_to(h.battText, h.battDot, LV_ALIGN_OUT_LEFT_MID, -3, 1);
+            slotR -= 3 + headerLabelTextW(h.battText);
+        } else {
+            lv_obj_add_flag(h.battText, LV_OBJ_FLAG_HIDDEN);
+            battAnchor = h.battDot;
+        }
+        if (h.gps && h.wifi) {
+            lv_obj_align_to(h.wifi, battAnchor, LV_ALIGN_OUT_LEFT_MID, -6, 0);
+            lv_obj_align_to(h.gps, h.wifi, LV_ALIGN_OUT_LEFT_MID, -7, 0);
+            slotR -= 6 + headerLabelTextW(h.wifi) + 7 + headerLabelTextW(h.gps);
+        }
+        slotR -= 2;
+    }
+
+    // Where the clock wants to be, so the name knows how much room it has.
+    const lv_coord_t clockW = headerLabelTextW(h.time);
+    const lv_coord_t clockX = headerClockX(clockW, slotR);
+    const lv_coord_t titleL = contentL + g.titleX;
+    const lv_coord_t titleMax = clockX - 6 - titleL;
+
+    // The channel name's face where the name fits beside the clock, and a size
+    // or two down where it does not ("Configuration" in the P4's upright 24 px
+    // would otherwise run under it) -- only then is it cut short.
+    static const lv_font_t *const kSmaller[] = {
+        &lv_font_montserrat_18, &lv_font_montserrat_16,
+        &lv_font_montserrat_14, &lv_font_montserrat_12,
+    };
+    const lv_font_t *font = g.clockFont;
+    lv_point_t sz = {0, 0};
+    lv_text_get_size(&sz, h.titleText, font, 0, 0, LV_COORD_MAX, LV_TEXT_FLAG_NONE);
+    for (const lv_font_t *f : kSmaller) {
+        if (sz.x <= titleMax) break;
+        if (lv_font_get_line_height(f) >= lv_font_get_line_height(font)) continue;
+        font = f;
+        lv_text_get_size(&sz, h.titleText, font, 0, 0, LV_COORD_MAX, LV_TEXT_FLAG_NONE);
+    }
+    const lv_coord_t titleW = (titleMax <= 0) ? 0 : min((lv_coord_t)sz.x, titleMax);
+    if (lv_obj_get_style_text_font(h.title, LV_PART_MAIN) != font) {
+        lv_obj_set_style_text_font(h.title, font, 0);
+    }
+    lv_obj_set_width(h.title, titleW);
+    labelSingleLine(h.title);
+    lv_label_set_text(h.title, h.titleText);
+    lv_obj_align(h.title, LV_ALIGN_LEFT_MID, g.titleX, g.textYOffset);
+
+    centreHeaderClock(h.time, contentL, titleL + titleW + 6, slotR, 1);
+}
+
+static lv_obj_t *buildScreenHeader(lv_obj_t *modal, const char *text) {
+    if (!modal) return nullptr;
+    ScreenHeader *slot = nullptr;
+    for (ScreenHeader &h : s_screenHeaders) {
+        if (!lvObjValid(h.bar)) { h = ScreenHeader{}; slot = &h; break; }
+    }
+    if (!slot) slot = &s_screenHeaders[0];   // cannot happen: one screen at a time
+    ScreenHeader &h = *slot;
+    const ChatHeaderGeom &g = s_chatHdrGeom;
+
+    // Every screen that takes this is a full-display panel with 4 px of padding
+    // and whatever border it has -- the same pair appendHeltecBottomNav()
+    // cancels to put its bar on the display edges, and cancelled here the same
+    // way so this bar lands where the chat header is.
+    const int inset = (int)lv_obj_get_style_border_width(modal, LV_PART_MAIN) + 4;
+    const int leftGap = navSideLeft() ? 2 : 0;
+    const int rightGap = (navIsSideColumn() && !navSideLeft()) ? 2 : 0;
+    h.barX = g.margin + navSideInsetLeft() + leftGap;
+    h.barW = (int)lv_disp_get_hor_res(NULL) - 2 * g.margin
+           - navSideInsetLeft() - navSideInsetRight() - leftGap - rightGap;
+
+    // Holds the bar's room in the screen's flex column; the bar itself floats.
+    lv_obj_t *spacer = lv_obj_create(modal);
+    lv_obj_remove_style_all(spacer);
+    lv_obj_set_width(spacer, lv_pct(100));
+    lv_obj_set_height(spacer, max(1, g.margin + g.h - inset));
+    lv_obj_clear_flag(spacer, LV_OBJ_FLAG_SCROLLABLE);
+
+    h.bar = lv_obj_create(modal);
+    lv_obj_add_flag(h.bar, LV_OBJ_FLAG_IGNORE_LAYOUT);
+    lv_obj_add_flag(h.bar, LV_OBJ_FLAG_FLOATING);
+    lv_obj_set_size(h.bar, h.barW, g.h);
+    // From the content area's left edge, which the side column's padding (added
+    // later, by appendHeltecBottomNav()) moves by exactly navSideInsetLeft().
+    lv_obj_align(h.bar, LV_ALIGN_TOP_LEFT, g.margin + leftGap - inset, g.margin - inset);
+    lv_obj_clear_flag(h.bar, LV_OBJ_FLAG_SCROLLABLE);
+#if defined(DEVICE_TDECK_PRO)
+    lv_obj_set_style_bg_opa(h.bar, LV_OPA_TRANSP, 0);
+    lv_obj_set_style_border_width(h.bar, 1, 0);
+    lv_obj_set_style_border_color(h.bar, lv_color_make(0, 0, 0), 0);
+#else
+    lv_obj_set_style_bg_color(
+        h.bar,
+        (s_cfg.uiMode == UI_MODE_LIGHT) ? chatPanelBackgroundColor() : lv_color_hex(0x0E285B),
+        0);
+    lv_obj_set_style_bg_opa(h.bar, (s_cfg.uiMode == UI_MODE_LIGHT) ? LV_OPA_60 : LV_OPA_70, 0);
+    lv_obj_set_style_border_width(h.bar, 1, 0);
+    lv_obj_set_style_border_color(h.bar, lv_color_hex(0x335D9D), 0);
+#endif
+    lv_obj_set_style_pad_all(h.bar, 2, 0);
+    cornerSafeHeader(h.bar);
+    lv_obj_add_event_cb(h.bar, onScreenHeaderDeleted, LV_EVENT_DELETE, nullptr);
+
+    snprintf(h.titleText, sizeof(h.titleText), "%s", text ? text : "");
+    h.title = lv_label_create(h.bar);
+    lv_obj_set_style_text_font(h.title, g.clockFont, 0);
+    lv_obj_set_style_text_color(h.title, lv_color_hex(0xD9E8FF), 0);
+    lv_obj_set_style_text_align(h.title, LV_TEXT_ALIGN_LEFT, 0);
+    lv_label_set_long_mode(h.title, LV_LABEL_LONG_DOT);
+
+    h.time = lv_label_create(h.bar);
+    lv_obj_set_style_text_font(h.time, g.clockFont, 0);
+    lv_obj_set_style_text_color(h.time, lv_color_hex(0xD9E8FF), 0);
+    lv_label_set_text(h.time, s_chatHeaderTime ? lv_label_get_text(s_chatHeaderTime) : "");
+
+    bool rightCluster = true;
+#if HAS_STATUS_STRIP
+    if (uiPortrait()) rightCluster = false;   // in the status strip instead
+#endif
+    if (rightCluster) {
+#if UI_TOUCH_ONLY_PROFILE
+        h.gps = lv_label_create(h.bar);
+        lv_obj_set_style_text_font(h.gps, g.textFont, 0);
+        lv_obj_set_style_text_color(h.gps, lv_color_hex(0xBFD6FF), 0);
+        lv_label_set_text(h.gps, "");
+
+        h.wifi = lv_label_create(h.bar);
+        lv_obj_set_style_text_font(h.wifi, g.iconFont, 0);
+        lv_obj_set_style_text_color(h.wifi, lv_color_hex(0xBFD6FF), 0);
+        lv_label_set_text(h.wifi, "");
+#endif
+        h.battDot = lv_obj_create(h.bar);
+        lv_obj_remove_style_all(h.battDot);
+        lv_obj_set_size(h.battDot, g.battDotW, g.battDotH);
+        lv_obj_set_style_radius(h.battDot, LV_RADIUS_CIRCLE, 0);
+        lv_obj_set_style_bg_opa(h.battDot, LV_OPA_COVER, 0);
+        lv_obj_set_style_bg_color(h.battDot, headerGoodGreenColor(), 0);
+        lv_obj_set_style_border_width(h.battDot, 1, 0);
+        lv_obj_set_style_border_color(h.battDot, lv_color_hex(0x274A84), 0);
+
+        h.battText = lv_label_create(h.bar);
+        lv_obj_set_style_text_font(h.battText, g.textFont, 0);
+        lv_obj_set_style_text_color(h.battText, lv_color_hex(0xBFD6FF), 0);
+        lv_label_set_text(h.battText,
+                          s_chatHeaderBattText ? lv_label_get_text(s_chatHeaderBattText) : "");
+    }
+
+    layoutScreenHeader(h);
+    // The periodic refresh early-outs while nothing has changed, which opening a
+    // screen normally is; one forced pass fills the icons and battery in now.
+    refreshHeaderStatus(true);
+    return h.title;
+}
+
+// Renames a screen header (Nodes puts its count and filter in the name).
+static void screenHeaderSetTitle(lv_obj_t *title, const char *text) {
+    if (!title) return;
+    for (ScreenHeader &h : s_screenHeaders) {
+        if (h.title != title || !lvObjValid(h.bar)) continue;
+        if (strcmp(h.titleText, text) == 0) return;
+        snprintf(h.titleText, sizeof(h.titleText), "%s", text);
+        layoutScreenHeader(h);
+        return;
+    }
+}
+
+#if UI_TOUCH_ONLY_PROFILE
+// The secondary header: the row under a screen header that holds the screen's
+// own actions (Nodes' Filter, Config's Info), packed from the left. They used
+// to share the header with the title; the header's right end now carries the
+// same status cluster as the chat screen's, and there is no room for both.
+static lv_obj_t *buildSecondaryHeader(lv_obj_t *modal) {
+    lv_obj_t *row = lv_obj_create(modal);
+    lv_obj_remove_style_all(row);
+    lv_obj_set_width(row, lv_pct(100));
+    lv_obj_set_height(row, LV_SIZE_CONTENT);
+    lv_obj_clear_flag(row, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_set_style_pad_column(row, toolStackLayout() ? 6 : 4, 0);
+    lv_obj_set_flex_flow(row, LV_FLEX_FLOW_ROW);
+    lv_obj_set_flex_align(row, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_CENTER,
+                          LV_FLEX_ALIGN_CENTER);
+    return row;
+}
+
+static lv_obj_t *secondaryHeaderBtn(lv_obj_t *row, const char *text, lv_event_cb_t cb) {
+    const bool big = toolStackLayout();
+    lv_obj_t *btn = lv_btn_create(row);
+    lv_obj_set_height(btn, big ? kStackBtnH : 22);
+    lv_obj_set_style_min_width(btn, big ? 72 : 58, 0);
+    lv_obj_set_style_radius(btn, 4, 0);
+    lv_obj_set_style_pad_hor(btn, big ? 10 : 6, 0);
+    lv_obj_set_style_pad_ver(btn, 1, 0);
+    lv_obj_set_style_shadow_width(btn, 0, 0);
+    lv_obj_set_style_bg_color(btn, lv_color_hex(0x16386F), 0);
+    lv_obj_set_style_bg_opa(btn, LV_OPA_70, 0);
+    lv_obj_set_style_border_width(btn, 1, 0);
+    lv_obj_set_style_border_color(btn, lv_color_hex(0x335D9D), 0);
+    lv_obj_add_event_cb(btn, cb, LV_EVENT_CLICKED, nullptr);
+
+    lv_obj_t *lbl = lv_label_create(btn);
+#if defined(DEVICE_CROWPANEL_35)
+    lv_obj_set_style_text_font(lbl, big ? STACK_BTN_FONT : &lv_font_montserrat_12, 0);
+#else
+    lv_obj_set_style_text_font(lbl, big ? STACK_BTN_FONT : &lv_font_montserrat_10, 0);
+#endif
+    lv_obj_set_style_text_color(lbl, lv_color_hex(0xD9E8FF), 0);
+    lv_label_set_text(lbl, text);
+    lv_obj_center(lbl);
+    return btn;
+}
+#endif
 
 static inline lv_color_t headerBatteryDotColor(uint8_t battPct) {
     if (battPct >= 80) {
@@ -49049,6 +49533,16 @@ static void refreshHeaderStatus(bool force) {
                      battPct, battV,
                      headerBatteryDotColor(battPct));
 #endif
+    // The copies on DMs, Nodes, Config and Tools (buildScreenHeader()).
+    for (ScreenHeader &h : s_screenHeaders) {
+        if (!lvObjValid(h.bar)) continue;
+        paintStatusIcons(h.gps, h.wifi,
+                         gpsEnabled, gpsFix, gpsSatCount, wifiApMode, wifiConnected,
+                         headerStatusInk());
+        if (h.battDot) lv_obj_set_style_bg_color(h.battDot, headerBatteryDotColor(battPct), 0);
+        if (h.battText) lv_label_set_text(h.battText, lv_label_get_text(s_chatHeaderBattText));
+        layoutScreenHeader(h);
+    }
 
     lv_obj_t *gpsParent = lv_obj_get_parent(s_chatHeaderGps);
     lv_obj_t *wifiParent = lv_obj_get_parent(s_chatHeaderWifi);
@@ -54073,6 +54567,7 @@ static void buildUi() {
     lv_obj_set_style_text_font(s_channelSelectorLabel, selectorTextFont, 0);
     lv_obj_set_style_text_align(s_channelSelectorLabel, LV_TEXT_ALIGN_LEFT, 0);
     lv_label_set_long_mode(s_channelSelectorLabel, LV_LABEL_LONG_DOT);
+    labelSingleLine(s_channelSelectorLabel);
 #if UI_TOUCH_ONLY_PROFILE
     if (compactHeltecSelector) {
         lv_obj_set_width(s_channelSelectorLabel, 1);
@@ -54165,6 +54660,35 @@ static void buildUi() {
     s_chatDmAlert = nullptr;
     s_chatChanAlert = nullptr;
 #endif
+
+    s_chatHdrGeom.margin = panelMargin;
+    s_chatHdrGeom.h = chatHeaderH;
+#if UI_CHANNEL_LIST_DROPDOWN
+    // Where refreshChannelSelectorLabel() leaves the name: flush with the
+    // selector's left edge, or 4 px in where a caret shares the button.
+#if UI_TOUCH_ONLY_PROFILE
+    s_chatHdrGeom.titleX = compactHeltecSelector
+        ? headerPadX
+        : selectorBtnOffsetX + (showSelectorCaret ? 4 : 0);
+#else
+    s_chatHdrGeom.titleX = selectorBtnOffsetX + (showSelectorCaret ? 4 : 0);
+#endif
+    s_chatHdrGeom.textYOffset = selectorTextYOffset;
+#else
+    s_chatHdrGeom.titleX = headerPadX + 4;
+    s_chatHdrGeom.textYOffset = 1;
+#endif
+    s_chatHdrGeom.padX = headerPadX;
+    s_chatHdrGeom.battDotW = lv_obj_get_style_width(s_chatHeaderBattBar, LV_PART_MAIN);
+    s_chatHdrGeom.battDotH = lv_obj_get_style_height(s_chatHeaderBattBar, LV_PART_MAIN);
+    s_chatHdrGeom.clockFont = clockTextFont;
+    s_chatHdrGeom.textFont = headerTextFont;
+#if UI_TOUCH_ONLY_PROFILE
+    s_chatHdrGeom.iconFont = headerIconFont;
+#else
+    s_chatHdrGeom.iconFont = headerTextFont;
+#endif
+
 #if UI_CHANNEL_LIST_DROPDOWN
     layoutHeaderInlineItems();
 #endif

@@ -239,6 +239,7 @@ Custom	Własny
 Custom (%u B)	Własny (%u B)
 Cyan	Cyjan
 DIRECT MESSAGES	WIADOMOŚCI PRYWATNE
+Direct Messages	Wiadomości prywatne
 DISTANCE UNKNOWN	ODLEGŁOŚĆ NIEZNANA
 DM blink: %u flash%s	Mruganie DM: %u raz(y)%.0s
 DMs	DM
@@ -469,7 +470,9 @@ No GPS fix	Brak pozycji GPS
 Send NODEINFO and telemetry to the mesh now?	Wysłać teraz NODEINFO i telemetrię do sieci?
 NODES	WĘZŁY
 NODES (%d%s)	WĘZŁY (%d%s)
+Nodes (%d%s)	Węzły (%d%s)
 NODES [%s] (%d%s)	WĘZŁY [%s] (%d%s)
+Nodes [%s] (%d%s)	Węzły [%s] (%d%s)
 Name	Nazwa
 Name: %s\nShort: %s\nID: !%08X\nLast heard: %s\nSNR: %.1f dB\nHops: %u\nChannel: %d\n\nPosition:\n%s\n\nTelemetry:\n%s	Nazwa: %s\nKrótka: %s\nID: !%08X\nOstatnio słyszany: %s\nSNR: %.1f dB\nSkoki: %u\nKanał: %d\n\nPozycja:\n%s\n\nTelemetria:\n%s
 Name\nShort\nID	Nazwa\nKrótka\nID

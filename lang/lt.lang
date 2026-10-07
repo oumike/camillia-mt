@@ -239,6 +239,7 @@ Custom	Pasirinktinis
 Custom (%u B)	Pasirinktinis (%u B)
 Cyan	Žydra
 DIRECT MESSAGES	TIESIOGINĖS ŽINUTĖS
+Direct Messages	Tiesioginės žinutės
 DISTANCE UNKNOWN	ATSTUMAS NEŽINOMAS
 DM blink: %u flash%s	DM mirksėjimas: %u k.%.0s
 DMs	DM
@@ -468,7 +469,9 @@ No GPS fix	Nėra GPS fiksacijos
 Send NODEINFO and telemetry to the mesh now?	Siųsti NODEINFO ir telemetriją į tinklą dabar?
 NODES	MAZGAI
 NODES (%d%s)	MAZGAI (%d%s)
+Nodes (%d%s)	Mazgai (%d%s)
 NODES [%s] (%d%s)	MAZGAI [%s] (%d%s)
+Nodes [%s] (%d%s)	Mazgai [%s] (%d%s)
 Name	Vardas
 Name: %s\nShort: %s\nID: !%08X\nLast heard: %s\nSNR: %.1f dB\nHops: %u\nChannel: %d\n\nPosition:\n%s\n\nTelemetry:\n%s	Vardas: %s\nTrumpas: %s\nID: !%08X\nPaskutinį kartą girdėtas: %s\nSNR: %.1f dB\nŠuoliai: %u\nKanalas: %d\n\nPadėtis:\n%s\n\nTelemetrija:\n%s
 Name\nShort\nID	Vardas\nTrumpas\nID

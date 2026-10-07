@@ -239,6 +239,7 @@ Custom	Pielāgots
 Custom (%u B)	Pielāgots (%u B)
 Cyan	Ciāns
 DIRECT MESSAGES	TIEŠĀS ZIŅAS
+Direct Messages	Tiešās ziņas
 DISTANCE UNKNOWN	ATTĀLUMS NEZINĀMS
 DM blink: %u flash%s	DM mirgošana: %u reizes%.0s
 DMs	DM
@@ -468,7 +469,9 @@ No GPS fix	Nav GPS fiksācijas
 Send NODEINFO and telemetry to the mesh now?	Sūtīt NODEINFO un telemetriju uz tīklu tagad?
 NODES	MEZGLI
 NODES (%d%s)	MEZGLI (%d%s)
+Nodes (%d%s)	Mezgli (%d%s)
 NODES [%s] (%d%s)	MEZGLI [%s] (%d%s)
+Nodes [%s] (%d%s)	Mezgli [%s] (%d%s)
 Name	Vārds
 Name: %s\nShort: %s\nID: !%08X\nLast heard: %s\nSNR: %.1f dB\nHops: %u\nChannel: %d\n\nPosition:\n%s\n\nTelemetry:\n%s	Vārds: %s\nĪsais: %s\nID: !%08X\nPēdējoreiz dzirdēts: %s\nSNR: %.1f dB\nLēcieni: %u\nKanāls: %d\n\nPozīcija:\n%s\n\nTelemetrija:\n%s
 Name\nShort\nID	Vārds\nĪsais\nID

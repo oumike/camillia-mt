@@ -240,6 +240,7 @@ Custom	Po meri
 Custom (%u B)	Po meri (%u B)
 Cyan	Cian
 DIRECT MESSAGES	NEPOSREDNA SPOROČILA
+Direct Messages	Neposredna sporočila
 DISTANCE UNKNOWN	RAZDALJA NEZNANA
 DM blink: %u flash%s	Utripanje DM: %u-krat%.0s
 DMs	DM
@@ -467,7 +468,9 @@ No GPS fix	Ni položaja GPS
 Send NODEINFO and telemetry to the mesh now?	Pošljem zdaj NODEINFO in telemetrijo v omrežje?
 NODES	VOZLIŠČA
 NODES (%d%s)	VOZLIŠČA (%d%s)
+Nodes (%d%s)	Vozlišča (%d%s)
 NODES [%s] (%d%s)	VOZLIŠČA [%s] (%d%s)
+Nodes [%s] (%d%s)	Vozlišča [%s] (%d%s)
 Name	Ime
 Name: %s\nShort: %s\nID: !%08X\nLast heard: %s\nSNR: %.1f dB\nHops: %u\nChannel: %d\n\nPosition:\n%s\n\nTelemetry:\n%s	Ime: %s\nKratko: %s\nID: !%08X\nNazadnje slišano: %s\nSNR: %.1f dB\nSkoki: %u\nKanal: %d\n\nPoložaj:\n%s\n\nTelemetrija:\n%s
 Name\nShort\nID	Ime\nKratko\nID

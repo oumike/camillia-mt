@@ -239,6 +239,7 @@ Custom	Egyéni
 Custom (%u B)	Egyéni (%u B)
 Cyan	Ciánkék
 DIRECT MESSAGES	KÖZVETLEN ÜZENETEK
+Direct Messages	Közvetlen üzenetek
 DISTANCE UNKNOWN	ISMERETLEN TÁVOLSÁG
 DM blink: %u flash%s	DM villogás: %u×%.0s
 DMs	DM-ek
@@ -469,7 +470,9 @@ No GPS fix	Nincs GPS-fix
 Send NODEINFO and telemetry to the mesh now?	Elküldöd most a NODEINFO-t és a telemetriát a hálózatra?
 NODES	CSOMÓPONTOK
 NODES (%d%s)	CSOMÓPONTOK (%d%s)
+Nodes (%d%s)	Csomópontok (%d%s)
 NODES [%s] (%d%s)	CSOMÓPONTOK [%s] (%d%s)
+Nodes [%s] (%d%s)	Csomópontok [%s] (%d%s)
 Name	Név
 Name: %s\nShort: %s\nID: !%08X\nLast heard: %s\nSNR: %.1f dB\nHops: %u\nChannel: %d\n\nPosition:\n%s\n\nTelemetry:\n%s	Név: %s\nRövid: %s\nID: !%08X\nUtoljára hallva: %s\nSNR: %.1f dB\nUgrások: %u\nCsatorna: %d\n\nPozíció:\n%s\n\nTelemetria:\n%s
 Name\nShort\nID	Név\nRövid\nID

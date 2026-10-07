@@ -236,6 +236,7 @@ Counting files... %u found	Comptage des fichiers... %u trouvés
 Custom	Personnalisé
 Custom (%u B)	Personnalisée (%u o)
 DIRECT MESSAGES	MESSAGES PRIVÉS
+Direct Messages	Messages privés
 DISTANCE UNKNOWN	DISTANCE INCONNUE
 DM blink: %u flash%s	Clignotement MP : %u éclairs%.0s
 DMs	MP
@@ -468,7 +469,9 @@ No GPS fix	Pas de fix GPS
 Send NODEINFO and telemetry to the mesh now?	Envoyer NODEINFO et la télémétrie au maillage maintenant ?
 NODES	NŒUDS
 NODES (%d%s)	NŒUDS (%d%s)
+Nodes (%d%s)	Nœuds (%d%s)
 NODES [%s] (%d%s)	NŒUDS [%s] (%d%s)
+Nodes [%s] (%d%s)	Nœuds [%s] (%d%s)
 Name	Nom
 Name: %s\nShort: %s\nID: !%08X\nLast heard: %s\nSNR: %.1f dB\nHops: %u\nChannel: %d\n\nPosition:\n%s\n\nTelemetry:\n%s	Nom : %s\nCourt : %s\nID : !%08X\nDernier contact : %s\nSNR : %.1f dB\nSauts : %u\nCanal : %d\n\nPosition :\n%s\n\nTélémétrie :\n%s
 Name\nShort\nID	Nom\nCourt\nID

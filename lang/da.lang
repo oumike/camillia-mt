@@ -236,6 +236,7 @@ Counting files... %u found	Tæller filer... %u fundet
 Custom	Tilpasset
 Custom (%u B)	Tilpasset (%u B)
 DIRECT MESSAGES	DIREKTE BESKEDER
+Direct Messages	Direkte beskeder
 DISTANCE UNKNOWN	UKENDT AFSTAND
 DM blink: %u flash%s	DM-blink: %u gang(e)%.0s
 DMs	DM
@@ -459,7 +460,9 @@ No GPS fix	Ingen GPS-fix
 Send NODEINFO and telemetry to the mesh now?	Send NODEINFO og telemetri til nettet nu?
 NODES	NODER
 NODES (%d%s)	NODER (%d%s)
+Nodes (%d%s)	Noder (%d%s)
 NODES [%s] (%d%s)	NODER [%s] (%d%s)
+Nodes [%s] (%d%s)	Noder [%s] (%d%s)
 Name	Navn
 Name: %s\nShort: %s\nID: !%08X\nLast heard: %s\nSNR: %.1f dB\nHops: %u\nChannel: %d\n\nPosition:\n%s\n\nTelemetry:\n%s	Navn: %s\nKort: %s\nID: !%08X\nSidst hørt: %s\nSNR: %.1f dB\nHop: %u\nKanal: %d\n\nPosition:\n%s\n\nTelemetri:\n%s
 Name\nShort\nID	Navn\nKort\nID
