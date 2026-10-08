@@ -30343,9 +30343,24 @@ static void openLiveToolsModal() {
     // keeps its two-column grid there, the height not being there for a list
     // of eight.
     const bool toolsTop = toolStackLayout();
-    const lv_font_t *toolsRowFont   = toolsStacked ? &lv_font_montserrat_14 : kChanModalRowFont;
+    // P4 landscape: the same two-column grid, but filling the room under the
+    // header rather than the 300 px block sized for 320x240 panels, which left
+    // most of this panel empty. Row heights are set once the layout is known,
+    // at the end; the font and gaps grow with them.
+#if defined(DEVICE_TDISPLAY_P4)
+    const bool toolsFill = !toolsStacked;
+    const lv_font_t *toolsFillFont =
+        UI_LARGE_PANEL_PROFILE ? &lv_font_montserrat_28 : &lv_font_montserrat_16;
+    const int toolsFillGap = UI_LARGE_PANEL_PROFILE ? 20 : 10;
+#else
+    constexpr bool toolsFill = false;
+    const lv_font_t *toolsFillFont = kChanModalRowFont;
+    constexpr int toolsFillGap = kChanModalGap;
+#endif
+    const lv_font_t *toolsRowFont   = toolsStacked ? &lv_font_montserrat_14
+                                    : toolsFill    ? toolsFillFont : kChanModalRowFont;
     const int toolsRowH   = toolsStacked ? 44 : kChanModalRowH;
-    const int toolsRowGap = toolsStacked ? 10 : kChanModalGap;
+    const int toolsRowGap = toolsStacked ? 10 : toolsFill ? toolsFillGap : kChanModalGap;
     lv_obj_set_flex_align(s_liveToolsModal, LV_FLEX_ALIGN_START,
                           LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
 
@@ -30424,7 +30439,7 @@ static void openLiveToolsModal() {
     lv_obj_set_style_border_width(grid, 0, 0);
     lv_obj_set_style_pad_all(grid, 0, 0);
     lv_obj_set_style_pad_row(grid, toolsRowGap, 0);
-    lv_obj_set_style_pad_column(grid, kChanModalGap, 0);
+    lv_obj_set_style_pad_column(grid, toolsFill ? toolsFillGap : kChanModalGap, 0);
     lv_obj_set_flex_flow(grid, toolsStacked ? LV_FLEX_FLOW_COLUMN : LV_FLEX_FLOW_ROW_WRAP);
     lv_obj_set_flex_align(grid, LV_FLEX_ALIGN_SPACE_BETWEEN, LV_FLEX_ALIGN_CENTER,
                           LV_FLEX_ALIGN_START);
@@ -30490,6 +30505,22 @@ static void openLiveToolsModal() {
     // A no-op where the bar is switched off, which is what leaves Tools looking
     // as it does today on a keyboard board with no bar — minus the backdrop.
     appendHeltecBottomNav(s_liveToolsModal, HELTEC_NAV_TOOLS);
+
+    if (toolsFill) {
+        // Measured after the nav bar is in, so the room it takes -- along the
+        // bottom or down the side column -- is already gone from the body.
+        // A gap's margin on every side keeps the cells off the header, the
+        // bar and the panel's rounded corners.
+        lv_obj_update_layout(s_liveToolsModal);
+        const int fillW = (int)lv_obj_get_content_width(body) - 2 * toolsFillGap;
+        const int fillH = (int)lv_obj_get_content_height(body) - 2 * toolsFillGap;
+        int rowH = (fillH - (kLiveToolRowsPerCol - 1) * toolsRowGap) / kLiveToolRowsPerCol;
+        if (rowH < toolsRowH) rowH = toolsRowH;
+        if (fillW > toolsContentW) lv_obj_set_width(grid, fillW);
+        for (int i = 0; i < LIVE_TOOL_COUNT; i++) {
+            if (s_liveToolsRows[i]) lv_obj_set_height(s_liveToolsRows[i], rowH);
+        }
+    }
 
     refreshLiveToolsSelection();
 }
@@ -45775,6 +45806,29 @@ static void pumpKeyboardInput() {
                     continue;
                 }
             }
+#elif defined(DEVICE_TDISPLAY_P4)
+            // The keyboard expansion on the portrait drawer. Touch-only, so the
+            // selector block above is not compiled here and the arrows already
+            // switch the channel as they move (see the main-nav block below).
+            // What was missing is the finish: Enter fell through to compose, so
+            // picking a channel opened a new message on it instead of the
+            // channel itself. Enter now closes the drawer onto the chat.
+            if (isChannelDropdownVisible()) {
+                if (k == KEY_SCROLL_UP || k == KEY_SCROLL_DN) {
+                    // Claimed here so a message cursor left on from before the
+                    // drawer opened cannot take the arrows away from the list.
+                    int next = s_activeChannel + ((k == KEY_SCROLL_UP) ? -1 : 1);
+                    if (next < 0) next = MESH_CHANNELS - 1;
+                    if (next >= MESH_CHANNELS) next = 0;
+                    setActiveChannel(next);
+                    continue;
+                }
+                if (k == KEY_ENTER || isModalCloseKey(k)) {
+                    setChannelDropdownVisible(false);
+                    refreshChannelGlow(true);
+                    continue;
+                }
+            }
 #endif
 
             if (kUseScrollKeysForMainNav) {
@@ -46089,8 +46143,11 @@ static void pumpKeyboardInput() {
                 setChannelDropdownVisible(!isChannelDropdownVisible());
                 refreshChannelGlow(true);
 #endif
-#if UI_TOUCH_ONLY_PROFILE
+#if UI_TOUCH_ONLY_PROFILE && !defined(DEVICE_TDISPLAY_P4)
             // Touch-first build: Enter keeps its original new-message behavior.
+            // Not the P4: its keyboard expansion has a space bar, so it takes
+            // the keyboard builds' keys below -- Space composes, Enter steps
+            // into the messages.
             } else if (k == KEY_ENTER
                        && s_activeChannel >= 0 && s_activeChannel < MESH_CHANNELS) {
 #if HAS_HOME_DASHBOARD
