@@ -327,6 +327,13 @@ These apply to all keyboard builds, including `tdeck`, `tdeck-pro`,
   space back and shows twice as many lines
 - **Left and Right move the cursor inside a text field.** Up and Down move
   through the channel list and wrap at either end
+- **Space starts a new message on the chat screen; Enter does not.** Enter puts
+  the cursor on the newest message, and a second Enter opens
+  [Message Actions](#message-actions), as on the other keyboard boards. The
+  on-screen New Message button still works as before
+- **Enter on the channel list opens the highlighted channel.** With the list
+  slid out (F2), Up and Down pick a channel and Enter closes the list onto it;
+  Esc closes it the same way
 - **In landscape, Right and Left move between the channel list and the chat.**
   Right from the list puts the cursor on the newest message; Up and Down then
   step through messages and Enter opens [Message Actions](#message-actions).

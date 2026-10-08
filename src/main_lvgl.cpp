@@ -45775,6 +45775,29 @@ static void pumpKeyboardInput() {
                     continue;
                 }
             }
+#elif defined(DEVICE_TDISPLAY_P4)
+            // The keyboard expansion on the portrait drawer. Touch-only, so the
+            // selector block above is not compiled here and the arrows already
+            // switch the channel as they move (see the main-nav block below).
+            // What was missing is the finish: Enter fell through to compose, so
+            // picking a channel opened a new message on it instead of the
+            // channel itself. Enter now closes the drawer onto the chat.
+            if (isChannelDropdownVisible()) {
+                if (k == KEY_SCROLL_UP || k == KEY_SCROLL_DN) {
+                    // Claimed here so a message cursor left on from before the
+                    // drawer opened cannot take the arrows away from the list.
+                    int next = s_activeChannel + ((k == KEY_SCROLL_UP) ? -1 : 1);
+                    if (next < 0) next = MESH_CHANNELS - 1;
+                    if (next >= MESH_CHANNELS) next = 0;
+                    setActiveChannel(next);
+                    continue;
+                }
+                if (k == KEY_ENTER || isModalCloseKey(k)) {
+                    setChannelDropdownVisible(false);
+                    refreshChannelGlow(true);
+                    continue;
+                }
+            }
 #endif
 
             if (kUseScrollKeysForMainNav) {
@@ -46089,8 +46112,11 @@ static void pumpKeyboardInput() {
                 setChannelDropdownVisible(!isChannelDropdownVisible());
                 refreshChannelGlow(true);
 #endif
-#if UI_TOUCH_ONLY_PROFILE
+#if UI_TOUCH_ONLY_PROFILE && !defined(DEVICE_TDISPLAY_P4)
             // Touch-first build: Enter keeps its original new-message behavior.
+            // Not the P4: its keyboard expansion has a space bar, so it takes
+            // the keyboard builds' keys below -- Space composes, Enter steps
+            // into the messages.
             } else if (k == KEY_ENTER
                        && s_activeChannel >= 0 && s_activeChannel < MESH_CHANNELS) {
 #if HAS_HOME_DASHBOARD
