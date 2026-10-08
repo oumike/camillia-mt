@@ -42751,6 +42751,13 @@ static bool handleGlobalNavigationKey(char key) {
                             /*resetChannel=*/kNavChatKeyIsDeliberate);
         return true;
     }
+    if (key == KEY_OPEN_CHAT_BTN) {
+        // The P4's F2: a labelled key, so as deliberate as the M9's button and
+        // pressed on chat it opens the channel list. It keeps the channel you
+        // were on, as every keyboard board's chat shortcut always has.
+        openNavChatShortcut(/*allowChannelList=*/true, /*resetChannel=*/false);
+        return true;
+    }
 #endif
     if (key == KEY_OPEN_DMS) {
         openNavDirectMessagesShortcut();

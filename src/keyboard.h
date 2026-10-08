@@ -79,6 +79,11 @@
 // Steps the keyboard light through its levels (kKbBacklightLevels) -- F11 on
 // the T-Display P4's keyboard expansion. KEY_TOGGLE_KB_BACKLIGHT is on/off.
 #define KEY_KB_BACKLIGHT_STEP 0x98
+// F2 on the T-Display P4's keyboard expansion: Chat from a labelled key of its
+// own, so pressed on chat it goes on to open the channel list. Its own code
+// because Alt+C raises KEY_OPEN_CHAT on the same board, and that chord is the
+// reflexive escape hatch that must not open the list.
+#define KEY_OPEN_CHAT_BTN 0x99
 
 // The key currently held down (mapped code), or KEY_NONE when nothing is held,
 // plus how long it has been down. Pager builds report this from real press/

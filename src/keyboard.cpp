@@ -395,7 +395,7 @@ static inline uint8_t tloraReadRotaryAB() {
 // Help is F10. F7 switches the keyboard light on and off, F11 steps its level.
 const char kTloraTapMap[TLORA_KEY_COUNT][3] = {
     {KEY_OPEN_HOME, KEY_OPEN_HOME, KEY_OPEN_HOME},                   // F1
-    {KEY_OPEN_CHAT, KEY_OPEN_CHAT, KEY_OPEN_CHAT},                   // F2
+    {KEY_OPEN_CHAT_BTN, KEY_OPEN_CHAT_BTN, KEY_OPEN_CHAT_BTN},       // F2
     {KEY_OPEN_DMS, KEY_OPEN_DMS, KEY_OPEN_DMS},                      // F3
     {KEY_OPEN_NODES, KEY_OPEN_NODES, KEY_OPEN_NODES},                // F4
     {KEY_OPEN_TOOLS, KEY_OPEN_TOOLS, KEY_OPEN_TOOLS},                // F5

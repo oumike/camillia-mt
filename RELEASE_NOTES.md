@@ -1,5 +1,6 @@
 ### New
 - Touch boards with a lock screen: long-press a message preview on the lock screen to unlock, open that message's channel and bring up Message Actions for it. A short tap still dismisses the lock screen as before.
+- T-Display P4 with the keyboard expansion attached: pressing F2 while chat is already showing slides out the channel list, and pressing it again closes it. This works wherever the channel list is a drawer: in portrait, and in landscape with the side navigation column.
 - T-Display P4 (landscape): the Home screen header now spans the full width. The node name and clock sit beside this node's ID, short name, firmware version and role. Current weather sits beside the fuller forecast details: feels-like, humidity, wind, location and how old the reading is.
 - Heltec V4 and Wio Tracker L2 (portrait): Direct Messages and Nodes now stack their two panes top to bottom. The Nodes list and details use a larger font.
 

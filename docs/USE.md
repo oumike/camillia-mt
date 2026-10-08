@@ -314,7 +314,10 @@ These apply to all keyboard builds, including `tdeck`, `tdeck-pro`,
   be on and unlocked, and closes on its own if the keyboard is removed during
   the countdown. An unsent message in the compose box is lost on the reboot
 - **The F-keys follow the navigation bar from left to right:** F1 Home, F2 Chat,
-  F3 DMs, F4 Nodes, F5 Tools, F6 Config. F10 opens Help. F8 and F9 do nothing
+  F3 DMs, F4 Nodes, F5 Tools, F6 Config. F10 opens Help. F8 and F9 do nothing.
+  F2 pressed while chat is already showing slides the channel list out, and
+  pressed again closes it, wherever the list is a drawer (portrait, and
+  landscape with the side navigation column)
 - **In landscape, each navigation bar button shows the F-key that opens it**,
   small beside its icon. Portrait has no room for the labels, but the keys work
   the same
