@@ -128,7 +128,9 @@
 // Latin Extended-A and the euro sign, under the same names -- so every
 // &lv_font_montserrat_N in the source resolves to them unchanged. They keep
 // LVGL's line metrics, so no layout moves. tools/gen_latin_fonts.sh makes them
-// into src/fonts/latin/; every env builds that directory.
+// into src/fonts/latin/; every env builds that directory except tdeck-pro, which
+// builds src/fonts/eink/ instead: 1 bpp Terminus under the same names, for its
+// black-and-white e-paper (tools/gen_eink_fonts.py).
 //
 // LVGL's own copies are switched off (0) so the names are not defined twice,
 // and the replacements are declared to lvgl.h below. A size nothing draws at

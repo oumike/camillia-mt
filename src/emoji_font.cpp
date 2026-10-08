@@ -15,6 +15,7 @@ struct EmojiSlot {
     lv_font_t merged;          // mutable copy of base with fallback attached
     lv_font_t *emoji;          // tiny_ttf instance (owns glyph cache)
     bool ready;
+    lv_font_t baseFallback;    // copy of base's own fallback, emoji chained on
 };
 
 // The Montserrat sizes chat/DM/node text is actually drawn at (see main_lvgl
@@ -110,6 +111,14 @@ void emojiFontInit() {
         // duplicated; the fallback is what LVGL walks for missing glyphs.
         s.merged = *s.base;
         s.merged.fallback = s.emoji;
+        // A base that already has a fallback keeps it ahead of the emoji: the
+        // T-Deck Pro's Terminus faces carry the LV_SYMBOL_* icons in theirs
+        // (src/fonts/eink/). One level is all any face here has.
+        if (s.base->fallback) {
+            s.baseFallback = *s.base->fallback;
+            s.baseFallback.fallback = s.emoji;
+            s.merged.fallback = &s.baseFallback;
+        }
         s.ready = true;
         readyCount++;
     }

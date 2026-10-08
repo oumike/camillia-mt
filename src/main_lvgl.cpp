@@ -40,6 +40,14 @@
 // that draw the overlay (see the font source and build_src_filter).
 LV_FONT_DECLARE(lv_font_montserrat_bold_12);
 #endif
+#if defined(DEVICE_TDECK_PRO)
+// Terminus Bold at the chat sizes, for sender names (chatNameFont()). Built
+// from src/fonts/eink/, which only this env compiles.
+LV_FONT_DECLARE(lv_font_eink_bold_12);
+LV_FONT_DECLARE(lv_font_eink_bold_14);
+LV_FONT_DECLARE(lv_font_eink_bold_16);
+LV_FONT_DECLARE(lv_font_eink_bold_18);
+#endif
 #include "env_sensor.h"
 #include "gps.h"
 #include "los.h"
@@ -2144,6 +2152,45 @@ static const lv_font_t *scaledChatFont(const lv_font_t *base) {
     return emojiFont(scaledChatFontBase(base));
 }
 
+#if defined(DEVICE_TDECK_PRO)
+// The bold twin of a chat face, for the sender's name in a message. On the
+// 1-bit panel neither colour nor a lighter grey can set the name apart from the
+// text after it, so weight does.
+//
+// The twin carries the chat face's line metrics (tools/gen_eink_fonts.py), so a
+// bold name and the regular text beside it share a baseline. The face passed
+// in is usually emojiFont()'s copy rather than the font itself; both point at
+// the same glyph data, which is what identifies the size. The bold copy takes
+// over the regular face's fallback chain (icons, then emoji), so a name with an
+// emoji in it still draws one.
+static const lv_font_t *chatNameFont(const lv_font_t *regular) {
+    if (!regular) return regular;
+    struct Twin { const lv_font_t *regular; const lv_font_t *bold; };
+    static const Twin kTwins[] = {
+        { &lv_font_montserrat_12, &lv_font_eink_bold_12 },
+        { &lv_font_montserrat_14, &lv_font_eink_bold_14 },
+        { &lv_font_montserrat_16, &lv_font_eink_bold_16 },
+        { &lv_font_montserrat_18, &lv_font_eink_bold_18 },
+    };
+    struct Made { const lv_font_t *regular; lv_font_t bold; };
+    static Made s_made[8];
+    static int s_madeCount = 0;
+    for (int i = 0; i < s_madeCount; i++) {
+        if (s_made[i].regular == regular) return &s_made[i].bold;
+    }
+    for (const Twin &t : kTwins) {
+        if (t.regular->dsc != regular->dsc) continue;
+        if (s_madeCount >= (int)(sizeof(s_made) / sizeof(s_made[0]))) return t.bold;
+        Made &m = s_made[s_madeCount++];
+        m.regular = regular;
+        m.bold = *t.bold;
+        m.bold.fallback = regular->fallback;
+        return &m.bold;
+    }
+    return regular;
+}
+#endif
+
 static const char *fontSizeName(uint8_t size) {
     switch (size) {
         case FONT_SIZE_SMALL:  return TR("Small");
@@ -2645,6 +2692,8 @@ static void emojiPickerActivate(int idx);
 static const char *chatStripPrefix(const char *line);
 static const lv_font_t *chatAckMarkerFont(const lv_font_t *chatFont);
 static void chatSetAckedLineText(lv_obj_t *sg, const char *line, const lv_font_t *chatFont);
+static void chatSetLineSpans(lv_obj_t *sg, const char *line, const lv_font_t *chatFont,
+                             bool ackMark, const lv_font_t *nameFont);
 static void chatBubbleBeginRender(lv_obj_t *list);
 static inline void stylePaperMessageRow(lv_obj_t *row) {
 #if defined(DEVICE_TDECK_PRO)
@@ -7781,10 +7830,11 @@ static int tdeckProCollectSleepMsgs(const TdeckProRecentMsg *out[kTdeckProSleepM
     return found;
 }
 
-// Montserrat Bold 12 with the metrics of lv_font_montserrat_12 and its emoji
-// fallback chained on. Both overrides matter: LVGL positions a label's glyphs
-// from line_height and base_line, so the generated face's own 13/2 would sit
-// the bold half of a row a pixel above the regular half, and without the
+// Bold 12 (Terminus Bold on this board, see src/fonts/eink/) with the metrics
+// of lv_font_montserrat_12 and its icon and emoji fallbacks chained on. Both
+// overrides matter: LVGL positions a label's glyphs from line_height and
+// base_line, so the bold face's own metrics would sit the bold half of a row
+// off the regular half's baseline, and without the
 // fallback any character outside ASCII in a channel or node name would come out
 // blank in the bold field while rendering fine in the regular one.
 static const lv_font_t *tdeckProBoldRowFont() {
@@ -38411,8 +38461,19 @@ static void refreshDmModal(bool force) {
             // color loses it entirely. A marked line is a span group, for the
             // marker's smaller face.
             const bool ackedLine = (dl->ack == DmLine::ACKED);
-            lv_obj_t *msg = ackedLine ? lv_spangroup_create(s_dmMsgList)
-                                      : lv_label_create(s_dmMsgList);
+#if defined(DEVICE_TDECK_PRO)
+            // Every line on the T-Deck Pro, for the bold sender tag.
+            const bool spanLine = true;
+#else
+            const bool spanLine = ackedLine;
+#endif
+            lv_obj_t *msg = spanLine ? lv_spangroup_create(s_dmMsgList)
+                                     : lv_label_create(s_dmMsgList);
+#if defined(DEVICE_TDECK_PRO)
+            // A span group is clickable by default, a label is not; DM lines
+            // have no press handler, so keep them inert as labels were.
+            lv_obj_remove_flag(msg, LV_OBJ_FLAG_CLICKABLE);
+#endif
             lastMsgObj = msg;
             chatBlinkTrack(s_dmBlink, msg, dl->fresh);
             lv_obj_set_width(msg, lv_pct(100));
@@ -38423,7 +38484,7 @@ static void refreshDmModal(bool force) {
             lv_obj_set_style_pad_bottom(msg, 0, 0);
             // DmMgr now stores one logical message per DmLine; let LVGL wrap it
             // to the actual pane pixel width so font metrics drive line breaks.
-            if (!ackedLine) lv_label_set_long_mode(msg, LV_LABEL_LONG_WRAP);
+            if (!spanLine) lv_label_set_long_mode(msg, LV_LABEL_LONG_WRAP);
 
             uint16_t lineColor = dl->color;
             switch (dl->ack) {
@@ -38453,11 +38514,15 @@ static void refreshDmModal(bool force) {
 #if !defined(DEVICE_TDECK_PRO)
             lv_obj_set_style_bg_opa(msg, LV_OPA_TRANSP, 0);
 #endif
+#if defined(DEVICE_TDECK_PRO)
+            chatSetLineSpans(msg, dl->text, dmMsgFont, ackedLine, chatNameFont(dmMsgFont));
+#else
             if (ackedLine) {
                 chatSetAckedLineText(msg, dl->text, dmMsgFont);
             } else {
                 setLabelTextEmojiSafe(msg, dl->text);
             }
+#endif
         }
 
         if (autoScrollToLatest && lastMsgObj) {
@@ -53707,39 +53772,82 @@ static const lv_font_t *chatAckMarkerFont(const lv_font_t *chatFont) {
     return &lv_font_montserrat_10;                 // 16 and under
 }
 
-// Fills a classic message whose ACK is in: the line as one paragraph, with the
-// small marker spliced in after its clock. A span group rather than a label,
-// because a label draws in one face. The spans set no colour of their own, so
-// the whole line, marker included, takes the group's.
-static void chatSetAckedLineText(lv_obj_t *sg, const char *line, const lv_font_t *chatFont) {
+// Where a classic line's sender tag sits: "[Name]" on a received line, "<me>"
+// on our own -- the bracketed field that ends the prefix, found the way
+// chatStripPrefix() finds the prefix's end, brackets included. False when the
+// line has no tag (notices, prefix-less lines).
+static bool chatFindNameTag(const char *line, size_t *from, size_t *to) {
+    if (!line) return false;
+    const int kWindow = 64;   // chatStripPrefix()'s, for the same long names
+    for (const char *p = line; *p && (int)(p - line) < kWindow; p++) {
+        if (!((p[0] == ']' || p[0] == '>') && p[1] == ' ')) continue;
+        const char open = (p[0] == ']') ? '[' : '<';
+        for (const char *q = p; q > line; ) {
+            q--;
+            if (*q == open) {
+                *from = (size_t)(q - line);
+                *to = (size_t)(p + 1 - line);
+                return true;
+            }
+        }
+        return false;
+    }
+    return false;
+}
+
+static void chatAddLineSpan(lv_obj_t *sg, const char *text, size_t n, const lv_font_t *font) {
+    if (n == 0) return;
+    char buf[512];
+    if (n >= sizeof(buf)) n = sizeof(buf) - 1;
+    memcpy(buf, text, n);
+    buf[n] = '\0';
+    lv_span_t *sp = lv_spangroup_add_span(sg);
+    if (font) lv_style_set_text_font(lv_span_get_style(sp), font);
+    lv_spangroup_set_span_text(sg, sp, buf);
+}
+
+// Fills a classic message drawn as a span group: the line as one paragraph,
+// with the small ACK marker spliced in after its clock when ackMark is set, and
+// the sender tag in nameFont when one is given (the T-Deck Pro's bold names). A
+// span group rather than a label, because a label draws in one face. The spans
+// set no colour of their own, so the whole line, marker included, takes the
+// group's.
+static void chatSetLineSpans(lv_obj_t *sg, const char *line, const lv_font_t *chatFont,
+                             bool ackMark, const lv_font_t *nameFont) {
     if (!sg) return;
-    // Folded before the split, so the offset is measured in the bytes drawn.
+    // Folded before the split, so the offsets are measured in the bytes drawn.
     // The clock is ASCII and the fold leaves it where it was.
     char text[512];   // a merged channel message is 384, a DM line under that
     renderEmojiSafeText(line ? line : "", text, sizeof(text));
-    const size_t at = chatAckMarkerOffset(text);
+    const size_t len = strlen(text);
 
-    char head[sizeof(text)];
-    memcpy(head, text, at);
-    head[at] = '\0';
-    if (head[0]) {
-        lv_span_t *sp = lv_spangroup_add_span(sg);
-        lv_spangroup_set_span_text(sg, sp, head);
+    size_t pos = 0;
+    if (ackMark) {
+        const size_t at = chatAckMarkerOffset(text);
+        chatAddLineSpan(sg, text, at, nullptr);
+        lv_span_t *mark = lv_spangroup_add_span(sg);
+        lv_style_set_text_font(lv_span_get_style(mark), chatAckMarkerFont(chatFont));
+        // A space either side, in the marker's own small face: the line's
+        // spacing around it then does not depend on which side of it the text
+        // had one.
+        pos = at;
+        while (text[pos] == ' ') pos++;
+        char markText[8];
+        snprintf(markText, sizeof(markText), " %s%s", kChatAckMarker, text[pos] ? " " : "");
+        lv_spangroup_set_span_text(sg, mark, markText);
     }
-    lv_span_t *mark = lv_spangroup_add_span(sg);
-    lv_style_set_text_font(lv_span_get_style(mark), chatAckMarkerFont(chatFont));
-    // A space either side, in the marker's own small face: the line's spacing
-    // around it then does not depend on which side of it the text had one.
-    const char *tail = text + at;
-    while (*tail == ' ') tail++;
-    char markText[8];
-    snprintf(markText, sizeof(markText), " %s%s", kChatAckMarker, tail[0] ? " " : "");
-    lv_spangroup_set_span_text(sg, mark, markText);
-    if (tail[0]) {
-        lv_span_t *sp = lv_spangroup_add_span(sg);
-        lv_spangroup_set_span_text(sg, sp, tail);
+    size_t nameFrom = 0, nameTo = 0;
+    if (nameFont && chatFindNameTag(text, &nameFrom, &nameTo) && nameFrom >= pos) {
+        chatAddLineSpan(sg, text + pos, nameFrom - pos, nullptr);
+        chatAddLineSpan(sg, text + nameFrom, nameTo - nameFrom, nameFont);
+        pos = nameTo;
     }
+    chatAddLineSpan(sg, text + pos, len - pos, nullptr);
     lv_spangroup_refresh(sg);
+}
+
+static void chatSetAckedLineText(lv_obj_t *sg, const char *line, const lv_font_t *chatFont) {
+    chatSetLineSpans(sg, line, chatFont, true, nullptr);
 }
 
 // Joins the icon and clock into the bubble's leading meta field, in the same
@@ -53844,6 +53952,54 @@ static void chatFitBubbleLabel(lv_obj_t *label, const lv_font_t *font, lv_coord_
     if (w > maxW) w = maxW;
     lv_obj_set_width(label, w);
 }
+
+#if defined(DEVICE_TDECK_PRO)
+// A bubble's header on the T-Deck Pro: the time in the chat face, then the
+// sender in its bold twin (chatNameFont()), then the ACK mark. Three labels in
+// a row rather than one, because a label draws in one face.
+//
+// The row hugs its labels when they fit on one line. When they do not -- a long
+// chat name next to the time -- it takes the bubble's full label width and
+// wraps, so the name drops under the time instead of being clipped, the way
+// the single-label header reflowed.
+static void chatMakeBubbleHeaderPro(lv_obj_t *b, const char *metaTag, const char *whoTag,
+                                    bool ackMark, const lv_font_t *font,
+                                    lv_color_t tagColor, lv_coord_t maxW) {
+    const lv_font_t *nameFont = chatNameFont(font);
+    const lv_coord_t gap = (lv_coord_t)lv_font_get_glyph_width(font, ' ', ' ');
+
+    lv_obj_t *hdr = lv_obj_create(b);
+    lv_obj_remove_style_all(hdr);
+    lv_obj_set_height(hdr, LV_SIZE_CONTENT);
+    lv_obj_set_flex_flow(hdr, LV_FLEX_FLOW_ROW_WRAP);
+    lv_obj_set_flex_align(hdr, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_END, LV_FLEX_ALIGN_END);
+    lv_obj_set_style_pad_column(hdr, gap, 0);
+
+    lv_coord_t total = 0;
+    auto addLabel = [&](const char *text, const lv_font_t *f) {
+        lv_obj_t *l = lv_label_create(hdr);
+        lv_obj_set_style_text_font(l, f, 0);
+        lv_obj_set_style_text_color(l, tagColor, 0);
+        lv_obj_set_style_text_opa(l, LV_OPA_70, 0);
+        lv_label_set_text(l, text);
+        lv_point_t sz;
+        lv_txt_get_size(&sz, text, f, 0, 0, LV_COORD_MAX, LV_TEXT_FLAG_NONE);
+        total += (total ? gap : 0) + (lv_coord_t)sz.x;
+        return l;
+    };
+    if (metaTag && metaTag[0]) addLabel(metaTag, font);
+    lv_obj_t *nm = addLabel(whoTag, nameFont);
+    if (ackMark) addLabel(kChatAckMarker, chatAckMarkerFont(font));
+
+    if (total <= maxW) {
+        lv_obj_set_width(hdr, LV_SIZE_CONTENT);
+    } else {
+        lv_obj_set_width(hdr, maxW);
+        // A name too long for a line of its own wraps inside its label.
+        chatFitBubbleLabel(nm, nameFont, maxW);
+    }
+}
+#endif
 
 // Create one message bubble (row wrapper + colored container + optional name tag
 // + body) in the chat list. Right-aligned + accent for our own messages,
@@ -53954,6 +54110,11 @@ static void chatMakeBubble(lv_obj_t *list, uint32_t sender, bool isMe,
                                   || ackState == DisplayLine::ACKED_RELAY);
 
     const char *whoTag = (nameTag && nameTag[0]) ? nameTag : stateTag;
+#if defined(DEVICE_TDECK_PRO)
+    if (whoTag) {
+        chatMakeBubbleHeaderPro(b, metaTag, whoTag, ackMark, bubbleFont, tagColor, bubbleMaxW);
+    } else
+#endif
     if (whoTag || (metaTag && metaTag[0])) {
         char header[56];
         if (metaTag && metaTag[0] && whoTag) {
@@ -54194,6 +54355,9 @@ static void chatMakeIrcRow(lv_obj_t *list, const lv_font_t *font,
         snprintf(tagged, sizeof(tagged), "%s: ", name);
         lv_span_t *sp = lv_spangroup_add_span(sg);
         lv_style_set_text_color(lv_span_get_style(sp), nameColor);
+#if defined(DEVICE_TDECK_PRO)
+        lv_style_set_text_font(lv_span_get_style(sp), chatNameFont(font));
+#endif
         lv_spangroup_set_span_text(sg, sp, tagged);
     }
     {
@@ -54643,12 +54807,21 @@ static void refreshChatView(bool force) {
                 }
 
                 // A message whose ACK is in is a span group, for the small
-                // marker; every other one stays a plain label.
+                // marker; every other one stays a plain label. On the T-Deck
+                // Pro every message with a packet id is one too, for the bold
+                // sender tag. Lines without one stay labels: a tap selects
+                // those by their text, which onChatMessagePressed() can only
+                // read back from a label.
                 const bool ackedLine = rows[i]->packetId
                     && (rows[i]->ack == DisplayLine::ACKED
                         || rows[i]->ack == DisplayLine::ACKED_RELAY);
-                lv_obj_t *msg = ackedLine ? lv_spangroup_create(s_chatList)
-                                          : lv_label_create(s_chatList);
+#if defined(DEVICE_TDECK_PRO)
+                const bool spanLine = ackedLine || rows[i]->packetId != 0;
+#else
+                const bool spanLine = ackedLine;
+#endif
+                lv_obj_t *msg = spanLine ? lv_spangroup_create(s_chatList)
+                                         : lv_label_create(s_chatList);
                 lastMsgObj = msg;
                 chatBlinkTrack(s_chatBlink, msg, rows[i]->fresh);
                 if (anchorHere) anchorObj = msg;
@@ -54667,7 +54840,7 @@ static void refreshChatView(bool force) {
 #endif
                 lv_obj_set_style_pad_top(msg, 0, 0);
                 lv_obj_set_style_pad_bottom(msg, 0, 0);
-                if (!ackedLine) lv_label_set_long_mode(msg, LV_LABEL_LONG_WRAP);
+                if (!spanLine) lv_label_set_long_mode(msg, LV_LABEL_LONG_WRAP);
 
                 uint16_t textColor565 = (s_cfg.uiMode == UI_MODE_LIGHT) ? TFT_BLACK : TFT_WHITE;
                 if (s_cfg.chatColorsEnabled
@@ -54709,8 +54882,13 @@ static void refreshChatView(bool force) {
 #endif
 
                 lv_obj_set_style_text_color(msg, tftColorToLv(textColor565), 0);
-                if (ackedLine) {
+                if (spanLine) {
+#if defined(DEVICE_TDECK_PRO)
+                    chatSetLineSpans(msg, merged, scaledChatFont(kChannelChatFont), ackedLine,
+                                     chatNameFont(scaledChatFont(kChannelChatFont)));
+#else
                     chatSetAckedLineText(msg, merged, scaledChatFont(kChannelChatFont));
+#endif
                 } else {
                     setLabelTextEmojiSafe(msg, merged);
                 }
