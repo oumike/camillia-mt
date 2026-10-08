@@ -5,8 +5,6 @@
 - Heltec V4 and Wio Tracker L2 (portrait): Direct Messages and Nodes now stack their two panes top to bottom. The Nodes list and details use a larger font.
 
 ### Changed
-- T-Display P4 (landscape): the Tools screen now fills the room between the header and the navigation bar. The tool buttons are larger, with bigger text, instead of a small block in the middle of the screen.
-- T-Display P4 with the keyboard expansion attached: Space now starts a new message on the chat screen, and Enter puts the cursor on the newest message (a second Enter opens Message Actions), as on the other keyboard boards. Enter used to start a new message. The on-screen New Message button is unchanged.
 - Direct Messages, Nodes, Configuration, Tools and Help now open with the same header bar as the chat screen. It shows the screen's name, the clock and the battery, plus GPS and Wi-Fi on boards whose chat header shows them. When you move between these screens, only the name changes.
 - Screen titles now read "Direct Messages" and "Nodes (…)" instead of all capitals, in every translated language.
 - The Nodes Filter button and the Configuration Info button are now in a row just below the header.
@@ -23,7 +21,15 @@
 - Touch boards: Help no longer has a close (X) button. Leave it with the nav bar, as on other screens.
 
 ### Fixed
-- T-Display P4 with the keyboard expansion attached: choosing a channel from the channel list with the arrow keys and pressing Enter now opens that channel, instead of opening a new message on it.
 - T-Display P4 with the keyboard expansion attached: the battery percentage no longer drops too fast and then jumps. It is now based on the voltage of all connected cells, including the expansion's 21700 pack.
 - Long channel names in the chat header now stay on one line and end with "…" instead of wrapping onto a second line.
 - Pressing a message in the bubble or IRC chat views now uses that message's text when replying, instead of garbled text.
+
+
+### Update (v5.7.9)
+#### Changed
+- T-Display P4 with the keyboard expansion attached: Space now starts a new message on the chat screen, and Enter puts the cursor on the newest message (a second Enter opens Message Actions), as on the other keyboard boards. Enter used to start a new message. The on-screen New Message button is unchanged.
+- T-Display P4 (landscape): the Tools screen now fills the room between the header and the navigation bar. The tool buttons are larger, with bigger text, instead of a small block in the middle of the screen.
+
+#### Fixed
+- T-Display P4 with the keyboard expansion attached: choosing a channel from the channel list with the arrow keys and pressing Enter now opens that channel, instead of opening a new message on it.
