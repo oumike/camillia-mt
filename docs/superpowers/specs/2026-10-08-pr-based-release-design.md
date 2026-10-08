@@ -137,6 +137,7 @@ and continues from step 7.
 | `--notes-only` | Drafts notes; in PR mode, from the selected PR. Builds and publishes nothing. |
 | `--use-committed-notes`, `--build-local`, `--check-targets`, `--no-clean`, `--version`, `-y`, `--append-last-notes` | Unchanged. |
 | `--alpha` | Unchanged: releases the `alpha` branch as today, with no PR stage. |
+| `--audit` | **New.** Audits a PR and posts the findings to it; releases nothing. See Part 4. Combines only with `--pr N`. |
 
 `release.yml` passes `--use-committed-notes` and runs with `GITHUB_ACTIONS=true`,
 so it never enters PR mode; it is unchanged.
@@ -151,6 +152,55 @@ so it never enters PR mode; it is unchanged.
   open a PR into `main`, keep it draft until ready, `gh pr ready`, and how the
   release picks it up.
 
+## Part 4 — `release.sh --audit`
+
+A standalone, on-demand full audit of a PR. It never merges, commits, pushes or
+releases; it reports. Fixes are made on the branch afterwards (e.g. by asking
+Claude to fix the findings in the composite PR) and the audit can be rerun.
+
+**Usage:** `./scripts/release.sh --audit [--pr N]`
+
+1. **Pick the PR.** `--pr N` if given. Otherwise the open PR labelled
+   `composite`. If there is none, or more than one, a numbered menu of every
+   open PR into `main`, drafts included and marked as such. Drafts are allowed:
+   auditing before marking ready is the point.
+2. **Isolated checkout.** `git worktree add` of the PR's head SHA in a temporary
+   directory, so the audit never touches the user's working tree (a dirty tree
+   is fine here). Removed on exit, including on failure or interrupt.
+3. **Build checks** (in the worktree):
+   - Build every environment in `RELEASE_ENVS`, using the same per-env
+     PlatformIO core selection the release build uses (the P4 envs' isolated
+     core). Builds continue past a failure so the report lists every env.
+   - `tools/flash_headroom.py` over the built images.
+   - Each result is recorded as pass / fail with the tail of the log on failure.
+4. **Claude review** (in the worktree): headless `claude -p` with read-only tools
+   (read, search, and `git diff` / `git log`), given the PR's title, body,
+   commit list, and the range `origin/main...<head SHA>`. It reviews the whole
+   PR against these areas:
+   - correctness bugs in the changed code;
+   - cross-board regressions: shared code (`main_lvgl.cpp` and friends) changed
+     without the right board gating, or a board-specific change leaking to
+     other builds;
+   - UI strings not going through `TR()` / missing translations;
+   - docs, README or PR description out of step with the code;
+   - risky changes to OTA, signing, config layout (`RhinoConfig` size/offsets)
+     or storage.
+   Findings are grouped as **Blocking**, **Should fix** and **Nit**, each with
+   `file:line`, what is wrong, and why it matters. This step needs the `claude`
+   CLI (it reads files itself, which the API-key path cannot); without it the
+   audit reports the review as skipped and still posts the build results.
+5. **Report.**
+   - Written to `logs/audit-pr<N>-<sha7>.md`.
+   - Posted to the PR as a new comment (`gh pr comment N --body-file`), headed
+     with the audited head SHA, a build results table, then the review. A new
+     comment per run keeps the history; the SHA says which commit each audit
+     saw.
+   - Printed to the terminal as a summary: env pass/fail counts and the number
+     of findings per severity.
+6. **Exit status.** Non-zero if any build or headroom check failed or there are
+   Blocking findings; zero otherwise. The release flow does **not** require an
+   audit and does not read audit results.
+
 ## Error handling summary
 
 | Situation | Behaviour |
@@ -163,6 +213,9 @@ so it never enters PR mode; it is unchanged.
 | Head moved since selection | `--match-head-commit` makes the merge fail; stop, rerun. |
 | Failure after merge | Rerun with `--pr N` to resume. |
 | `gh` missing or unauthenticated | Stop in preflight (already checked today). |
+| `--audit`: `claude` CLI missing | Builds still run; review marked skipped in the report and comment. |
+| `--audit`: an env fails to build | Keep building the rest; report all; non-zero exit. |
+| `--audit`: interrupted | Worktree removed by the exit trap; nothing posted. |
 
 ## Testing
 
@@ -175,7 +228,10 @@ avoid publishing anything:
 3. A dirty tree is refused.
 4. The first real release through the new flow is the PR that carries this
    change, which also exercises the merge and dispatch.
-5. Resume: tested by interrupting a run between merge and dispatch only if a
+5. `--audit --pr <real PR>` produces the local report and one PR comment with
+   the head SHA, and leaves the working tree and branch untouched; a run with a
+   deliberately broken env lists that env as failed and exits non-zero.
+6. Resume: tested by interrupting a run between merge and dispatch only if a
    real failure occurs; otherwise covered by reading the detection logic
    against a merged-but-untagged PR in `--dry-run`.
 
