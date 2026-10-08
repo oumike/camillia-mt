@@ -352,8 +352,8 @@ struct GlanceHeader {
     lv_obj_t *wxTemp;   // temperature, opposite the clock
     lv_obj_t *wxRule;   // the divider between the two columns, when there are two
     // Set by the caller before building: weather goes under the clock, as a
-    // fuller block beneath a rule, instead of in a column beside it. Only the
-    // P4's landscape Home asks for it (openHomeDashboard()).
+    // fuller block beneath a rule, instead of in a column beside it. Nothing
+    // asks for it at present (glanceSetHomeShape() sets it false).
     bool      wxBelow;
     lv_obj_t *wxBelowRule;
     lv_obj_t *wxBelowText;
@@ -361,7 +361,8 @@ struct GlanceHeader {
     // across a wide panel, each with its reading on the left and the detail on
     // the right in a smaller face -- node name and clock beside this node's
     // ID, short name, firmware and role; conditions and temperature beside the
-    // fuller weather. Only the P4's landscape Home asks for it (alignGlanceWide()).
+    // fuller weather. P4 landscape only, on Home and the lock screen alike
+    // (glanceSetHomeShape(), alignGlanceWide()).
     bool      wideHero;
     lv_obj_t *nodeInfo;   // wideHero: this node's particulars, right of the clock
     lv_obj_t *wxDetail;   // wideHero: feels-like, wind, where and when
@@ -437,6 +438,7 @@ struct TdeckProRecentMsg {
     uint32_t epoch;          // 0 = clock was unset when it arrived; row omits the time
     uint32_t senderNodeId;
     int8_t   chanIdx;        // -1 = DM
+    uint32_t packetId;       // 0 = none; the lock screen's long press acts on it
     char     text[144];
 };
 static TdeckProRecentMsg s_tdeckProRecentMsgs[kTdeckProSleepMsgSlots];
@@ -1772,12 +1774,14 @@ static constexpr time_t kClockSetEpoch = 1700000000;
 // conversation visible on screen right now. Behind the glance overlay nothing
 // is visible, so the ring holds the active channel's traffic too -- which is
 // usually the traffic most worth reporting.
-static void tdeckProNoteRecentMessage(int chanIdx, uint32_t fromNode, const char *text) {
+static void tdeckProNoteRecentMessage(int chanIdx, uint32_t fromNode, const char *text,
+                                      uint32_t packetId) {
     TdeckProRecentMsg &slot = s_tdeckProRecentMsgs[s_tdeckProRecentMsgHead];
     const time_t now = time(nullptr);
     slot.epoch        = (now >= kClockSetEpoch) ? (uint32_t)now : 0;
     slot.senderNodeId = fromNode;
     slot.chanIdx      = (chanIdx >= 0 && chanIdx < MESH_CHANNELS) ? (int8_t)chanIdx : -1;
+    slot.packetId     = packetId;
     utf8util::copyTruncate(slot.text, sizeof(slot.text), text ? text : "");
     // A preview row is one line by construction, and a label given a newline
     // draws a second one straight through the row underneath it. Flatten the
@@ -8152,6 +8156,15 @@ static int tdeckProFillSleepMsgRow(int row, int y, int maxLines,
 }
 
 // Repaints the whole notification area.
+#if FEATURE_LOCK_SCREEN && HAS_TOUCH && HAS_MESSAGE_ACTIONS
+// What each preview row is showing, as of its last paint, for the lock screen's
+// long press (lockMsgRowAt()). Copied rather than pointed at: the ring slot a
+// row was filled from can be overwritten before the row is repainted.
+static uint32_t s_lockMsgRowPid[kTdeckProSleepMsgSlots] = {};
+static uint32_t s_lockMsgRowSender[kTdeckProSleepMsgSlots] = {};
+static int8_t   s_lockMsgRowChan[kTdeckProSleepMsgSlots] = {};
+#endif
+
 static void tdeckProRefreshSleepMsgRows() {
     const TdeckProRecentMsg *picked[kTdeckProSleepMsgSlots] = {nullptr};
     const int n = tdeckProSleepHasUnread() ? tdeckProCollectSleepMsgs(picked) : 0;
@@ -8178,6 +8191,11 @@ static void tdeckProRefreshSleepMsgRows() {
             const int drew = tdeckProFillSleepMsgRow(i, y, allow, *picked[i]);
             y += drew + kTdeckProMsgGapY;
             linesLeft -= drew / kTdeckProMsgLineH;
+#if FEATURE_LOCK_SCREEN && HAS_TOUCH && HAS_MESSAGE_ACTIONS
+            s_lockMsgRowPid[i]    = picked[i]->packetId;
+            s_lockMsgRowSender[i] = picked[i]->senderNodeId;
+            s_lockMsgRowChan[i]   = picked[i]->chanIdx;
+#endif
         } else if (s_tdeckProSleepMsgBold[i] && s_tdeckProSleepMsgSender[i]
                && s_tdeckProSleepMsgRest[i]) {
             // Hidden, not blanked: an empty label still occupies a line box, and
@@ -8913,6 +8931,29 @@ static void buildGlanceHeader(lv_obj_t *parent, GlanceHeader &w,
     paintGlanceStatusIcons(w);
 }
 
+// The header's shape, shared by Home and the lock screen so a landscape touch
+// panel draws one header on both: weather beside the clock, never under it, and
+// on the P4 in landscape the two-cell wide hero (alignGlanceWide()).
+static void glanceSetHomeShape(GlanceHeader &w) {
+#if HAS_WEATHER
+    w.wxBelow = false;
+#if defined(DEVICE_TDISPLAY_P4)
+    w.wideHero = !uiPortrait();
+#else
+    w.wideHero = false;
+#endif
+#else
+    LV_UNUSED(w);
+#endif
+}
+
+// The first free row under the header's clock, which is where Home's widget
+// band starts. Read after buildGlanceHeader(): the P4 settles the clock's face
+// there (glanceFitHeroFonts()).
+static int glanceBandTop() {
+    return kTdeckProTimeTop + (int)lv_font_get_line_height(kSleepOverlayTimeFont) + 6;
+}
+
 static void showTdeckProSleepClock() {
     if (!s_rootScreen) return;
     if (s_tdeckProSleepOverlay && lv_obj_is_valid(s_tdeckProSleepOverlay)) {
@@ -8935,6 +8976,10 @@ static void showTdeckProSleepClock() {
     lv_obj_add_flag(s_tdeckProSleepOverlay, LV_OBJ_FLAG_CLICKABLE);
 #endif
 
+#if FEATURE_LOCK_SCREEN && HAS_TOUCH
+    // Landscape touch panels: the same header Home draws (glanceSetHomeShape()).
+    if (!uiPortrait()) glanceSetHomeShape(s_sleepGlance);
+#endif
     buildGlanceHeader(s_tdeckProSleepOverlay, s_sleepGlance,
                       /*withStatusIcons=*/true, /*themed=*/false);
 
@@ -8953,7 +8998,8 @@ static void showTdeckProSleepClock() {
     // On the lock screen this band is a carousel and the messages are its first
     // face, so the rows are built onto that page instead of onto the overlay.
     // Everything below is unchanged by it: the page is full width and sits at
-    // kTdeckProMsgTop, so the x offsets and the row width still mean what they
+    // the band top (kTdeckProMsgTop, or Home's band top on landscape touch
+    // panels), so the x offsets and the row width still mean what they
     // did, and only the y origin moves -- see tdeckProRefreshSleepMsgRows().
     //
     // The Pro never gets here: FEATURE_LOCK_SCREEN excludes it, and its band
@@ -8968,8 +9014,15 @@ static void showTdeckProSleepClock() {
     // full-height overlay and had the whole panel to overhang into. The cards
     // on the other faces keep their inset regardless: the page inside this
     // carries kTdeckProBandInset/2 of padding of its own.
-    const int bandH = lv_disp_get_ver_res(NULL) - kTdeckProMsgTop;
-    s_lockMsgPage = buildLockCarousel(s_tdeckProSleepOverlay, kTdeckProMsgTop, bandH);
+    int bandTop = kTdeckProMsgTop;
+#if HAS_TOUCH
+    // Landscape touch panels start the band where Home starts its widgets, so
+    // the cards sit in the same place on both screens. Every such panel still
+    // fits the full message budget under it (kTdeckProMsgTotalLines).
+    if (!uiPortrait()) bandTop = glanceBandTop();
+#endif
+    const int bandH = lv_disp_get_ver_res(NULL) - bandTop;
+    s_lockMsgPage = buildLockCarousel(s_tdeckProSleepOverlay, bandTop, bandH);
     if (s_lockMsgPage) msgParent = s_lockMsgPage;
 #endif
     for (int i = 0; i < kTdeckProSleepMsgSlots; i++) {
@@ -32183,15 +32236,9 @@ static void glanceBuildNodePages(GlanceCarousel &c, lv_obj_t *host, int cardH) {
         return;
     }
 #endif
-    bool bothOnOnePage = homeDashSideBySide();
-#if defined(DEVICE_TDISPLAY_P4)
-    // Landscape Home puts the widgets in the right-hand column only (see the
-    // dashboard builder), too narrow to halve again -- so there the two lists
-    // are two widgets of their own. The lock screen keeps the full width and
-    // keeps them side by side.
-    if (!uiPortrait() && &c == &s_homeCarousel) bothOnOnePage = false;
-#endif
-    if (bothOnOnePage) {
+    // P4 landscape Home included: the header spans the screen there now, so the
+    // band gets the full width and the two lists share one page again.
+    if (homeDashSideBySide()) {
         lv_obj_t *page = buildHomeDashPage(host, true);
         buildGlanceNodeCard(c, page, 0, TR("RECENTLY HEARD"), true, cardH);
         buildGlanceNodeCard(c, page, 1, TR("LONGEST SILENT"), true, cardH);
@@ -32740,14 +32787,9 @@ static void openHomeDashboard() {
     const int widgetsX = 0;
     const int widgetsW = dashW;
 #if HAS_WEATHER
-    s_homeGlance.wxBelow = false;
     // P4 landscape: 616 px across is room for each hero cell to carry its
     // detail beside it (alignGlanceWide()).
-#if defined(DEVICE_TDISPLAY_P4)
-    s_homeGlance.wideHero = !uiPortrait();
-#else
-    s_homeGlance.wideHero = false;
-#endif
+    glanceSetHomeShape(s_homeGlance);
 #endif
     buildGlanceHeader(headerParent, s_homeGlance, !homeDashFooterShowsStatus(),
                       /*themed=*/true);
@@ -32762,8 +32804,7 @@ static void openHomeDashboard() {
     // the bottom of the clock — computed from the font rather than hardcoded,
     // because the six layouts do not share one.
     //
-    const int chartsTop =
-        kTdeckProTimeTop + (int)lv_font_get_line_height(kSleepOverlayTimeFont) + 6;
+    const int chartsTop = glanceBandTop();
 
     // Defensive floor. Every panel this builds on clears 90 px here, but the
     // header's height comes from a font and the dashboard's from a widget it
@@ -32864,9 +32905,10 @@ static void openHomeDashboard() {
 // declarations at the top of the file instead, and hands back the one thing it
 // has to own itself: where to put the message labels.
 //
-// There is no input path. Every press on a locked screen is a dismissal -- see
-// tryExitLockScreenFromInput() -- so a swipe handler here would either fight
-// that or never fire. The band turns on a timer or not at all, which is also
+// There is no navigation input. Every press on a locked screen is a dismissal --
+// see tryExitLockScreenFromInput() -- apart from a hold on a message preview,
+// which opens Message Actions (lockMsgHoldOnTouch()); a swipe handler here would
+// fight both. The band turns on a timer or not at all, which is also
 // why it draws no arrows: those mark a gesture, and there is no gesture to mark.
 
 // Returns the page the message rows should be built into, or nullptr if the
@@ -46256,7 +46298,11 @@ static void onChatMessagePressed(lv_event_t *e) {
 #endif
 
     uint32_t replyPacketId = (uint32_t)(uintptr_t)lv_event_get_user_data(e);
-    const char *txt = lv_label_get_text(label);
+    // Only the classic view's rows are labels; a bubble or an IRC row is a
+    // plain container, and lv_label_get_text() on one reads garbage. Those
+    // carry a packet id, which setSelectedReplyContext() resolves on its own.
+    const char *txt = lv_obj_check_type(label, &lv_label_class)
+                          ? lv_label_get_text(label) : nullptr;
     // Sender 0: a tap selects a message for *reply*, and this handler has the
     // label and packet id but no node id. Claiming a sender here would be
     // guessing, and carrying a stale one forward would point the Enter action
@@ -47226,6 +47272,132 @@ static bool meshDeckReadTouch(int32_t *outX, int32_t *outY) {
 }
 #endif
 
+#if FEATURE_LOCK_SCREEN && TOUCH_POLL_ENABLED && HAS_TOUCH && HAS_MESSAGE_ACTIONS \
+    && SCREEN_WAKE_FROM_TOUCH
+#define HAS_LOCK_MSG_HOLD 1
+#else
+#define HAS_LOCK_MSG_HOLD 0
+#endif
+
+#if HAS_LOCK_MSG_HOLD
+// Long press on a lock-screen message preview: unlock, open that message's
+// channel, and bring up Message Actions for it, as a hold on the same message in
+// chat would. Every other touch on the lock screen still dismisses it on
+// contact; a touch that lands on a preview row waits to see whether it is a
+// hold, and dismisses on release if it is not.
+static constexpr uint32_t kLockMsgHoldMs     = 600;
+static constexpr int32_t  kLockMsgHoldSlopPx = 16;
+static bool     s_lockMsgHoldActive = false;
+static uint32_t s_lockMsgHoldPid = 0;
+static uint32_t s_lockMsgHoldSender = 0;
+static int      s_lockMsgHoldChan = -1;
+static uint32_t s_lockMsgHoldStartMs = 0;
+static int32_t  s_lockMsgHoldX = 0;
+static int32_t  s_lockMsgHoldY = 0;
+// Set once Actions has opened under a finger still down, so the rest of that
+// touch cannot press whatever in the menu happens to be under it.
+static bool     s_lockTouchSwallow = false;
+
+// The preview row under screen row `y`, or -1. Only rows Message Actions can act
+// on count: channel messages from someone else, carrying a packet id -- the
+// same rule the chat view's long press applies. A DM row reads as no row.
+static int lockMsgRowAt(int32_t y) {
+    if (s_lockMsgPage && glanceFacing(s_lockCarousel) != GLANCE_PAGE_MESSAGES) return -1;
+    const int32_t slop = kTdeckProMsgGapY / 2;
+    for (int i = 0; i < kTdeckProSleepMsgSlots; i++) {
+        lv_obj_t *bold = s_tdeckProSleepMsgBold[i];
+        if (!lvObjValid(bold) || lv_obj_has_flag(bold, LV_OBJ_FLAG_HIDDEN)) continue;
+        if (s_lockMsgRowPid[i] == 0 || s_lockMsgRowChan[i] < 0
+            || s_lockMsgRowChan[i] >= MESH_CHANNELS
+            || s_lockMsgRowSender[i] == 0 || s_lockMsgRowSender[i] == s_myNodeId) {
+            continue;
+        }
+        lv_area_t a;
+        lv_obj_get_coords(bold, &a);
+        int32_t bottom = a.y2;
+        lv_obj_t *cont = s_tdeckProSleepMsgCont[i];
+        if (lvObjValid(cont) && !lv_obj_has_flag(cont, LV_OBJ_FLAG_HIDDEN)) {
+            lv_area_t c;
+            lv_obj_get_coords(cont, &c);
+            if (c.y2 > bottom) bottom = c.y2;
+        }
+        if (y >= a.y1 - slop && y <= bottom + slop) return i;
+    }
+    return -1;
+}
+
+static void lockMsgOpenActions(uint32_t pid, int chan, uint32_t sender) {
+    if (pid == 0 || chan < 0 || chan >= MESH_CHANNELS) return;
+
+    exitLockScreen();
+    if (s_lockScreenActive) return;
+
+    // Out of whatever was open underneath: Actions acts on the active channel,
+    // and a tapback sent with the DM screen up would go to that conversation.
+#if HAS_HOME_DASHBOARD
+    if (homeDashboardVisible()) closeHomeDashboard();
+#endif
+    if (s_dmModal) closeDmModal();
+    if (s_nodesActionModal) closeNodesActionMenu();
+    closeEmojiPicker();
+
+    if (chan != s_activeChannel) setActiveChannel(chan);
+    const char *text = nullptr;
+    uint32_t lineSender = 0;
+    if (chatLineForPacketId(pid, &lineSender, &text) && lineSender != 0) sender = lineSender;
+    setSelectedReplyContext(pid, text ? text : "", sender);
+    openMessageActionMenu(pid, sender);
+    Serial.printf("[screen] lock screen hold, actions for %08lx\n", (unsigned long)pid);
+}
+
+// A touched sample while locked. True when this consumed it; false leaves the
+// caller to dismiss as for any other touch.
+static bool lockMsgHoldOnTouch(uint32_t nowMs, int32_t x, int32_t y) {
+    // A hold from an earlier lock session that never saw its release.
+    if (s_lockMsgHoldActive
+        && (int32_t)(s_lockScreenSinceMs - s_lockMsgHoldStartMs) > 0) {
+        s_lockMsgHoldActive = false;
+    }
+    if (!s_lockMsgHoldActive) {
+        if ((int32_t)(nowMs - s_screenWakeBlockedUntilMs) < 0) return false;
+        const int row = lockMsgRowAt(y);
+        if (row < 0) return false;
+        s_lockMsgHoldActive = true;
+        // The message, not the row: a repaint mid-hold can move every row down.
+        s_lockMsgHoldPid = s_lockMsgRowPid[row];
+        s_lockMsgHoldSender = s_lockMsgRowSender[row];
+        s_lockMsgHoldChan = s_lockMsgRowChan[row];
+        s_lockMsgHoldStartMs = nowMs;
+        s_lockMsgHoldX = x;
+        s_lockMsgHoldY = y;
+        return true;
+    }
+    if (abs(x - s_lockMsgHoldX) > kLockMsgHoldSlopPx
+        || abs(y - s_lockMsgHoldY) > kLockMsgHoldSlopPx
+        || (s_lockMsgPage && glanceFacing(s_lockCarousel) != GLANCE_PAGE_MESSAGES)) {
+        // A drag rather than a hold, or the band turned away from the message
+        // under the finger: dismiss like any other touch.
+        s_lockMsgHoldActive = false;
+        return false;
+    }
+    if ((uint32_t)(nowMs - s_lockMsgHoldStartMs) >= kLockMsgHoldMs) {
+        s_lockMsgHoldActive = false;
+        s_lockTouchSwallow = true;
+        lockMsgOpenActions(s_lockMsgHoldPid, s_lockMsgHoldChan, s_lockMsgHoldSender);
+    }
+    return true;
+}
+
+// The finger came up. A press on a preview row that never became a hold is a
+// tap, and a tap dismisses.
+static void lockMsgHoldOnRelease(uint32_t nowMs) {
+    s_lockTouchSwallow = false;
+    if (!s_lockMsgHoldActive) return;
+    s_lockMsgHoldActive = false;
+    (void)tryExitLockScreenFromInput(nowMs, true);
+}
+#endif  // HAS_LOCK_MSG_HOLD
+
 static void lvglTouchRead(lv_indev_t *indev, lv_indev_data_t *data) {
     LV_UNUSED(indev);
 #if TOUCH_POLL_ENABLED
@@ -47302,7 +47474,19 @@ static void lvglTouchRead(lv_indev_t *indev, lv_indev_data_t *data) {
     if (touched) {
 #if FEATURE_LOCK_SCREEN
         if (s_lockScreenActive) {
+#if HAS_LOCK_MSG_HOLD
+            if (lockMsgHoldOnTouch(millis(), tx, ty)) {
+                data->state = LV_INDEV_STATE_RELEASED;
+                return;
+            }
+#endif
             (void)tryExitLockScreenFromInput(millis(), SCREEN_WAKE_FROM_TOUCH);
+            data->state = LV_INDEV_STATE_RELEASED;
+            return;
+        }
+#endif
+#if HAS_LOCK_MSG_HOLD
+        if (s_lockTouchSwallow) {
             data->state = LV_INDEV_STATE_RELEASED;
             return;
         }
@@ -47323,6 +47507,9 @@ static void lvglTouchRead(lv_indev_t *indev, lv_indev_data_t *data) {
         data->point.x = tx;
         data->point.y = ty;
     } else {
+#if HAS_LOCK_MSG_HOLD
+        lockMsgHoldOnRelease(millis());
+#endif
         data->state = LV_INDEV_STATE_RELEASED;
     }
 #else
@@ -50023,7 +50210,7 @@ static void appendRxText(int chanIdx, uint32_t fromNode, const char *text, uint3
         // device is raising an alert for -- a muted channel stays silent there
         // too. The unwrapped body is recorded here, before addMessage() bakes a
         // prefix into it and splits it across rows.
-        tdeckProNoteRecentMessage(chanIdx, fromNode, text);
+        tdeckProNoteRecentMessage(chanIdx, fromNode, text, packetId);
 #endif
     }
 }
@@ -51778,7 +51965,7 @@ static bool processMeshPacket(const MeshPacket &rxPkt) {
                     else {
                         // -1, not chanIdx: the row should read "DM", not the
                         // channel the DM happened to arrive on.
-                        tdeckProNoteRecentMessage(-1, pkt.hdr.from, textBuf);
+                        tdeckProNoteRecentMessage(-1, pkt.hdr.from, textBuf, pkt.hdr.id);
                     }
 #endif
                 } else {
@@ -53497,6 +53684,9 @@ static void chatMakeIrcRow(lv_obj_t *list, const lv_font_t *font,
     lv_coord_t textW = s_chatBubbleListW - padL - padR - timeW - gap;
     if (textW < 24) textW = 24;
     lv_obj_t *sg = lv_spangroup_create(row);
+    // Unlike a label, a span group is clickable by default, so it took every
+    // press on the text and the row's tap and long press never fired.
+    lv_obj_remove_flag(sg, LV_OBJ_FLAG_CLICKABLE);
     lv_obj_set_width(sg, textW);
     lv_obj_set_height(sg, LV_SIZE_CONTENT);
     lv_obj_set_style_text_font(sg, font, 0);
