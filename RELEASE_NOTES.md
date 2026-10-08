@@ -7,3 +7,9 @@
 - T-Display P4: Nav Alignment replaces Nav Bar Side and now works in portrait too. A unit already set to Right keeps it, and landscape still uses the left column by default.
 - T-Display P4 landscape with the keyboard expansion attached: the bottom nav bar is slimmer and the Actions / New Message buttons under the chat are hidden, so the message list gets more room. Both come back when the keyboard is removed.
 - In the side-column nav layout, the GPS/status readout moves out of the nav bar and stays visible in the home screen header.
+
+
+### Update (v5.7.11)
+### Changed
+- T-Deck Pro: Text on the e-paper screen now uses Terminus, a bitmap font made for 1-bit displays. Letters stay sharp instead of looking bloated, filling in, or breaking up. Accented Latin characters, icons and emoji still work.
+- T-Deck Pro: Sender names in channel chats and DMs now appear in bold, across the classic, bubble and IRC chat layouts, so they're easy to tell apart from the message text.
