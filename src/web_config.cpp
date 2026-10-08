@@ -4730,6 +4730,23 @@ static void sendConfigPage(const char *msg = "", bool lite = false) {
             "pulse away from whatever you pick and settle back on it.</p>";
 #endif
 #endif
+#if HAS_KB_LIGHT_TIMEOUT
+    html += "<label>Keyboard Light Timeout<select name='kb_light_timeout'>";
+    for (int i = 0; i < kKbLightTimeoutCount; i++) {
+        snprintf(tmp, sizeof(tmp), "<option value='%u'%s>%s</option>",
+                 (unsigned)kKbLightTimeouts[i].secs,
+                 (gCfg->kbLightTimeoutS == kKbLightTimeouts[i].secs) ? " selected" : "",
+                 kKbLightTimeouts[i].label);
+        html += tmp;
+    }
+    html += "</select></label>";
+    html += "<p style='font-size:.8em;color:var(--muted);margin:.2em 0 0'>"
+            "Turns the keyboard light off after this long with no key press or "
+            "touch, the way Screen Timeout does for the screen. The next key or "
+            "touch lights it again. Notification blinks still flash while it is "
+            "off. Never keeps it lit for as long as the screen is. Takes effect "
+            "immediately, no reboot.</p>";
+#endif
 #if HAS_NAV_BAR_TOGGLE
     html += "<label>Bottom Nav Bar<select name='nav_bar'>"
             "<option value='1'"; if ( gCfg->navBarEnabled) html += " selected"; html += ">Enabled</option>"
@@ -4743,16 +4760,20 @@ static void sendConfigPage(const char *msg = "", bool lite = false) {
             "either way; where the board has a touch panel or a browser Remote, "
             "the cells are clickable too. Takes effect immediately, no reboot.</p>";
 #endif
-#if HAS_NAV_SIDE_SETTING
-    html += "<label>Nav Bar Side (landscape)<select name='nav_side'>"
-            "<option value='left'";  if ( cfgNavSideLeft(*gCfg)) html += " selected"; html += ">Left</option>"
-            "<option value='right'"; if (!cfgNavSideLeft(*gCfg)) html += " selected"; html += ">Right</option>"
-            "</select></label>";
+#if HAS_NAV_ALIGN_SETTING
+    {
+        const NavAlign navAlign = cfgNavAlign(*gCfg);
+        html += "<label>Nav Alignment<select name='nav_align'>"
+                "<option value='left'";   if (navAlign == NAV_ALIGN_LEFT)   html += " selected"; html += ">Left</option>"
+                "<option value='center'"; if (navAlign == NAV_ALIGN_CENTER) html += " selected"; html += ">Center</option>"
+                "<option value='right'";  if (navAlign == NAV_ALIGN_RIGHT)  html += " selected"; html += ">Right</option>"
+                "</select></label>";
+    }
     html += "<p style='font-size:.8em;color:var(--muted);margin:.2em 0 0'>"
-            "In landscape the nav bar is a narrow column down one side of the "
-            "screen, each button an icon with its F-key under it. Pick which "
-            "side. Portrait keeps the bar along the bottom. Takes effect "
-            "immediately, no reboot.</p>";
+            "Where the nav bar sits. Center is the row of icons along the bottom "
+            "of the screen. Left and Right condense it into a narrow column down "
+            "that side, one icon per button, and give the screen its full height "
+            "back. Takes effect immediately, no reboot.</p>";
 #endif
 #if HAS_AUDIO_ALERTS
     html += "<label>Splash Melody<select name='splash_melody'>"
@@ -7998,9 +8019,17 @@ static void handlePostSave() {
     if (server.hasArg("nav_bar")) {
         gCfg->navBarEnabled = server.arg("nav_bar").toInt() != 0;
     }
-    // hasArg-guarded like nav_bar: only rendered on the board that has it.
-    if (server.hasArg("nav_side")) {
-        gCfg->navSide = (server.arg("nav_side") == "right") ? kNavSideRight : kNavSideLeft;
+    // hasArg-guarded like nav_bar: only rendered on builds that have the bar.
+    // Stored only when it differs from what is in force, so a save that leaves
+    // the select alone keeps an unset default unset -- on the P4 that default
+    // follows the orientation, and pinning it here would carry landscape's
+    // column into portrait.
+    if (server.hasArg("nav_align")) {
+        const uint8_t want = navAlignParse(server.arg("nav_align").c_str());
+        if (want != kNavAlignUnset
+            && want != navAlignCode(cfgNavAlign(*gCfg))) {
+            gCfg->navAlign = want;
+        }
     }
 #if HAS_KB_BACKLIGHT_LEVEL
     // hasArg-guarded like the two above: the control only exists on the one
@@ -8010,6 +8039,13 @@ static void handlePostSave() {
         gCfg->kbBacklightLevel =
             cfgCoerceKbBacklightLevel(server.arg("keypad_light").toInt());
         keyboardSetKeypadBacklight(gCfg->kbBacklightLevel);
+    }
+#endif
+#if HAS_KB_LIGHT_TIMEOUT
+    // hasArg-guarded like keypad_light: only rendered where the board has it.
+    if (server.hasArg("kb_light_timeout")) {
+        gCfg->kbLightTimeoutS =
+            cfgCoerceKbLightTimeout(server.arg("kb_light_timeout").toInt());
     }
 #endif
 #if defined(DEVICE_MESH_DECK)
@@ -8255,15 +8291,18 @@ static void handlePostSave() {
     // Mirrored into wardrive_log by the main loop every pass, so toggling it
     // needs no reboot -- and a reboot would also wipe the session counters.
     cfgMasked.wardriveLogEnabled = cfgBefore.wardriveLogEnabled;
-    // The nav column's side: onWebCfgSaved() rebuilds the screen around it.
-    cfgMasked.navSide = cfgBefore.navSide;
+    // Nav alignment: onWebCfgSaved() rebuilds the screen around it.
+    cfgMasked.navAlign = cfgBefore.navAlign;
+    // Read live by the keyboard light service every loop pass.
+    cfgMasked.kbLightTimeoutS = cfgBefore.kbLightTimeoutS;
     const bool fontChanged  = (gCfg->fontSize != cfgBefore.fontSize);
     const bool spellChanged = (gCfg->spellCheckEnabled != cfgBefore.spellCheckEnabled);
     const bool wardriveChanged = (gCfg->wardriveLogEnabled != cfgBefore.wardriveLogEnabled);
-    const bool navSideChanged = (gCfg->navSide != cfgBefore.navSide);
+    const bool navAlignChanged = (gCfg->navAlign != cfgBefore.navAlign);
+    const bool kbLightTimeoutChanged = (gCfg->kbLightTimeoutS != cfgBefore.kbLightTimeoutS);
     const bool liveOnly = (memcmp(&cfgMasked, &cfgBefore, sizeof(RhinoConfig)) == 0)
                           && (fontChanged || spellChanged || wardriveChanged
-                              || navSideChanged);
+                              || navAlignChanged || kbLightTimeoutChanged);
 
     if (liveOnly) {
         redirectHomeWithFlash(fontChanged ? "Saved. Font size applied." : "Saved.");

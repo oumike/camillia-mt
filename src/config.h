@@ -298,7 +298,8 @@
 #define MY_CHAT_COLORS_EN   0
 #define HAS_CHAT_STYLE_OPTIONS 1
 #define HAS_CHAT_BUBBLE_STYLE_OPTION 0
-#define HAS_CHAT_IRC_STYLE_OPTION 0
+// IRC draws in black on this board (chatMakeIrcRow()), like its outline bubbles.
+#define HAS_CHAT_IRC_STYLE_OPTION 1
 #else
 #define MY_CHAT_STYLE       CHAT_STYLE_CLASSIC
 #define MY_CHAT_COLORS_EN   1      // classic mode: per-node text colors
@@ -610,14 +611,23 @@
 #else
 #define HAS_NAV_BAR_TOGGLE 0
 #endif
-// P4 landscape draws the nav bar as a column down one side (navIsSideColumn()
-// in main_lvgl.cpp), and which side is a setting: Config -> Nav Bar Side and
-// the web config's Display section. The pixel-doubled P4 only; the large-panel
-// build keeps its bottom bar.
-#if defined(DEVICE_TDISPLAY_P4) && !UI_LARGE_PANEL_PROFILE
-#define HAS_NAV_SIDE_SETTING 1
+// Where the nav bar sits: Config -> Nav Alignment and the web config's Display
+// section, on every build that has the bar. Center is the row along the bottom;
+// Left and Right are the condensed column down that edge (navIsSideColumn() in
+// main_lvgl.cpp). See cfgNavAlign() in config_io.h for the default.
+//
+// The pixel-doubled P4 in landscape is the one shape whose unset default is the
+// column rather than the row: it drew the column before the setting covered
+// every board, and an upgrading unit keeps looking the way it did.
+#if UI_TOUCH_NAV_BAR
+#define HAS_NAV_ALIGN_SETTING 1
 #else
-#define HAS_NAV_SIDE_SETTING 0
+#define HAS_NAV_ALIGN_SETTING 0
+#endif
+#if defined(DEVICE_TDISPLAY_P4) && !UI_LARGE_PANEL_PROFILE
+#define NAV_ALIGN_DEFAULT_SIDE_IN_LANDSCAPE 1
+#else
+#define NAV_ALIGN_DEFAULT_SIDE_IN_LANDSCAPE 0
 #endif
 // The default splits on whether the board has ever drawn the bar.
 //
@@ -766,6 +776,24 @@
 #else
 #define MY_KB_BACKLIGHT_LEVEL 255
 #endif
+// Keyboard light timeout (issue #104): the keyboard light goes dark after this
+// long with no input, like the screen timeout does for the panel, and comes
+// back with the next key or touch. The boards whose keyboard light the host
+// drives: the T-Deck's I2C duty, the T-Deck Pro's and P4 expansion's LEDC pin,
+// and the Pager's GPIO.
+//
+// Not the M9: its controller owns the keypad LEDs and already runs its own
+// ~10 s keypress auto-light (KB_REG_BACKLIGHT, hal/hw_m9.h). The host cannot
+// light them, so it has nothing to time out.
+#if defined(DEVICE_TDECK) || defined(DEVICE_TDECK_PRO) \
+    || defined(DEVICE_TLORA_PAGER_TFT) || defined(DEVICE_TDISPLAY_P4)
+#define HAS_KB_LIGHT_TIMEOUT 1
+#else
+#define HAS_KB_LIGHT_TIMEOUT 0
+#endif
+// 0 = never, which is what every build before the setting did: the light
+// follows the screen and its own on/off controls, and nothing else.
+#define MY_KB_LIGHT_TIMEOUT_S 0
 #define MY_KB_BLINK_ENABLED 1
 // Flashes per notification cycle. DMs get the longer pattern: with no
 // notification LED on either board, length is what distinguishes them.

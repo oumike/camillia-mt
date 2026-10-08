@@ -698,16 +698,32 @@ struct RhinoConfig {
     // padding, so this starts at exactly the previous sizeof(RhinoConfig) and an
     // upgrading device keeps the compiled default.
     bool     wardriveLogEnabled;
-    // ── T-Display P4 landscape nav column side ───────────────────────────────
-    // Which edge the nav column runs down in P4 landscape, where the bar is a
-    // column rather than a row along the bottom. Only kNavSideRight means right;
-    // every other value -- including whatever an older build left in this pad
-    // byte -- is the left, which is the default. Ignored off the P4 and in
-    // portrait.
-    uint8_t  navSide;
+    // ── Nav bar alignment ────────────────────────────────────────────────────
+    // Where the nav bar sits: kNavAlignCenter is the row along the bottom,
+    // kNavAlignLeft / kNavAlignRight the condensed column down that edge. Any
+    // other value -- 0, or whatever an older build left in this byte -- is
+    // unset and resolves to the board's default (cfgNavAlign()).
+    //
+    // This was navSide, which only the pixel-doubled P4 read in landscape, as
+    // 'R' for right and anything else for left. 'R' is kept as kNavAlignRight,
+    // so a unit set to Right stays there; one left on its default Left reads
+    // unset, which on that board in landscape is still the left column.
+    uint8_t  navAlign;
     // For whoever appends next: two pad bytes remain, carrying whatever older
     // builds wrote into them. Past them is the old sizeof(RhinoConfig).
     uint8_t  _reservedPad17[2];
+
+    // ── Keyboard light timeout (issue #104) ──────────────────────────────────
+    // Seconds with no input before the keyboard light goes dark; 0 = never.
+    // See kKbLightTimeouts. Ignored on builds without HAS_KB_LIGHT_TIMEOUT.
+    //
+    // Safe at the end: _reservedPad17 above keeps the old struct's trailing
+    // padding, so this starts at exactly the previous sizeof(RhinoConfig) and
+    // an upgrading device keeps the compiled default (never).
+    uint16_t kbLightTimeoutS;
+    // For whoever appends next: the struct's trailing padding, spelled out.
+    // Past it is the old sizeof(RhinoConfig).
+    uint8_t  _reservedPad18[2];
 };
 
 #define CHAT_SERVER_MODE_OFF     0
@@ -721,11 +737,44 @@ inline bool cfgP4AntennaExternal(const RhinoConfig &c) {
     return c.p4Antenna == kP4AntennaExternal;
 }
 
-// Not 1 or 0: an old pad byte must read as the default (left).
-static constexpr uint8_t kNavSideRight = 0x52;   // 'R'
-static constexpr uint8_t kNavSideLeft  = 0;
-inline bool cfgNavSideLeft(const RhinoConfig &c) {
-    return c.navSide != kNavSideRight;
+// Letters rather than 0..2: an old pad byte must read as unset, not as a choice.
+static constexpr uint8_t kNavAlignUnset  = 0;
+static constexpr uint8_t kNavAlignLeft   = 0x4C;   // 'L'
+static constexpr uint8_t kNavAlignCenter = 0x43;   // 'C'
+static constexpr uint8_t kNavAlignRight  = 0x52;   // 'R', navSide's old "right"
+
+enum NavAlign : uint8_t { NAV_ALIGN_LEFT, NAV_ALIGN_CENTER, NAV_ALIGN_RIGHT };
+
+// The alignment in force. Unset is Center everywhere but the pixel-doubled P4
+// held landscape, which drew the left column before this was a setting
+// (NAV_ALIGN_DEFAULT_SIDE_IN_LANDSCAPE). uiOrientation is the mirror of the
+// boot orientation, so the web config resolves it the same way the screen does.
+inline NavAlign cfgNavAlign(const RhinoConfig &c) {
+    if (c.navAlign == kNavAlignLeft)   return NAV_ALIGN_LEFT;
+    if (c.navAlign == kNavAlignCenter) return NAV_ALIGN_CENTER;
+    if (c.navAlign == kNavAlignRight)  return NAV_ALIGN_RIGHT;
+#if NAV_ALIGN_DEFAULT_SIDE_IN_LANDSCAPE
+    if (c.uiOrientation == 0) return NAV_ALIGN_LEFT;
+#endif
+    return NAV_ALIGN_CENTER;
+}
+
+inline uint8_t navAlignCode(NavAlign a) {
+    return a == NAV_ALIGN_LEFT ? kNavAlignLeft
+         : a == NAV_ALIGN_RIGHT ? kNavAlignRight : kNavAlignCenter;
+}
+
+inline const char *navAlignKey(NavAlign a) {   // YAML and the web form
+    return a == NAV_ALIGN_LEFT ? "left" : a == NAV_ALIGN_RIGHT ? "right" : "center";
+}
+
+// "left" / "center" / "right", any case; anything else is unset.
+inline uint8_t navAlignParse(const char *v) {
+    if (!v) return kNavAlignUnset;
+    if (!strcasecmp(v, "left"))   return kNavAlignLeft;
+    if (!strcasecmp(v, "center") || !strcasecmp(v, "centre")) return kNavAlignCenter;
+    if (!strcasecmp(v, "right"))  return kNavAlignRight;
+    return kNavAlignUnset;
 }
 
 // Not 1: a pad byte left at 1 by some older write must not open the Files tab.
@@ -830,6 +879,23 @@ const char *notifyLightTimeoutName(uint16_t secs);
 // to. Never (0) is only chosen by an exact 0, so no small number rounds a
 // timeout away into "never stop".
 uint16_t cfgCoerceNotifyLightTimeout(long secs);
+
+// ── Keyboard light timeout (issue #104) ──────────────────────────────────────
+// How long the keyboard light stays lit with no input. Never (0) is the default:
+// the light follows the screen and its own controls, as it always has.
+struct KbLightTimeoutOption {
+    uint16_t    secs;
+    const char *label;
+};
+extern const KbLightTimeoutOption kKbLightTimeouts[];
+extern const int kKbLightTimeoutCount;
+
+// Label for a stored value; Never for anything unrecognised.
+const char *kbLightTimeoutName(uint16_t secs);
+
+// Snaps to the nearest listed value, the same way cfgCoerceNotifyLightTimeout()
+// does and for the same reasons: only an exact 0 means never.
+uint16_t cfgCoerceKbLightTimeout(long secs);
 
 // How the local battery reads where it is shown as a single number: the chat
 // header indicator and the web status chip. Percentage comes off a Li-ion SOC

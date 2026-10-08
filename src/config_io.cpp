@@ -672,6 +672,41 @@ uint16_t cfgCoerceNotifyLightTimeout(long secs) {
     return (bestDelta < 0) ? 0 : best;
 }
 
+// Ascending, Never last, for the same slider reason as the notification list.
+const KbLightTimeoutOption kKbLightTimeouts[] = {
+    {   10, TR_NOOP("10 sec") },
+    {   30, TR_NOOP("30 sec") },
+    {   60, TR_NOOP("1 min")  },
+    {  120, TR_NOOP("2 min")  },
+    {  300, TR_NOOP("5 min")  },
+    {    0, TR_NOOP("Never")  },
+};
+const int kKbLightTimeoutCount =
+    (int)(sizeof(kKbLightTimeouts) / sizeof(kKbLightTimeouts[0]));
+
+const char *kbLightTimeoutName(uint16_t secs) {
+    for (int i = 0; i < kKbLightTimeoutCount; i++) {
+        if (kKbLightTimeouts[i].secs == secs) return kKbLightTimeouts[i].label;
+    }
+    return TR_NOOP("Never");
+}
+
+uint16_t cfgCoerceKbLightTimeout(long secs) {
+    if (secs <= 0) return 0;
+    uint16_t best = 0;
+    long bestDelta = -1;
+    for (int i = 0; i < kKbLightTimeoutCount; i++) {
+        if (kKbLightTimeouts[i].secs == 0) continue;
+        long delta = (long)kKbLightTimeouts[i].secs - secs;
+        if (delta < 0) delta = -delta;
+        if (bestDelta < 0 || delta < bestDelta) {
+            bestDelta = delta;
+            best = kKbLightTimeouts[i].secs;
+        }
+    }
+    return (bestDelta < 0) ? 0 : best;
+}
+
 uint8_t positionPrecisionCoerce(uint8_t bits) {
     for (int i = 0; i < kPositionPrecisionCount; i++) {
         if (kPositionPrecisions[i].bits == bits) return bits;
@@ -1170,7 +1205,7 @@ void cfgInitDefaults(RhinoConfig &cfg) {
     cfg.otaAutoUpdatePeriod = MY_OTA_AUTOUPDATE;
     cfg.nodeArchiveEnabled = MY_NODE_ARCHIVE_EN;
     cfg.wardriveLogEnabled = MY_WARDRIVE_LOG_EN;
-    cfg.navSide            = kNavSideLeft;   // see cfgNavSideLeft()
+    cfg.navAlign           = kNavAlignUnset;   // the board's default; see cfgNavAlign()
     // Off regardless of whether archiving is on. The Nodes screen is a live-mesh
     // view by default on a fresh device exactly as it is on an upgraded one --
     // which also keeps this independent of any board that defines
@@ -1198,6 +1233,7 @@ void cfgInitDefaults(RhinoConfig &cfg) {
     cfg.kbBlinkChanFlashes = cfgCoerceKbFlashes(MY_KB_BLINK_CHAN_FLASHES);
     cfg.kbBlinkDmFlashes   = cfgCoerceKbFlashes(MY_KB_BLINK_DM_FLASHES);
     cfg.notifyLightTimeoutS = cfgCoerceNotifyLightTimeout(MY_NOTIFY_LIGHT_TIMEOUT_S);
+    cfg.kbLightTimeoutS     = cfgCoerceKbLightTimeout(MY_KB_LIGHT_TIMEOUT_S);
     cfg.meshBeaconListen  = (bool)MY_MESH_BEACON_LISTEN;
     cfg.debugAcks          = MY_DBG_ACKS;
     cfg.debugMessages      = MY_DBG_MESSAGES;
@@ -1647,10 +1683,13 @@ void cfgToYaml(const RhinoConfig &cfg, String &out) {
              (unsigned)cfg.notifyLightTimeoutS,
              notifyLightTimeoutName(cfg.notifyLightTimeoutS));
     out += tmp;
+    // Carried by every build so a backup moves between boards.
+    snprintf(tmp, sizeof(tmp), "    keyboardLightTimeoutSecs: %u   # 0 = never (%s)\n",
+             (unsigned)cfg.kbLightTimeoutS, kbLightTimeoutName(cfg.kbLightTimeoutS));
+    out += tmp;
     snprintf(tmp, sizeof(tmp), "    invertScroll: %s\n", cfg.invertScroll ? "true" : "false"); out += tmp;
     snprintf(tmp, sizeof(tmp), "    navBar: %s\n", cfg.navBarEnabled ? "true" : "false"); out += tmp;
-    // P4 landscape only; carried by every build so a backup moves between them.
-    snprintf(tmp, sizeof(tmp), "    navSide: %s\n", cfgNavSideLeft(cfg) ? "left" : "right"); out += tmp;
+    snprintf(tmp, sizeof(tmp), "    navAlign: %s\n", navAlignKey(cfgNavAlign(cfg))); out += tmp;
     snprintf(tmp, sizeof(tmp), "    messageAlertSound: %s\n",
              kMsgAlertSoundNames[constrain((int)cfg.msgAlertSound, 0, kNumMsgAlertSounds - 1)]);
     out += tmp;
@@ -2305,10 +2344,15 @@ bool cfgImportFromBuf(const char *buf, size_t len, RhinoConfig &cfg) {
                     cfg.kbBlinkDmFlashes = cfgCoerceKbFlashes(atoi(val));
                 else if (!strcmp(key, "lightNotifyTimeoutSecs"))
                     cfg.notifyLightTimeoutS = cfgCoerceNotifyLightTimeout(atol(val));
+                else if (!strcmp(key, "keyboardLightTimeoutSecs"))
+                    cfg.kbLightTimeoutS = cfgCoerceKbLightTimeout(atol(val));
                 else if (!strcmp(key, "invertScroll"))    cfg.invertScroll = parseBoolValue(val);
                 else if (!strcmp(key, "navBar"))         cfg.navBarEnabled = parseBoolValue(val);
+                else if (!strcmp(key, "navAlign"))     cfg.navAlign = navAlignParse(val);
+                // The P4-only setting navAlign replaced. Its "left" was the
+                // default, so it imports as unset rather than pinning Left.
                 else if (!strcmp(key, "navSide"))
-                    cfg.navSide = (!strcasecmp(val, "right")) ? kNavSideRight : kNavSideLeft;
+                    cfg.navAlign = (!strcasecmp(val, "right")) ? kNavAlignRight : kNavAlignUnset;
                 else if (!strcmp(key, "messageAlertSound")) cfg.msgAlertSound = parseMsgAlertSound(val);
                 else if (!strcmp(key, "messageAlertBeep")) {
                     cfg.msgAlertSound = parseBoolValue(val)
