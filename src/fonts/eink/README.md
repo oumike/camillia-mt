@@ -17,7 +17,7 @@ at each pixel size, taken straight from its BDF sources and written as LVGL
 | `lv_font_montserrat_14` … `_32` | same px size | Montserrat's (or the Terminus cell, if taller) |
 | `lv_font_montserrat_40` | 32 px | 44/12 |
 | `lv_font_montserrat_bold_12` | Bold 12 px | 17/4 |
-| `lv_font_eink_bold_12` … `_18` | Bold, same px size | the regular face's, so a bold sender name shares the text's baseline |
+| `lv_font_eink_bold_12` … `_18` | Bold, same px size, emboldened 1 px | the regular face's, so a bold sender name shares the text's baseline |
 
 Text covers the same Latin range as `../latin/` (issue #99). The LV_SYMBOL_*
 icons come from `lv_font_eink_symbols_<N>.c` (LVGL's Font Awesome set, 1 bpp, at
