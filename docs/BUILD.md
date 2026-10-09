@@ -388,6 +388,47 @@ Windows users: run the three `pio` commands above instead, or use WSL.
 
 ---
 
+## Contributing and releasing
+
+Every change goes in through a pull request into `main`; nothing is pushed to
+`main` directly.
+
+1. Branch from an up-to-date `main` and open a PR into `main`. Keep it a
+   **draft** while you are still working on it.
+2. CI builds every environment on each push to the PR (the **Build** check).
+3. Write the PR description for the people who will use the change: what it
+   does, which boards it affects, how it was tested, and anything the release
+   notes must mention. The release notes are written from it.
+4. When it is done, mark it ready: `gh pr ready <number>`.
+
+Optionally, audit it first:
+
+```bash
+./scripts/release.sh --audit --pr <number>                # build every board + Claude review
+./scripts/release.sh --audit --pr <number> --skip-builds  # review only
+```
+
+The audit runs in a temporary worktree (your checkout is not touched), posts its
+report as a PR comment, and exits non-zero on a failed build or a blocking
+finding.
+
+**Releasing** (maintainers) is one PR at a time, from a clean working tree:
+
+```bash
+./scripts/release.sh             # the only ready PR, or a menu if there are several
+./scripts/release.sh --pr 106    # a particular PR
+./scripts/release.sh --dry-run   # everything up to the merge, then stop
+```
+
+The script checks that the PR's Build check passed and that it merges cleanly,
+drafts release notes from the PR for you to accept, edit or reject, merges it,
+commits the notes to `main`, and dispatches the GitHub release workflow, which
+builds, signs and publishes. The notes end with a link to the PR. If a run fails
+after the merge, `--pr <number>` resumes it. `--from-main` releases `main`
+without a PR, for emergencies.
+
+---
+
 ## Build settings
 
 | Setting | Value |

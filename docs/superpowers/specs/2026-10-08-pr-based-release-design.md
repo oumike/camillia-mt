@@ -1,7 +1,7 @@
 # PR-based development and release — design
 
 Date: 2026-10-08
-Status: approved in conversation; awaiting review of this written spec
+Status: approved; implemented on branch `pr-release-flow`
 
 ## Goal
 
@@ -111,20 +111,22 @@ The default (remote) mode gains a PR stage in front of today's flow.
    - The notes end with `Pull request: #N`.
    - Reviewed with today's Yes / edit / no prompt. "No" stops the run here,
      before the merge, with `RELEASE_NOTES.md` restored by the existing guard.
-6. **Merge.**
-   `gh pr merge N --merge --delete-branch --match-head-commit <head SHA>`.
+6. **Merge.** After one confirmation covering merge, commit and dispatch:
+   `gh pr merge N --merge --match-head-commit <head SHA>`.
    `--match-head-commit` guarantees the merged commit is the one whose build
-   passed; a push in between makes the merge fail and the run stop.
-   Branch deletion is best-effort (it cannot delete a fork's branch).
+   passed; a push in between makes the merge fail and the run stop. The
+   branch is then deleted on origin when it lives in this repo (not a fork's);
+   a local copy is left alone, since it may hold unpushed work, which is why
+   `gh pr merge --delete-branch` is not used.
 7. **Today's flow from here.** Pull `main`, write `RELEASE_NOTES.md`, commit
    `Prepare release vX (#N) [skip ci]`, push, dispatch `release.yml`, and report
    the run, exactly as the current remote path does.
 
 **Resume after a partial run.** If the run fails after step 6 (push or dispatch
 error), `release.sh --pr N` detects that PR N is already merged and its merge
-commit is on `main` but not contained in any release tag. It skips steps 2–3
-and 6, regenerates or reuses the notes (offering `RELEASE_NOTES.md` if present),
-and continues from step 7.
+commit is on `main` but not contained in any release tag. It skips the open-PR
+gates and the merge, writes and reviews the notes from the PR again, and
+continues from step 7.
 
 ### Flags
 
@@ -137,7 +139,8 @@ and continues from step 7.
 | `--notes-only` | Drafts notes; in PR mode, from the selected PR. Builds and publishes nothing. |
 | `--use-committed-notes`, `--build-local`, `--check-targets`, `--no-clean`, `--version`, `-y`, `--append-last-notes` | Unchanged. |
 | `--alpha` | Unchanged: releases the `alpha` branch as today, with no PR stage. |
-| `--audit` | **New.** Audits a PR and posts the findings to it; releases nothing. See Part 4. Combines only with `--pr N`. |
+| `--audit` | **New.** Audits a PR and posts the findings to it; releases nothing. See Part 4. Combines only with `--pr N` and `--skip-builds`. |
+| `--skip-builds` | **New.** With `--audit` only: skip the local builds and headroom check; review only. |
 
 `release.yml` passes `--use-committed-notes` and runs with `GITHUB_ACTIONS=true`,
 so it never enters PR mode; it is unchanged.
@@ -158,7 +161,7 @@ A standalone, on-demand full audit of a PR. It never merges, commits, pushes or
 releases; it reports. Fixes are made on the branch afterwards (e.g. by asking
 Claude to fix the findings in the composite PR) and the audit can be rerun.
 
-**Usage:** `./scripts/release.sh --audit [--pr N]`
+**Usage:** `./scripts/release.sh --audit [--pr N] [--skip-builds]`
 
 1. **Pick the PR.** `--pr N` if given. Otherwise the open PR labelled
    `composite`. If there is none, or more than one, a numbered menu of every
@@ -167,7 +170,8 @@ Claude to fix the findings in the composite PR) and the audit can be rerun.
 2. **Isolated checkout.** `git worktree add` of the PR's head SHA in a temporary
    directory, so the audit never touches the user's working tree (a dirty tree
    is fine here). Removed on exit, including on failure or interrupt.
-3. **Build checks** (in the worktree):
+3. **Build checks** (in the worktree; skipped entirely with `--skip-builds`,
+   which the report says, since CI builds every PR push anyway):
    - Build every environment in `RELEASE_ENVS`, using the same per-env
      PlatformIO core selection the release build uses (the P4 envs' isolated
      core). Builds continue past a failure so the report lists every env.
@@ -200,6 +204,17 @@ Claude to fix the findings in the composite PR) and the audit can be rerun.
 6. **Exit status.** Non-zero if any build or headroom check failed or there are
    Blocking findings; zero otherwise. The release flow does **not** require an
    audit and does not read audit results.
+
+## Implementation notes
+
+- PR stage: `scripts/lib/release_pr.sh`; audit: `scripts/lib/release_audit.sh`.
+  Both are sourced by `release.sh` and stay bash 3.2 compatible (macOS).
+- `release.sh` re-executes itself from a temporary copy (with `lib/`) before
+  doing anything. A PR release switches to `main` and fast-forwards it over the
+  merged PR, which can rewrite `release.sh` while bash is still reading it.
+- The failure guard is re-snapshotted once `main` holds the merge, so a later
+  failure restores `main`'s post-merge files rather than pre-merge ones, and
+  the exit message points at `--pr N` to resume.
 
 ## Error handling summary
 

@@ -1,6 +1,23 @@
 #!/bin/bash
 set -e
 
+# Run from a copy. Bash reads a script as it executes it, and a PR release
+# changes this very file mid-run: it switches to main, then fast-forwards main
+# over the merged PR — which may well carry a new release.sh. Executing a file
+# that is being rewritten underneath runs whatever bytes happen to be at the
+# offset bash reached. The copy (with lib/) is what runs; the checkout is free
+# to change.
+if [[ -z "${CAMILLIA_RELEASE_COPY:-}" ]]; then
+    _copy="$(mktemp -d "${TMPDIR:-/tmp}/camillia-release-script.XXXXXX")"
+    _src="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+    cp "$_src/release.sh" "$_copy/release.sh"
+    cp -R "$_src/lib" "$_copy/lib"
+    CAMILLIA_RELEASE_COPY="$_copy" exec bash "$_copy/release.sh" "$@"
+fi
+# Replaced by the release's own exit handling further down, which also removes
+# the copy; this covers the exits before it (--help, a bad flag).
+trap 'rm -rf "$CAMILLIA_RELEASE_COPY"' EXIT
+
 # The -vertical Heltec envs are deliberately absent. Orientation is a runtime
 # setting now (issue #77), so they are not separate firmware -- each is its
 # parent's binary with the portrait first-boot default pre-set. They still build
@@ -214,19 +231,44 @@ VERSION_ARG=""
 NOTES_ONLY=false
 USE_COMMITTED_NOTES=false
 BUILD_LOCAL=false
+PR_ARG=""
+DRY_RUN=false
+FROM_MAIN=false
+AUDIT=false
+SKIP_BUILDS=false
 while [[ $# -gt 0 ]]; do
     case "$1" in
         -h|--help)
-            echo "Usage: $0 [-y|--yes] [--alpha] [--version V] [--no-clean]"
+            echo "Usage: ./scripts/release.sh [-y|--yes] [--alpha] [--version V] [--no-clean]"
             echo "          [--append-last-notes] [--check-targets] [--notes-only]"
             echo "          [--use-committed-notes] [--build-local]"
-            echo "  Cuts a release on GitHub. Works out the version, writes"
-            echo "  and reviews the release notes, commits them, pushes, and"
-            echo "  dispatches the release workflow — which builds every"
-            echo "  environment, signs the OTA images and publishes. Nothing"
-            echo "  is compiled on this machine, and no toolchain is needed."
+            echo "          [--pr N] [--dry-run] [--from-main]"
+            echo "       ./scripts/release.sh --audit [--pr N] [--skip-builds]"
+            echo "  Releases one pull request into main. Picks the PR (the"
+            echo "  only ready one, or asks which), checks its Build passed,"
+            echo "  writes and reviews release notes from it, merges it, then"
+            echo "  commits the notes and dispatches the release workflow —"
+            echo "  which builds every environment, signs the OTA images and"
+            echo "  publishes. Nothing is compiled on this machine, and no"
+            echo "  toolchain is needed. Run it from a clean working tree."
             echo ""
             echo "  --build-local does all of it here instead."
+            echo ""
+            echo "  --pr N      Release PR N instead of choosing. Also resumes a"
+            echo "              release whose PR was merged but never released."
+            echo "  --dry-run   Pick and check the PR and review the notes, then"
+            echo "              print what would happen and change nothing."
+            echo "  --from-main Release main as it stands, without a PR (notes"
+            echo "              from the commits since the last tag). For"
+            echo "              emergency fixes."
+            echo "  --audit     Audit a PR instead of releasing: build every"
+            echo "              release environment and have Claude review it,"
+            echo "              in a temporary worktree, then post the report"
+            echo "              as a PR comment. Defaults to the open"
+            echo "              'composite' PR. Exits non-zero on a failed"
+            echo "              build or a blocking finding."
+            echo "  --skip-builds"
+            echo "              With --audit: review only, no local builds."
             echo ""
             echo "  --alpha     Cut an ALPHA release instead: tags"
             echo "              v<version>-alpha.<n> and publishes it as a GitHub"
@@ -281,6 +323,19 @@ while [[ $# -gt 0 ]]; do
         --notes-only) NOTES_ONLY=true ;;
         --use-committed-notes) USE_COMMITTED_NOTES=true ;;
         --build-local) BUILD_LOCAL=true ;;
+        --dry-run) DRY_RUN=true ;;
+        --from-main) FROM_MAIN=true ;;
+        --audit) AUDIT=true ;;
+        --skip-builds) SKIP_BUILDS=true ;;
+        --pr)
+            if [[ ! "${2:-}" =~ ^[0-9]+$ ]]; then
+                echo "--pr requires a PR number (e.g. --pr 106)" >&2
+                exit 1
+            fi
+            PR_ARG="$2"
+            shift
+            ;;
+        --pr=*) PR_ARG="${1#*=}" ;;
         --version)
             if [[ -z "${2:-}" ]]; then
                 echo "--version requires a value (e.g. --version 4.9.0)" >&2
@@ -294,6 +349,42 @@ while [[ $# -gt 0 ]]; do
     esac
     shift
 done
+
+# The PR stage and the audit live in their own files.
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=lib/release_pr.sh
+source "$SCRIPT_DIR/lib/release_pr.sh"
+# shellcheck source=lib/release_audit.sh
+source "$SCRIPT_DIR/lib/release_audit.sh"
+
+if [[ -n "$PR_ARG" && ! "$PR_ARG" =~ ^[0-9]+$ ]]; then
+    echo "--pr requires a PR number (got '$PR_ARG')." >&2
+    exit 1
+fi
+if [[ "$SKIP_BUILDS" == true && "$AUDIT" != true ]]; then
+    echo "--skip-builds only applies to --audit." >&2
+    exit 1
+fi
+
+# ── Audit: a separate job, not a release ─────────────────────────────────────
+if [[ "$AUDIT" == true ]]; then
+    if [[ "$ASSUME_YES" == true || "$ALPHA" == true || -n "$VERSION_ARG" \
+          || "$NO_CLEAN" == true || "$APPEND_LAST_NOTES" == true \
+          || "$CHECK_TARGETS_ONLY" == true || "$NOTES_ONLY" == true \
+          || "$USE_COMMITTED_NOTES" == true || "$BUILD_LOCAL" == true \
+          || "$DRY_RUN" == true || "$FROM_MAIN" == true ]]; then
+        echo "--audit takes only --pr N and --skip-builds." >&2
+        exit 1
+    fi
+    audit_main
+fi
+
+if [[ -n "$PR_ARG" || "$DRY_RUN" == true ]] \
+   && [[ "$FROM_MAIN" == true || "$ALPHA" == true || "$BUILD_LOCAL" == true ]]; then
+    echo "--pr and --dry-run are for releasing a pull request; they do not" >&2
+    echo "combine with --from-main, --alpha or --build-local." >&2
+    exit 1
+fi
 
 if [[ "$NOTES_ONLY" == true && "$USE_COMMITTED_NOTES" == true ]]; then
     echo "--notes-only writes the notes; --use-committed-notes reuses them." >&2
@@ -318,6 +409,31 @@ if [[ "$NOTES_ONLY" != true && "$CHECK_TARGETS_ONLY" != true \
     REMOTE=true
 fi
 
+# ── Release a pull request, or main as it stands? ────────────────────────────
+# A release is one pull request into main (PR mode): picked, checked, written
+# up and merged below, before the existing flow commits the notes and
+# dispatches. --from-main is the old way, for emergencies. Alphas release the
+# alpha branch as before. The workflow's own run (GITHUB_ACTIONS) is never in PR
+# mode: it builds what this script already merged and committed.
+PR_MODE=false
+if [[ ( "$REMOTE" == true || "$NOTES_ONLY" == true ) \
+      && "$FROM_MAIN" != true && "$ALPHA" != true ]]; then
+    PR_MODE=true
+fi
+if [[ "$PR_MODE" == true && "$USE_COMMITTED_NOTES" == true ]]; then
+    echo "A PR release writes its notes from the PR; --use-committed-notes" >&2
+    echo "only goes with --from-main or --build-local." >&2
+    exit 1
+fi
+if [[ "$DRY_RUN" == true && ( "$PR_MODE" != true || "$REMOTE" != true ) ]]; then
+    echo "--dry-run previews a PR release; it does not combine with --notes-only." >&2
+    exit 1
+fi
+if [[ -n "$PR_ARG" && "$PR_MODE" != true ]]; then
+    echo "--pr only applies to a PR release." >&2
+    exit 1
+fi
+
 # ── Catch up with the branch before doing anything ───────────────────────────
 # A remote release leaves this clone exactly one commit behind every time: the
 # workflow pushes its own "Release <tag>" commit — the VERSION bump — to this
@@ -329,10 +445,31 @@ fi
 # lives only on the remote until we fetch, and -y derives the next version from
 # the tag list.
 if [[ "$REMOTE" == true ]]; then
+    # Only what went through a PR (or, with --from-main, what is committed) is
+    # released. This used to sweep uncommitted work into the release with
+    # `git add -A`; with more than one person working on the firmware, a release
+    # has to be something others could see and review first.
+    DIRTY="$(git status --porcelain || true)"
+    if [[ -n "$DIRTY" ]]; then
+        echo "The working tree has uncommitted changes:" >&2
+        printf '%s\n' "$DIRTY" | sed 's/^/  /' >&2
+        echo "" >&2
+        echo "A release ships only committed work. Commit it to a PR (or stash it)" >&2
+        echo "and rerun." >&2
+        exit 1
+    fi
+
     BRANCH="$(git rev-parse --abbrev-ref HEAD)"
     if [[ "$BRANCH" == "HEAD" ]]; then
         echo "Detached HEAD — check out a branch before releasing." >&2
         exit 1
+    fi
+    # A PR release merges into main and releases main, wherever it was started.
+    # The tree is clean (checked above), so switching costs nothing.
+    if [[ "$PR_MODE" == true && "$BRANCH" != "main" ]]; then
+        echo "Switching from $BRANCH to main to release."
+        git checkout -q main
+        BRANCH="main"
     fi
 
     git fetch -q --tags origin 2>/dev/null || true
@@ -357,6 +494,31 @@ validate_release_targets
 if [[ "$CHECK_TARGETS_ONLY" == true ]]; then
     echo "Release target contract OK."
     exit 0
+fi
+
+# ── Pick and check the pull request ──────────────────────────────────────────
+# Before the version and the notes, so a PR that cannot be released stops the
+# run before anything is written. The merge itself waits until the notes are
+# reviewed (see "PR release" below): nothing irreversible happens before that.
+if [[ "$PR_MODE" == true ]]; then
+    if ! command -v gh >/dev/null 2>&1; then
+        echo "Error: GitHub CLI (gh) is required. Install from https://cli.github.com/ and run: gh auth login" >&2
+        exit 1
+    fi
+    echo ""
+    if [[ -n "$PR_ARG" ]]; then
+        PICKED_PR="$PR_ARG"
+    else
+        PICKED_PR="$(pr_choose_for_release)" || exit 1
+    fi
+    pr_load "$PICKED_PR" || exit 1
+    if [[ "$PR_MERGED" == true ]]; then
+        pr_gate_merged || exit 1
+    else
+        pr_gate_open || exit 1
+    fi
+    echo "Releasing #$PR_NUMBER \"$PR_TITLE\" (head ${PR_HEAD_SHA:0:7})"
+    echo ""
 fi
 
 # ── Version prompt ────────────────────────────────────────────────────────────
@@ -549,6 +711,9 @@ guard_snapshot() {
     local f
     for f in "${GUARD_FILES[@]}"; do
         mkdir -p "$GUARD_DIR/$(dirname "$f")"
+        # Taken twice on a PR release (again once main holds the merge), so
+        # each take replaces the last one's record of the file entirely.
+        rm -f "$GUARD_DIR/$f" "$GUARD_DIR/$f.absent"
         if [[ -f "$f" ]]; then
             cp -p "$f" "$GUARD_DIR/$f"
         else
@@ -583,12 +748,18 @@ on_exit() {
         echo "Release failed (exit $status) — rolling back." >&2
         guard_rollback || true
         echo "Restored: ${GUARD_FILES[*]}" >&2
-        echo "Nothing was committed, tagged, or published." >&2
+        if [[ "${PR_MODE:-false}" == true && "${PR_MERGED:-false}" == true ]]; then
+            echo "#$PR_NUMBER is merged into main, but nothing was released." >&2
+            echo "Resume with:  ./scripts/release.sh --pr $PR_NUMBER" >&2
+        else
+            echo "Nothing was committed, tagged, or published." >&2
+        fi
         if [[ "$RECREATE_RELEASE" == true ]]; then
             echo "Existing release ${TAG} was left untouched." >&2
         fi
     fi
     rm -rf "$GUARD_DIR"
+    rm -rf "${CAMILLIA_RELEASE_COPY:-/nonexistent}"
 }
 # INT/TERM exit non-zero, which then runs the EXIT trap and rolls back.
 trap on_exit EXIT
@@ -642,6 +813,29 @@ write_placeholder_notes() {
     write_release_notes "Release ${TAG}
 
 No release notes were generated for this build."
+}
+
+# One prompt to Claude, answer on stdout. Prefers the API (ANTHROPIC_API_KEY),
+# then the locally authenticated `claude` CLI; non-zero when neither exists.
+ask_model() {
+    local prompt="$1"
+    if [[ -n "${ANTHROPIC_API_KEY:-}" ]]; then
+        jq -n --arg p "$prompt" \
+            '{model:"claude-opus-5",
+              max_tokens:16000,
+              thinking:{type:"adaptive"},
+              messages:[{role:"user",content:$p}]}' 2>/dev/null \
+        | curl -sS --max-time 180 https://api.anthropic.com/v1/messages \
+            -H "content-type: application/json" \
+            -H "x-api-key: ${ANTHROPIC_API_KEY}" \
+            -H "anthropic-version: 2023-06-01" \
+            --data @- 2>/dev/null \
+        | jq -r '.content[]? | select(.type=="text") | .text' 2>/dev/null || true
+    elif command -v claude >/dev/null 2>&1; then
+        claude -p "$prompt" 2>/dev/null || true
+    else
+        return 1
+    fi
 }
 
 generate_ai_summary() {
@@ -708,23 +902,41 @@ ${untracked}
 Diff (zero context, truncated):
 ${diff}"
 
-    if [[ -n "${ANTHROPIC_API_KEY:-}" ]]; then
-        jq -n --arg p "$prompt" \
-            '{model:"claude-opus-5",
-              max_tokens:16000,
-              thinking:{type:"adaptive"},
-              messages:[{role:"user",content:$p}]}' 2>/dev/null \
-        | curl -sS --max-time 180 https://api.anthropic.com/v1/messages \
-            -H "content-type: application/json" \
-            -H "x-api-key: ${ANTHROPIC_API_KEY}" \
-            -H "anthropic-version: 2023-06-01" \
-            --data @- 2>/dev/null \
-        | jq -r '.content[]? | select(.type=="text") | .text' 2>/dev/null || true
-    elif command -v claude >/dev/null 2>&1; then
-        claude -p "$prompt" 2>/dev/null || true
-    else
-        return 1
-    fi
+    ask_model "$prompt"
+}
+
+# Release notes from the pull request being released, rather than from the
+# commit log. The PR description is written as a running changelog of the PR
+# (see CLAUDE.md), so it is the best account of what changed; the commits and
+# diff fill in what it leaves out.
+generate_pr_summary() {
+    local material prompt
+    material="$(pr_notes_material)"
+    prompt="You are writing release notes for Camillia-MT, Meshtastic-compatible
+firmware for ESP32 handheld LoRa devices (T-Deck, T-Deck Pro, T-Lora Pager TFT, M5Stack
+Cardputer, Heltec V4, Attaky Mesh Deck, Elecrow ThinkNode M9, Seeed Wio Tracker L2,
+Elecrow CrowPanel Advance 3.5, and LilyGo T-Display P4).
+
+Release ${TAG} is exactly the pull request below. Summarize what changed for the
+people who flash and use it.
+
+Rules:
+- Group under '### New', '### Changed', '### Fixed'. Omit any empty section.
+- One line per user-visible change, written for a device owner, not a developer.
+- Name the affected board(s) when a change is board-specific.
+- Skip pure refactors, dependency bumps, version bumps, and release chores.
+- The PR description is the primary source. Its testing notes and reviewer
+  detail are not release notes; leave them out. Anything under a 'Notes for
+  release' heading must be covered.
+- Where the description is thin, work out what changed from the commits and the
+  diff. If you still cannot tell what something means for a user, leave it out
+  silently.
+- This text is published verbatim as the release notes. Never address the reader
+  or the requester, never ask questions, and never explain what you omitted or
+  why. Output nothing but the section headers and their bullet lines.
+
+${material}"
+    ask_model "$prompt"
 }
 
 # Interactive accept/edit/discard for freshly generated notes. Returns 0 when the
@@ -771,7 +983,18 @@ if [[ "$USE_COMMITTED_NOTES" == true ]]; then
 else
     echo ""
     echo "Generating AI release summary..."
-    AI_SUMMARY=$(generate_ai_summary || true)
+    if [[ "$PR_MODE" == true ]]; then
+        AI_SUMMARY=$(generate_pr_summary || true)
+        # The release names its PR: GitHub links "#N" on the release page, and
+        # it reads cleanly on the device, which shows these same notes.
+        if [[ -n "${AI_SUMMARY//[[:space:]]/}" ]]; then
+            AI_SUMMARY="${AI_SUMMARY}
+
+Pull request: #${PR_NUMBER}"
+        fi
+    else
+        AI_SUMMARY=$(generate_ai_summary || true)
+    fi
     if [[ -n "${AI_SUMMARY// /}" ]]; then
         write_release_notes "$AI_SUMMARY"
         echo ""
@@ -816,6 +1039,19 @@ if [[ "$NOTES_ONLY" == true || "$REMOTE" == true ]]; then
     if [[ "$ALPHA" == true ]]; then NOTES_CHANNEL=alpha; else NOTES_CHANNEL=stable; fi
 fi
 
+if [[ "$NOTES_ONLY" == true && "$PR_MODE" == true ]]; then
+    # A draft to read, not an input to the release: the real run writes the
+    # notes from the PR again, at the moment it merges it.
+    echo ""
+    echo "Draft release notes for #$PR_NUMBER are above. Nothing was merged,"
+    echo "committed, built or published, and $NOTES_FILE has been put back."
+    echo ""
+    echo "To release it:  ./scripts/release.sh --pr $PR_NUMBER"
+    guard_rollback
+    GUARD_ARMED=false
+    exit 0
+fi
+
 if [[ "$NOTES_ONLY" == true ]]; then
     GUARD_ARMED=false
     echo ""
@@ -831,6 +1067,59 @@ if [[ "$NOTES_ONLY" == true ]]; then
     echo "Pass that version to the workflow. Left blank it derives its own, and"
     echo "these notes would then be published under a different tag."
     exit 0
+fi
+
+if [[ "$REMOTE" == true && "$PR_MODE" == true ]]; then
+    # ── PR release: merge it, then hand over to the flow below ───────────────
+    # The notes are reviewed and the PR passed its checks, so this is the one
+    # irreversible step that remains before the existing flow commits the notes
+    # to main and dispatches. Confirmed here, once, for both.
+    echo ""
+    if [[ "$PR_MERGED" == true ]]; then
+        echo "Ready to release $TAG from #$PR_NUMBER (already merged):"
+    else
+        echo "Ready to release $TAG from #$PR_NUMBER:"
+        echo "  merge:    #$PR_NUMBER \"$PR_TITLE\" at ${PR_HEAD_SHA:0:7} into main (merge commit)"
+    fi
+    echo "  commit:   $NOTES_FILE to main as \"Prepare release $TAG (#$PR_NUMBER) [skip ci]\""
+    echo "  dispatch: release.yml for $TAG (stable), which builds, signs and publishes"
+    echo ""
+    if [[ "$DRY_RUN" == true ]]; then
+        echo "Dry run: nothing merged, committed or dispatched; $NOTES_FILE put back."
+        guard_rollback
+        GUARD_ARMED=false
+        exit 0
+    fi
+    if [[ -t 0 && "$ASSUME_YES" != true ]]; then
+        read -rp "Merge #$PR_NUMBER and release $TAG? [y/N]: " ans || ans="n"
+        case "${ans:-n}" in
+            y|Y|yes|Yes) ;;
+            *) echo "Aborted. Nothing was merged. RELEASE_NOTES.md will be restored." >&2; exit 1 ;;
+        esac
+    fi
+    PR_CONFIRMED=true
+
+    # The reviewed notes are set aside while main catches up with the merge:
+    # the PR may have changed RELEASE_NOTES.md itself, and a modified file in
+    # the way would stop the fast-forward.
+    REVIEWED_NOTES="$GUARD_DIR/reviewed-notes.md"
+    cp "$NOTES_FILE" "$REVIEWED_NOTES"
+    guard_rollback
+
+    if [[ "$PR_MERGED" != true ]]; then
+        pr_merge || exit 1
+        echo "Merged #$PR_NUMBER."
+    fi
+    git fetch -q origin main
+    if ! git merge -q --ff-only origin/main; then
+        echo "Could not fast-forward main to origin/main after the merge." >&2
+        echo "#$PR_NUMBER is merged. Sort out main, then resume with: ./scripts/release.sh --pr $PR_NUMBER" >&2
+        exit 1
+    fi
+    # Main now holds the PR. A failure from here on should put back main's
+    # files as they are now, not as they were before the merge.
+    guard_snapshot
+    cp "$REVIEWED_NOTES" "$NOTES_FILE"
 fi
 
 if [[ "$REMOTE" == true ]]; then
@@ -862,7 +1151,7 @@ if [[ "$REMOTE" == true ]]; then
     fi
     echo ""
 
-    if [[ -t 0 && "$ASSUME_YES" != true ]]; then
+    if [[ -t 0 && "$ASSUME_YES" != true && "${PR_CONFIRMED:-false}" != true ]]; then
         read -rp "Commit, push $BRANCH and dispatch? [y/N]: " ans || ans="n"
         case "${ans:-n}" in
             y|Y|yes|Yes) ;;
@@ -886,6 +1175,8 @@ if [[ "$REMOTE" == true ]]; then
         # workflow_dispatch ignores [skip ci], so the release itself still runs.
         if [[ "$ALPHA" == true ]]; then
             git commit -m "Prepare alpha release $TAG [skip ci]"
+        elif [[ "$PR_MODE" == true ]]; then
+            git commit -m "Prepare release $TAG (#$PR_NUMBER) [skip ci]"
         else
             git commit -m "Prepare release $TAG [skip ci]"
         fi
