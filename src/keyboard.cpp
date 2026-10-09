@@ -334,9 +334,19 @@ bool p4KeyboardExpanderRead(uint8_t reg, uint8_t &value) {
     TwoWire &bus = keyboardBus();
     bus.beginTransmission(TDISPLAY_P4_KB_EXPANDER_ADDR);
     bus.write(reg);
-    if (bus.endTransmission(false) != 0) return false;
-    if (bus.requestFrom((uint8_t)TDISPLAY_P4_KB_EXPANDER_ADDR,
-                        (size_t)1, true) != 1) return false;
+    bool ok = bus.endTransmission(false) == 0
+           && bus.requestFrom((uint8_t)TDISPLAY_P4_KB_EXPANDER_ADDR,
+                              (size_t)1, true) == 1;
+    if (!ok) {
+        // Names the device when Wire's own "Error 259" lines do not: the
+        // first failure, then every 100th.
+        static uint32_t s_fails = 0;
+        if ((s_fails++ % 100) == 0) {
+            Serial.printf("[p4-kb] expander 0x%02X reg 0x%02X read failed (%lu)\n",
+                          TDISPLAY_P4_KB_EXPANDER_ADDR, reg, (unsigned long)s_fails);
+        }
+        return false;
+    }
     value = (uint8_t)bus.read();
     return true;
 }
