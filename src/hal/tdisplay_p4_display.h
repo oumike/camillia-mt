@@ -161,7 +161,15 @@ public:
         if (!points || count == 0 || _touchDataAddress == 0) return 0;
 
         uint8_t header[kEventHeaderSize] = {};
-        if (!readRegister(_touchDataAddress, header, sizeof(header))) return 0;
+        if (!readRegister(_touchDataAddress, header, sizeof(header))) {
+            // Names the device when Wire's own "Error 259" lines do not: the
+            // first failure, then every 100th.
+            if ((_readFails++ % 100) == 0) {
+                Serial.printf("[tdisplay-p4-touch] GT9895 read failed (%lu)\n",
+                              (unsigned long)_readFails);
+            }
+            return 0;
+        }
         if (header[0] == 0) return 0;
         if (!validChecksum(header, sizeof(header))) {
             (void)clearStatus();
@@ -272,6 +280,7 @@ private:
     }
 
     uint32_t _touchDataAddress = 0;
+    uint32_t _readFails = 0;
 };
 
 class LGFX_TDeck : public lgfx::LGFX_Device {
