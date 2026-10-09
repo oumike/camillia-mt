@@ -30596,6 +30596,16 @@ static void openLiveModal() {
 // ── Live Tools modal ─────────────────────────────────────────────────────────
 static void refreshLiveToolsSelection() {
     paintPickerRows(s_liveToolsRows, LIVE_TOOL_COUNT, s_liveToolsSelection, PICKER_SCROLL_NONE);
+#if defined(DEVICE_TDECK_PRO)
+    // A hairline round every other tool, so the grid reads as buttons rather
+    // than loose words. The picker rows elsewhere in Config stay bare; this is
+    // a grid of things to press, not a list to choose one line from.
+    for (int i = 0; i < LIVE_TOOL_COUNT; i++) {
+        if (s_liveToolsRows[i] && i != s_liveToolsSelection) {
+            lv_obj_set_style_border_width(s_liveToolsRows[i], 1, 0);
+        }
+    }
+#endif
 }
 
 // MQTT needs a broker and a broker needs WiFi, so with the master switch off
@@ -30843,12 +30853,16 @@ static void openLiveToolsModal() {
         TR_NOOP("Announce"),
     };
 #else
+#if !defined(DEVICE_TDECK_PRO)
+    // Not on the T-Deck Pro: the (L)etters on the buttons already say what
+    // the keys do, and the line only took height from the grid.
     lv_obj_t *hint = lv_label_create(body);
     lv_obj_set_width(hint, toolsContentW);
     lv_obj_set_style_text_font(hint, &lv_font_montserrat_10, 0);
     lv_obj_set_style_text_color(hint, lv_color_hex(0xA7C7FF), 0);
     lv_obj_set_style_text_align(hint, LV_TEXT_ALIGN_CENTER, 0);
     lv_label_set_text_fmt(hint, TR("Move  Enter=Open  %s=Back"), modalCloseKeyLabel());
+#endif
 
     static const char *kToolLabels[LIVE_TOOL_COUNT] = {
         TR_NOOP("(L)ive"), TR_NOOP("(S)NR/RSSI"), TR_NOOP("Ch(U)til"),
