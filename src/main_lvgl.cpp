@@ -57496,6 +57496,12 @@ static void powerHookShowMessage(const char *msg) {
 }
 
 static void powerHookTierChanged(PowerBatteryTier tier) {
+#if defined(DEVICE_TDISPLAY_P4)
+    // No "Battery low" popup on the P4: the battery reading in the status strip
+    // already says so. Critical and empty still pop up -- those shed loads or
+    // power off.
+    if (tier == POWER_TIER_WARN) return;
+#endif
     const char *label = (tier == POWER_TIER_WARN)     ? TR("Battery low")
                       : (tier == POWER_TIER_CRITICAL) ? TR("Battery critical - shedding load")
                       : (tier == POWER_TIER_CUTOFF)   ? TR("Battery empty")
