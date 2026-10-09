@@ -7984,8 +7984,8 @@ static int sleepOverlayMsgRowWidth() {
 // The budget is eight lines of text, however many messages that turns out to be:
 // four if every one of them wraps, eight if none does. The tallest the block can
 // therefore get is eight single-line messages, which is also the case with the
-// most gaps in it: 8*15 + 7*6 = 162 px, running 150..312 and leaving the same
-// 8 px at the bottom that the status band leaves at the top.
+// most gaps in it: 8*15 + 7*6 = 162 px, which on the T-Deck Pro runs 134..296
+// and leaves 24 px at the bottom.
 #if HAS_RUNTIME_ORIENTATION
 // Both shapes in one build, so these are set at boot rather than compiled in —
 // see orientationApplyOverlayGeometry(). Initialised landscape; the portrait
@@ -8002,7 +8002,9 @@ static constexpr int kTdeckProMsgTop        = 150;
 // 120 px, running 116..236 with four pixels left at the bottom.
 static constexpr int kTdeckProMsgTop        = 116;
 #else
-static constexpr int kTdeckProMsgTop        = 150;
+// The T-Deck Pro: 6 px under the clock's line box, as Home's widgets are
+// (glanceBandTop()). Eight one-line messages run 134..296.
+static constexpr int kTdeckProMsgTop        = 134;
 #endif
 static constexpr int kTdeckProMsgLineH      = 15;   // montserrat_12 line box
 static constexpr int kTdeckProMsgMaxLines   = 2;    // per message
@@ -8077,10 +8079,13 @@ static constexpr int kTdeckProTimeTop      = 72;   // 32 px face, 35 px line box
 #else
 static constexpr int kTdeckProBandTop      = 8;
 // "Camillia", the node name and the clock group together under the band, tight
-// enough to read as one block: 6 px, 3 px and 8 px of air between them.
+// enough to read as one block. The clock's face is Terminus 32 in Montserrat
+// 40's 44 px line box (src/fonts/eink/), which leaves 12 px of it empty above
+// the digits -- so its top sits inside the node name's line box, and the digits
+// land 9 px under the name's baseline.
 static constexpr int kTdeckProTitleTop     = 30;   // 32 px face, 35 px line box
 static constexpr int kTdeckProNodeTop      = 68;   // 16 px face, 18 px line box
-static constexpr int kTdeckProTimeTop      = 94;   // 40 px face, 44 px line box
+static constexpr int kTdeckProTimeTop      = 78;   // 40 px face, 44 px line box
 #endif
 #if !HAS_RUNTIME_ORIENTATION
 static inline void orientationApplyOverlayGeometry() {}
@@ -8411,6 +8416,27 @@ static lv_point_t glanceTextSize(lv_obj_t *label, int maxW) {
     return sz;
 }
 
+// Where the temperature's label goes so that its digits start level with the
+// clock's. Both labels are placed by their tops, and the tops of the digits sit
+// a different distance down each line box whenever the two faces' line metrics
+// differ -- on the T-Deck Pro the clock and the temperature are the same
+// Terminus 32 glyphs in 44 px and 35 px boxes, which put the temperature 4 px
+// high. Measured from a digit rather than assumed, so a font change follows.
+static int glanceWxTempTop() {
+#if defined(DEVICE_TDECK_PRO)
+    auto digitTop = [](const lv_font_t *font) {
+        lv_font_glyph_dsc_t g = {};
+        if (!lv_font_get_glyph_dsc(font, &g, '0', 0)) return 0;
+        return (int)lv_font_get_line_height(font) - (int)font->base_line
+             - (int)g.box_h - (int)g.ofs_y;
+    };
+    return kTdeckProTimeTop + digitTop(kSleepOverlayTimeFont)
+                            - digitTop(kSleepOverlayWxFont);
+#else
+    return kTdeckProTimeTop;
+#endif
+}
+
 // The wide hero (GlanceHeader::wideHero): two cells, the rule between them.
 // In each, the reading is left-aligned at the cell's left edge -- node name over
 // the clock, conditions over the temperature -- and the detail block is right-
@@ -8495,7 +8521,7 @@ static void alignGlanceHero(GlanceHeader &w, bool wxShown) {
         lv_obj_set_style_text_align(w.wxDesc, LV_TEXT_ALIGN_CENTER, 0);
         lv_obj_align(w.wxDesc, LV_ALIGN_TOP_MID, quarter, kTdeckProNodeTop);
         lv_obj_set_style_text_align(w.wxTemp, LV_TEXT_ALIGN_CENTER, 0);
-        lv_obj_align(w.wxTemp, LV_ALIGN_TOP_MID, quarter, kTdeckProTimeTop);
+        lv_obj_align(w.wxTemp, LV_ALIGN_TOP_MID, quarter, glanceWxTempTop());
         return;
     }
     // No reading (or no side column): one centred column at the build-time width.
@@ -8909,7 +8935,7 @@ static void buildGlanceHeader(lv_obj_t *parent, GlanceHeader &w,
     lv_obj_set_style_text_color(w.wxTemp, pal.clockInk, 0);
     lv_obj_set_style_text_align(w.wxTemp, LV_TEXT_ALIGN_RIGHT, 0);
     lv_obj_align(w.wxTemp, LV_ALIGN_TOP_RIGHT,
-                 -kTdeckProBandInset, kTdeckProTimeTop);
+                 -kTdeckProBandInset, glanceWxTempTop());
     lv_obj_add_flag(w.wxTemp, LV_OBJ_FLAG_HIDDEN);
 
     if (w.wideHero) {
