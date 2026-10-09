@@ -47,9 +47,7 @@ env_label() {
 		"$CARDPUTER_ENV_NAME")     echo "M5Stack Cardputer + Cap LoRa/GPS" ;;
 		"$TLORA_ENV_NAME")         echo "LilyGo T-Lora Pager TFT" ;;
 		"$HELTEC_ENV_NAME")        echo "Heltec V4 Expansion Kit" ;;
-		heltec-v4-vertical)        echo "Heltec V4 Expansion Kit (portrait-seeded asset)" ;;
 		"$HELTEC_R8_ENV_NAME")     echo "Heltec V4-R8 + Expansion Kit V2" ;;
-		heltec-r8-vertical)        echo "Heltec V4-R8 + Expansion Kit V2 (portrait-seeded asset)" ;;
 		"$ATTAKY_ENV_NAME")        echo "Attaky Mesh Deck" ;;
 		"$M9_ENV_NAME")            echo "Elecrow ThinkNode M9" ;;
 		"$WIO_TRACKER_L2_ENV_NAME") echo "Seeed Wio Tracker L2" ;;

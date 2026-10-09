@@ -574,7 +574,7 @@ channel raises nothing.
 
 ### Heltec WiFi LoRa 32 V4 + TFT expansion
 
-Builds: `heltec-v4`, `heltec-v4-vertical`
+Builds: `heltec-v4`
 
 - Primary usage is touch (no dedicated hardware keyboard shortcuts)
 - **Chat and DM transcripts survive a reboot.** This board has no card slot, so
@@ -1315,10 +1315,9 @@ The device info panel is scrollable with the keyboard on every keyboard build:
 
 ### Lock screen
 
-Eleven of the thirteen builds can show a lock screen before putting the panel fully
-to sleep: `tdeck`, `tlora-pager-tft`, `heltec-v4`, `heltec-v4-vertical`,
-`mesh-deck`, `m9`, `wio-tracker-l2`, `heltec-r8`, `heltec-r8-vertical` and
-`p4-amoled-sx1262` and `p4-amoled-lr2021`. The two that cannot are `cardputer-cap` and `tdeck-pro`, for different reasons given
+These builds can show a lock screen before putting the panel fully
+to sleep: `tdeck`, `tlora-pager-tft`, `heltec-v4`, `mesh-deck`, `m9`,
+`wio-tracker-l2`, `heltec-r8`, `p4-amoled-sx1262` and `p4-amoled-lr2021`. The two that cannot are `cardputer-cap` and `tdeck-pro`, for different reasons given
 under [Locking and unlocking, build by build](#locking-and-unlocking-build-by-build). It uses a black background with the time and channel in
 blue, node names in green, and message text in white. The current date, battery
 reading and newest unread message previews remain visible while it is active.
@@ -1522,10 +1521,6 @@ UI underneath nor the lock screen itself.
 - A tap on the panel has no tap/hold split of its own: from the lock screen it
   unlocks, and from a dark panel it goes straight to the UI.
 
-**`heltec-v4-vertical`** — not a second firmware: `heltec-v4` with the
-first-boot orientation seeded to portrait. Locking is identical in every
-respect.
-
 **`mesh-deck` — Attaky Mesh Deck**
 
 - Lock screen: **yes**.
@@ -1570,9 +1565,6 @@ respect.
   from a dark panel it goes straight to the UI.
 - Ignored while locked: the USER button on GPIO0 — the UI's action button here
   too. It still wakes a fully dark panel to the UI.
-
-**`heltec-r8-vertical`** — `heltec-r8` with the portrait first-boot seed, and
-otherwise identical.
 
 **A browser VNC session counts as someone looking at the screen.** While one is
 connected the lock screen is dismissed and kept down, the panel and its timers
@@ -1629,8 +1621,6 @@ level.
 - `tdeck-pro` keeps its existing black-on-white e-paper sleep screen. E-paper
   holds that image without a lit backlight, so it does not use the dwell timer
   and does not rotate its band.
-- `heltec-v4-vertical` and `heltec-r8-vertical` are the two base builds with a
-  portrait first-boot seed, so they carry these settings unchanged.
 
 ### Scan SD Card for Malware (ThinkNode M9)
 
@@ -2917,9 +2907,8 @@ Primary usage is touch.
   the cable leaves the case and which hand is holding it, so it is a choice
   rather than something the firmware picks. Web Config → **Orientation** offers
   the same three as a dropdown.
-  There is no separate vertical firmware any more — `heltec-v4-vertical` still
-  exists as a build target, but it produces the same firmware with the portrait
-  default pre-set, for units coming off the old separate vertical build
+  There is no separate vertical firmware or build target any more; a unit
+  coming off the old vertical build is reflashed with `heltec-v4` once
 - The **Wio Tracker L2** has the same setting, in both Config → **Orientation**
   and Web Config → **Orientation**. It shares this board's 240x320 panel, so
   both shapes lay out identically; only the rotation values differ, because the

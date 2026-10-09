@@ -18,17 +18,14 @@ fi
 # the copy; this covers the exits before it (--help, a bad flag).
 trap 'rm -rf "$CAMILLIA_RELEASE_COPY"' EXIT
 
-# The -vertical Heltec envs are deliberately absent. Orientation is a runtime
-# setting now (issue #77), so they are not separate firmware -- each is its
-# parent's binary with the portrait first-boot default pre-set. They still build
-# (pio run -e heltec-v4-vertical) if a seeded image is ever wanted, but they are
-# not published.
+# There are no -vertical Heltec envs any more. Orientation is a runtime setting
+# (issue #77, Config -> Orientation), so a portrait unit runs its board's normal
+# firmware.
 #
 # The cost is on units still running the OLD separate vertical firmware: that
 # build asks OTA for a `heltec-vertical` asset, and with none published its
 # update check fails and it stays where it is until someone reflashes it over
-# USB. Re-add heltec-v4-vertical here for one release if those units should be
-# carried across instead.
+# USB with heltec-v4.
 RELEASE_ENVS=(
     tdeck
     tdeck-pro
@@ -104,11 +101,8 @@ env_flash_mode() {
 
 env_out_name() {
     case "$1" in
-        heltec-v4)          echo "heltec" ;;
-        # Kept although the env is no longer released: it still names the file
-        # correctly if the seeded image is ever built and published by hand.
-        heltec-v4-vertical) echo "heltec-vertical" ;;
-        *)                  echo "$1" ;;
+        heltec-v4) echo "heltec" ;;
+        *)         echo "$1" ;;
     esac
 }
 

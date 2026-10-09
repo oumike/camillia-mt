@@ -19,7 +19,7 @@ and its [`src/hal/hw_*.h`](../src/hal/) pin map.
 
 | Spec | T-Deck | T-Deck Pro | T-LoRa Pager | Cardputer + LoRa-1262 Cap | Heltec V4 (expansion) | Elecrow ThinkNode M9 | Seeed Wio Tracker L2 |
 | --- | --- | --- | --- | --- | --- | --- | --- |
-| **Build env** | `tdeck` | `tdeck-pro` | `tlora-pager-tft` | `cardputer-cap` | `heltec-v4`, `heltec-v4-vertical` | `m9` | `wio-tracker-l2` |
+| **Build env** | `tdeck` | `tdeck-pro` | `tlora-pager-tft` | `cardputer-cap` | `heltec-v4` | `m9` | `wio-tracker-l2` |
 | **MCU** | ESP32-S3FN16R8 | ESP32-S3, 16 MB flash | ESP32-S3 | ESP32-S3FN8 (StampS3) | ESP32-S3R2 | ESP32-S3R8 | ESP32-S3, 16 MB flash + 8 MB octal PSRAM |
 | **PSRAM** | 8 MB octal | 8 MB QSPI | 8 MB (firmware uses quad `qio_qspi` access) | **None** | 2 MB | 8 MB octal | 8 MB octal |
 | **Flash** | 16 MB | 16 MB | 16 MB | 8 MB | 16 MB | 16 MB | 16 MB |

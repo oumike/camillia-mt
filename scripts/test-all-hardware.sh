@@ -18,23 +18,19 @@ fi
 # 2) tdeck-pro
 # 3) pager
 # 4) heltec
-# 5) heltec-vertical
-# 6) heltec-r8
-# 7) heltec-r8-vertical
-# 8) cardputer
-# 9) mesh-deck
-# 10) wio-tracker-l2
-# 11) crowpanel-35
-# 12) p4-amoled-sx1262
-# 13) p4-amoled-lr2021
+# 5) heltec-r8
+# 6) cardputer
+# 7) mesh-deck
+# 8) wio-tracker-l2
+# 9) crowpanel-35
+# 10) p4-amoled-sx1262
+# 11) p4-amoled-lr2021
 TARGET_LABELS=(
   "tdeck"
   "tdeck-pro"
   "pager"
   "heltec"
-  "heltec-vertical"
   "heltec-r8"
-  "heltec-r8-vertical"
   "cardputer"
   "mesh-deck"
   "wio-tracker-l2"
@@ -48,9 +44,7 @@ TARGET_ENVS=(
   "tdeck-pro"
   "tlora-pager-tft"
   "heltec-v4"
-  "heltec-v4-vertical"
   "heltec-r8"
-  "heltec-r8-vertical"
   "cardputer-cap"
   "mesh-deck"
   "wio-tracker-l2"

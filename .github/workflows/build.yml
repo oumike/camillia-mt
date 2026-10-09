@@ -97,9 +97,7 @@ jobs:
           pio run -e tlora-pager-tft --disable-auto-clean
           pio run -e cardputer-cap --disable-auto-clean
           pio run -e heltec-v4 --disable-auto-clean
-          pio run -e heltec-v4-vertical --disable-auto-clean
           pio run -e heltec-r8 --disable-auto-clean
-          pio run -e heltec-r8-vertical --disable-auto-clean
           pio run -e mesh-deck --disable-auto-clean
           pio run -e m9 --disable-auto-clean
           pio run -e wio-tracker-l2 --disable-auto-clean

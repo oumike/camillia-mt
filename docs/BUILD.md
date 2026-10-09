@@ -559,13 +559,12 @@ pre-release build.
   byte slot — but that margin is about 48 KB, and it is the reason to reflash
   rather than wait.
 
-### Heltec V4-R8 (heltec-r8, heltec-r8-vertical)
+### Heltec V4-R8 (heltec-r8)
 
 The **WiFi LoRa 32 V4-R8** paired with the **Expansion Kit V2**. Same UI and
 feature set as the `heltec-v4` profile below, which it shares almost all of its
 code with, plus a working micro-SD slot. Orientation is a runtime setting here
-too, so `heltec-r8-vertical` is a portrait-seeded build for USB flashing rather
-than a second firmware, and is not released — see the `heltec-v4` notes below.
+too (Config → Orientation).
 
 It is a separate env from the V4 rather than a flag on it because the
 mainboard is an ESP32-S3**R8** — 8 MB *octal* PSRAM against the V4's 2 MB quad.
@@ -582,21 +581,16 @@ documents where each pin value came from.
 > this firmware. The header carries a bring-up order; the LoRa front-end
 > TX-mode pin is the least certain value on the board.
 
-### Heltec (heltec-v4, heltec-v4-vertical)
+### Heltec (heltec-v4)
 
-- **Neither `-vertical` env is a second firmware, and neither is released.**
-  `heltec-v4-vertical` `extends` `heltec-v4` and `heltec-r8-vertical` `extends`
-  `heltec-r8`; each adds one flag, `-DORIENTATION_SEED_PORTRAIT=1`. Orientation
-  is a runtime setting (Config → Orientation) stored in the standalone
-  `uiOrient` NVS key; the seed only decides what a device that has *never* had
-  that key writes on its first boot. Build one with
-  `pio run -e heltec-v4-vertical` when you want a USB flash that comes up
-  portrait; they are absent from `RELEASE_ENVS`, so no `-vertical` asset ships.
+- **There is no `-vertical` env.** Orientation is a runtime setting
+  (Config → Orientation) stored in the standalone `uiOrient` NVS key; a fresh
+  device comes up landscape.
 - **Units still on the old separate vertical firmware do not update over the
   air.** That build asks OTA for a `heltec-vertical` asset, and with none
   published its update check fails and it stays where it is. Reflash once over
-  USB — `pio run -e heltec-v4 -t upload`, or the seeded env to come back up
-  portrait — and it rejoins the normal update path.
+  USB — `pio run -e heltec-v4 -t upload`, then pick portrait in Config →
+  Orientation — and it rejoins the normal update path.
 - **App slots grew from 3.2 MB to 6.25 MB (issue #99).** The UI translations and
   the accented fonts they need no longer fit the old slots. Every 16 MB board that
   used `partitions.csv` now uses `partitions_16mb.csv`, and `partitions_16mb_fs.csv`
