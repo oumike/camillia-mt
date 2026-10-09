@@ -47966,6 +47966,34 @@ static void lockMsgHoldOnRelease(uint32_t nowMs) {
 }
 #endif  // HAS_LOCK_MSG_HOLD
 
+#if TOUCH_POLL_ENABLED
+// A finger used to scroll a list must not end up tapping the row it held. LVGL
+// already withholds the click from a press that turned into a scroll; two
+// things got past that.
+//
+// A controller that misses a report mid-drag. The read comes back untouched
+// for a frame, LVGL takes that as a release -- ending the scroll -- and the
+// next frame as a fresh press on whatever row is under the finger now, which
+// the lift then clicks. So a release has to last kTouchReleaseHoldMs before it
+// is reported; until then the finger is held where it was last seen.
+//
+// A finger landing on a list still coasting from a flick. LVGL stops the
+// coast and treats the touch as a new press, so lifting clicks the row it
+// stopped on. That touch is a grip, so its clicks are dropped (onTouchIndev-
+// Event()); it can still drag.
+static constexpr uint32_t kTouchReleaseHoldMs = 60;
+static bool     s_touchDown = false;
+static bool     s_touchGrip = false;
+static uint32_t s_touchLastDownMs = 0;
+static int32_t  s_touchLastX = 0;
+static int32_t  s_touchLastY = 0;
+
+static void onTouchIndevEvent(lv_event_t *e) {
+    if (!s_touchGrip) return;
+    lv_indev_stop_processing((lv_indev_t *)lv_event_get_current_target(e));
+}
+#endif
+
 static void lvglTouchRead(lv_indev_t *indev, lv_indev_data_t *data) {
     LV_UNUSED(indev);
 #if TOUCH_POLL_ENABLED
@@ -48071,10 +48099,24 @@ static void lvglTouchRead(lv_indev_t *indev, lv_indev_data_t *data) {
             return;
         }
         s_lastActivityMs = millis();
+        if (!s_touchDown) {
+            s_touchDown = true;
+            // Set while LVGL is still coasting a flicked list.
+            s_touchGrip = (lv_indev_get_scroll_obj(indev) != nullptr);
+        }
+        s_touchLastDownMs = s_lastActivityMs;
+        s_touchLastX = tx;
+        s_touchLastY = ty;
         data->state = LV_INDEV_STATE_PRESSED;
         data->point.x = tx;
         data->point.y = ty;
+    } else if (s_touchDown && (uint32_t)(millis() - s_touchLastDownMs) < kTouchReleaseHoldMs) {
+        // A missed report, not a lift (see kTouchReleaseHoldMs).
+        data->state = LV_INDEV_STATE_PRESSED;
+        data->point.x = s_touchLastX;
+        data->point.y = s_touchLastY;
     } else {
+        s_touchDown = false;
 #if HAS_LOCK_MSG_HOLD
         lockMsgHoldOnRelease(millis());
 #endif
@@ -57063,6 +57105,12 @@ void setup() {
     lv_indev_set_type(touchIndev, LV_INDEV_TYPE_POINTER);
     lv_indev_set_read_cb(touchIndev, lvglTouchRead);
     lv_indev_set_display(touchIndev, s_lvDisplay);
+#if TOUCH_POLL_ENABLED
+    // Clicks only: a grip's press still selects and its drag still scrolls.
+    lv_indev_add_event_cb(touchIndev, onTouchIndevEvent, LV_EVENT_SHORT_CLICKED, nullptr);
+    lv_indev_add_event_cb(touchIndev, onTouchIndevEvent, LV_EVENT_CLICKED, nullptr);
+    lv_indev_add_event_cb(touchIndev, onTouchIndevEvent, LV_EVENT_LONG_PRESSED, nullptr);
+#endif
 #if UI_CHANNEL_LIST_DROPDOWN
     channelDrawerAttachTouch(touchIndev);
 #endif
