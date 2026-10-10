@@ -2563,7 +2563,10 @@ does:
 - **CORE_PORTNUMS_ONLY** relays them. It filters by what a packet is for, and
   that cannot be read from a packet nobody here can decrypt. Dropping them broke
   remote administration through any node in this mode — which is the default for
-  the Router role.
+  the Router role. For packets it can read, it relays the same set Meshtastic
+  does: text (plain and compressed), position, node info, routing, telemetry,
+  admin, alerts, key verification, waypoints, store and forward (both kinds) and
+  traceroute. Neighbor info and beacons are not relayed in this mode.
 - **LOCAL_ONLY** and **KNOWN_ONLY** relay a direct message between two other
   nodes when this node knows at least one of them. Direct messages, remote
   administration and key verification all travel that way, and a relay that

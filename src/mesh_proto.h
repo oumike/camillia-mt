@@ -71,6 +71,12 @@ enum PortNum : uint32_t {
     ADMIN_APP        = 6,    // Remote administration (AdminMessage). Client only:
                              //   Camillia administers other nodes and does not
                              //   serve the other half -- see issue #89.
+    // Named for the CORE_PORTNUMS_ONLY relay list; we do not handle these.
+    TEXT_MESSAGE_COMPRESSED_APP = 7,
+    WAYPOINT_APP     = 8,
+    ALERT_APP        = 11,
+    KEY_VERIFICATION_APP = 12,
+    STORE_FORWARD_PLUSPLUS_APP = 35,
 
     STORE_FORWARD_APP = 65,  // Store and Forward module (replayed messages)
     TELEMETRY_APP    = 67,

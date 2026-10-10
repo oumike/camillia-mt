@@ -52035,16 +52035,20 @@ static bool rebroadcastModeAllows(const MeshPacket &pkt) {
             // dropping it broke remote admin through ROUTER-role nodes, whose
             // default this mode is.
             if (!pkt.decrypted) return true;
+            // Upstream Router.cpp's list, exactly (unchanged from 2.8.0 to
+            // 2.8.1). This is about what we relay for the rest of the mesh, not
+            // what we handle ourselves: a node in this mode that drops key
+            // verification or admin cuts off whoever it is the only path for,
+            // and one that relays neighbor info or beacons spends airtime that
+            // every stock node in the same mode saves.
             switch (pkt.portnum) {
-                case TEXT_MESSAGE_APP: case POSITION_APP: case NODEINFO_APP:
-                case ROUTING_APP: case TELEMETRY_APP: case NEIGHBORINFO_APP:
-                case TRACEROUTE_APP: case MESH_BEACON_APP:
-                // ADMIN_APP is in upstream Router.cpp's core-portnum list. It is
-                // here for the same reason the others are: this is about what we
-                // relay for the rest of the mesh, not about what we ourselves
-                // send -- and dropping it would quietly break someone else's
-                // remote administration wherever we are the only path.
-                case ADMIN_APP: return true;
+                case TEXT_MESSAGE_APP: case TEXT_MESSAGE_COMPRESSED_APP:
+                case POSITION_APP: case NODEINFO_APP: case ROUTING_APP:
+                case TELEMETRY_APP: case ADMIN_APP: case ALERT_APP:
+                case KEY_VERIFICATION_APP: case WAYPOINT_APP:
+                case STORE_FORWARD_APP: case TRACEROUTE_APP:
+                case STORE_FORWARD_PLUSPLUS_APP:
+                    return true;
                 default: return false;
             }
         default: // ALL / ALL_SKIP_DECODING — relay raw regardless of decode
