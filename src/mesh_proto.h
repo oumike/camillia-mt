@@ -33,6 +33,13 @@ struct ChannelKey {
     // two would be indistinguishable, which is the same trap ChanBlobRecord's
     // extFlags documents.
     uint8_t hopLimitPlus1;
+    // Meshtastic 2.8.1 ChannelSettings.use_aead (field 8): encrypt with AES-CCM
+    // and a 12-byte tag instead of AES-CTR, so a packet altered in flight fails
+    // to decrypt rather than decrypting into something its sender never wrote.
+    // Off by default, and every node on the channel has to agree: it changes the
+    // channel hash. Ignored on a channel with no key, as upstream clears it
+    // there -- read it through channelUsesAead(), not directly.
+    bool    useAead;
 };
 
 // Encode/decode helpers for the field above, so the +1 lives in one place.
@@ -251,6 +258,21 @@ bool    channelKeyIsPublic(const ChannelKey &ck);
 // Compute the on-air channel hash (XOR of name bytes ^ XOR of expanded key bytes).
 uint8_t computeChannelHash(const char *name, const uint8_t *key, uint8_t keyLen);
 
+// Bytes an AEAD channel adds to every packet: the AES-CCM tag
+// (MESHTASTIC_AEAD_OVERHEAD upstream).
+#define MESH_AEAD_OVERHEAD 12
+
+// Whether this channel encrypts with AES-CCM. useAead on a channel that has no
+// key (keyLen 0, or PSK index 0) is ignored: there is nothing to authenticate
+// with, and upstream clears the flag in that case.
+bool    channelUsesAead(const ChannelKey &ck);
+
+// The hash this channel goes by on the air: computeChannelHash(), XORed with
+// 0xAE when the channel uses AEAD (Channels::generateHash() in 2.8.1), so an
+// AEAD channel and a plain one with the same name and key never match each
+// other's traffic. Everything that sets ChannelKey::hash goes through this.
+uint8_t channelKeyHash(const ChannelKey &ck);
+
 // ── Curve25519 PKI key pair (generated once, stored in NVS) ──
 // Defined in the active UI entrypoint (main_lvgl.cpp); used by mesh_proto.cpp and dm_mgr.cpp.
 extern uint8_t myPubKey[32];
@@ -261,14 +283,27 @@ extern uint8_t myPrivKey[32];
 extern uint8_t myDeviceRole;
 
 // ── Encryption / decryption ───────────────────────────────────
-// Try all known channel keys; returns channel index or -1.
+// Try all known channel keys; returns channel index or -1. plainLen is set to
+// the length of what landed in plain: len for an AES-CTR channel, len minus
+// the tag for an AEAD one.
 int  decryptPacket(const MeshHdr &hdr, const uint8_t *cipher,
-                   uint8_t *plain, size_t len);
+                   uint8_t *plain, size_t len, size_t &plainLen);
 
-// Encrypt with a specific key (16 or 32 bytes).
+// AES-CTR with a specific key (16 or 32 bytes, or a 1-byte PSK index). For a
+// key that is not a channel's -- the chat-server discovery key. Channel
+// traffic goes through encryptChannelPayload(), which honours use_aead.
 bool encryptPayload(uint32_t packetId, uint32_t fromNode,
                     const uint8_t *key, uint8_t keyLen,
                     const uint8_t *plain, uint8_t *cipher, size_t len);
+
+// Encrypt plain[len] for channel ck: AES-CTR, or AES-CCM with the tag appended
+// when channelUsesAead(ck). to is the packet's destination, which AEAD binds
+// into the tag. Returns the length written to cipher (len, or len +
+// MESH_AEAD_OVERHEAD), or 0 when it would not fit in cipherCap or failed.
+size_t encryptChannelPayload(const ChannelKey &ck, uint32_t packetId,
+                             uint32_t fromNode, uint32_t toNode,
+                             const uint8_t *plain, size_t len,
+                             uint8_t *cipher, size_t cipherCap);
 
 // PKI-encrypt plain[plainLen] → out[plainLen + 12].
 // Uses Curve25519 ECDH(myPrivKey, recipientPubKey) → SHA256 → AES-CCM.

@@ -672,12 +672,13 @@ bool MeshRadio::pollRx(MeshPacket &pkt) {
         // decrypt to avoid channel-key false positives on random ciphertext.
         if (pkt.hdr.channel != 0) {
             uint8_t plain[256];
-            pkt.chanIdx = decryptPacket(pkt.hdr, cipher, plain, payloadLen);
+            size_t plainLen = 0;
+            pkt.chanIdx = decryptPacket(pkt.hdr, cipher, plain, payloadLen, plainLen);
             pkt.decrypted = (pkt.chanIdx >= 0);
 
             if (pkt.decrypted) {
                 const uint8_t *payPtr; size_t payLen;
-                decodeData(plain, payloadLen, pkt.portnum, payPtr, payLen,
+                decodeData(plain, plainLen, pkt.portnum, payPtr, payLen,
                            pkt.requestId, pkt.wantResponse,
                            &pkt.dataDest, &pkt.hasDataDest,
                            &pkt.dataSource, &pkt.hasDataSource,

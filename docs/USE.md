@@ -741,8 +741,9 @@ it.
 - The offer line reads *channel / preset / region* — whichever parts the beacon
   carried, `(nothing)` when it carried none. A `*` after a channel name means the
   offer included a key, and `AEAD` means the channel uses Meshtastic 2.8.1's
-  authenticated encryption, which this firmware cannot join (see
-  [Authenticated channels (AEAD)](#authenticated-channels-aead)). Nothing here is
+  authenticated encryption, so joining it means turning AEAD on for that channel
+  here too (see [Authenticated channels (AEAD)](#authenticated-channels-aead)).
+  Nothing here is
   ever applied to your radio; acting on an offer is manual, on the Config screen
 - Once a sender has beaconed twice, its card also says how many have been heard
   and roughly how far apart they have been — which is the number that tells you
@@ -2575,13 +2576,30 @@ does:
 Meshtastic 2.8.1 can encrypt a channel with **AES-CCM** instead of AES-CTR, so
 that a packet altered in flight is rejected rather than decrypted into something
 the sender never wrote. It is an experimental, per-channel switch (`use_aead`),
-off by default, and every node on the channel has to turn it on.
+off by default, and Camillia supports it the same way.
 
-Camillia does not support it yet. An AEAD channel has a different channel hash
-from the same channel without it, so this node does not mistake its traffic for
-yours: it is simply not heard. A beacon offering an AEAD channel says so on the
-Beacons screen. If your mesh turns AEAD on, Camillia nodes on that channel will
-stop hearing it.
+- **Turning it on**: in Web Config, tick **AEAD** on the channel's row and save.
+  In an exported config it is the channel's `use_aead: true` line. The on-device
+  channel editor does not show it yet, but saving a channel there keeps whatever
+  it was set to.
+- **Every node on the channel has to turn it on.** An AEAD channel goes by a
+  different channel hash from the same name and key without it, so the two never
+  hear each other. That includes nodes on Meshtastic older than 2.8.1 and on older
+  Camillia builds: they cannot join an AEAD channel at all, and stop hearing it
+  the moment it is switched over.
+- **Older nodes can still relay it** if their **Rebroadcast** mode is `ALL`. In
+  any other mode a node before 2.8.1 drops what it cannot decrypt, so a mesh whose
+  routers run older firmware can cut AEAD traffic off.
+- **It needs a key.** On a channel with no encryption the switch does nothing.
+- **Messages get 12 bytes shorter.** Each packet carries a 12-byte authentication
+  tag. A full-length text still fits, but there is less room left over.
+- **Direct messages are unaffected.** They already use their own authenticated
+  encryption, whatever the channel says.
+
+Keep the primary channel off AEAD unless every node you talk to is on 2.8.1 or
+later: node names and keys are announced there, and a node that cannot hear the
+primary cannot learn them or send you a direct message. A secondary channel is
+the safer place to try it.
 
 ### Traffic this node no longer relays
 

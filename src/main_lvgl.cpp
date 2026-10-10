@@ -10869,12 +10869,16 @@ struct ChanBlobRecord {
     // defaults ON for the primary channel — every upgraded device would quietly
     // stop announcing its position. Bit0 marks the byte as written; only then is
     // bit1 believed, and an older blob keeps the compiled defaults instead.
-    uint8_t extFlags;    // bit0 extFlags valid, bit1 shareLocation
+    // bit2 is use_aead (Meshtastic 2.8.1). Off is its default, so unlike
+    // shareLocation it would have been safe as a plain bit, but it lives here
+    // with the other bits that postdate the record.
+    uint8_t extFlags;    // bit0 extFlags valid, bit1 shareLocation, bit2 useAead
 };
 
 enum : uint8_t {
     CHAN_EXT_VALID          = 0x01,
     CHAN_EXT_SHARE_LOCATION = 0x02,
+    CHAN_EXT_AEAD           = 0x04,
 };
 
 struct ChanBlob {
@@ -10924,7 +10928,8 @@ static void persistChannelsToPrefs() {
                                        | (ck.downlinkEnabled ? 2 : 0)
                                        | (ck.muted           ? 4 : 0));
         blob.chans[i].extFlags = (uint8_t)(CHAN_EXT_VALID
-                                         | (ck.shareLocation ? CHAN_EXT_SHARE_LOCATION : 0));
+                                         | (ck.shareLocation ? CHAN_EXT_SHARE_LOCATION : 0)
+                                         | (ck.useAead       ? CHAN_EXT_AEAD           : 0));
         blob.hopLimitPlus1[i] = ck.hopLimitPlus1;
     }
 
@@ -11517,6 +11522,7 @@ static void loadChannelsFromPrefs() {
             // compiled default (primary on, secondary off) — see ChanBlobRecord.
             if (r.extFlags & CHAN_EXT_VALID) {
                 CHANNEL_KEYS[i].shareLocation = (r.extFlags & CHAN_EXT_SHARE_LOCATION) != 0;
+                CHANNEL_KEYS[i].useAead       = (r.extFlags & CHAN_EXT_AEAD) != 0;
             }
             if (haveHop) {
                 const uint8_t p1 = raw[hopOff + (size_t)i];
@@ -11779,8 +11785,7 @@ static void deriveNodeId() {
 
 static void recomputeChannelHashes() {
     for (int i = 0; i < MAX_CHANNELS; i++) {
-        const char *name = CHANNEL_KEYS[i].name_buf[0] ? CHANNEL_KEYS[i].name_buf : CHANNEL_KEYS[i].name;
-        CHANNEL_KEYS[i].hash = computeChannelHash(name, CHANNEL_KEYS[i].key, CHANNEL_KEYS[i].keyLen);
+        CHANNEL_KEYS[i].hash = channelKeyHash(CHANNEL_KEYS[i]);
     }
 }
 
@@ -18268,7 +18273,7 @@ struct BeaconOffer {
     bool     hasChannel;
     char     channelName[16];
     bool     channelHasPsk;
-    bool     channelUsesAead;   // an AEAD channel, which this firmware cannot join
+    bool     channelUsesAead;   // an AEAD channel: joining it means turning AEAD on here too
     int      preset;            // our PRESET_* index, or -1 when not offered/unmappable
     char     region[12];        // "" when not offered
     int8_t   chanIdx;           // channel it arrived on, for legacy-split pairing
@@ -29299,12 +29304,14 @@ static bool sendTracerouteToNode(uint32_t toNodeId, uint32_t *packetIdOut) {
     bool ok = false;
     if (s_myNodeId != 0 && Radio.isReady()) {
         uint8_t proto[64];
-        uint8_t cipher[96];
+        uint8_t cipher[96 + MESH_AEAD_OVERHEAD];
         size_t protoLen = encodeTracerouteRequest(proto, sizeof(proto), true,
                                                   s_cfg.okToMqtt ? 0x01 : 0);
         if (protoLen > 0) {
             const ChannelKey &ck = CHANNEL_KEYS[0];  // LongFast
-            if (encryptPayload(packetId, s_myNodeId, ck.key, ck.keyLen, proto, cipher, protoLen)) {
+            const size_t cipherLen = encryptChannelPayload(ck, packetId, s_myNodeId, toNodeId,
+                                                           proto, protoLen, cipher, sizeof(cipher));
+            if (cipherLen > 0) {
                 uint8_t frame[sizeof(MeshHdr) + sizeof(cipher)];
                 MeshHdr hdr = {};
                 hdr.to = toNodeId;
@@ -29315,8 +29322,8 @@ static bool sendTracerouteToNode(uint32_t toNodeId, uint32_t *packetIdOut) {
                 hdr.relay_node = (uint8_t)(s_myNodeId & 0xFF);
 
                 memcpy(frame, &hdr, sizeof(hdr));
-                memcpy(frame + sizeof(hdr), cipher, protoLen);
-                ok = Radio.transmit(frame, sizeof(hdr) + protoLen);
+                memcpy(frame + sizeof(hdr), cipher, cipherLen);
+                ok = Radio.transmit(frame, sizeof(hdr) + cipherLen);
             }
         }
     }
@@ -33637,8 +33644,8 @@ static void beaconsBuildList() {
 
         // What is on offer: channel, preset, region — whichever the beacon
         // carried. A trailing * means the channel came with a key, and "AEAD"
-        // that it uses Meshtastic 2.8.1's authenticated encryption, which this
-        // firmware does not speak -- so the channel cannot be joined from here.
+        // that it uses Meshtastic 2.8.1's authenticated encryption -- a channel
+        // set up here with the same name and key but AEAD off would not hear it.
         // Shown even when empty, because "this beacon offered nothing" is itself
         // an answer.
         char offer[72] = {};
@@ -51882,9 +51889,11 @@ static bool sendRoutingResult(uint32_t toNodeId, uint32_t requestId, uint32_t er
     if (protoLen == 0) return false;
 
     const ChannelKey &ck = CHANNEL_KEYS[0];  // ROUTING replies on primary channel.
-    uint8_t cipher[96];
+    uint8_t cipher[96 + MESH_AEAD_OVERHEAD];
     uint32_t packetId = nextMeshPacketId();
-    if (!encryptPayload(packetId, s_myNodeId, ck.key, ck.keyLen, proto, cipher, protoLen)) {
+    const size_t cipherLen = encryptChannelPayload(ck, packetId, s_myNodeId, toNodeId,
+                                                   proto, protoLen, cipher, sizeof(cipher));
+    if (cipherLen == 0) {
         return false;
     }
 
@@ -51898,8 +51907,8 @@ static bool sendRoutingResult(uint32_t toNodeId, uint32_t requestId, uint32_t er
     hdr.relay_node = (uint8_t)(s_myNodeId & 0xFF);
 
     memcpy(frame, &hdr, sizeof(hdr));
-    memcpy(frame + sizeof(hdr), cipher, protoLen);
-    return Radio.transmit(frame, sizeof(hdr) + protoLen);
+    memcpy(frame + sizeof(hdr), cipher, cipherLen);
+    return Radio.transmit(frame, sizeof(hdr) + cipherLen);
 }
 
 // Answer a traceroute aimed at us. Stock Meshtastic's destination node echoes
@@ -51927,9 +51936,11 @@ static bool sendTracerouteReply(uint32_t toNodeId, uint32_t requestId,
     // Reply on the channel the request arrived on: that is the one the sender is
     // listening to, and it need not be the primary.
     const ChannelKey &ck = CHANNEL_KEYS[chanIdx];
-    uint8_t cipher[sizeof(proto)];
+    uint8_t cipher[sizeof(proto) + MESH_AEAD_OVERHEAD];
     uint32_t packetId = nextMeshPacketId();
-    if (!encryptPayload(packetId, s_myNodeId, ck.key, ck.keyLen, proto, cipher, protoLen)) {
+    const size_t cipherLen = encryptChannelPayload(ck, packetId, s_myNodeId, toNodeId,
+                                                   proto, protoLen, cipher, sizeof(cipher));
+    if (cipherLen == 0) {
         return false;
     }
 
@@ -51943,8 +51954,8 @@ static bool sendTracerouteReply(uint32_t toNodeId, uint32_t requestId,
     hdr.relay_node = (uint8_t)(s_myNodeId & 0xFF);
 
     memcpy(frame, &hdr, sizeof(hdr));
-    memcpy(frame + sizeof(hdr), cipher, protoLen);
-    const bool ok = Radio.transmit(frame, sizeof(hdr) + protoLen);
+    memcpy(frame + sizeof(hdr), cipher, cipherLen);
+    const bool ok = Radio.transmit(frame, sizeof(hdr) + cipherLen);
 
     // Logged like the outbound request, so the Live feed shows both halves of a
     // traceroute and answering one can be confirmed without a second device.
@@ -52221,26 +52232,29 @@ static bool csTransmit(const csc::Send &out) {
     data[n++] = (9 << 3) | 0;                 // Data.bitfield = 0 (2.8 drops Data without it)
     data[n++] = 0;
 
-    const uint8_t *key;
-    uint8_t keyLen, hash;
-    if (out.chanIdx < 0) {
-        key = csp::DISCOVERY_KEY; keyLen = 16; hash = csDiscoveryHash();
-    } else {
-        const ChannelKey &ck = CHANNEL_KEYS[out.chanIdx];
-        key = ck.key; keyLen = ck.keyLen; hash = ck.hash;
-    }
-    uint8_t frame[sizeof(MeshHdr) + sizeof(data)];
+    uint8_t frame[sizeof(MeshHdr) + sizeof(data) + MESH_AEAD_OVERHEAD];
     MeshHdr hdr = {};
     hdr.to = out.to;
     hdr.from = s_myNodeId;
     hdr.id = nextMeshPacketId();
-    hdr.channel = hash;
     const uint8_t hop = out.hopLimit & 0x07;
     hdr.flags = (uint8_t)(hop | (hop << 5));
     hdr.relay_node = (uint8_t)(s_myNodeId & 0xFF);
-    if (!encryptPayload(hdr.id, s_myNodeId, key, keyLen, data, frame + sizeof(MeshHdr), n)) return false;
+    size_t cipherLen = 0;
+    if (out.chanIdx < 0) {
+        // The discovery channel is ours alone and stays AES-CTR.
+        hdr.channel = csDiscoveryHash();
+        if (encryptPayload(hdr.id, s_myNodeId, csp::DISCOVERY_KEY, 16, data, frame + sizeof(MeshHdr), n))
+            cipherLen = n;
+    } else {
+        const ChannelKey &ck = CHANNEL_KEYS[out.chanIdx];
+        hdr.channel = ck.hash;
+        cipherLen = encryptChannelPayload(ck, hdr.id, s_myNodeId, hdr.to, data, n,
+                                          frame + sizeof(MeshHdr), sizeof(frame) - sizeof(MeshHdr));
+    }
+    if (cipherLen == 0) return false;
     memcpy(frame, &hdr, sizeof(hdr));
-    const bool ok = Radio.transmit(frame, sizeof(hdr) + n);
+    const bool ok = Radio.transmit(frame, sizeof(hdr) + cipherLen);
 
     csp::Type t = csp::DISCOVER;
     csp::peekType(out.payload, out.len, t);
@@ -53104,11 +53118,12 @@ static void mqttDownlinkInject(const MeshHdr &hdr, const uint8_t *cipher,
         memcpy(pkt.rawCipher, cipher, cipherLen);
         pkt.rawLen = cipherLen;
         uint8_t plain[256];
-        pkt.chanIdx = decryptPacket(pkt.hdr, cipher, plain, cipherLen);
+        size_t plainLen = 0;
+        pkt.chanIdx = decryptPacket(pkt.hdr, cipher, plain, cipherLen, plainLen);
         pkt.decrypted = (pkt.chanIdx >= 0);
         if (pkt.decrypted) {
             const uint8_t *payPtr; size_t payLen;
-            decodeData(plain, cipherLen, pkt.portnum, payPtr, payLen,
+            decodeData(plain, plainLen, pkt.portnum, payPtr, payLen,
                        pkt.requestId, pkt.wantResponse,
                        &pkt.dataDest, &pkt.hasDataDest,
                        &pkt.dataSource, &pkt.hasDataSource,

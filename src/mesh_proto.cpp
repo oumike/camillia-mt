@@ -139,6 +139,22 @@ uint8_t computeChannelHash(const char *name, const uint8_t *key, uint8_t keyLen)
     return h;
 }
 
+bool channelUsesAead(const ChannelKey &ck) {
+    if (!ck.useAead) return false;
+    uint8_t exp[16];
+    const uint8_t *k = ck.key;
+    uint8_t kl = ck.keyLen;
+    resolveMeshKey(ck.key, ck.keyLen, exp, k, kl);
+    return kl > 0;
+}
+
+uint8_t channelKeyHash(const ChannelKey &ck) {
+    const char *name = ck.name_buf[0] ? ck.name_buf : (ck.name ? ck.name : "");
+    uint8_t h = computeChannelHash(name, ck.key, ck.keyLen);
+    if (channelUsesAead(ck)) h ^= 0xAE;
+    return h;
+}
+
 // ── Channel key table ─────────────────────────────────────────
 // 1-byte PSK keys are stored as a single byte and expanded at runtime via expandPsk().
 // role: 0=PRIMARY, 1=SECONDARY, 2=DISABLED
@@ -591,18 +607,82 @@ static bool looksLikeData(const uint8_t *plain, size_t len) {
     return portnum > 0 && portnum <= 1024;
 }
 
+// ── AEAD channels (Meshtastic 2.8.1 use_aead) ────────────────
+// AES-CCM, as CryptoEngine::encryptPacketCCM() builds it upstream:
+//   nonce (13): the AES-CTR nonce's first 13 bytes -- packet id as a
+//               little-endian u64 (ours are 32-bit, so bytes 4..7 are zero),
+//               then from, then a zero byte
+//   AAD   (8):  from | to, little-endian. Hop fields are left out because
+//               relays rewrite them; the nonce already binds from and the id.
+//   tag   (12): appended after the ciphertext
+// Key: the channel PSK as resolved for AES-CTR, AES-128 or AES-256 by length.
+static void aeadNonceAad(uint32_t packetId, uint32_t fromNode, uint32_t toNode,
+                         uint8_t nonce[13], uint8_t aad[8]) {
+    memset(nonce, 0, 13);
+    memcpy(nonce,     &packetId, 4);
+    memcpy(nonce + 8, &fromNode, 4);
+    memcpy(aad,     &fromNode, 4);
+    memcpy(aad + 4, &toNode,   4);
+}
+
+static bool aeadSeal(const uint8_t *key, uint8_t keyLen,
+                     uint32_t packetId, uint32_t fromNode, uint32_t toNode,
+                     const uint8_t *plain, size_t len, uint8_t *out) {
+    if (keyLen != 16 && keyLen != 32) return false;
+    uint8_t nonce[13], aad[8];
+    aeadNonceAad(packetId, fromNode, toNode, nonce, aad);
+    mbedtls_ccm_context ccm;
+    mbedtls_ccm_init(&ccm);
+    int ret = mbedtls_ccm_setkey(&ccm, MBEDTLS_CIPHER_ID_AES, key, keyLen * 8);
+    if (ret == 0) {
+        ret = mbedtls_ccm_encrypt_and_tag(&ccm, len, nonce, sizeof(nonce), aad, sizeof(aad),
+                                          plain, out, out + len, MESH_AEAD_OVERHEAD);
+    }
+    mbedtls_ccm_free(&ccm);
+    return ret == 0;
+}
+
+// in holds ciphertext then tag; len counts both. plain gets len - tag bytes.
+static bool aeadOpen(const uint8_t *key, uint8_t keyLen,
+                     uint32_t packetId, uint32_t fromNode, uint32_t toNode,
+                     const uint8_t *in, size_t len, uint8_t *plain) {
+    if (keyLen != 16 && keyLen != 32) return false;
+    if (len <= MESH_AEAD_OVERHEAD) return false;
+    const size_t cryptLen = len - MESH_AEAD_OVERHEAD;
+    uint8_t nonce[13], aad[8];
+    aeadNonceAad(packetId, fromNode, toNode, nonce, aad);
+    mbedtls_ccm_context ccm;
+    mbedtls_ccm_init(&ccm);
+    int ret = mbedtls_ccm_setkey(&ccm, MBEDTLS_CIPHER_ID_AES, key, keyLen * 8);
+    if (ret == 0) {
+        ret = mbedtls_ccm_auth_decrypt(&ccm, cryptLen, nonce, sizeof(nonce), aad, sizeof(aad),
+                                       in, plain, in + cryptLen, MESH_AEAD_OVERHEAD);
+    }
+    mbedtls_ccm_free(&ccm);
+    return ret == 0;
+}
+
 int decryptPacket(const MeshHdr &hdr, const uint8_t *cipher,
-                  uint8_t *plain, size_t len) {
+                  uint8_t *plain, size_t len, size_t &plainLen) {
+    plainLen = 0;
     auto tryDecrypt = [&](int i) -> bool {
         uint8_t exp[16];
         const uint8_t *keyPtr = CHANNEL_KEYS[i].key;
         uint8_t keyLen = CHANNEL_KEYS[i].keyLen;
         resolveMeshKey(CHANNEL_KEYS[i].key, CHANNEL_KEYS[i].keyLen, exp, keyPtr, keyLen);
+        if (channelUsesAead(CHANNEL_KEYS[i])) {
+            // The tag decides; no AES-CTR fallback, as upstream. A packet that
+            // fails it was altered, or is not this channel's.
+            if (!aeadOpen(keyPtr, keyLen, hdr.id, hdr.from, hdr.to, cipher, len, plain)) return false;
+            plainLen = len - MESH_AEAD_OVERHEAD;
+            return looksLikeData(plain, plainLen);
+        }
         if (keyLen == 0) {
             memcpy(plain, cipher, len);
         } else {
             if (!aesCtr(keyPtr, keyLen, hdr.id, hdr.from, cipher, plain, len)) return false;
         }
+        plainLen = len;
         return looksLikeData(plain, len);
     };
 
@@ -626,6 +706,26 @@ bool encryptPayload(uint32_t packetId, uint32_t fromNode,
     resolveMeshKey(key, keyLen, exp, key, keyLen);
     if (keyLen == 0) { memcpy(cipher, plain, len); return true; }
     return aesCtr(key, keyLen, packetId, fromNode, plain, cipher, len);
+}
+
+size_t encryptChannelPayload(const ChannelKey &ck, uint32_t packetId,
+                             uint32_t fromNode, uint32_t toNode,
+                             const uint8_t *plain, size_t len,
+                             uint8_t *cipher, size_t cipherCap) {
+    if (channelUsesAead(ck)) {
+        if (len + MESH_AEAD_OVERHEAD > cipherCap) return 0;
+        uint8_t exp[16];
+        const uint8_t *k = ck.key;
+        uint8_t kl = ck.keyLen;
+        resolveMeshKey(ck.key, ck.keyLen, exp, k, kl);
+        if (!aeadSeal(k, kl, packetId, fromNode, toNode, plain, len, cipher)) {
+            debugLogMessages("[aead] encrypt failed id=%08lX\n", (unsigned long)packetId);
+            return 0;
+        }
+        return len + MESH_AEAD_OVERHEAD;
+    }
+    if (len > cipherCap) return 0;
+    return encryptPayload(packetId, fromNode, ck.key, ck.keyLen, plain, cipher, len) ? len : 0;
 }
 
 // ── PKI (Curve25519) encryption ───────────────────────────────
