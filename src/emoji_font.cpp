@@ -36,8 +36,8 @@ EmojiSlot s_slots[] = {
     // The P4's Extra Large chat size, which no other board draws at.
     { &lv_font_montserrat_20, 22, {}, nullptr, false },
 #endif
-#if defined(DEVICE_CROWPANEL_35)
-    // The CrowPanel 3.5's Extra Large chat size.
+#if defined(DEVICE_CROWPANEL)
+    // The CrowPanels' Extra Large chat size.
     { &lv_font_montserrat_24, 26, {}, nullptr, false },
 #endif
 };

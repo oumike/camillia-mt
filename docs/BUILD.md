@@ -124,6 +124,7 @@ the `.bin` for your device:
 | Elecrow ThinkNode M9 | `camillia-mt-m9-vX.Y.Z.bin` |
 | Seeed Wio Tracker L2 | `camillia-mt-wio-tracker-l2-vX.Y.Z.bin` |
 | Elecrow CrowPanel Advance 3.5 | `camillia-mt-crowpanel-35-vX.Y.Z.bin` |
+| Elecrow CrowPanel Advance 5.0 | `camillia-mt-crowpanel-50-vX.Y.Z.bin` |
 | LilyGo T-Display P4 AMOLED + SX1262 | `camillia-mt-p4-amoled-sx1262-vX.Y.Z.bin` |
 | LilyGo T-Display P4 AMOLED + LR2021 | `camillia-mt-p4-amoled-lr2021-vX.Y.Z.bin` |
 
@@ -317,6 +318,7 @@ Pick the environment for your board:
 | Elecrow ThinkNode M9 | `m9` |
 | Seeed Wio Tracker L2 | `wio-tracker-l2` |
 | Elecrow CrowPanel Advance 3.5" | `crowpanel-35` |
+| Elecrow CrowPanel Advance 5.0" | `crowpanel-50` |
 | LilyGo T-Display P4 AMOLED + SX1262 | `p4-amoled-sx1262` |
 | LilyGo T-Display P4 AMOLED + LR2021 | `p4-amoled-lr2021` |
 
@@ -380,6 +382,7 @@ Run it with no flags to get a device picker.
 | `--m9`, `-9` | `m9` |
 | `--wio-tracker-l2` | `wio-tracker-l2` |
 | `--crowpanel-35` | `crowpanel-35` |
+| `--crowpanel-50` | `crowpanel-50` |
 | `--p4-amoled-sx1262` | `p4-amoled-sx1262` |
 | `--p4-amoled-lr2021` | `p4-amoled-lr2021` |
 | `--erase`, `-E` | erase flash before a clean build/upload (M9 uses `upload_erase`) |

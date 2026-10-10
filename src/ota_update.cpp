@@ -565,6 +565,8 @@ const char *otaCurrentDeviceAssetSlug() {
     return "wio-tracker-l2";
 #elif defined(DEVICE_CROWPANEL_35)
     return "crowpanel-35";
+#elif defined(DEVICE_CROWPANEL_50)
+    return "crowpanel-50";
 #elif defined(DEVICE_TDISPLAY_P4)
 #if defined(MESH_LORA_LR2021) && MESH_LORA_LR2021
     return "p4-amoled-lr2021";

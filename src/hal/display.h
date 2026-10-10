@@ -12,6 +12,7 @@
 //   DEVICE_TLORA_PAGER_TFT      → Panel_ST7796
 //   DEVICE_WIO_TRACKER_L2               → Panel_NV3031B (quad-SPI)
 //   DEVICE_CROWPANEL_35         → Panel_ILI9488
+//   DEVICE_CROWPANEL_50         → crowpanel_50_display.h (RGB, own class)
 //   All others                   → Panel_ST7789
 //
 // Touch controller selection:
@@ -33,6 +34,8 @@
 #include "tdisplay_p4_display.h"
 #elif defined(DEVICE_TDECK_PRO)
 #include "tdeck_pro_display.h"
+#elif defined(DEVICE_CROWPANEL_50)
+#include "crowpanel_50_display.h"
 #else
 
 #if defined(DEVICE_HELTEC_V4_EXPANSION) && HAS_TOUCH
