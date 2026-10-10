@@ -268,6 +268,11 @@ uint8_t computeChannelHash(const char *name, const uint8_t *key, uint8_t keyLen)
 // (MESHTASTIC_AEAD_OVERHEAD upstream).
 #define MESH_AEAD_OVERHEAD 12
 
+// The on-air header, and the most a LoRa frame carries (header included):
+// upstream's MESHTASTIC_HEADER_LENGTH and MAX_LORA_PAYLOAD_LEN.
+#define MESH_HEADER_BYTES    16
+#define MESH_MAX_FRAME_BYTES 255
+
 // Whether this channel encrypts with AES-CCM. useAead on a channel that has no
 // key (keyLen 0, or PSK index 0) is ignored: there is nothing to authenticate
 // with, and upstream clears the flag in that case.

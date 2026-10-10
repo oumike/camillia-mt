@@ -24,7 +24,7 @@
 #include "cs_client.h"
 #include "cs_proto.h"
 #include "mesh_proto.h"
-#include "xeddsa.h"
+#include "xeddsa_sig.h"
 #include "ack_proof.h"
 #include "mesh_radio.h"
 #include "mqtt_bridge.h"
@@ -2830,7 +2830,7 @@ static void openMessageActionMenu(uint32_t packetId, uint32_t senderNodeId);
 //
 // Verification is advisory here: an unsigned or unverifiable packet is handled
 // exactly as before. Meshtastic's own default receive policy is COMPATIBLE,
-// which accepts unsigned traffic, and we do not have the signing half yet — so
+// which accepts unsigned traffic, so
 // treating a failed check as a reason to drop would punish the majority of the
 // mesh for a feature almost nobody is using. What it buys today is the ability
 // to say a node has proved it holds the key we have for it.
@@ -11743,6 +11743,10 @@ static void deriveNodeId() {
                        | (uint32_t)mac[5];
         }
     }
+
+    // Sign our broadcasts as this node (Meshtastic 2.8.1). Every path that
+    // changes the key or the ID comes through here.
+    xeddsaInitSigner(myPrivKey, s_myNodeId);
 
     // Remember the ID we previously announced under, so chat history written by
     // the old identity can still be recognised as ours. Stored rather than
@@ -52118,9 +52122,25 @@ static void maybeRebroadcastPacket(const MeshPacket &pkt) {
         return;
     }
 
+    // A unicast routed through a chosen relay names it in next_hop (the low byte
+    // of its node number). As upstream's NextHopRouter, relay only one that
+    // names nobody or names us: the sender picked another path, and a node that
+    // floods it anyway spends airtime and makes duplicates for nothing.
+    const uint8_t ourRelayByte = (uint8_t)(s_myNodeId & 0xFF);
+    if (pkt.hdr.next_hop != 0 && pkt.hdr.next_hop != ourRelayByte) {
+        debugLogMessages("[fwd] skip (next_hop %02x is not us) from=%08lx id=%08lx\n",
+                         pkt.hdr.next_hop,
+                         (unsigned long)pkt.hdr.from, (unsigned long)pkt.hdr.id);
+        return;
+    }
+
     MeshHdr hdr = pkt.hdr;
     hdr.flags = (uint8_t)((pkt.hdr.flags & 0xF8) | ((hopLimit - 1) & 0x07));
-    hdr.relay_node = (uint8_t)(s_myNodeId & 0xFF);
+    hdr.relay_node = ourRelayByte;
+    // Upstream rewrites next_hop from its route table as it relays. We keep no
+    // routes, which upstream treats as no preference: left as our own byte, the
+    // nodes after us would see a packet routed to someone else and drop it.
+    hdr.next_hop = 0;
 
     PendingRebroadcast *slot = allocPendingRebroadcast();
     if (!slot) {                             // queue full: drop rather than block

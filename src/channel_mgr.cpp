@@ -8,6 +8,7 @@
 #include "battery_util.h"
 #include "utf8_utils.h"
 #include "esp_heap_caps.h"
+#include "xeddsa_sig.h"
 #include "esp_mac.h"
 #include "storage.h"
 #include <time.h>
@@ -1002,7 +1003,7 @@ bool ChannelMgr::sendPosition(uint32_t myNodeId, int32_t latI, int32_t lonI, int
     // holds the real fix.
     applyPositionPrecision(latI, lonI, precisionBits);
 
-    uint8_t proto[64], cipher[64 + MESH_AEAD_OVERHEAD];
+    uint8_t proto[64], cipher[64 + XEDDSA_SIGNATURE_FIELD_BYTES + MESH_AEAD_OVERHEAD];
     uint32_t bitfield = okToMqtt ? 0x01 : 0;
     size_t protoLen = encodePosition(latI, lonI, alt, proto, sizeof(proto), bitfield,
                                      precisionBits);
@@ -1092,7 +1093,7 @@ static uint32_t telemetryEpochNow() {
 bool ChannelMgr::sendTelemetryDevice(uint32_t myNodeId, bool okToMqtt) {
     if (!Radio.isReady()) return false;
 
-    uint8_t proto[80], cipher[80 + MESH_AEAD_OVERHEAD];
+    uint8_t proto[80], cipher[80 + XEDDSA_SIGNATURE_FIELD_BYTES + MESH_AEAD_OVERHEAD];
     uint32_t bitfield = okToMqtt ? 0x01 : 0;
     size_t protoLen = encodeTelemetryDevice(batteryReadPercent(), batteryReadVoltage(),
                                             Radio.channelUtilPercent(), Radio.airUtilTxPercent(),
@@ -1134,7 +1135,7 @@ bool ChannelMgr::sendTelemetryEnvironment(uint32_t myNodeId,
                                           bool okToMqtt) {
     if (!Radio.isReady()) return false;
 
-    uint8_t proto[96], cipher[96 + MESH_AEAD_OVERHEAD];
+    uint8_t proto[96], cipher[96 + XEDDSA_SIGNATURE_FIELD_BYTES + MESH_AEAD_OVERHEAD];
     uint32_t bitfield = okToMqtt ? 0x01 : 0;
     size_t protoLen = encodeTelemetryEnvironment(temperatureC, humidityPct, pressureHpa,
                                                  telemetryEpochNow(),
@@ -1176,7 +1177,7 @@ bool ChannelMgr::sendNeighborInfo(uint32_t myNodeId,
                                   bool okToMqtt) {
     if (!Radio.isReady()) return false;
 
-    uint8_t proto[224], cipher[224 + MESH_AEAD_OVERHEAD];
+    uint8_t proto[224], cipher[224 + XEDDSA_SIGNATURE_FIELD_BYTES + MESH_AEAD_OVERHEAD];
     uint32_t bitfield = okToMqtt ? 0x01 : 0;
     size_t protoLen = encodeNeighborInfo(myNodeId,
                                          nodeBroadcastIntervalS,

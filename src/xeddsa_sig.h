@@ -1,15 +1,12 @@
 #pragma once
-// XEdDSA signature verification (Meshtastic 2.8, Data.xeddsa_signature).
+// XEdDSA signatures (Meshtastic 2.8, Data.xeddsa_signature).
 //
 // 2.8 signs packets with XEdDSA over the Curve25519 identity every node already
 // has — no new key material and no key exchange. Verification is ordinary
 // Ed25519 verification; the only extra step is converting the sender's
-// Curve25519 public key into the Ed25519 public key it corresponds to, which is
-// what this module exists to do.
-//
-// Only verification is implemented. Signing needs the private-scalar path
-// (Ed25519 signing from a supplied scalar rather than a seed), which the Crypto
-// library we link does not expose — see docs and issue #60 B1b.
+// Curve25519 public key into the Ed25519 public key it corresponds to.
+// Signing is Ed25519 from the Curve25519 scalar itself rather than from a seed,
+// which is what meshtastic/Crypto's XEdDSA class adds to rweather/Crypto.
 #include <Arduino.h>
 #include <stdint.h>
 #include <stddef.h>
@@ -18,6 +15,8 @@
 // and rejects anything between, so a partial signature is not a thing to
 // tolerate — it is a malformed packet.
 #define XEDDSA_SIGNATURE_BYTES 64
+// What the signature adds to an encoded Data: tag, length and the 64 bytes.
+#define XEDDSA_SIGNATURE_FIELD_BYTES (XEDDSA_SIGNATURE_BYTES + 2)
 
 // Convert a Curve25519 public key (Montgomery u) to the Ed25519 public key
 // (Edwards y, sign bit clear) that XEdDSA signs under.
@@ -64,3 +63,17 @@ struct XeddsaSignedFields {
 bool xeddsaVerify(const uint8_t senderPubKey[32], const XeddsaSignedFields &fields,
                   const uint8_t *payload, size_t payloadLen,
                   const uint8_t signature[XEDDSA_SIGNATURE_BYTES]);
+
+// Load our identity for signing: derive the Ed25519 key pair once from our
+// Curve25519 private key. nodeId is the node number the key belongs to; only
+// packets from it are ever signed. Call again whenever the key changes.
+void xeddsaInitSigner(const uint8_t curvePrivKey[32], uint32_t nodeId);
+
+// The node xeddsaInitSigner() was given, or 0 before it has a key.
+uint32_t xeddsaSignerNodeId();
+
+// Sign one packet in the layout above. fields.from must be the signer's node.
+// Signatures are hedged (random input mixed into the nonce), so signing the
+// same packet twice gives two different, equally valid signatures.
+bool xeddsaSign(const XeddsaSignedFields &fields, const uint8_t *payload, size_t payloadLen,
+                uint8_t signature[XEDDSA_SIGNATURE_BYTES]);

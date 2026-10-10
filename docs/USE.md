@@ -2530,14 +2530,23 @@ failed check would punish the whole mesh for a feature barely in use. A failed
 check is logged rather than acted on — it means either the key we hold is stale
 or something is claiming to be that node.
 
-Camillia does not sign its own packets yet. That needs a signing primitive the
-cryptography library here does not provide, and is tracked separately.
+Camillia also signs its own packets, by the same rule as Meshtastic 2.8.1: every
+broadcast it sends — channel messages, position, node info, telemetry, neighbor
+info — carries a signature whenever the signed packet still fits in one radio
+frame. Direct messages are not signed, because their encryption already proves
+who sent them, and nothing is signed on a node's behalf when Camillia shares
+someone else's node info. There is nothing to turn on.
 
-What that means against a stock 2.8.1 node: on its default settings it accepts
-unsigned traffic from a node that has never signed, which is every Camillia node,
-so nothing changes. A 2.8.1 node switched to the **Strict** signature policy
-drops every unsigned packet, Camillia's included. A 2.8.1 node also drops any
-packet whose signature fails outright, where Camillia only logs it.
+What that means against a stock 2.8.1 node: once it has learned your key, your
+broadcasts show as signed, and on any of its three signature policies it treats
+your traffic exactly as it treats another 2.8.1 node's. On the default
+**Compatible** policy that changes nothing. **Strict**, which drops unsigned
+packets, no longer drops your broadcasts. **Balanced**, having seen a node sign,
+drops an unsigned broadcast from it that would have fit with a signature — so a
+Camillia build from before this change should not share a node ID with one
+after it. A 2.8.1
+node also drops any packet whose signature fails outright, where Camillia only
+logs it.
 
 ### Delivery proofs
 
@@ -2573,6 +2582,11 @@ does:
   drops them cuts the two nodes either side off from each other. An unreadable
   broadcast, or a direct message between two nodes this one has never heard of,
   is still dropped: ignoring foreign meshes is what those modes are for.
+
+In every mode, a direct message that its sender routed through a particular
+relay is left to that relay, as Meshtastic does. Camillia relays one only when
+it names no relay or names this node, and since Camillia keeps no routing table
+of its own, a packet it does relay goes on with no relay named.
 
 ### Authenticated channels (AEAD)
 

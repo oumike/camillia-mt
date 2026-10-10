@@ -1,5 +1,7 @@
-#include "xeddsa.h"
+#include "xeddsa_sig.h"
 #include <Ed25519.h>
+#include <XEdDSA.h>
+#include <esp_random.h>
 #include <string.h>
 
 // ── Field arithmetic mod p = 2^255 - 19 ───────────────────────
@@ -20,9 +22,9 @@
 // answer produces a key that simply fails to verify, silently.
 namespace {
 
-typedef uint32_t fe[8];
+typedef uint32_t fe256[8];
 
-void feFromBytes(fe out, const uint8_t in[32]) {
+void feFromBytes(fe256 out, const uint8_t in[32]) {
     for (int i = 0; i < 8; i++) {
         out[i] = (uint32_t)in[i * 4]
                | ((uint32_t)in[i * 4 + 1] << 8)
@@ -36,7 +38,7 @@ void feFromBytes(fe out, const uint8_t in[32]) {
 // Add 'carry' worth of p back in / take it out, keeping the value in range.
 // Adds b*2^256 mod p, i.e. b*38, into the eight limbs and returns any further
 // carry out of the top.
-uint32_t feAddScaled(fe r, uint32_t b) {
+uint32_t feAddScaled(fe256 r, uint32_t b) {
     uint64_t c = (uint64_t)b * 38u;
     for (int i = 0; i < 8; i++) {
         c += r[i];
@@ -46,7 +48,7 @@ uint32_t feAddScaled(fe r, uint32_t b) {
     return (uint32_t)c;
 }
 
-void feAdd(fe r, const fe a, const fe b) {
+void feAdd(fe256 r, const fe256 a, const fe256 b) {
     uint64_t c = 0;
     for (int i = 0; i < 8; i++) {
         c += (uint64_t)a[i] + b[i];
@@ -58,7 +60,7 @@ void feAdd(fe r, const fe a, const fe b) {
     while (extra) extra = feAddScaled(r, extra);
 }
 
-void feSub(fe r, const fe a, const fe b) {
+void feSub(fe256 r, const fe256 a, const fe256 b) {
     // Plain limb-wise subtract first. A borrow out of the top means the true
     // result is negative and what sits in r is that result plus 2^256.
     uint32_t borrow = 0;
@@ -79,7 +81,7 @@ void feSub(fe r, const fe a, const fe b) {
     }
 }
 
-void feMul(fe r, const fe a, const fe b) {
+void feMul(fe256 r, const fe256 a, const fe256 b) {
     uint32_t t[16] = {0};
     for (int i = 0; i < 8; i++) {
         uint64_t carry = 0;
@@ -108,22 +110,22 @@ void feMul(fe r, const fe a, const fe b) {
     for (int i = 0; i < 8; i++) r[i] = lo[i];
 }
 
-void feSquare(fe r, const fe a) { feMul(r, a, a); }
+void feSquare(fe256 r, const fe256 a) { feMul(r, a, a); }
 
-void feOne(fe r) { r[0] = 1; for (int i = 1; i < 8; i++) r[i] = 0; }
+void feOne(fe256 r) { r[0] = 1; for (int i = 1; i < 8; i++) r[i] = 0; }
 
 // Inversion by Fermat: a^(p-2) mod p. p-2 = 2^255 - 21, whose binary form is
 // 250 ones, then 0, 1, 0, 1, 1 reading from the top — the standard addition
 // chain is spelled out as a plain square-and-multiply over the exponent bits so
 // it can be checked against the constant rather than trusted.
-void feInvert(fe r, const fe a) {
+void feInvert(fe256 r, const fe256 a) {
     static const uint8_t kPMinus2[32] = {
         0xEB, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF,
         0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF,
         0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF,
         0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0x7F,
     };
-    fe result;
+    fe256 result;
     feOne(result);
     // Most significant bit first.
     for (int byte = 31; byte >= 0; byte--) {
@@ -135,7 +137,7 @@ void feInvert(fe r, const fe a) {
     for (int i = 0; i < 8; i++) r[i] = result[i];
 }
 
-void feToBytes(uint8_t out[32], const fe in) {
+void feToBytes(uint8_t out[32], const fe256 in) {
     // Bring the value fully below p: subtract p once if it fits, twice at most.
     uint32_t t[8];
     for (int i = 0; i < 8; i++) t[i] = in[i];
@@ -168,7 +170,7 @@ void feToBytes(uint8_t out[32], const fe in) {
 } // namespace
 
 void xeddsaCurveToEdPub(const uint8_t curvePubKey[32], uint8_t edPubKey[32]) {
-    fe u, one, num, den, denInv, y;
+    fe256 u, one, num, den, denInv, y;
     feFromBytes(u, curvePubKey);
     feOne(one);
     feSub(num, u, one);     // u - 1
@@ -180,27 +182,17 @@ void xeddsaCurveToEdPub(const uint8_t curvePubKey[32], uint8_t edPubKey[32]) {
     edPubKey[31] &= 0x7F;
 }
 
-bool xeddsaVerify(const uint8_t senderPubKey[32], const XeddsaSignedFields &fields,
-                  const uint8_t *payload, size_t payloadLen,
-                  const uint8_t signature[XEDDSA_SIGNATURE_BYTES]) {
-    if (!senderPubKey || !signature) return false;
-    if (payloadLen && !payload) return false;
+// The layout in xeddsa_sig.h, byte for byte as upstream's buildSigningBuffer()
+// writes it. Integers little-endian explicitly, so the meaning does not change
+// if this is ever built big-endian. Returns the length, or 0 if it won't fit.
+static constexpr size_t kSignedHeaderLen = 1 + 8 * 4 + 1;
+static constexpr size_t kSignedMsgCap = kSignedHeaderLen + 256;
 
-    // A key we have never learned is all zeroes. Verifying against it would be
-    // meaningless, and the birational map divides by u + 1 — which is 1 here,
-    // so it would not even fail loudly.
-    bool allZero = true;
-    for (int i = 0; i < 32; i++) {
-        if (senderPubKey[i]) { allZero = false; break; }
-    }
-    if (allZero) return false;
-
-    // The layout in xeddsa.h, byte for byte as upstream's buildSigningBuffer()
-    // writes it. Integers little-endian explicitly, so the meaning does not
-    // change if this is ever built big-endian.
-    constexpr size_t kHeaderLen = 1 + 8 * 4 + 1;
-    uint8_t msg[kHeaderLen + 256];
-    if (payloadLen > sizeof(msg) - kHeaderLen) return false;
+static size_t buildSignedMessage(const XeddsaSignedFields &fields,
+                                 const uint8_t *payload, size_t payloadLen,
+                                 uint8_t msg[kSignedMsgCap]) {
+    if (payloadLen > kSignedMsgCap - kSignedHeaderLen) return 0;
+    if (payloadLen && !payload) return 0;
     uint8_t *w = msg;
     *w++ = XEDDSA_SIGNING_VERSION;
     const uint32_t words[8] = {
@@ -216,9 +208,72 @@ bool xeddsaVerify(const uint8_t senderPubKey[32], const XeddsaSignedFields &fiel
     }
     *w++ = (uint8_t)((fields.wantResponse ? 0x01 : 0) | (fields.hasBitfield ? 0x02 : 0));
     if (payloadLen) memcpy(w, payload, payloadLen);
+    return kSignedHeaderLen + payloadLen;
+}
+
+bool xeddsaVerify(const uint8_t senderPubKey[32], const XeddsaSignedFields &fields,
+                  const uint8_t *payload, size_t payloadLen,
+                  const uint8_t signature[XEDDSA_SIGNATURE_BYTES]) {
+    if (!senderPubKey || !signature) return false;
+
+    // A key we have never learned is all zeroes. Verifying against it would be
+    // meaningless, and the birational map divides by u + 1 — which is 1 here,
+    // so it would not even fail loudly.
+    bool allZero = true;
+    for (int i = 0; i < 32; i++) {
+        if (senderPubKey[i]) { allZero = false; break; }
+    }
+    if (allZero) return false;
+
+    uint8_t msg[kSignedMsgCap];
+    const size_t msgLen = buildSignedMessage(fields, payload, payloadLen, msg);
+    if (!msgLen) return false;
 
     uint8_t edPub[32];
     xeddsaCurveToEdPub(senderPubKey, edPub);
 
-    return Ed25519::verify(signature, edPub, msg, kHeaderLen + payloadLen);
+    return Ed25519::verify(signature, edPub, msg, msgLen);
+}
+
+// ── Signing ───────────────────────────────────────────────────
+// The Ed25519 key pair our Curve25519 identity signs as, derived once by
+// XEdDSA::priv_curve_to_ed_keys() (meshtastic/Crypto): the clamped Curve25519
+// scalar, negated when needed so the public key's sign bit is zero, which is
+// what xeddsaCurveToEdPub() assumes on the verifying side.
+static uint8_t  s_signEdPriv[32];
+static uint8_t  s_signEdPub[32];
+static uint32_t s_signNodeId = 0;
+static bool     s_signReady = false;
+
+void xeddsaInitSigner(const uint8_t curvePrivKey[32], uint32_t nodeId) {
+    s_signReady = false;
+    bool allZero = true;
+    for (int i = 0; i < 32; i++) {
+        if (curvePrivKey[i]) { allZero = false; break; }
+    }
+    if (allZero || nodeId == 0) return;
+    uint8_t priv[32];
+    memcpy(priv, curvePrivKey, 32);   // the library takes a mutable buffer
+    XEdDSA::priv_curve_to_ed_keys(priv, s_signEdPriv, s_signEdPub);
+    memset(priv, 0, sizeof(priv));
+    s_signNodeId = nodeId;
+    s_signReady = true;
+}
+
+uint32_t xeddsaSignerNodeId() {
+    return s_signReady ? s_signNodeId : 0;
+}
+
+bool xeddsaSign(const XeddsaSignedFields &fields, const uint8_t *payload, size_t payloadLen,
+                uint8_t signature[XEDDSA_SIGNATURE_BYTES]) {
+    if (!s_signReady || fields.from != s_signNodeId) return false;
+    uint8_t msg[kSignedMsgCap];
+    const size_t msgLen = buildSignedMessage(fields, payload, payloadLen, msg);
+    if (!msgLen) return false;
+    // XEdDSA::sign mixes signature[0..31] into the nonce as the spec's random Z,
+    // as upstream seeds it (meshtastic/Crypto#3): hedged, so a weak RNG still
+    // never repeats a nonce for two different messages.
+    esp_fill_random(signature, 32);
+    XEdDSA::sign(signature, s_signEdPriv, s_signEdPub, msg, msgLen);
+    return true;
 }

@@ -6,7 +6,7 @@
 #include "mbedtls/sha256.h"
 #include <Curve25519.h>
 #include <esp_random.h>
-#include "xeddsa.h"
+#include "xeddsa_sig.h"
 #include "ack_proof.h"
 
 // ── PSK expansion ─────────────────────────────────────────────
@@ -708,10 +708,73 @@ bool encryptPayload(uint32_t packetId, uint32_t fromNode,
     return aesCtr(key, keyLen, packetId, fromNode, plain, cipher, len);
 }
 
+// Append Data.xeddsa_signature (field 10) to an encoded Data we originate, as
+// upstream's perhapsEncode() does: broadcasts only (unicasts are left to PKI),
+// and only when the signed packet still fits a LoRa frame. That rule is the one
+// a 2.8.1 receiver on the Balanced policy mirrors -- once it has seen us sign, it
+// drops an unsigned broadcast from us whose signed form would have fit -- so
+// every broadcast that fits has to be signed, not just some. Returns the signed
+// length in out, or 0 to send plain as it is.
+static size_t signBroadcastData(const ChannelKey &ck, uint32_t packetId,
+                                uint32_t fromNode, uint32_t toNode,
+                                const uint8_t *plain, size_t len,
+                                uint8_t *out, size_t outCap) {
+    if (toNode != 0xFFFFFFFF || fromNode == 0 || fromNode != xeddsaSignerNodeId()) return 0;
+    const size_t signedLen = len + XEDDSA_SIGNATURE_FIELD_BYTES;
+    // Upstream's signedDataFits(): header + signed Data within the 255-byte
+    // frame. On an AEAD channel the tag has to fit as well, or the packet could
+    // not be sent at all; unsigned, it still reaches Compatible receivers.
+    const size_t aead = channelUsesAead(ck) ? MESH_AEAD_OVERHEAD : 0;
+    if (MESH_HEADER_BYTES + signedLen + aead > MESH_MAX_FRAME_BYTES || signedLen > outCap) return 0;
+
+    uint32_t portnum = 0, requestId = 0;
+    bool wantResponse = false;
+    const uint8_t *pay = nullptr;
+    size_t payLen = 0;
+    DataEnvelope env;
+    decodeData(plain, len, portnum, pay, payLen, requestId, wantResponse,
+               nullptr, nullptr, nullptr, nullptr, &env);
+    if (portnum == 0 || env.hasSignature) return 0;
+
+    XeddsaSignedFields f = {};
+    f.from         = fromNode;
+    f.id           = packetId;
+    f.to           = toNode;
+    f.portnum      = portnum;
+    f.requestId    = requestId;
+    f.replyId      = env.replyId;
+    f.emoji        = env.emoji;
+    f.bitfield     = env.bitfield;
+    f.hasBitfield  = env.hasBitfield;
+    f.wantResponse = wantResponse;
+    uint8_t sig[XEDDSA_SIGNATURE_BYTES];
+    if (!xeddsaSign(f, pay, pay ? payLen : 0, sig)) return 0;
+
+    // Appended rather than re-encoded: field order means nothing to a protobuf
+    // parser, and the bytes before it stay exactly what was built.
+    memcpy(out, plain, len);
+    out[len]     = (10 << 3) | 2;   // xeddsa_signature, length-delimited
+    out[len + 1] = XEDDSA_SIGNATURE_BYTES;
+    memcpy(out + len + 2, sig, XEDDSA_SIGNATURE_BYTES);
+    return signedLen;
+}
+
 size_t encryptChannelPayload(const ChannelKey &ck, uint32_t packetId,
                              uint32_t fromNode, uint32_t toNode,
                              const uint8_t *plain, size_t len,
                              uint8_t *cipher, size_t cipherCap) {
+    // Signed only if the result still fits the caller's buffer, tag included:
+    // a buffer too small to sign into must not turn into a failed send.
+    uint8_t signedData[MESH_MAX_FRAME_BYTES];
+    const size_t tag = channelUsesAead(ck) ? MESH_AEAD_OVERHEAD : 0;
+    size_t signCap = cipherCap > tag ? cipherCap - tag : 0;
+    if (signCap > sizeof(signedData)) signCap = sizeof(signedData);
+    const size_t signedLen = signBroadcastData(ck, packetId, fromNode, toNode, plain, len,
+                                               signedData, signCap);
+    if (signedLen) {
+        plain = signedData;
+        len = signedLen;
+    }
     if (channelUsesAead(ck)) {
         if (len + MESH_AEAD_OVERHEAD > cipherCap) return 0;
         uint8_t exp[16];
