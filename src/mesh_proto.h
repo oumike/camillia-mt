@@ -78,6 +78,19 @@ enum PortNum : uint32_t {
 };
 
 // ── Decoded incoming packet ───────────────────────────────────
+// The parts of a Data message a Meshtastic 2.8.1 signature covers beyond
+// portnum, request_id, want_response and the payload, which MeshPacket already
+// carries. Kept with the packet so the signature can be checked once, wherever
+// it arrived from (RF, MQTT or PKI).
+struct DataEnvelope {
+    uint32_t replyId;         // Data.reply_id (field 7)
+    uint32_t emoji;           // Data.emoji (field 8)
+    uint32_t bitfield;        // Data.bitfield (field 9)
+    bool     hasBitfield;     // field 9 present; signed separately from its value
+    bool     hasSignature;    // Data.xeddsa_signature (field 10) was a full 64 bytes
+    uint8_t  signature[64];
+};
+
 struct MeshPacket {
     MeshHdr  hdr;
     uint32_t portnum;
@@ -97,6 +110,7 @@ struct MeshPacket {
     bool     hasDataDest;
     bool     hasDataSource;
     bool     wantResponse;    // Data.want_response: requester wants us to send our NODEINFO back
+    DataEnvelope env;         // the rest of what a signature covers, see above
     bool     decrypted;
     int      chanIdx;         // which channel key was used (-1 = none, -2 = PKI)
     uint8_t  rawCipher[240];  // preserved raw cipher for deferred PKI decrypt in handleRx
@@ -182,6 +196,7 @@ struct MeshBeaconPayload {
     char     offerChannelName[16];
     uint8_t  offerPsk[32];
     uint8_t  offerPskLen;
+    bool     offerUsesAead;      // ChannelSettings.use_aead (field 8), Meshtastic 2.8.1
     uint8_t  offerRegion;        // Meshtastic RegionCode enum; 0 = UNSET
     bool     hasOfferPreset;
     uint8_t  offerPreset;        // Meshtastic ModemPreset enum — NOT camillia's
@@ -201,12 +216,11 @@ bool decodeData(const uint8_t *buf, size_t len,
                 uint32_t &requestId, bool &wantResponse,
                 uint32_t *destNode = nullptr, bool *hasDestNode = nullptr,
                 uint32_t *sourceNode = nullptr, bool *hasSourceNode = nullptr,
-                // Data.xeddsa_signature (field 10), Meshtastic 2.8. Points into
-                // buf when present, so it lives exactly as long as buf does.
-                // Set only for a full 64-byte signature: 2.8 emits 0 or 64 and
-                // treats anything between as malformed, so a short one is not
-                // something to half-accept.
-                const uint8_t **signature = nullptr);
+                // reply_id, emoji, bitfield and xeddsa_signature (fields 7-10).
+                // The signature is copied only when it is a full 64 bytes: 2.8
+                // emits 0 or 64 and treats anything between as malformed, so a
+                // short one is not something to half-accept.
+                DataEnvelope *env = nullptr);
 
 bool decodeUser(const uint8_t *buf, size_t len, UserInfo &out);
 bool decodePosition(const uint8_t *buf, size_t len, PositionInfo &out);
@@ -371,8 +385,17 @@ size_t encodeNeighborInfo(uint32_t nodeId,
 // Encode a ROUTING_APP Data message.
 // requestId = original packet ID; fromNodeId = our nodeId (sets Data.source field).
 // errorReason = Routing.error_reason (0 = ACK success, non-zero = NAK).
+//
+// proofKey, when given, is the PKI shared key with ackTo (pkiSharedKey()): the
+// Routing message then carries a Routing.ack_proof (ack_proof.h), which a 2.8.1
+// sender uses to show the message as received by us and nobody else.
 size_t encodeRouting(uint32_t requestId, uint32_t fromNodeId, uint32_t errorReason,
-                     uint8_t *buf, size_t bufLen, uint32_t bitfield = 0);
+                     uint8_t *buf, size_t bufLen, uint32_t bitfield = 0,
+                     const uint8_t *proofKey = nullptr, uint32_t ackTo = 0);
+
+// SHA256(X25519(our private key, peer public key)): the key PKI direct messages
+// to and from that peer are encrypted under, and the ack proof key.
+bool pkiSharedKey(const uint8_t peerPubKey[32], uint8_t out[32]);
 
 // Encode a TRACEROUTE_APP Data message containing an empty RouteDiscovery
 // payload. wantResponse should stay true for request packets.

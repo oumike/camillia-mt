@@ -7,6 +7,7 @@
 #include <Curve25519.h>
 #include <esp_random.h>
 #include "xeddsa.h"
+#include "ack_proof.h"
 
 // ── PSK expansion ─────────────────────────────────────────────
 // Meshtastic DEFAULT_KEY = kDkBase[0..14] + PSK_byte.
@@ -191,13 +192,13 @@ bool decodeData(const uint8_t *buf, size_t len,
                 uint32_t &requestId, bool &wantResponse,
                 uint32_t *destNode, bool *hasDestNode,
                 uint32_t *sourceNode, bool *hasSourceNode,
-                const uint8_t **signature) {
+                DataEnvelope *env) {
     portnum = 0; payPtr = nullptr; payLen = 0; requestId = 0; wantResponse = false;
     if (destNode) *destNode = 0;
     if (sourceNode) *sourceNode = 0;
     if (hasDestNode) *hasDestNode = false;
     if (hasSourceNode) *hasSourceNode = false;
-    if (signature) *signature = nullptr;
+    if (env) memset(env, 0, sizeof(*env));
     size_t i = 0;
     while (i < len) {
         uint64_t tag; i = pbReadVarint(buf, len, i, tag); if (!i) break;
@@ -206,6 +207,10 @@ bool decodeData(const uint8_t *buf, size_t len,
             uint64_t v; i = pbReadVarint(buf, len, i, v); if (!i) break;
             if (field == 1) portnum = (uint32_t)v;
             else if (field == 3) wantResponse = (v != 0);
+            else if (field == 9 && env) {
+                env->bitfield = (uint32_t)v;
+                env->hasBitfield = true;
+            }
             else if (field == 6) requestId = (uint32_t)v;   // request_id varint (Meshtastic standard)
             else if (field == 4 && destNode) {
                 *destNode = (uint32_t)v;
@@ -217,8 +222,9 @@ bool decodeData(const uint8_t *buf, size_t len,
         } else if (wtype == 2) {
             uint64_t sz; i = pbReadVarint(buf, len, i, sz); if (!i) break;
             if (field == 2) { payPtr = buf + i; payLen = (size_t)sz; }
-            else if (field == 10 && signature && sz == XEDDSA_SIGNATURE_BYTES) {
-                *signature = buf + i;
+            else if (field == 10 && env && sz == XEDDSA_SIGNATURE_BYTES && i + sz <= len) {
+                memcpy(env->signature, buf + i, XEDDSA_SIGNATURE_BYTES);
+                env->hasSignature = true;
             }
             i += sz;
         } else if (wtype == 5) {
@@ -226,6 +232,8 @@ bool decodeData(const uint8_t *buf, size_t len,
             if (i + 4 <= len) {
                 uint32_t v; memcpy(&v, buf + i, 4);
                 if (field == 6) requestId = v;
+                else if (field == 7 && env) env->replyId = v;
+                else if (field == 8 && env) env->emoji = v;
                 else if (field == 4 && destNode) {
                     *destNode = v;
                     if (hasDestNode) *hasDestNode = true;
@@ -394,6 +402,7 @@ bool decodeMeshBeacon(const uint8_t *buf, size_t len, MeshBeaconPayload &out) {
                 uint64_t v = 0;
                 j = pbReadVarint(sub, subLen, j, v);
                 if (!j) return;
+                if (f == 8) out.offerUsesAead = (v != 0);   // use_aead
             } else if (wt == 5) {
                 if (j + 4 > subLen) return;
                 j += 4;
@@ -625,6 +634,10 @@ bool encryptPayload(uint32_t packetId, uint32_t fromNode,
 // Key: SHA256(ECDH(myPrivKey, recipientPubKey))
 // Caller sets hdr.channel = 0 to signal PKI to receiving nodes.
 static bool derivePkiAesKey(const uint8_t *remotePubKey, uint8_t outAesKey[32]) {
+    return pkiSharedKey(remotePubKey, outAesKey);
+}
+
+bool pkiSharedKey(const uint8_t *remotePubKey, uint8_t outAesKey[32]) {
     if (!remotePubKey) return false;
 
     uint8_t sharedKey[32];
@@ -1241,11 +1254,19 @@ size_t encodeNeighborInfo(uint32_t nodeId,
 }
 
 size_t encodeRouting(uint32_t requestId, uint32_t fromNodeId, uint32_t errorReason,
-                     uint8_t *buf, size_t bufLen, uint32_t bitfield) {
-    // Inner Routing proto: field 3 (error_reason), varint
-    uint8_t inner[4]; size_t innerLen = 0;
+                     uint8_t *buf, size_t bufLen, uint32_t bitfield,
+                     const uint8_t *proofKey, uint32_t ackTo) {
+    // Inner Routing proto: field 3 (error_reason), varint, then the ack proof
+    // when we have a key to prove with. The proof covers the bytes before it.
+    uint8_t inner[8 + 2 + ACK_PROOF_BYTES]; size_t innerLen = 0;
     inner[innerLen++] = (3 << 3) | 0;  // field 3, varint
     innerLen += pbWriteVarint(inner + innerLen, errorReason);
+    if (proofKey) {
+        uint8_t proof[ACK_PROOF_BYTES];
+        ackProofCompute(proofKey, fromNodeId, ackTo, requestId, inner, innerLen, proof);
+        const size_t withProof = ackProofAppend(inner, innerLen, sizeof(inner), proof);
+        if (withProof) innerLen = withProof;
+    }
 
     size_t n = 0;
     // Data field 1 (portnum = ROUTING_APP), varint

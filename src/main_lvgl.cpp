@@ -25,6 +25,7 @@
 #include "cs_proto.h"
 #include "mesh_proto.h"
 #include "xeddsa.h"
+#include "ack_proof.h"
 #include "mesh_radio.h"
 #include "mqtt_bridge.h"
 #include "i18n.h"   // TR(): UI translations (issue #99)
@@ -2824,7 +2825,8 @@ static void openDestructiveConfirm(DestructiveConfirmAction action, uint32_t nod
 // message. Falls back to the node menu when there is no packet id.
 static void openMessageActionMenu(uint32_t packetId, uint32_t senderNodeId);
 // Check a Data.xeddsa_signature against the sender's stored public key and
-// record the outcome on the node.
+// record the outcome on the node. Called once per packet from processMeshPacket(),
+// after any PKI decrypt, so RF, MQTT and PKI traffic are all checked the same way.
 //
 // Verification is advisory here: an unsigned or unverifiable packet is handled
 // exactly as before. Meshtastic's own default receive policy is COMPATIBLE,
@@ -2832,17 +2834,26 @@ static void openMessageActionMenu(uint32_t packetId, uint32_t senderNodeId);
 // treating a failed check as a reason to drop would punish the majority of the
 // mesh for a feature almost nobody is using. What it buys today is the ability
 // to say a node has proved it holds the key we have for it.
-static void notePacketSignature(MeshPacket &pkt, const uint8_t *signature,
-                                const uint8_t *payload, size_t payloadLen) {
-    if (!signature) return;
+static void notePacketSignature(const MeshPacket &pkt) {
+    if (!pkt.decrypted || !pkt.env.hasSignature) return;
     NodeEntry *n = Nodes.find(pkt.hdr.from);
     if (!n || !n->hasPubKey) return;
     // Already proved; the crypto is cheap but not free, and the answer cannot
     // change while the entry holds the same key.
     if (n->xeddsaVerified) return;
 
-    if (xeddsaVerify(n->pubKey, pkt.hdr.from, pkt.hdr.id, pkt.portnum,
-                     payload, payloadLen, signature)) {
+    XeddsaSignedFields f = {};
+    f.from         = pkt.hdr.from;
+    f.id           = pkt.hdr.id;
+    f.to           = pkt.hdr.to;
+    f.portnum      = pkt.portnum;
+    f.requestId    = pkt.requestId;
+    f.replyId      = pkt.env.replyId;
+    f.emoji        = pkt.env.emoji;
+    f.bitfield     = pkt.env.bitfield;
+    f.hasBitfield  = pkt.env.hasBitfield;
+    f.wantResponse = pkt.wantResponse;
+    if (xeddsaVerify(n->pubKey, f, pkt.payload, pkt.payloadLen, pkt.env.signature)) {
         n->xeddsaVerified = true;
         Serial.printf("[xeddsa] verified signature from !%08lx port=%lu\n",
                       (unsigned long)pkt.hdr.from, (unsigned long)pkt.portnum);
@@ -18257,6 +18268,7 @@ struct BeaconOffer {
     bool     hasChannel;
     char     channelName[16];
     bool     channelHasPsk;
+    bool     channelUsesAead;   // an AEAD channel, which this firmware cannot join
     int      preset;            // our PRESET_* index, or -1 when not offered/unmappable
     char     region[12];        // "" when not offered
     int8_t   chanIdx;           // channel it arrived on, for legacy-split pairing
@@ -18369,6 +18381,7 @@ static void beaconOfferStore(const MeshPacket &pkt, const MeshBeaconPayload &b, 
     if (b.hasOfferChannel) {
         utf8util::copyTruncate(o.channelName, sizeof(o.channelName), b.offerChannelName);
         o.channelHasPsk = (b.offerPskLen > 0);
+        o.channelUsesAead = b.offerUsesAead;
     }
     o.preset = b.hasOfferPreset ? presetFromMeshtastic(b.offerPreset) : -1;
     const char *rc = regionCodeFromMeshtastic(b.offerRegion);
@@ -33623,14 +33636,18 @@ static void beaconsBuildList() {
         }
 
         // What is on offer: channel, preset, region — whichever the beacon
-        // carried. A trailing * means the channel came with a key. Shown even
-        // when empty, because "this beacon offered nothing" is itself an answer.
-        char offer[64] = {};
+        // carried. A trailing * means the channel came with a key, and "AEAD"
+        // that it uses Meshtastic 2.8.1's authenticated encryption, which this
+        // firmware does not speak -- so the channel cannot be joined from here.
+        // Shown even when empty, because "this beacon offered nothing" is itself
+        // an answer.
+        char offer[72] = {};
         int n = 0;
         if (o.hasChannel) {
-            n += snprintf(offer + n, sizeof(offer) - n, "%s%s",
+            n += snprintf(offer + n, sizeof(offer) - n, "%s%s%s",
                           o.channelName[0] ? o.channelName : "(unnamed)",
-                          o.channelHasPsk ? "*" : "");
+                          o.channelHasPsk ? "*" : "",
+                          o.channelUsesAead ? " AEAD" : "");
         }
         if (o.preset >= 0 && o.preset < PRESET_COUNT) {
             n += snprintf(offer + n, sizeof(offer) - n, "%s%s",
@@ -51811,15 +51828,57 @@ int webCfgAdminRescanFavorites(uint32_t &waitSecs) {
 }
 #endif  // HAS_ADMIN_TERMINAL
 
+// Check the Routing.ack_proof on an ack or nak that answered one of our DMs, and
+// log the verdict. The caller has matched it to a DM sent to pkt.hdr.from, which
+// is what binds the proof to the node we addressed (upstream #11932).
+static void noteAckProof(const MeshPacket &pkt) {
+    uint8_t claimed[ACK_PROOF_BYTES];
+    uint8_t routing[sizeof(pkt.payload)];
+    size_t routingLen = 0;
+    const AckProofFind found = ackProofExtract(pkt.payload, pkt.payloadLen, claimed,
+                                               routing, &routingLen);
+    if (found == ACK_PROOF_ABSENT) return;
+    if (found == ACK_PROOF_MALFORMED) {
+        Serial.printf("[ackproof] malformed proof from !%08lx for %08lx\n",
+                      (unsigned long)pkt.hdr.from, (unsigned long)pkt.requestId);
+        return;
+    }
+    const NodeEntry *peer = Nodes.find(pkt.hdr.from);
+    uint8_t key[32];
+    if (!peer || !peer->hasPubKey || !pkiSharedKey(peer->pubKey, key)) {
+        Serial.printf("[ackproof] proof from !%08lx, but no key to check it\n",
+                      (unsigned long)pkt.hdr.from);
+        return;
+    }
+    uint8_t expected[ACK_PROOF_BYTES];
+    ackProofCompute(key, pkt.hdr.from, pkt.hdr.to, pkt.requestId, routing, routingLen, expected);
+    memset(key, 0, sizeof(key));
+    const bool valid = memcmp(claimed, expected, ACK_PROOF_BYTES) == 0;
+    Serial.printf("[ackproof] %s proof from !%08lx for %08lx\n", valid ? "valid" : "INVALID",
+                  (unsigned long)pkt.hdr.from, (unsigned long)pkt.requestId);
+}
+
 static bool sendRoutingResult(uint32_t toNodeId, uint32_t requestId, uint32_t errorReason) {
     if (!Radio.isReady()) return false;
     if (toNodeId == 0 || toNodeId == 0xFFFFFFFF || requestId == 0) return false;
     if (s_myNodeId == 0) deriveNodeId();
     if (s_myNodeId == 0) return false;
 
+    // Prove the receipt when we share a key with the sender (Meshtastic 2.8.1
+    // Routing.ack_proof): their client can then show the message as delivered to
+    // us rather than to whoever sent an ack with our number on it. Upstream
+    // proves every ack to a keyed peer, PKI-encrypted original or not.
+    uint8_t proofKey[32];
+    bool haveProofKey = false;
+    if (const NodeEntry *peer = Nodes.find(toNodeId)) {
+        haveProofKey = peer->hasPubKey && pkiSharedKey(peer->pubKey, proofKey);
+    }
+
     uint8_t proto[64];
     size_t protoLen = encodeRouting(requestId, s_myNodeId, errorReason, proto, sizeof(proto),
-                                    s_cfg.okToMqtt ? 0x01 : 0);
+                                    s_cfg.okToMqtt ? 0x01 : 0,
+                                    haveProofKey ? proofKey : nullptr, toNodeId);
+    memset(proofKey, 0, sizeof(proofKey));
     if (protoLen == 0) return false;
 
     const ChannelKey &ck = CHANNEL_KEYS[0];  // ROUTING replies on primary channel.
@@ -51915,15 +51974,30 @@ static bool roleRebroadcasts(uint8_t role) {
     return role != 1 /*CLIENT_MUTE*/ && role != 8 /*CLIENT_HIDDEN*/;
 }
 
+// A PKI direct message between two other nodes, at least one of whom we know.
+// LOCAL_ONLY and KNOWN_ONLY relay these although they cannot read them (upstream
+// #11898): DMs, remote administration and key verification all travel this way,
+// and a relay that drops them black-holes them for the two nodes either side.
+// An unreadable broadcast, or a unicast between two strangers, is still dropped
+// -- ignoring foreign meshes is what those modes are for.
+static bool isPkiUnicastWithKnownParty(const MeshPacket &pkt) {
+    if (pkt.decrypted || pkt.hdr.channel != 0 || pkt.hdr.to == 0xFFFFFFFF) return false;
+    return Nodes.find(pkt.hdr.from) != nullptr || Nodes.find(pkt.hdr.to) != nullptr;
+}
+
 // Apply the configured rebroadcastMode filter to a received packet.
 static bool rebroadcastModeAllows(const MeshPacket &pkt) {
     switch (s_cfg.rebroadcastMode) {
         case 2: // LOCAL_ONLY — only packets we decrypted on a known channel
-            return pkt.decrypted && pkt.chanIdx >= 0;
+            return (pkt.decrypted && pkt.chanIdx >= 0) || isPkiUnicastWithKnownParty(pkt);
         case 3: // KNOWN_ONLY — only from nodes already in our DB
-            return Nodes.find(pkt.hdr.from) != nullptr;
+            return Nodes.find(pkt.hdr.from) != nullptr || isPkiUnicastWithKnownParty(pkt);
         case 4: // CORE_PORTNUMS_ONLY — only decoded core portnums
-            if (!pkt.decrypted) return false;
+            // A packet we cannot read is relayed as it is (upstream #11844): the
+            // portnum filter cannot apply to a payload nobody here can see, and
+            // dropping it broke remote admin through ROUTER-role nodes, whose
+            // default this mode is.
+            if (!pkt.decrypted) return true;
             switch (pkt.portnum) {
                 case TEXT_MESSAGE_APP: case POSITION_APP: case NODEINFO_APP:
                 case ROUTING_APP: case TELEMETRY_APP: case NEIGHBORINFO_APP:
@@ -52421,13 +52495,11 @@ static bool processMeshPacket(const MeshPacket &rxPkt) {
                 pkt.chanIdx = -2;
                 const uint8_t *payPtr = nullptr;
                 size_t payLen = 0;
-                const uint8_t *sig = nullptr;
                 decodeData(plain, plainLen, pkt.portnum, payPtr, payLen,
                            pkt.requestId, pkt.wantResponse,
                            &pkt.dataDest, &pkt.hasDataDest,
                            &pkt.dataSource, &pkt.hasDataSource,
-                           &sig);
-                notePacketSignature(pkt, sig, payPtr, payLen);
+                           &pkt.env);
                 if (payPtr && payLen <= sizeof(pkt.payload)) {
                     memcpy(pkt.payload, payPtr, payLen);
                     pkt.payloadLen = payLen;
@@ -52440,6 +52512,8 @@ static bool processMeshPacket(const MeshPacket &rxPkt) {
             }
         }
     }
+
+    notePacketSignature(pkt);
 
     // Managed flood: relay new traffic onward before handling it locally. Held
     // while a preset scan has the radio parked: relaying there makes this node a
@@ -52672,6 +52746,11 @@ static bool processMeshPacket(const MeshPacket &rxPkt) {
             }
 #endif
             bool dmRoutingMatched = DMs.handleRoutingResult(pkt.hdr.from, pkt.requestId, errorReason);
+            // Routing.ack_proof (Meshtastic 2.8.1). Only for an answer to one of
+            // our DMs, from the node it went to -- a nak from a relay is not a
+            // receipt -- and advisory, as upstream's is: the verdict is logged,
+            // and the ack counts the same either way.
+            if (dmRoutingMatched) noteAckProof(pkt);
             tracerouteProgressOnRouting(pkt.hdr.from,
                                         pkt.requestId,
                                         errorReason,
@@ -53029,15 +53108,11 @@ static void mqttDownlinkInject(const MeshHdr &hdr, const uint8_t *cipher,
         pkt.decrypted = (pkt.chanIdx >= 0);
         if (pkt.decrypted) {
             const uint8_t *payPtr; size_t payLen;
-            const uint8_t *sig = nullptr;
             decodeData(plain, cipherLen, pkt.portnum, payPtr, payLen,
                        pkt.requestId, pkt.wantResponse,
                        &pkt.dataDest, &pkt.hasDataDest,
                        &pkt.dataSource, &pkt.hasDataSource,
-                       &sig);
-            // Before the payload is copied out: the signature covers the
-            // payload as it arrived, and both pointers are into `plain`.
-            notePacketSignature(pkt, sig, payPtr, payLen);
+                       &pkt.env);
             if (payPtr && payLen <= sizeof(pkt.payload)) {
                 memcpy(pkt.payload, payPtr, payLen);
                 pkt.payloadLen = payLen;

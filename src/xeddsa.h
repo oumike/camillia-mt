@@ -29,16 +29,38 @@
 // this clears the bit unconditionally rather than taking it as input.
 void xeddsaCurveToEdPub(const uint8_t curvePubKey[32], uint8_t edPubKey[32]);
 
-// Verify a signature over one packet.
+// Everything a signature covers besides the payload: the packet header's from,
+// id and to, and the Data envelope's fields. A field the packet did not carry is
+// zero, which is what upstream signs for it too.
+struct XeddsaSignedFields {
+    uint32_t from;
+    uint32_t id;
+    uint32_t to;
+    uint32_t portnum;
+    uint32_t requestId;
+    uint32_t replyId;
+    uint32_t emoji;
+    uint32_t bitfield;
+    bool     hasBitfield;   // presence is signed, so a stripped field differs from a zero one
+    bool     wantResponse;
+};
+
+// Version byte at the head of the signed message (upstream XEDDSA_SIGNING_VERSION).
+#define XEDDSA_SIGNING_VERSION 0x01
+
+// Verify a signature over one packet, in the layout Meshtastic 2.8.1 signs:
 //
-// The signed message is fromNode || packetId || portnum || payload, each of the
-// three integers as four little-endian bytes. Binding all three means a
-// signature cannot be lifted onto another packet, re-attributed to another
-// sender, or replayed against a different port.
+//   version(1) | from | id | to | portnum | request_id | reply_id | emoji
+//             | bitfield | flags(1) | payload
+//
+// Each integer is four little-endian bytes; flags is want_response (0x01) and
+// bitfield presence (0x02). The header is a fixed 34 bytes, so the payload
+// boundary never depends on content. 2.8.0 signed only from | id | portnum |
+// payload, and its signatures do not verify here: that release was revoked over
+// it, and nothing signs that way any more.
 //
 // Returns false for a wrong signature, a malformed key, or an all-zero public
 // key (a peer whose key we have never learned) — never true on doubt.
-bool xeddsaVerify(const uint8_t senderPubKey[32],
-                  uint32_t fromNode, uint32_t packetId, uint32_t portnum,
+bool xeddsaVerify(const uint8_t senderPubKey[32], const XeddsaSignedFields &fields,
                   const uint8_t *payload, size_t payloadLen,
                   const uint8_t signature[XEDDSA_SIGNATURE_BYTES]);

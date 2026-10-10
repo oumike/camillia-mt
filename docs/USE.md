@@ -740,8 +740,10 @@ it.
   and when it was last heard
 - The offer line reads *channel / preset / region* — whichever parts the beacon
   carried, `(nothing)` when it carried none. A `*` after a channel name means the
-  offer included a key. Nothing here is ever applied to your radio; acting on an
-  offer is manual, on the Config screen
+  offer included a key, and `AEAD` means the channel uses Meshtastic 2.8.1's
+  authenticated encryption, which this firmware cannot join (see
+  [Authenticated channels (AEAD)](#authenticated-channels-aead)). Nothing here is
+  ever applied to your radio; acting on an offer is manual, on the Config screen
 - Once a sender has beaconed twice, its card also says how many have been heard
   and roughly how far apart they have been — which is the number that tells you
   when it is worth looking again
@@ -2502,7 +2504,17 @@ Two things worth knowing:
 
 Meshtastic 2.8 can sign a packet with the same identity key it already uses for
 direct messages, so a receiver can tell that a packet genuinely came from the
-node it claims to. Camillia checks those signatures when they arrive.
+node it claims to. Camillia checks those signatures when they arrive, whether
+the packet came over the radio, over MQTT, or as a direct message.
+
+The signature covers the whole message as Meshtastic 2.8.1 defines it: who sent
+it and to whom, its packet number and port, which message it replies to, whether
+it is a reaction, its MQTT-consent flag, and the text itself. So a signed reply
+cannot be moved under a different message, turned into a reaction, re-addressed
+as a private message, or released to MQTT against its sender's wishes without
+the check failing. Meshtastic 2.8.0 signed less than that and was withdrawn for
+it; its signatures do not verify under 2.8.1 or here, and nothing in use still
+sends them.
 
 The node detail panel gains a **Signed** row with three states. **yes** means a
 packet from that node carried a signature that verified against the key we hold
@@ -2519,6 +2531,57 @@ or something is claiming to be that node.
 
 Camillia does not sign its own packets yet. That needs a signing primitive the
 cryptography library here does not provide, and is tracked separately.
+
+What that means against a stock 2.8.1 node: on its default settings it accepts
+unsigned traffic from a node that has never signed, which is every Camillia node,
+so nothing changes. A 2.8.1 node switched to the **Strict** signature policy
+drops every unsigned packet, Camillia's included. A 2.8.1 node also drops any
+packet whose signature fails outright, where Camillia only logs it.
+
+### Delivery proofs
+
+When you acknowledge a direct message from a node whose key you hold, Camillia
+adds a **delivery proof** to the acknowledgement, as Meshtastic 2.8.1 does. It is
+eight bytes computed from the key the two of you share, so only you could have
+produced it; the sender's app can then show the message as received by you,
+rather than by anyone who sent an acknowledgement with your number on it.
+
+It works the other way too. When a node acknowledges a direct message you sent
+and includes a proof, Camillia checks it and writes the result to the serial log
+under `[ackproof]` — `valid`, `INVALID`, or `malformed`. The proof is advisory,
+on both firmwares: a missing or failed proof does not stop the message counting
+as delivered, because a node that never learned your key cannot produce one, and
+that is not something either of you can see from your end.
+
+### Relaying traffic you cannot read
+
+The **Rebroadcast** setting in web config decides what this node relays for
+others. Three of its modes now treat packets this node cannot decrypt the way Meshtastic 2.8.1
+does:
+
+- **CORE_PORTNUMS_ONLY** relays them. It filters by what a packet is for, and
+  that cannot be read from a packet nobody here can decrypt. Dropping them broke
+  remote administration through any node in this mode — which is the default for
+  the Router role.
+- **LOCAL_ONLY** and **KNOWN_ONLY** relay a direct message between two other
+  nodes when this node knows at least one of them. Direct messages, remote
+  administration and key verification all travel that way, and a relay that
+  drops them cuts the two nodes either side off from each other. An unreadable
+  broadcast, or a direct message between two nodes this one has never heard of,
+  is still dropped: ignoring foreign meshes is what those modes are for.
+
+### Authenticated channels (AEAD)
+
+Meshtastic 2.8.1 can encrypt a channel with **AES-CCM** instead of AES-CTR, so
+that a packet altered in flight is rejected rather than decrypted into something
+the sender never wrote. It is an experimental, per-channel switch (`use_aead`),
+off by default, and every node on the channel has to turn it on.
+
+Camillia does not support it yet. An AEAD channel has a different channel hash
+from the same channel without it, so this node does not mistake its traffic for
+yours: it is simply not heard. A beacon offering an AEAD channel says so on the
+Beacons screen. If your mesh turns AEAD on, Camillia nodes on that channel will
+stop hearing it.
 
 ### Traffic this node no longer relays
 

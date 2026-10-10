@@ -180,8 +180,7 @@ void xeddsaCurveToEdPub(const uint8_t curvePubKey[32], uint8_t edPubKey[32]) {
     edPubKey[31] &= 0x7F;
 }
 
-bool xeddsaVerify(const uint8_t senderPubKey[32],
-                  uint32_t fromNode, uint32_t packetId, uint32_t portnum,
+bool xeddsaVerify(const uint8_t senderPubKey[32], const XeddsaSignedFields &fields,
                   const uint8_t *payload, size_t payloadLen,
                   const uint8_t signature[XEDDSA_SIGNATURE_BYTES]) {
     if (!senderPubKey || !signature) return false;
@@ -196,23 +195,30 @@ bool xeddsaVerify(const uint8_t senderPubKey[32],
     }
     if (allZero) return false;
 
-    // fromNode || packetId || portnum || payload. The three integers go out as
-    // four little-endian bytes each, which is what upstream's memcpy of a
-    // uint32 produces on every platform Meshtastic targets. Written explicitly
-    // so this does not silently change meaning if it is ever built big-endian.
-    uint8_t msg[12 + 256];
-    if (payloadLen > sizeof(msg) - 12) return false;
-    const uint32_t hdr[3] = { fromNode, packetId, portnum };
-    for (int i = 0; i < 3; i++) {
-        msg[i * 4]     = (uint8_t)(hdr[i]);
-        msg[i * 4 + 1] = (uint8_t)(hdr[i] >> 8);
-        msg[i * 4 + 2] = (uint8_t)(hdr[i] >> 16);
-        msg[i * 4 + 3] = (uint8_t)(hdr[i] >> 24);
+    // The layout in xeddsa.h, byte for byte as upstream's buildSigningBuffer()
+    // writes it. Integers little-endian explicitly, so the meaning does not
+    // change if this is ever built big-endian.
+    constexpr size_t kHeaderLen = 1 + 8 * 4 + 1;
+    uint8_t msg[kHeaderLen + 256];
+    if (payloadLen > sizeof(msg) - kHeaderLen) return false;
+    uint8_t *w = msg;
+    *w++ = XEDDSA_SIGNING_VERSION;
+    const uint32_t words[8] = {
+        fields.from, fields.id, fields.to, fields.portnum,
+        fields.requestId, fields.replyId, fields.emoji,
+        fields.hasBitfield ? fields.bitfield : 0,
+    };
+    for (uint32_t v : words) {
+        *w++ = (uint8_t)(v);
+        *w++ = (uint8_t)(v >> 8);
+        *w++ = (uint8_t)(v >> 16);
+        *w++ = (uint8_t)(v >> 24);
     }
-    if (payloadLen) memcpy(msg + 12, payload, payloadLen);
+    *w++ = (uint8_t)((fields.wantResponse ? 0x01 : 0) | (fields.hasBitfield ? 0x02 : 0));
+    if (payloadLen) memcpy(w, payload, payloadLen);
 
     uint8_t edPub[32];
     xeddsaCurveToEdPub(senderPubKey, edPub);
 
-    return Ed25519::verify(signature, edPub, msg, 12 + payloadLen);
+    return Ed25519::verify(signature, edPub, msg, kHeaderLen + payloadLen);
 }
