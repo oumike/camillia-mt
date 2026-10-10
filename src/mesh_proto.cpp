@@ -6,7 +6,8 @@
 #include "mbedtls/sha256.h"
 #include <Curve25519.h>
 #include <esp_random.h>
-#include "xeddsa.h"
+#include "xeddsa_sig.h"
+#include "ack_proof.h"
 
 // ── PSK expansion ─────────────────────────────────────────────
 // Meshtastic DEFAULT_KEY = kDkBase[0..14] + PSK_byte.
@@ -138,6 +139,22 @@ uint8_t computeChannelHash(const char *name, const uint8_t *key, uint8_t keyLen)
     return h;
 }
 
+bool channelUsesAead(const ChannelKey &ck) {
+    if (!ck.useAead) return false;
+    uint8_t exp[16];
+    const uint8_t *k = ck.key;
+    uint8_t kl = ck.keyLen;
+    resolveMeshKey(ck.key, ck.keyLen, exp, k, kl);
+    return kl > 0;
+}
+
+uint8_t channelKeyHash(const ChannelKey &ck) {
+    const char *name = ck.name_buf[0] ? ck.name_buf : (ck.name ? ck.name : "");
+    uint8_t h = computeChannelHash(name, ck.key, ck.keyLen);
+    if (channelUsesAead(ck)) h ^= 0xAE;
+    return h;
+}
+
 // ── Channel key table ─────────────────────────────────────────
 // 1-byte PSK keys are stored as a single byte and expanded at runtime via expandPsk().
 // role: 0=PRIMARY, 1=SECONDARY, 2=DISABLED
@@ -191,13 +208,13 @@ bool decodeData(const uint8_t *buf, size_t len,
                 uint32_t &requestId, bool &wantResponse,
                 uint32_t *destNode, bool *hasDestNode,
                 uint32_t *sourceNode, bool *hasSourceNode,
-                const uint8_t **signature) {
+                DataEnvelope *env) {
     portnum = 0; payPtr = nullptr; payLen = 0; requestId = 0; wantResponse = false;
     if (destNode) *destNode = 0;
     if (sourceNode) *sourceNode = 0;
     if (hasDestNode) *hasDestNode = false;
     if (hasSourceNode) *hasSourceNode = false;
-    if (signature) *signature = nullptr;
+    if (env) memset(env, 0, sizeof(*env));
     size_t i = 0;
     while (i < len) {
         uint64_t tag; i = pbReadVarint(buf, len, i, tag); if (!i) break;
@@ -206,6 +223,10 @@ bool decodeData(const uint8_t *buf, size_t len,
             uint64_t v; i = pbReadVarint(buf, len, i, v); if (!i) break;
             if (field == 1) portnum = (uint32_t)v;
             else if (field == 3) wantResponse = (v != 0);
+            else if (field == 9 && env) {
+                env->bitfield = (uint32_t)v;
+                env->hasBitfield = true;
+            }
             else if (field == 6) requestId = (uint32_t)v;   // request_id varint (Meshtastic standard)
             else if (field == 4 && destNode) {
                 *destNode = (uint32_t)v;
@@ -217,8 +238,9 @@ bool decodeData(const uint8_t *buf, size_t len,
         } else if (wtype == 2) {
             uint64_t sz; i = pbReadVarint(buf, len, i, sz); if (!i) break;
             if (field == 2) { payPtr = buf + i; payLen = (size_t)sz; }
-            else if (field == 10 && signature && sz == XEDDSA_SIGNATURE_BYTES) {
-                *signature = buf + i;
+            else if (field == 10 && env && sz == XEDDSA_SIGNATURE_BYTES && i + sz <= len) {
+                memcpy(env->signature, buf + i, XEDDSA_SIGNATURE_BYTES);
+                env->hasSignature = true;
             }
             i += sz;
         } else if (wtype == 5) {
@@ -226,6 +248,8 @@ bool decodeData(const uint8_t *buf, size_t len,
             if (i + 4 <= len) {
                 uint32_t v; memcpy(&v, buf + i, 4);
                 if (field == 6) requestId = v;
+                else if (field == 7 && env) env->replyId = v;
+                else if (field == 8 && env) env->emoji = v;
                 else if (field == 4 && destNode) {
                     *destNode = v;
                     if (hasDestNode) *hasDestNode = true;
@@ -394,6 +418,7 @@ bool decodeMeshBeacon(const uint8_t *buf, size_t len, MeshBeaconPayload &out) {
                 uint64_t v = 0;
                 j = pbReadVarint(sub, subLen, j, v);
                 if (!j) return;
+                if (f == 8) out.offerUsesAead = (v != 0);   // use_aead
             } else if (wt == 5) {
                 if (j + 4 > subLen) return;
                 j += 4;
@@ -582,18 +607,82 @@ static bool looksLikeData(const uint8_t *plain, size_t len) {
     return portnum > 0 && portnum <= 1024;
 }
 
+// ── AEAD channels (Meshtastic 2.8.1 use_aead) ────────────────
+// AES-CCM, as CryptoEngine::encryptPacketCCM() builds it upstream:
+//   nonce (13): the AES-CTR nonce's first 13 bytes -- packet id as a
+//               little-endian u64 (ours are 32-bit, so bytes 4..7 are zero),
+//               then from, then a zero byte
+//   AAD   (8):  from | to, little-endian. Hop fields are left out because
+//               relays rewrite them; the nonce already binds from and the id.
+//   tag   (12): appended after the ciphertext
+// Key: the channel PSK as resolved for AES-CTR, AES-128 or AES-256 by length.
+static void aeadNonceAad(uint32_t packetId, uint32_t fromNode, uint32_t toNode,
+                         uint8_t nonce[13], uint8_t aad[8]) {
+    memset(nonce, 0, 13);
+    memcpy(nonce,     &packetId, 4);
+    memcpy(nonce + 8, &fromNode, 4);
+    memcpy(aad,     &fromNode, 4);
+    memcpy(aad + 4, &toNode,   4);
+}
+
+static bool aeadSeal(const uint8_t *key, uint8_t keyLen,
+                     uint32_t packetId, uint32_t fromNode, uint32_t toNode,
+                     const uint8_t *plain, size_t len, uint8_t *out) {
+    if (keyLen != 16 && keyLen != 32) return false;
+    uint8_t nonce[13], aad[8];
+    aeadNonceAad(packetId, fromNode, toNode, nonce, aad);
+    mbedtls_ccm_context ccm;
+    mbedtls_ccm_init(&ccm);
+    int ret = mbedtls_ccm_setkey(&ccm, MBEDTLS_CIPHER_ID_AES, key, keyLen * 8);
+    if (ret == 0) {
+        ret = mbedtls_ccm_encrypt_and_tag(&ccm, len, nonce, sizeof(nonce), aad, sizeof(aad),
+                                          plain, out, out + len, MESH_AEAD_OVERHEAD);
+    }
+    mbedtls_ccm_free(&ccm);
+    return ret == 0;
+}
+
+// in holds ciphertext then tag; len counts both. plain gets len - tag bytes.
+static bool aeadOpen(const uint8_t *key, uint8_t keyLen,
+                     uint32_t packetId, uint32_t fromNode, uint32_t toNode,
+                     const uint8_t *in, size_t len, uint8_t *plain) {
+    if (keyLen != 16 && keyLen != 32) return false;
+    if (len <= MESH_AEAD_OVERHEAD) return false;
+    const size_t cryptLen = len - MESH_AEAD_OVERHEAD;
+    uint8_t nonce[13], aad[8];
+    aeadNonceAad(packetId, fromNode, toNode, nonce, aad);
+    mbedtls_ccm_context ccm;
+    mbedtls_ccm_init(&ccm);
+    int ret = mbedtls_ccm_setkey(&ccm, MBEDTLS_CIPHER_ID_AES, key, keyLen * 8);
+    if (ret == 0) {
+        ret = mbedtls_ccm_auth_decrypt(&ccm, cryptLen, nonce, sizeof(nonce), aad, sizeof(aad),
+                                       in, plain, in + cryptLen, MESH_AEAD_OVERHEAD);
+    }
+    mbedtls_ccm_free(&ccm);
+    return ret == 0;
+}
+
 int decryptPacket(const MeshHdr &hdr, const uint8_t *cipher,
-                  uint8_t *plain, size_t len) {
+                  uint8_t *plain, size_t len, size_t &plainLen) {
+    plainLen = 0;
     auto tryDecrypt = [&](int i) -> bool {
         uint8_t exp[16];
         const uint8_t *keyPtr = CHANNEL_KEYS[i].key;
         uint8_t keyLen = CHANNEL_KEYS[i].keyLen;
         resolveMeshKey(CHANNEL_KEYS[i].key, CHANNEL_KEYS[i].keyLen, exp, keyPtr, keyLen);
+        if (channelUsesAead(CHANNEL_KEYS[i])) {
+            // The tag decides; no AES-CTR fallback, as upstream. A packet that
+            // fails it was altered, or is not this channel's.
+            if (!aeadOpen(keyPtr, keyLen, hdr.id, hdr.from, hdr.to, cipher, len, plain)) return false;
+            plainLen = len - MESH_AEAD_OVERHEAD;
+            return looksLikeData(plain, plainLen);
+        }
         if (keyLen == 0) {
             memcpy(plain, cipher, len);
         } else {
             if (!aesCtr(keyPtr, keyLen, hdr.id, hdr.from, cipher, plain, len)) return false;
         }
+        plainLen = len;
         return looksLikeData(plain, len);
     };
 
@@ -619,12 +708,99 @@ bool encryptPayload(uint32_t packetId, uint32_t fromNode,
     return aesCtr(key, keyLen, packetId, fromNode, plain, cipher, len);
 }
 
+// Append Data.xeddsa_signature (field 10) to an encoded Data we originate, as
+// upstream's perhapsEncode() does: broadcasts only (unicasts are left to PKI),
+// and only when the signed packet still fits a LoRa frame. That rule is the one
+// a 2.8.1 receiver on the Balanced policy mirrors -- once it has seen us sign, it
+// drops an unsigned broadcast from us whose signed form would have fit -- so
+// every broadcast that fits has to be signed, not just some. Returns the signed
+// length in out, or 0 to send plain as it is.
+static size_t signBroadcastData(const ChannelKey &ck, uint32_t packetId,
+                                uint32_t fromNode, uint32_t toNode,
+                                const uint8_t *plain, size_t len,
+                                uint8_t *out, size_t outCap) {
+    if (toNode != 0xFFFFFFFF || fromNode == 0 || fromNode != xeddsaSignerNodeId()) return 0;
+    const size_t signedLen = len + XEDDSA_SIGNATURE_FIELD_BYTES;
+    // Upstream's signedDataFits(): header + signed Data within the 255-byte
+    // frame. On an AEAD channel the tag has to fit as well, or the packet could
+    // not be sent at all; unsigned, it still reaches Compatible receivers.
+    const size_t aead = channelUsesAead(ck) ? MESH_AEAD_OVERHEAD : 0;
+    if (MESH_HEADER_BYTES + signedLen + aead > MESH_MAX_FRAME_BYTES || signedLen > outCap) return 0;
+
+    uint32_t portnum = 0, requestId = 0;
+    bool wantResponse = false;
+    const uint8_t *pay = nullptr;
+    size_t payLen = 0;
+    DataEnvelope env;
+    decodeData(plain, len, portnum, pay, payLen, requestId, wantResponse,
+               nullptr, nullptr, nullptr, nullptr, &env);
+    if (portnum == 0 || env.hasSignature) return 0;
+
+    XeddsaSignedFields f = {};
+    f.from         = fromNode;
+    f.id           = packetId;
+    f.to           = toNode;
+    f.portnum      = portnum;
+    f.requestId    = requestId;
+    f.replyId      = env.replyId;
+    f.emoji        = env.emoji;
+    f.bitfield     = env.bitfield;
+    f.hasBitfield  = env.hasBitfield;
+    f.wantResponse = wantResponse;
+    uint8_t sig[XEDDSA_SIGNATURE_BYTES];
+    if (!xeddsaSign(f, pay, pay ? payLen : 0, sig)) return 0;
+
+    // Appended rather than re-encoded: field order means nothing to a protobuf
+    // parser, and the bytes before it stay exactly what was built.
+    memcpy(out, plain, len);
+    out[len]     = (10 << 3) | 2;   // xeddsa_signature, length-delimited
+    out[len + 1] = XEDDSA_SIGNATURE_BYTES;
+    memcpy(out + len + 2, sig, XEDDSA_SIGNATURE_BYTES);
+    return signedLen;
+}
+
+size_t encryptChannelPayload(const ChannelKey &ck, uint32_t packetId,
+                             uint32_t fromNode, uint32_t toNode,
+                             const uint8_t *plain, size_t len,
+                             uint8_t *cipher, size_t cipherCap) {
+    // Signed only if the result still fits the caller's buffer, tag included:
+    // a buffer too small to sign into must not turn into a failed send.
+    uint8_t signedData[MESH_MAX_FRAME_BYTES];
+    const size_t tag = channelUsesAead(ck) ? MESH_AEAD_OVERHEAD : 0;
+    size_t signCap = cipherCap > tag ? cipherCap - tag : 0;
+    if (signCap > sizeof(signedData)) signCap = sizeof(signedData);
+    const size_t signedLen = signBroadcastData(ck, packetId, fromNode, toNode, plain, len,
+                                               signedData, signCap);
+    if (signedLen) {
+        plain = signedData;
+        len = signedLen;
+    }
+    if (channelUsesAead(ck)) {
+        if (len + MESH_AEAD_OVERHEAD > cipherCap) return 0;
+        uint8_t exp[16];
+        const uint8_t *k = ck.key;
+        uint8_t kl = ck.keyLen;
+        resolveMeshKey(ck.key, ck.keyLen, exp, k, kl);
+        if (!aeadSeal(k, kl, packetId, fromNode, toNode, plain, len, cipher)) {
+            debugLogMessages("[aead] encrypt failed id=%08lX\n", (unsigned long)packetId);
+            return 0;
+        }
+        return len + MESH_AEAD_OVERHEAD;
+    }
+    if (len > cipherCap) return 0;
+    return encryptPayload(packetId, fromNode, ck.key, ck.keyLen, plain, cipher, len) ? len : 0;
+}
+
 // ── PKI (Curve25519) encryption ───────────────────────────────
 // Meshtastic wire format: [ciphertext(N)] [CCM-tag(8)] [extraNonce(4)]
 // Nonce (8 bytes): [packetId_LE32(4)] [extraNonce_LE(4)]
 // Key: SHA256(ECDH(myPrivKey, recipientPubKey))
 // Caller sets hdr.channel = 0 to signal PKI to receiving nodes.
 static bool derivePkiAesKey(const uint8_t *remotePubKey, uint8_t outAesKey[32]) {
+    return pkiSharedKey(remotePubKey, outAesKey);
+}
+
+bool pkiSharedKey(const uint8_t *remotePubKey, uint8_t outAesKey[32]) {
     if (!remotePubKey) return false;
 
     uint8_t sharedKey[32];
@@ -1241,11 +1417,19 @@ size_t encodeNeighborInfo(uint32_t nodeId,
 }
 
 size_t encodeRouting(uint32_t requestId, uint32_t fromNodeId, uint32_t errorReason,
-                     uint8_t *buf, size_t bufLen, uint32_t bitfield) {
-    // Inner Routing proto: field 3 (error_reason), varint
-    uint8_t inner[4]; size_t innerLen = 0;
+                     uint8_t *buf, size_t bufLen, uint32_t bitfield,
+                     const uint8_t *proofKey, uint32_t ackTo) {
+    // Inner Routing proto: field 3 (error_reason), varint, then the ack proof
+    // when we have a key to prove with. The proof covers the bytes before it.
+    uint8_t inner[8 + 2 + ACK_PROOF_BYTES]; size_t innerLen = 0;
     inner[innerLen++] = (3 << 3) | 0;  // field 3, varint
     innerLen += pbWriteVarint(inner + innerLen, errorReason);
+    if (proofKey) {
+        uint8_t proof[ACK_PROOF_BYTES];
+        ackProofCompute(proofKey, fromNodeId, ackTo, requestId, inner, innerLen, proof);
+        const size_t withProof = ackProofAppend(inner, innerLen, sizeof(inner), proof);
+        if (withProof) innerLen = withProof;
+    }
 
     size_t n = 0;
     // Data field 1 (portnum = ROUTING_APP), varint

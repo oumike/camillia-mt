@@ -8,6 +8,7 @@
 #include "battery_util.h"
 #include "utf8_utils.h"
 #include "esp_heap_caps.h"
+#include "xeddsa_sig.h"
 #include "esp_mac.h"
 #include "storage.h"
 #include <time.h>
@@ -882,7 +883,7 @@ bool ChannelMgr::sendText(uint32_t myNodeId, const char *text, bool okToMqtt,
     if (_active != txChan) setActive(txChan);
 
     uint32_t packetId = nextMeshPacketId();
-    uint8_t  proto[256], cipher[256];
+    uint8_t  proto[256], cipher[256 + MESH_AEAD_OVERHEAD];
 
     uint32_t bitfield = okToMqtt ? 0x01 : 0;
     size_t protoLen = encodeTextMessage(text, proto, sizeof(proto), bitfield, replyId, emoji);
@@ -893,11 +894,12 @@ bool ChannelMgr::sendText(uint32_t myNodeId, const char *text, bool okToMqtt,
     uint8_t effectiveKeyLen = (ck.keyLen == 1 && ck.key[0] == 0x00) ? 0 : ck.keyLen;
     debugLogMessages("[tx] ch%d name='%s' keyLen=%u effectiveKeyLen=%u hash=0x%02X\n",
                      txChan, txName ? txName : "", ck.keyLen, effectiveKeyLen, ck.hash);
-    if (!encryptPayload(packetId, myNodeId, ck.key, ck.keyLen,
-                        proto, cipher, protoLen)) return false;
+    const size_t cipherLen = encryptChannelPayload(ck, packetId, myNodeId, 0xFFFFFFFF,
+                                                   proto, protoLen, cipher, sizeof(cipher));
+    if (cipherLen == 0) return false;
 
     // Build MeshHdr
-    uint8_t frame[sizeof(MeshHdr) + 256];
+    uint8_t frame[sizeof(MeshHdr) + sizeof(cipher)];
     MeshHdr hdr = {};
     hdr.to      = 0xFFFFFFFF;     // broadcast
     hdr.from    = myNodeId;
@@ -906,8 +908,8 @@ bool ChannelMgr::sendText(uint32_t myNodeId, const char *text, bool okToMqtt,
     hdr.flags   = meshOriginHopFlagsForChannel(txChan, 1 << 3);   // want_ack
     hdr.relay_node = (uint8_t)(myNodeId & 0xFF);
     memcpy(frame, &hdr, sizeof(hdr));
-    memcpy(frame + sizeof(hdr), cipher, protoLen);
-    size_t frameLen = sizeof(hdr) + protoLen;
+    memcpy(frame + sizeof(hdr), cipher, cipherLen);
+    size_t frameLen = sizeof(hdr) + cipherLen;
 
     char timePrefix[12];
     liveBuildPrefix(timePrefix, sizeof(timePrefix));
@@ -928,7 +930,7 @@ bool ChannelMgr::sendText(uint32_t myNodeId, const char *text, bool okToMqtt,
 
     // Mirror our own outgoing message to MQTT when this channel is uplink-enabled
     // (published once here, not on the reliability retry below).
-    uplinkSelfFrame(/*txOk=*/true, okToMqtt, txChan, hdr, cipher, protoLen);
+    uplinkSelfFrame(/*txOk=*/true, okToMqtt, txChan, hdr, cipher, cipherLen);
 
     // Reliability nudge for broadcast text: send one additional copy with the
     // same from:id shortly after the first TX. Receivers dedupe by from:id, so
@@ -1001,17 +1003,18 @@ bool ChannelMgr::sendPosition(uint32_t myNodeId, int32_t latI, int32_t lonI, int
     // holds the real fix.
     applyPositionPrecision(latI, lonI, precisionBits);
 
-    uint8_t proto[64], cipher[64];
+    uint8_t proto[64], cipher[64 + XEDDSA_SIGNATURE_FIELD_BYTES + MESH_AEAD_OVERHEAD];
     uint32_t bitfield = okToMqtt ? 0x01 : 0;
     size_t protoLen = encodePosition(latI, lonI, alt, proto, sizeof(proto), bitfield,
                                      precisionBits);
     if (protoLen == 0) return false;
 
     uint32_t packetId = nextMeshPacketId();
-    if (!encryptPayload(packetId, myNodeId, ck.key, ck.keyLen,
-                        proto, cipher, protoLen)) return false;
+    const size_t cipherLen = encryptChannelPayload(ck, packetId, myNodeId, 0xFFFFFFFF,
+                                                   proto, protoLen, cipher, sizeof(cipher));
+    if (cipherLen == 0) return false;
 
-    uint8_t frame[sizeof(MeshHdr) + 64];
+    uint8_t frame[sizeof(MeshHdr) + sizeof(cipher)];
     MeshHdr hdr = {};
     hdr.to      = 0xFFFFFFFF;
     hdr.from    = myNodeId;
@@ -1020,13 +1023,13 @@ bool ChannelMgr::sendPosition(uint32_t myNodeId, int32_t latI, int32_t lonI, int
     hdr.flags   = meshOriginHopFlagsForChannel(chanIdx);
     hdr.relay_node = (uint8_t)(myNodeId & 0xFF);
     memcpy(frame, &hdr, sizeof(hdr));
-    memcpy(frame + sizeof(hdr), cipher, protoLen);
+    memcpy(frame + sizeof(hdr), cipher, cipherLen);
 
-    bool ok = Radio.transmit(frame, sizeof(hdr) + protoLen);
+    bool ok = Radio.transmit(frame, sizeof(hdr) + cipherLen);
     debugLogMessages("[position] transmit ch%d %s\n", chanIdx, ok ? "OK" : "FAILED");
     // Uplinked per channel: an announce can walk several location-sharing
     // channels, and each one carries its own uplinkEnabled flag.
-    uplinkSelfFrame(ok, okToMqtt, chanIdx, hdr, cipher, protoLen);
+    uplinkSelfFrame(ok, okToMqtt, chanIdx, hdr, cipher, cipherLen);
     {
         // Position can now go out on several channels in one announce, so the
         // channel index is part of the line — otherwise the burst reads as a
@@ -1046,16 +1049,17 @@ bool ChannelMgr::sendPositionRequest(uint32_t myNodeId, uint32_t toNodeId,
 
     uint32_t bitfield = okToMqtt ? 0x01 : 0;
 
-    uint8_t proto[32], cipher[32];
+    uint8_t proto[32], cipher[32 + MESH_AEAD_OVERHEAD];
     size_t protoLen = encodePositionRequest(proto, sizeof(proto), bitfield);
     if (protoLen == 0) return false;
 
     const ChannelKey &ck = CHANNEL_KEYS[0]; // LongFast
     uint32_t packetId = nextMeshPacketId();
-    if (!encryptPayload(packetId, myNodeId, ck.key, ck.keyLen,
-                        proto, cipher, protoLen)) return false;
+    const size_t cipherLen = encryptChannelPayload(ck, packetId, myNodeId, toNodeId,
+                                                   proto, protoLen, cipher, sizeof(cipher));
+    if (cipherLen == 0) return false;
 
-    uint8_t frame[sizeof(MeshHdr) + 32];
+    uint8_t frame[sizeof(MeshHdr) + sizeof(cipher)];
     MeshHdr hdr = {};
     hdr.to      = toNodeId;
     hdr.from    = myNodeId;
@@ -1064,9 +1068,9 @@ bool ChannelMgr::sendPositionRequest(uint32_t myNodeId, uint32_t toNodeId,
     hdr.flags   = meshOriginHopFlagsForChannel(0);
     hdr.relay_node = (uint8_t)(myNodeId & 0xFF);
     memcpy(frame, &hdr, sizeof(hdr));
-    memcpy(frame + sizeof(hdr), cipher, protoLen);
+    memcpy(frame + sizeof(hdr), cipher, cipherLen);
 
-    bool ok = Radio.transmit(frame, sizeof(hdr) + protoLen);
+    bool ok = Radio.transmit(frame, sizeof(hdr) + cipherLen);
     debugLogMessages("[position] request to !%08X %s\n", toNodeId, ok ? "OK" : "FAILED");
     {
         char dst[16];
@@ -1089,7 +1093,7 @@ static uint32_t telemetryEpochNow() {
 bool ChannelMgr::sendTelemetryDevice(uint32_t myNodeId, bool okToMqtt) {
     if (!Radio.isReady()) return false;
 
-    uint8_t proto[80], cipher[80];
+    uint8_t proto[80], cipher[80 + XEDDSA_SIGNATURE_FIELD_BYTES + MESH_AEAD_OVERHEAD];
     uint32_t bitfield = okToMqtt ? 0x01 : 0;
     size_t protoLen = encodeTelemetryDevice(batteryReadPercent(), batteryReadVoltage(),
                                             Radio.channelUtilPercent(), Radio.airUtilTxPercent(),
@@ -1100,10 +1104,11 @@ bool ChannelMgr::sendTelemetryDevice(uint32_t myNodeId, bool okToMqtt) {
 
     const ChannelKey &ck = CHANNEL_KEYS[0]; // LongFast
     uint32_t packetId = nextMeshPacketId();
-    if (!encryptPayload(packetId, myNodeId, ck.key, ck.keyLen,
-                        proto, cipher, protoLen)) return false;
+    const size_t cipherLen = encryptChannelPayload(ck, packetId, myNodeId, 0xFFFFFFFF,
+                                                   proto, protoLen, cipher, sizeof(cipher));
+    if (cipherLen == 0) return false;
 
-    uint8_t frame[sizeof(MeshHdr) + 80];
+    uint8_t frame[sizeof(MeshHdr) + sizeof(cipher)];
     MeshHdr hdr = {};
     hdr.to      = 0xFFFFFFFF;
     hdr.from    = myNodeId;
@@ -1112,10 +1117,10 @@ bool ChannelMgr::sendTelemetryDevice(uint32_t myNodeId, bool okToMqtt) {
     hdr.flags   = meshOriginHopFlagsForChannel(0);
     hdr.relay_node = (uint8_t)(myNodeId & 0xFF);
     memcpy(frame, &hdr, sizeof(hdr));
-    memcpy(frame + sizeof(hdr), cipher, protoLen);
+    memcpy(frame + sizeof(hdr), cipher, cipherLen);
 
-    bool ok = Radio.transmit(frame, sizeof(hdr) + protoLen);
-    uplinkSelfFrame(ok, okToMqtt, 0, hdr, cipher, protoLen);
+    bool ok = Radio.transmit(frame, sizeof(hdr) + cipherLen);
+    uplinkSelfFrame(ok, okToMqtt, 0, hdr, cipher, cipherLen);
     {
         char live[56];
         snprintf(live, sizeof(live), "T TEL D %08X %s",
@@ -1130,7 +1135,7 @@ bool ChannelMgr::sendTelemetryEnvironment(uint32_t myNodeId,
                                           bool okToMqtt) {
     if (!Radio.isReady()) return false;
 
-    uint8_t proto[96], cipher[96];
+    uint8_t proto[96], cipher[96 + XEDDSA_SIGNATURE_FIELD_BYTES + MESH_AEAD_OVERHEAD];
     uint32_t bitfield = okToMqtt ? 0x01 : 0;
     size_t protoLen = encodeTelemetryEnvironment(temperatureC, humidityPct, pressureHpa,
                                                  telemetryEpochNow(),
@@ -1139,10 +1144,11 @@ bool ChannelMgr::sendTelemetryEnvironment(uint32_t myNodeId,
 
     const ChannelKey &ck = CHANNEL_KEYS[0]; // LongFast
     uint32_t packetId = nextMeshPacketId();
-    if (!encryptPayload(packetId, myNodeId, ck.key, ck.keyLen,
-                        proto, cipher, protoLen)) return false;
+    const size_t cipherLen = encryptChannelPayload(ck, packetId, myNodeId, 0xFFFFFFFF,
+                                                   proto, protoLen, cipher, sizeof(cipher));
+    if (cipherLen == 0) return false;
 
-    uint8_t frame[sizeof(MeshHdr) + 96];
+    uint8_t frame[sizeof(MeshHdr) + sizeof(cipher)];
     MeshHdr hdr = {};
     hdr.to      = 0xFFFFFFFF;
     hdr.from    = myNodeId;
@@ -1151,10 +1157,10 @@ bool ChannelMgr::sendTelemetryEnvironment(uint32_t myNodeId,
     hdr.flags   = meshOriginHopFlagsForChannel(0);
     hdr.relay_node = (uint8_t)(myNodeId & 0xFF);
     memcpy(frame, &hdr, sizeof(hdr));
-    memcpy(frame + sizeof(hdr), cipher, protoLen);
+    memcpy(frame + sizeof(hdr), cipher, cipherLen);
 
-    bool ok = Radio.transmit(frame, sizeof(hdr) + protoLen);
-    uplinkSelfFrame(ok, okToMqtt, 0, hdr, cipher, protoLen);
+    bool ok = Radio.transmit(frame, sizeof(hdr) + cipherLen);
+    uplinkSelfFrame(ok, okToMqtt, 0, hdr, cipher, cipherLen);
     {
         char live[56];
         snprintf(live, sizeof(live), "T TEL E %08X %s",
@@ -1171,7 +1177,7 @@ bool ChannelMgr::sendNeighborInfo(uint32_t myNodeId,
                                   bool okToMqtt) {
     if (!Radio.isReady()) return false;
 
-    uint8_t proto[224], cipher[224];
+    uint8_t proto[224], cipher[224 + XEDDSA_SIGNATURE_FIELD_BYTES + MESH_AEAD_OVERHEAD];
     uint32_t bitfield = okToMqtt ? 0x01 : 0;
     size_t protoLen = encodeNeighborInfo(myNodeId,
                                          nodeBroadcastIntervalS,
@@ -1184,10 +1190,11 @@ bool ChannelMgr::sendNeighborInfo(uint32_t myNodeId,
 
     const ChannelKey &ck = CHANNEL_KEYS[0]; // LongFast
     uint32_t packetId = nextMeshPacketId();
-    if (!encryptPayload(packetId, myNodeId, ck.key, ck.keyLen,
-                        proto, cipher, protoLen)) return false;
+    const size_t cipherLen = encryptChannelPayload(ck, packetId, myNodeId, 0xFFFFFFFF,
+                                                   proto, protoLen, cipher, sizeof(cipher));
+    if (cipherLen == 0) return false;
 
-    uint8_t frame[sizeof(MeshHdr) + 224];
+    uint8_t frame[sizeof(MeshHdr) + sizeof(cipher)];
     MeshHdr hdr = {};
     hdr.to      = 0xFFFFFFFF;
     hdr.from    = myNodeId;
@@ -1196,10 +1203,10 @@ bool ChannelMgr::sendNeighborInfo(uint32_t myNodeId,
     hdr.flags   = meshOriginHopFlagsForChannel(0);
     hdr.relay_node = (uint8_t)(myNodeId & 0xFF);
     memcpy(frame, &hdr, sizeof(hdr));
-    memcpy(frame + sizeof(hdr), cipher, protoLen);
+    memcpy(frame + sizeof(hdr), cipher, cipherLen);
 
-    bool ok = Radio.transmit(frame, sizeof(hdr) + protoLen);
-    uplinkSelfFrame(ok, okToMqtt, 0, hdr, cipher, protoLen);
+    bool ok = Radio.transmit(frame, sizeof(hdr) + cipherLen);
+    uplinkSelfFrame(ok, okToMqtt, 0, hdr, cipher, cipherLen);
     {
         char live[64];
         snprintf(live, sizeof(live), "T NBR B %08X %s",
@@ -1255,7 +1262,7 @@ static bool sendNodeInfoFrame(uint32_t myNodeId,
         (uint8_t)(myNodeId      )
     };
 
-    uint8_t proto[256], cipher[256];
+    uint8_t proto[256], cipher[256 + MESH_AEAD_OVERHEAD];
     uint32_t bitfield = okToMqtt ? 0x01 : 0;
     size_t protoLen = encodeNodeInfo(myNodeId, longName, shortName,
                                      mac, proto, sizeof(proto), reqReply, bitfield);
@@ -1264,10 +1271,11 @@ static bool sendNodeInfoFrame(uint32_t myNodeId,
     // Always send NODEINFO on LongFast (index 0) for maximum visibility
     const ChannelKey &ck = CHANNEL_KEYS[0];
     uint32_t packetId = nextMeshPacketId();
-    if (!encryptPayload(packetId, myNodeId, ck.key, ck.keyLen,
-                        proto, cipher, protoLen)) return false;
+    const size_t cipherLen = encryptChannelPayload(ck, packetId, myNodeId, toNodeId,
+                                                   proto, protoLen, cipher, sizeof(cipher));
+    if (cipherLen == 0) return false;
 
-    uint8_t frame[sizeof(MeshHdr) + 256];
+    uint8_t frame[sizeof(MeshHdr) + sizeof(cipher)];
     MeshHdr hdr = {};
     hdr.to      = toNodeId;
     hdr.from    = myNodeId;
@@ -1278,13 +1286,13 @@ static bool sendNodeInfoFrame(uint32_t myNodeId,
     hdr.flags   = meshOriginHopFlagsCapped(hopLimit);
     hdr.relay_node = (uint8_t)(myNodeId & 0xFF);
     memcpy(frame, &hdr, sizeof(hdr));
-    memcpy(frame + sizeof(hdr), cipher, protoLen);
+    memcpy(frame + sizeof(hdr), cipher, cipherLen);
 
     debugLogMessages("[nodeinfo] %s to !%08X  proto=%u bytes hops=%u reply=%d\n",
                      isUnicast ? "unicast" : "broadcast", toNodeId, (unsigned)protoLen,
                      (unsigned)hopLimit, (int)reqReply);
 
-    bool ok = Radio.transmit(frame, sizeof(hdr) + protoLen);
+    bool ok = Radio.transmit(frame, sizeof(hdr) + cipherLen);
     debugLogMessages("[nodeinfo] transmit %s\n", ok ? "OK" : "FAILED");
     // Start the 15s broadcast window only once a broadcast actually goes out,
     // so a failed transmit doesn't lock out the next attempt.
@@ -1293,7 +1301,7 @@ static bool sendNodeInfoFrame(uint32_t myNodeId,
     // publishing it would put a one-to-one answer on a topic the whole broker
     // reads. The periodic broadcast is what a map needs anyway — it is the
     // packet that gives this node a name and a role.
-    if (!isUnicast) uplinkSelfFrame(ok, okToMqtt, 0, hdr, cipher, protoLen);
+    if (!isUnicast) uplinkSelfFrame(ok, okToMqtt, 0, hdr, cipher, cipherLen);
     {
         char dst[16];
         liveNodeLabel(toNodeId, dst, sizeof(dst), true);
@@ -1339,7 +1347,7 @@ bool ChannelMgr::sendSharedNodeInfo(uint32_t myNodeId, uint32_t sharedNodeId,
         return false;
     }
 
-    uint8_t proto[256], cipher[256];
+    uint8_t proto[256], cipher[256 + MESH_AEAD_OVERHEAD];
     const size_t protoLen = encodeSharedNodeInfo(sharedNodeId, longName, shortName,
                                                  pubKey32, proto, sizeof(proto));
     if (protoLen == 0) return false;
@@ -1349,10 +1357,11 @@ bool ChannelMgr::sendSharedNodeInfo(uint32_t myNodeId, uint32_t sharedNodeId,
     const uint32_t packetId = nextMeshPacketId();
     // The nonce is built from the sender, so it has to be the node the packet
     // claims to come from, or no receiver could decrypt it.
-    if (!encryptPayload(packetId, sharedNodeId, ck.key, ck.keyLen,
-                        proto, cipher, protoLen)) return false;
+    const size_t cipherLen = encryptChannelPayload(ck, packetId, sharedNodeId, 0xFFFFFFFF,
+                                                   proto, protoLen, cipher, sizeof(cipher));
+    if (cipherLen == 0) return false;
 
-    uint8_t frame[sizeof(MeshHdr) + 256];
+    uint8_t frame[sizeof(MeshHdr) + sizeof(cipher)];
     MeshHdr hdr = {};
     hdr.to         = 0xFFFFFFFF;
     hdr.from       = sharedNodeId;
@@ -1361,9 +1370,9 @@ bool ChannelMgr::sendSharedNodeInfo(uint32_t myNodeId, uint32_t sharedNodeId,
     hdr.flags      = 0;   // hop_limit 0, hop_start 0: zero-hop, nothing relays it
     hdr.relay_node = (uint8_t)(myNodeId & 0xFF);
     memcpy(frame, &hdr, sizeof(hdr));
-    memcpy(frame + sizeof(hdr), cipher, protoLen);
+    memcpy(frame + sizeof(hdr), cipher, cipherLen);
 
-    const bool ok = Radio.transmit(frame, sizeof(hdr) + protoLen);
+    const bool ok = Radio.transmit(frame, sizeof(hdr) + cipherLen);
     if (ok) sLastShareMs = millis();
     debugLogMessages("[share] !%08X nodeinfo zero-hop %s\n",
                      (unsigned)sharedNodeId, ok ? "OK" : "FAILED");

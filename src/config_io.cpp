@@ -1892,6 +1892,9 @@ void cfgToYaml(const RhinoConfig &cfg, String &out) {
         out += tmp;
         snprintf(tmp, sizeof(tmp), "    shareLocation: %s\n", ch.shareLocation ? "true" : "false");
         out += tmp;
+        // Meshtastic 2.8.1 ChannelSettings.use_aead, under its upstream name.
+        snprintf(tmp, sizeof(tmp), "    use_aead: %s\n", ch.useAead ? "true" : "false");
+        out += tmp;
         // Written only when the channel has an override. Absent means "follow the
         // device default", which is also how a file from a build without this
         // field reads — so the two are the same thing rather than a special case.
@@ -2205,6 +2208,8 @@ bool cfgImportFromBuf(const char *buf, size_t len, RhinoConfig &cfg) {
                     CHANNEL_KEYS[chanIdx].muted = parseBoolValue(val);
                 } else if (!strcmp(key, "shareLocation")) {
                     CHANNEL_KEYS[chanIdx].shareLocation = parseBoolValue(val);
+                } else if (!strcmp(key, "use_aead")) {
+                    CHANNEL_KEYS[chanIdx].useAead = parseBoolValue(val);
                 } else if (!strcmp(key, "hop_limit")) {
                     // Camillia-only: Meshtastic has no per-channel hop field, so
                     // a config from stock tooling never carries this and the

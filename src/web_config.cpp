@@ -4130,7 +4130,9 @@ static void sendConfigPage(const char *msg = "", bool lite = false) {
             "Uplink publishes this channel's traffic to MQTT; downlink re-broadcasts "
             "MQTT traffic for it onto LoRa. Location broadcasts this node's position "
             "on the channel &mdash; only where Share Location above is on, and never "
-            "on an unnamed or disabled channel.</p>";
+            "on an unnamed or disabled channel. AEAD switches the channel to "
+            "Meshtastic 2.8.1's authenticated encryption: every node on it must "
+            "turn it on too, and nodes on older firmware stop hearing it.</p>";
     // Marker so the POST handler applies per-channel checkbox state (an unchecked
     // box submits nothing) only when this section was rendered.
     html += "<input type='hidden' name='ch_flags' value='1'>";
@@ -4142,8 +4144,8 @@ static void sendConfigPage(const char *msg = "", bool lite = false) {
     char b64buf[48];
     // Channel roles, not the device role list kRoles above — same function scope.
     static const char *kChanRoles[] = {"PRIMARY", "SECONDARY", "DISABLED"};
-    // Field name, label, and current state for the three per-channel toggles, so
-    // the three near-identical blocks this replaced cannot drift apart.
+    // Field name, label, and current state for the per-channel toggles, so the
+    // near-identical blocks this replaced cannot drift apart.
     struct ChanToggle { const char *suffix; const char *label; bool on; };
     for (int i = 0; i < MESH_CHANNELS; i++) {
         const ChannelKey &ch = CHANNEL_KEYS[i];
@@ -4225,6 +4227,7 @@ static void sendConfigPage(const char *msg = "", bool lite = false) {
             { "up",   "Uplink",   ch.uplinkEnabled },
             { "down", "Downlink", ch.downlinkEnabled },
             { "loc",  "Location", ch.shareLocation },
+            { "aead", "AEAD",     ch.useAead },
         };
         html += "<div class='ch-tog'>";
         for (const ChanToggle &t : toggles) {
@@ -7816,10 +7819,14 @@ static void handlePostSave() {
             CHANNEL_KEYS[i].downlinkEnabled = (server.arg(field) == "1");
             snprintf(field, sizeof(field), "ch%d_loc", i);
             CHANNEL_KEYS[i].shareLocation = (server.arg(field) == "1");
+            snprintf(field, sizeof(field), "ch%d_aead", i);
+            CHANNEL_KEYS[i].useAead = (server.arg(field) == "1");
         }
-        // Recompute on-air hash from current name + key
-        const char *nm2 = CHANNEL_KEYS[i].name_buf[0] ? CHANNEL_KEYS[i].name_buf : CHANNEL_KEYS[i].name;
-        CHANNEL_KEYS[i].hash = computeChannelHash(nm2, CHANNEL_KEYS[i].key, CHANNEL_KEYS[i].keyLen);
+        // AEAD needs a key; cleared without one, as Meshtastic's fixupChannel()
+        // does, so it cannot switch on later by surprise when a key is added.
+        if (!channelUsesAead(CHANNEL_KEYS[i])) CHANNEL_KEYS[i].useAead = false;
+        // Recompute on-air hash from current name + key (+ AEAD)
+        CHANNEL_KEYS[i].hash = channelKeyHash(CHANNEL_KEYS[i]);
     }
 
     // Region
