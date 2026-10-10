@@ -2578,10 +2578,10 @@ that a packet altered in flight is rejected rather than decrypted into something
 the sender never wrote. It is an experimental, per-channel switch (`use_aead`),
 off by default, and Camillia supports it the same way.
 
-- **Turning it on**: in Web Config, tick **AEAD** on the channel's row and save.
-  In an exported config it is the channel's `use_aead: true` line. The on-device
-  channel editor does not show it yet, but saving a channel there keeps whatever
-  it was set to.
+- **Turning it on**: on the device, Config &rarr; Channels &rarr; pick a slot
+  &rarr; **AEAD**, then **Save**. In Web Config, tick **AEAD** on the channel's
+  row and save. In an exported config it is the channel's `use_aead: true` line.
+  It is off unless you turn it on.
 - **Every node on the channel has to turn it on.** An AEAD channel goes by a
   different channel hash from the same name and key without it, so the two never
   hear each other. That includes nodes on Meshtastic older than 2.8.1 and on older
@@ -2590,7 +2590,7 @@ off by default, and Camillia supports it the same way.
 - **Older nodes can still relay it** if their **Rebroadcast** mode is `ALL`. In
   any other mode a node before 2.8.1 drops what it cannot decrypt, so a mesh whose
   routers run older firmware can cut AEAD traffic off.
-- **It needs a key.** On a channel with no encryption the switch does nothing.
+- **It needs a key.** Saving a channel with no encryption turns AEAD back off.
 - **Messages get 12 bytes shorter.** Each packet carries a 12-byte authentication
   tag. A full-length text still fits, but there is less room left over.
 - **Direct messages are unaffected.** They already use their own authenticated

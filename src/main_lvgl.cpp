@@ -18110,7 +18110,7 @@ static const lv_font_t *kChanModalTitleFont = &lv_font_montserrat_12;
 static const lv_font_t *kChanModalRowFont   = &lv_font_montserrat_10;
 // A half-width cell here is ~112px. "Encryption" plus its value does not fit,
 // and an ellipsised field name is worse than a short one.
-#define CHAN_EDIT_LABELS { TR_NOOP("Name"), TR_NOOP("Enc"), TR_NOOP("Save"), TR_NOOP("Loc"), TR_NOOP("Key"), TR_NOOP("Hops") }
+#define CHAN_EDIT_LABELS { TR_NOOP("Name"), TR_NOOP("Enc"), TR_NOOP("AEAD"), TR_NOOP("Save"), TR_NOOP("Loc"), TR_NOOP("Key"), TR_NOOP("Hops") }
 #elif defined(DEVICE_TLORA_PAGER_TFT)
 static constexpr int  kChanModalCols  = 2;
 static constexpr int  kChanModalMaxW  = 448;
@@ -18119,7 +18119,7 @@ static constexpr int  kChanModalGap   = 5;
 static constexpr int  kChanModalRowH  = 28;
 static const lv_font_t *kChanModalTitleFont = &lv_font_montserrat_16;
 static const lv_font_t *kChanModalRowFont   = &lv_font_montserrat_12;
-#define CHAN_EDIT_LABELS { TR_NOOP("Name"), TR_NOOP("Encryption"), TR_NOOP("Save"), TR_NOOP("Location"), TR_NOOP("Key"), TR_NOOP("Hops") }
+#define CHAN_EDIT_LABELS { TR_NOOP("Name"), TR_NOOP("Encryption"), TR_NOOP("AEAD"), TR_NOOP("Save"), TR_NOOP("Location"), TR_NOOP("Key"), TR_NOOP("Hops") }
 #else
 // 320x240 boards (T-Deck, Heltec V4, Mesh Deck). At 300px wide a 49% cell is
 // ~138px, which holds "0  LongFast" at montserrat_12 with room to spare.
@@ -18132,7 +18132,7 @@ static const lv_font_t *kChanModalTitleFont = &lv_font_montserrat_16;
 static const lv_font_t *kChanModalRowFont   = &lv_font_montserrat_12;
 // ~138px cells at montserrat_12: "Location" plus "Off" fits, "Encryption" plus
 // "AES-256" is the tightest pairing and ellipsises its value, not its name.
-#define CHAN_EDIT_LABELS { TR_NOOP("Name"), TR_NOOP("Encryption"), TR_NOOP("Save"), TR_NOOP("Location"), TR_NOOP("Key"), TR_NOOP("Hops") }
+#define CHAN_EDIT_LABELS { TR_NOOP("Name"), TR_NOOP("Encryption"), TR_NOOP("AEAD"), TR_NOOP("Save"), TR_NOOP("Location"), TR_NOOP("Key"), TR_NOOP("Hops") }
 #endif
 static constexpr int kChanModalRowsPerCol =
     (MESH_CHANNELS + kChanModalCols - 1) / kChanModalCols;
@@ -18724,24 +18724,27 @@ static int       s_chanCfgSelection = 0;
 // step with them. Laid out, that is:
 //     Name  | Location
 //     Enc   | Key
-//     Save  | Hops
+//     AEAD  | Hops
+//     Save  |
+// AEAD sits under Enc because it is part of how the channel is encrypted, and
+// Save stays bottom-left where it has always been. Seven rows come to four per
+// column -- the height of the channel picker's eight, so the editor fits
+// wherever the picker already does.
 enum ChanEditRow : uint8_t {
     CHAN_EDIT_NAME = 0,
     CHAN_EDIT_ENC,
+    CHAN_EDIT_AEAD,
     CHAN_EDIT_SAVE,
     CHAN_EDIT_LOCATION,
     CHAN_EDIT_KEY,
-    // Appended deliberately: five rows and six both come to three per column, so
-    // this takes the cell the short column used to leave empty and every other
-    // row keeps the position it had.
     CHAN_EDIT_HOPS,
     CHAN_EDIT_ROW_COUNT
 };
 
 // The editor uses the picker's grid, so its rows fill column-major too and a
-// step of one keeps walking down a column. Five rows over two columns leaves the
-// last cell empty rather than a gap mid-grid, which is why the build loop can
-// use the same index mapping without special-casing the short column.
+// step of one keeps walking down a column. Seven rows over two columns leaves
+// the last cell empty rather than a gap mid-grid, which is why the build loop
+// can use the same index mapping without special-casing the short column.
 static constexpr int kChanEditRowsPerCol =
     (CHAN_EDIT_ROW_COUNT + kChanModalCols - 1) / kChanModalCols;
 
@@ -18757,6 +18760,7 @@ static char    s_chanEditName[16] = {};
 static uint8_t s_chanEditKey[32]  = {};
 static uint8_t s_chanEditKeyLen   = 0;
 static bool    s_chanEditShareLoc = false;
+static bool    s_chanEditAead     = false;
 // Staged per-channel hop budget in the ChannelKey encoding: 0 = follow the
 // device default, else hops + 1.
 static uint8_t s_chanEditHopPlus1 = 0;
@@ -18878,6 +18882,11 @@ static void chanEditSave() {
     ck.keyLen = s_chanEditKeyLen;
     ck.shareLocation = s_chanEditShareLoc;
     ck.hopLimitPlus1 = s_chanEditHopPlus1;
+    // Cleared on a channel with no key, as Meshtastic's fixupChannel() does:
+    // there is nothing to authenticate with, and a flag left set would switch
+    // AEAD on by surprise the day a key is added.
+    ck.useAead = s_chanEditAead;
+    if (!channelUsesAead(ck)) ck.useAead = false;
 
     // Role is deliberately untouched — the web config owns it, and an empty
     // secondary slot already ships as SECONDARY, so naming one is enough to put
@@ -19118,6 +19127,9 @@ static void refreshChanEditRows() {
             case CHAN_EDIT_LOCATION:
                 lv_label_set_text(val, s_chanEditShareLoc ? TR("On") : TR("Off"));
                 break;
+            case CHAN_EDIT_AEAD:
+                lv_label_set_text(val, s_chanEditAead ? TR("On") : TR("Off"));
+                break;
             case CHAN_EDIT_HOPS:
                 // "Default" names where the number comes from when unset, and
                 // shows it, because "this channel follows the device" is only
@@ -19136,6 +19148,11 @@ static void refreshChanEditRows() {
 
 static void chanEditToggleShareLoc() {
     s_chanEditShareLoc = !s_chanEditShareLoc;
+    refreshChanEditRows();
+}
+
+static void chanEditToggleAead() {
+    s_chanEditAead = !s_chanEditAead;
     refreshChanEditRows();
 }
 
@@ -19164,6 +19181,9 @@ static void chanEditActivateRow(int row) {
             break;
         case CHAN_EDIT_LOCATION:
             chanEditToggleShareLoc();
+            break;
+        case CHAN_EDIT_AEAD:
+            chanEditToggleAead();
             break;
         case CHAN_EDIT_HOPS:
             chanEditCycleHops(1);
@@ -19202,6 +19222,7 @@ static void openChanEditModal(int slot) {
     memset(s_chanEditKey, 0, sizeof(s_chanEditKey));
     memcpy(s_chanEditKey, ck.key, s_chanEditKeyLen);
     s_chanEditShareLoc = ck.shareLocation;
+    s_chanEditAead     = ck.useAead;
     s_chanEditHopPlus1 = ck.hopLimitPlus1;
 
     const int w = lv_disp_get_hor_res(NULL);
@@ -19282,7 +19303,8 @@ static void openChanEditModal(int slot) {
 
     for (int pos = 0; pos < CHAN_EDIT_ROW_COUNT; pos++) {
         // Same column-major mapping as the picker grid, so a step of one walks
-        // down a column: left holds Name/Encryption/Key, right Location/Save.
+        // down a column: left holds Name/Encryption/AEAD/Save, right
+        // Location/Key/Hops.
         const int i = (pos % kChanModalCols) * kChanEditRowsPerCol + (pos / kChanModalCols);
         if (i >= CHAN_EDIT_ROW_COUNT) continue;
 
@@ -44422,6 +44444,10 @@ static void pumpKeyboardInput() {
             if (s_chanEditSelection == CHAN_EDIT_LOCATION) {
                 if (k == KEY_PREV_CHAN || k == KEY_PAGE_UP
                     || k == KEY_NEXT_CHAN || k == KEY_PAGE_DN) { chanEditToggleShareLoc(); continue; }
+            }
+            if (s_chanEditSelection == CHAN_EDIT_AEAD) {
+                if (k == KEY_PREV_CHAN || k == KEY_PAGE_UP
+                    || k == KEY_NEXT_CHAN || k == KEY_PAGE_DN) { chanEditToggleAead(); continue; }
             }
             if (s_chanEditSelection == CHAN_EDIT_HOPS) {
                 if (k == KEY_PREV_CHAN || k == KEY_PAGE_UP)  { chanEditCycleHops(-1); continue; }

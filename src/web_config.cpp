@@ -7822,6 +7822,9 @@ static void handlePostSave() {
             snprintf(field, sizeof(field), "ch%d_aead", i);
             CHANNEL_KEYS[i].useAead = (server.arg(field) == "1");
         }
+        // AEAD needs a key; cleared without one, as Meshtastic's fixupChannel()
+        // does, so it cannot switch on later by surprise when a key is added.
+        if (!channelUsesAead(CHANNEL_KEYS[i])) CHANNEL_KEYS[i].useAead = false;
         // Recompute on-air hash from current name + key (+ AEAD)
         CHANNEL_KEYS[i].hash = channelKeyHash(CHANNEL_KEYS[i]);
     }
