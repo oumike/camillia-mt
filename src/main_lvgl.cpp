@@ -48511,6 +48511,14 @@ static void drawBootSplash() {
     }
 
     const int cardMargin = 10;
+    // A card sized to what it holds, centred on a background with faint
+    // camellias in its corners, rather than one filling the panel: the boards
+    // whose screens are far bigger than the card's contents.
+#if defined(DEVICE_TDISPLAY_P4) || defined(DEVICE_CROWPANEL_50)
+#define SPLASH_FLOATING_CARD 1
+#else
+#define SPLASH_FLOATING_CARD 0
+#endif
 #if defined(DEVICE_TDISPLAY_P4)
     // The portrait card's width in both orientations, centred. Landscape used
     // to run the card end to end across 616 px with the same narrow stack of
@@ -48519,10 +48527,15 @@ static void drawBootSplash() {
     const int cardW = min(screenW - cardMargin * 2,
                           DEVICE_LCD_PORTRAIT_W / UI_PIXEL_SCALE - cardMargin * 2);
     const int cardX = (screenW - cardW) / 2;
+#elif defined(DEVICE_CROWPANEL_50)
+    // Room round the title and footer, which are drawn at the sizes of the
+    // 320 px boards, without stretching them across an 800 px panel.
+    const int cardW = min(screenW - cardMargin * 2, 360);
+    const int cardX = (screenW - cardW) / 2;
 #else
     const int cardX = cardMargin;
 #endif
-#if defined(DEVICE_TDISPLAY_P4)
+#if SPLASH_FLOATING_CARD
     // Sized to what it holds rather than to the canvas, and centred in it: on
     // the 596-tall canvas any fixed card left dead space above and below the
     // flower. Title block, a gap, the flower, a gap, the footer -- each measured
@@ -48559,7 +48572,7 @@ static void drawBootSplash() {
     const int cardY = 10;
     const int cardH = screenH - 20;
 #endif
-#if !defined(DEVICE_TDISPLAY_P4)
+#if !SPLASH_FLOATING_CARD
     const int cardW = screenW - cardMargin * 2;
 #endif
 
@@ -48689,7 +48702,7 @@ static void drawBootSplash() {
         splashDev().fillCircle(cx + leafInnerX, cy + leafInnerYRight, leafInnerR, fade(LEAF_LIGHT, cy + leafInnerYRight));
     };
 
-#if defined(DEVICE_TDISPLAY_P4)
+#if SPLASH_FLOATING_CARD
     // Four large, faint camellias behind the card, one centred on each corner
     // of the screen, so each shows as a partial bloom framing the card. Drawn
     // before the card, which covers whatever of them reaches it. Scaled to the
@@ -48926,6 +48939,7 @@ static void drawBootSplash() {
         bootSplashTick();
         delay(20);
     }
+#undef SPLASH_FLOATING_CARD
 }
 
 // ── Channel-button paint cache ───────────────────────────────────────────────
