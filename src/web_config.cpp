@@ -3348,7 +3348,10 @@ static void appendSavedNetworks(String &html) {
 // buttons and its form agree even when a slot is skipped as empty.
 static void appendSavedNetworkForms(String &html) {
     const int savedCount = cfgSavedWifiCount();
-    char tag[160];
+    // Room to spare: at 160 this was a few bytes short, cut the Forget form's
+    // </form> down to a lone "<" (shown at the bottom of the page) and left
+    // that form open around every form after it.
+    char tag[256];
     for (int i = 0; i < savedCount; i++) {
         snprintf(tag, sizeof(tag),
                  "<form id='wfu%d' method='POST' action='/wifi-use'></form>"
