@@ -2276,6 +2276,20 @@ Unlike Chat Style, this applies **without a reboot**: bubble views re-render
 immediately, and new classic-chat lines use the chosen style going forward. The
 Web Config **Chat Names** dropdown offers the same two choices.
 
+### Message blink
+
+A newly received message blinks in the chat and DM views until its conversation
+has been on screen for a while, or until you leave it. Config's **Message
+Blink** action opens a slider that sets how long: **Off**, or 5 to 60 seconds in
+5-second steps. The default is 15 seconds, which is what every build did before
+this setting existed. Off means new messages never blink; the channel list still
+stops flagging a conversation after 15 seconds on screen.
+
+It applies immediately, with no reboot. Switching it off stops anything already
+blinking. On the web page, **Message Blink** opens the same slider in a modal,
+with Save and Cancel. The T-Deck Pro has no such row, because its e-paper never
+blinks.
+
 ### Brightness
 
 The **Brightness** action opens a slider covering 10%–100% in 10% steps. The

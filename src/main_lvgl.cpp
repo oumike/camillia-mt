@@ -2284,7 +2284,8 @@ static inline void lvObjDeleteSafe(lv_obj_t *&obj) {
 // object of each fresh message as they build it, and one timer pulses them all.
 // text_opa is inherited, so setting it on the row reaches every label inside a
 // bubble or IRC row without each style knowing about it. Paper never blinks:
-// every pulse would be a panel refresh.
+// every pulse would be a panel refresh. How long it lasts, or whether it happens
+// at all, is the Message Blink setting (cfgChatBlinkSecs()).
 struct ChatBlinkSet {
     lv_obj_t *objs[48];
     int       count;
@@ -2304,6 +2305,16 @@ static void chatBlinkApply(ChatBlinkSet &set, lv_opa_t opa) {
 
 static void chatBlinkTick(lv_timer_t *) {
     if (s_chatBlink.count == 0 && s_dmBlink.count == 0) {
+        s_chatBlinkDim = false;
+        return;
+    }
+    // Switched Off (on the device or from the web page) with rows mid-blink:
+    // they go steady now rather than blinking on until their time is up.
+    if (cfgChatBlinkSecs(s_cfg) == 0) {
+        chatBlinkApply(s_chatBlink, LV_OPA_COVER);
+        chatBlinkApply(s_dmBlink, LV_OPA_COVER);
+        s_chatBlink.count = 0;
+        s_dmBlink.count = 0;
         s_chatBlinkDim = false;
         return;
     }
@@ -2333,6 +2344,7 @@ static void chatBlinkTrack(ChatBlinkSet &set, lv_obj_t *row, bool fresh) {
     (void)set; (void)row; (void)fresh;
 #else
     if (!fresh || !row || set.count >= (int)(sizeof(set.objs) / sizeof(set.objs[0]))) return;
+    if (cfgChatBlinkSecs(s_cfg) == 0) return;   // Message Blink: Off
     static lv_timer_t *timer = nullptr;
     if (!timer) timer = lv_timer_create(chatBlinkTick, kChatBlinkPeriodMs, nullptr);
     set.objs[set.count++] = row;
@@ -3462,6 +3474,9 @@ enum CfgActionId {
     CFG_ACTION_CHAT_STYLE,
     CFG_ACTION_CHAT_NAMES,
     CFG_ACTION_CHAT_COLORS,
+    #if HAS_CHAT_BLINK
+    CFG_ACTION_CHAT_BLINK,
+    #endif
     CFG_ACTION_FONT_SIZE,
     CFG_ACTION_ORIENTATION,
     CFG_ACTION_LANGUAGE,       // UI language (issue #99)
@@ -5414,6 +5429,13 @@ static const char *cfgActionLabel(int actionId, char *buf, size_t bufLen) {
             snprintf(buf, bufLen, TR("Chat Colors: %s"),
                      s_cfg.chatColorsEnabled ? TR("On") : TR("Off"));
             break;
+        #if HAS_CHAT_BLINK
+        case CFG_ACTION_CHAT_BLINK: {
+            const uint8_t secs = cfgChatBlinkSecs(s_cfg);
+            if (secs == 0) snprintf(buf, bufLen, TR("Message Blink: %s"), TR("Off"));
+            else snprintf(buf, bufLen, TR("Message Blink: %u sec"), (unsigned)secs);
+        } break;
+        #endif
         case CFG_ACTION_FONT_SIZE:
             snprintf(buf, bufLen, TR("Font Size: %s"), fontSizeName(s_cfg.fontSize));
             break;
@@ -14246,6 +14268,10 @@ static void initCfgActions() {
     s_cfgActions[s_cfgActionCount++] = CFG_ACTION_OWNER_COLOR;
     s_cfgActions[s_cfgActionCount++] = CFG_ACTION_RESET_CHAT_COLORS;
 #endif
+#if HAS_CHAT_BLINK
+    // With the other rows about how chat looks: it is how a new message looks.
+    s_cfgActions[s_cfgActionCount++] = CFG_ACTION_CHAT_BLINK;
+#endif
     // Font Size scales the chat and DM text in every style, so every build gets
     // it — the Cardputer arguably most of all.
     s_cfgActions[s_cfgActionCount++] = CFG_ACTION_FONT_SIZE;
@@ -16491,6 +16517,48 @@ static void openCfgSliderModal(const CfgSliderPicker *spec, int startIdx) {
     if (hasCheck) refreshCfgSliderFocus();
 #endif
 }
+
+#if HAS_CHAT_BLINK
+// ── Message blink ────────────────────────────────────────────────────────────
+// Stop 0 is Off, stop n is n * kChatBlinkStepS seconds, up to kChatBlinkMaxS.
+
+static const char *cfgChatBlinkLabelFor(int idx) {
+    static char buf[24];
+    if (idx <= 0) return TR("Off");
+    snprintf(buf, sizeof(buf), TR("%u sec"), (unsigned)(idx * kChatBlinkStepS));
+    return buf;
+}
+
+static void cfgChatBlinkApply(int idx) {
+    s_cfg.chatBlinkSecs = cfgCoerceChatBlink((long)idx * kChatBlinkStepS);
+    persistConfigToPrefs();
+    const uint8_t secs = cfgChatBlinkSecs(s_cfg);
+    if (secs == 0) {
+        snprintf(s_cfgStatus, sizeof(s_cfgStatus), "%s", TR("New messages do not blink"));
+    } else {
+        snprintf(s_cfgStatus, sizeof(s_cfgStatus), TR("New messages blink for %u sec"),
+                 (unsigned)secs);
+    }
+    // Off stops anything blinking at the next tick (chatBlinkTick()); turning it
+    // on needs the view rebuilt so its new rows register.
+    s_lastRenderedChannel = -1;
+    s_lastRenderedCount = -1;
+    refreshChatView(true);
+}
+
+static void openCfgChatBlinkModal() {
+    const int startIdx = cfgChatBlinkSecs(s_cfg) / kChatBlinkStepS;
+    static const CfgSliderPicker kSpec = {
+        TR_NOOP("Message Blink"),
+        kChatBlinkMaxS / kChatBlinkStepS + 1,
+        cfgChatBlinkLabelFor,
+        cfgChatBlinkApply,
+        TR_NOOP("off"),
+        TR_NOOP("60 sec"),
+    };
+    openCfgSliderModal(&kSpec, startIdx);
+}
+#endif  // HAS_CHAT_BLINK
 
 // ── Location precision ───────────────────────────────────────────────────────
 
@@ -40749,6 +40817,15 @@ static void performCfgAction(int actionId) {
             refreshChatView(true);
             break;
 
+#if HAS_CHAT_BLINK
+        // A slider, like the light timeouts: Off at one end, a minute at the other.
+        case CFG_ACTION_CHAT_BLINK:
+            if (s_cfgDebugLog) Serial.println("[lvgl-cfg] exec CHAT_BLINK");
+            showActionPopup = false;   // the picker is the feedback
+            openCfgChatBlinkModal();
+            break;
+#endif
+
         case CFG_ACTION_FONT_SIZE:
             if (s_cfgDebugLog) Serial.println("[lvgl-cfg] exec FONT_SIZE");
             showActionPopup = false;
@@ -57978,12 +58055,17 @@ static bool chatPanelInFront() {
     return true;
 }
 
-// How long a conversation's new messages blink once it is in front of the user.
-// A message arriving meanwhile starts the count again.
-static constexpr uint32_t kFreshSeenMs = 15000;
+// How long a conversation's new messages blink once it is in front of the user:
+// the Message Blink setting. A message arriving meanwhile starts the count
+// again. With the blink Off the marks still clear after the default 15 s, since
+// that is also when the channel list stops flagging the conversation.
+static uint32_t freshSeenMs() {
+    const uint32_t secs = cfgChatBlinkSecs(s_cfg);
+    return (secs ? secs : 15u) * 1000u;
+}
 
 // Tracks how long one conversation has been in front since its last new
-// message, and reports once when that reaches kFreshSeenMs.
+// message, and reports once when that reaches freshSeenMs().
 struct FreshSeenTimer {
     uint32_t sinceMs;
     uint32_t seq;
@@ -57995,14 +58077,14 @@ struct FreshSeenTimer {
             done = false;
             return false;
         }
-        if (done || (uint32_t)(now - sinceMs) < kFreshSeenMs) return false;
+        if (done || (uint32_t)(now - sinceMs) < freshSeenMs()) return false;
         done = true;
         return true;
     }
 };
 
 // New messages stay marked (and blinking) until the user has had their
-// conversation in front of them for kFreshSeenMs, or has left it sooner:
+// conversation in front of them for freshSeenMs(), or has left it sooner:
 // another channel, another screen, or the display going to sleep. Watching what
 // is in front each pass catches every way of leaving without hooking each one.
 static void serviceFreshMarks() {

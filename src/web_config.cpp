@@ -1393,6 +1393,38 @@ static const char kFontModal[] =
         "document.getElementById('fsBtn').textContent=l;fsClose();}"
         "</script>";
 
+#if HAS_CHAT_BLINK
+// Message Blink: a range in 5-second stops, Off at 0, staged in the modal and
+// copied to the hidden input only on Save -- the same commit-on-save as the
+// on-device slider.
+static const char kChatBlinkModal[] =
+        "<div class='modal-back' id='cbModal' onclick='if(event.target===this)cbClose()'>"
+        "<div class='modal-card'><h3>Message Blink</h3>"
+        "<p style='font-size:.85em;color:var(--text-dim);margin:0 0 .6em'>"
+            "How long a new message blinks in chat and DMs once you have it on "
+            "screen. Off: new messages do not blink.</p>"
+        "<div style='text-align:center;font-size:1.2em;font-weight:700' id='cbOut'></div>"
+        "<input type='range' id='cbRange' min='0' max='60' step='5' style='width:100%'"
+            " oninput='cbShow(+this.value)'>"
+        "<div style='display:flex;justify-content:space-between;font-size:.8em;"
+            "color:var(--text-dim)'><span>Off</span><span>60 sec</span></div>"
+        "<div style='display:flex;gap:.5em;margin-top:.8em'>"
+        "<button type='button' class='modal-opt' onclick='cbClose()'><b>Cancel</b></button>"
+        "<button type='button' class='modal-opt sel' onclick='cbSave()'><b>Save</b></button>"
+        "</div></div></div>"
+        "<script>"
+        "function cbLabel(v){return v>0?v+' sec':'Off';}"
+        "function cbShow(v){document.getElementById('cbOut').textContent=cbLabel(v);}"
+        "function cbOpen(){var v=+document.getElementById('cbInput').value;"
+        "document.getElementById('cbRange').value=v;cbShow(v);"
+        "document.getElementById('cbModal').classList.add('open');}"
+        "function cbClose(){document.getElementById('cbModal').classList.remove('open');}"
+        "function cbSave(){var v=+document.getElementById('cbRange').value;"
+        "document.getElementById('cbInput').value=v;"
+        "document.getElementById('cbBtn').textContent=cbLabel(v);cbClose();}"
+        "</script>";
+#endif
+
 // Swatch picker: each theme preset renders as a clickable card showing a
 // three-color preview (background, panel, accent). Cards are built in JS from
 // the same palette table used for live preview, keyed by preset.
@@ -4474,6 +4506,35 @@ static void sendConfigPage(const char *msg = "", bool lite = false) {
             "<option value='0'"; if (gCfg->chatNameStyle == CHAT_NAME_SHORT) html += " selected"; html += ">Short (ABCD)</option>"
             "<option value='1'"; if (gCfg->chatNameStyle == CHAT_NAME_LONG)  html += " selected"; html += ">Long (full name)</option>"
             "</select></label></div>";
+#if HAS_CHAT_BLINK
+    // Message Blink -- a button opening a slider modal, like Font Size below;
+    // lite gets a plain select of the same stops.
+    {
+        const unsigned cb = cfgChatBlinkSecs(*gCfg);
+        if (lite) {
+            html += "<label>Message Blink<select name='chat_blink'>";
+            for (unsigned v = 0; v <= kChatBlinkMaxS; v += kChatBlinkStepS) {
+                snprintf(tmp, sizeof(tmp), "<option value='%u'%s>%s%s</option>",
+                         v, (v == cb) ? " selected" : "",
+                         v ? String(v).c_str() : "Off", v ? " sec" : "");
+                html += tmp;
+            }
+            html += "</select></label>";
+        } else {
+            html += "<label>Message Blink</label>";
+            html += "<button type='button' class='chooser-btn' id='cbBtn' onclick='cbOpen()'>";
+            html += chatBlinkName(cb);
+            html += "</button>";
+            snprintf(tmp, sizeof(tmp), "<input type='hidden' name='chat_blink' id='cbInput' value='%u'>", cb);
+            html += tmp;
+            sendChunk(html);
+            sendFlash(kChatBlinkModal);
+        }
+        html += "<p style='font-size:.8em;color:var(--muted);margin:.2em 0 0'>"
+                "How long a new message blinks in chat and DMs once it is on "
+                "screen. Takes effect immediately, no reboot.</p>";
+    }
+#endif
     // Font size chooser — a modal (rather than a plain select) so the sizes read
     // as a deliberate pick. The button shows the current value; the hidden input
     // is what actually submits with the form.
@@ -8041,6 +8102,11 @@ static void handlePostSave() {
         keyboardSetKeypadBacklight(gCfg->kbBacklightLevel);
     }
 #endif
+#if HAS_CHAT_BLINK
+    if (server.hasArg("chat_blink")) {   // absent on the T-Deck Pro
+        gCfg->chatBlinkSecs = cfgCoerceChatBlink(server.arg("chat_blink").toInt());
+    }
+#endif
 #if HAS_KB_LIGHT_TIMEOUT
     // hasArg-guarded like keypad_light: only rendered where the board has it.
     if (server.hasArg("kb_light_timeout")) {
@@ -8295,14 +8361,18 @@ static void handlePostSave() {
     cfgMasked.navAlign = cfgBefore.navAlign;
     // Read live by the keyboard light service every loop pass.
     cfgMasked.kbLightTimeoutS = cfgBefore.kbLightTimeoutS;
+    // Read live by the chat blink every pass.
+    cfgMasked.chatBlinkSecs = cfgBefore.chatBlinkSecs;
     const bool fontChanged  = (gCfg->fontSize != cfgBefore.fontSize);
     const bool spellChanged = (gCfg->spellCheckEnabled != cfgBefore.spellCheckEnabled);
     const bool wardriveChanged = (gCfg->wardriveLogEnabled != cfgBefore.wardriveLogEnabled);
     const bool navAlignChanged = (gCfg->navAlign != cfgBefore.navAlign);
     const bool kbLightTimeoutChanged = (gCfg->kbLightTimeoutS != cfgBefore.kbLightTimeoutS);
+    const bool chatBlinkChanged = (gCfg->chatBlinkSecs != cfgBefore.chatBlinkSecs);
     const bool liveOnly = (memcmp(&cfgMasked, &cfgBefore, sizeof(RhinoConfig)) == 0)
                           && (fontChanged || spellChanged || wardriveChanged
-                              || navAlignChanged || kbLightTimeoutChanged);
+                              || navAlignChanged || kbLightTimeoutChanged
+                              || chatBlinkChanged);
 
     if (liveOnly) {
         redirectHomeWithFlash(fontChanged ? "Saved. Font size applied." : "Saved.");

@@ -721,9 +721,17 @@ struct RhinoConfig {
     // padding, so this starts at exactly the previous sizeof(RhinoConfig) and
     // an upgrading device keeps the compiled default (never).
     uint16_t kbLightTimeoutS;
+    // ── New-message blink ────────────────────────────────────────────────────
+    // How long a new message blinks in the chat and DM views; see
+    // cfgChatBlinkSecs(). 0 is unset (the compiled default), kChatBlinkOff is
+    // Off, anything else is seconds.
+    //
+    // Safe here: this was the first of _reservedPad18's two bytes, which older
+    // builds left 0 -- unset -- so an upgrading device keeps blinking for 15 s.
+    uint8_t  chatBlinkSecs;
     // For whoever appends next: the struct's trailing padding, spelled out.
     // Past it is the old sizeof(RhinoConfig).
-    uint8_t  _reservedPad18[2];
+    uint8_t  _reservedPad18[1];
 };
 
 #define CHAT_SERVER_MODE_OFF     0
@@ -896,6 +904,25 @@ const char *kbLightTimeoutName(uint16_t secs);
 // Snaps to the nearest listed value, the same way cfgCoerceNotifyLightTimeout()
 // does and for the same reasons: only an exact 0 means never.
 uint16_t cfgCoerceKbLightTimeout(long secs);
+
+// ── New-message blink ────────────────────────────────────────────────────────
+// Off, or 5..60 seconds in 5-second steps: the stops of the on-device slider
+// and the web one. Off is a value of its own rather than 0 because 0 is what an
+// upgrading device's padding byte reads, and that has to mean the default.
+static constexpr uint8_t kChatBlinkOff     = 0xFF;
+static constexpr uint8_t kChatBlinkStepS   = 5;
+static constexpr uint8_t kChatBlinkMaxS    = 60;
+
+// What to store for `secs`: 0 or less is Off, anything else snaps to the
+// nearest step within 5..60.
+uint8_t cfgCoerceChatBlink(long secs);
+
+// Seconds new messages blink for; 0 = Off. Unset or unrecognised bytes read as
+// the compiled default (MY_CHAT_BLINK_S).
+uint8_t cfgChatBlinkSecs(const RhinoConfig &c);
+
+// "Off" or "15 sec", for the settings row and the web button.
+const char *chatBlinkName(uint8_t secs);
 
 // How the local battery reads where it is shown as a single number: the chat
 // header indicator and the web status chip. Percentage comes off a Li-ion SOC
