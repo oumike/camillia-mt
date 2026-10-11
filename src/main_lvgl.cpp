@@ -7591,6 +7591,10 @@ static inline void loadBootOrientation() {}
 static constexpr int kSideNavW = 68;
 #elif defined(DEVICE_TDISPLAY_P4)
 static constexpr int kSideNavW = 34;
+#elif defined(DEVICE_CROWPANEL_50)
+// Wider than the bottom bar is tall (56), unlike the other boards' column, so
+// its 24 px icons (navIconFont) have padding either side.
+static constexpr int kSideNavW = 72;
 #else
 // The bottom bar's height on these boards (kBottomNavHeight): the same 28 px
 // cell edge, turned on its side.
@@ -31125,9 +31129,17 @@ static void openLiveToolsModal() {
         const int fillH = (int)lv_obj_get_content_height(body) - 2 * toolsFillGap;
         int rowH = (fillH - (kLiveToolRowsPerCol - 1) * toolsRowGap) / kLiveToolRowsPerCol;
         if (rowH < toolsRowH) rowH = toolsRowH;
+        const int gridW = (fillW > toolsContentW) ? fillW : toolsContentW;
         if (fillW > toolsContentW) lv_obj_set_width(grid, fillW);
+        // Cells in pixels, not kChanModalCellPct: two 49% cells and this gap
+        // only fit side by side where 2% of the grid covers the gap -- 600 px
+        // at a 12 px gap. Narrower (the CrowPanel 5" upright, 448 px) each cell
+        // wrapped onto a row of its own, and the grid became one column.
+        const int cellW = (gridW - toolsFillGap * (kChanModalCols - 1)) / kChanModalCols;
         for (int i = 0; i < LIVE_TOOL_COUNT; i++) {
-            if (s_liveToolsRows[i]) lv_obj_set_height(s_liveToolsRows[i], rowH);
+            if (!s_liveToolsRows[i]) continue;
+            lv_obj_set_height(s_liveToolsRows[i], rowH);
+            if (!toolsStacked) lv_obj_set_width(s_liveToolsRows[i], cellW);
         }
     }
 
