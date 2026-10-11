@@ -144,6 +144,8 @@ LV_FONT_DECLARE(lv_font_eink_bold_18);
 #define APP_VERSION "unknown"
 #endif
 
+#include "hal/crowpanel_50_fonts.h"   // last: renames fonts for the rest of this file
+
 // LVGL runs entirely on the Arduino loopTask (lv_timer_handler below), and the
 // default 8 KB loopTask stack is not enough to rasterize an emoji under LVGL 9.
 //
@@ -1732,6 +1734,10 @@ static constexpr int kBottomNavHeight = 56;
 // Landscape keeps 42 -- or 30 with the keyboard expansion on (p4NavBarHeight()).
 // Nothing reads it before then.
 static int kBottomNavHeight = 42;
+#elif defined(DEVICE_CROWPANEL_50)
+// Twice the usual 28: an 800x480 panel has the height, and these are the
+// targets a finger aims at most.
+static constexpr int kBottomNavHeight = 56;
 #else
 static constexpr int kBottomNavHeight = 28;
 #endif
@@ -2047,6 +2053,15 @@ static constexpr int kMainScreenChannelBtnHeight = 48;
 static const lv_font_t *kMainScreenFont = &lv_font_montserrat_12;
 static constexpr int kMainScreenChannelBtnHeight = 24;
 #endif
+#elif defined(DEVICE_CROWPANEL_50)
+// The default below is sized for a 320x240 panel and read as tiny at 800x480:
+// list text (channel list, DM conversations, Nodes) and the channel buttons
+// twice as big. Named 18, drawn as 20 (hal/crowpanel_50_fonts.h).
+static constexpr bool kPagerWheelChatNav = false;
+static constexpr bool kUseScrollKeysForMainNav = false;
+static constexpr bool kModalCloseUsesEscape = false;
+static const lv_font_t *kMainScreenFont = &lv_font_montserrat_18;
+static constexpr int kMainScreenChannelBtnHeight = 44;
 #else
 static constexpr bool kPagerWheelChatNav = false;
 static constexpr bool kUseScrollKeysForMainNav = false;
@@ -7916,6 +7931,16 @@ static const lv_font_t *kSleepOverlayTitleFont       = &lv_font_montserrat_18;
 static const lv_font_t *const kSleepOverlayNodeFont  = &lv_font_montserrat_14;
 static const lv_font_t *kSleepOverlayTimeFont        = &lv_font_montserrat_32;
 static const lv_font_t *kSleepOverlayWxFont          = &lv_font_montserrat_32;
+#elif defined(DEVICE_CROWPANEL_50)
+// Twice the usual faces, as its chat header is (the home dashboard and the lock
+// screen share this header), where the font set goes that high: title 18 -> 32,
+// node 14 -> 28 (named 24: hal/crowpanel_50_fonts.h puts every face but 32 and
+// 40 a step up), and the clock and temperature 32 -> 40, the largest there is.
+// The rows' positions follow from these (orientationApplyOverlayGeometry()).
+static const lv_font_t *const kSleepOverlayTitleFont = &lv_font_montserrat_32;
+static const lv_font_t *const kSleepOverlayNodeFont  = &lv_font_montserrat_24;
+static const lv_font_t *const kSleepOverlayTimeFont  = &lv_font_montserrat_40;
+static const lv_font_t *const kSleepOverlayWxFont    = &lv_font_montserrat_40;
 #else
 static const lv_font_t *const kSleepOverlayTitleFont = &lv_font_montserrat_18;
 static const lv_font_t *const kSleepOverlayNodeFont  = &lv_font_montserrat_14;
@@ -8034,7 +8059,11 @@ static constexpr int kTdeckProMsgTop        = 116;
 // (glanceBandTop()). Eight one-line messages run 134..296.
 static constexpr int kTdeckProMsgTop        = 134;
 #endif
+#if defined(DEVICE_CROWPANEL_50)
+static constexpr int kTdeckProMsgLineH      = 16;   // montserrat_12, drawn as 14 here
+#else
 static constexpr int kTdeckProMsgLineH      = 15;   // montserrat_12 line box
+#endif
 static constexpr int kTdeckProMsgMaxLines   = 2;    // per message
 #if HAS_RUNTIME_ORIENTATION
 static int kTdeckProMsgTotalLines           = 6;    // 320x240; 8 when portrait
@@ -8053,6 +8082,16 @@ static constexpr int kTdeckProMsgGapY       = 6;    // between messages, not lin
 // measured width is not something the gap should depend on.
 static constexpr int kTdeckProMsgGapPx     = 4;
 
+// The date and battery's face in the status band. Doubled on the CrowPanel 5",
+// with the rest of its header (named 24: see hal/crowpanel_50_fonts.h).
+static inline const lv_font_t *glanceBandFont() {
+#if defined(DEVICE_CROWPANEL_50)
+    return &lv_font_montserrat_24;
+#else
+    return &lv_font_montserrat_14;
+#endif
+}
+
 // The status band across the top: date pinned left, battery pinned right, both
 // at montserrat_14. The date used to be an 18 px centred line in the middle of
 // the stack, but a corner pinned opposite the battery reads as a status band
@@ -8069,6 +8108,23 @@ static int kTdeckProTimeTop                = 72;   // 32 px face, 35 px line box
 // is what the initialisers above already hold, so a board that never rotates
 // runs exactly the numbers it ran before this was a setting.
 static void orientationApplyOverlayGeometry() {
+#if defined(DEVICE_CROWPANEL_50)
+    // Its doubled faces (kSleepOverlay*Font, glanceBandFont()) in either
+    // orientation, each row placed under the line box of the one above -- read
+    // from the fonts rather than written down, so a face change moves them.
+    kTdeckProBandTop  = 8;
+    kTdeckProTitleTop = kTdeckProBandTop
+                      + (int)lv_font_get_line_height(glanceBandFont()) + 8;
+    kTdeckProNodeTop  = kTdeckProTitleTop
+                      + (int)lv_font_get_line_height(kSleepOverlayTitleFont) + 10;
+    kTdeckProTimeTop  = kTdeckProNodeTop
+                      + (int)lv_font_get_line_height(kSleepOverlayNodeFont) + 4;
+    kTdeckProMsgTop   = kTdeckProTimeTop
+                      + (int)lv_font_get_line_height(kSleepOverlayTimeFont) + 6;
+    // 480 px of height in landscape, 800 in portrait: room for more of them.
+    kTdeckProMsgTotalLines = uiPortrait() ? 24 : 12;
+    return;
+#endif
     if (!uiPortrait()) return;
     kTdeckProMsgTop        = 150;
     kTdeckProMsgTotalLines = 8;      // 240x320 has room for two more
@@ -9024,7 +9080,7 @@ static void buildGlanceHeader(lv_obj_t *parent, GlanceHeader &w,
     // percentage of the panel: a 92% box pinned to the left edge would reach
     // under the battery, and the two would collide the moment either grew.
     w.date = lv_label_create(parent);
-    lv_obj_set_style_text_font(w.date, &lv_font_montserrat_14, 0);
+    lv_obj_set_style_text_font(w.date, glanceBandFont(), 0);
     lv_obj_set_style_text_color(w.date, pal.ink, 0);
     lv_obj_set_style_text_align(w.date, LV_TEXT_ALIGN_LEFT, 0);
     // This band is the only row of the glance that reaches the top corners,
@@ -9047,7 +9103,7 @@ static void buildGlanceHeader(lv_obj_t *parent, GlanceHeader &w,
     // Right-aligned to the edge rather than centred, so "4.05V" and "9%" both
     // end in the same place instead of drifting with the reading.
     w.batt = lv_label_create(parent);
-    lv_obj_set_style_text_font(w.batt, &lv_font_montserrat_14, 0);
+    lv_obj_set_style_text_font(w.batt, glanceBandFont(), 0);
     lv_obj_set_style_text_color(w.batt, pal.ink, 0);
     lv_obj_set_style_text_align(w.batt, LV_TEXT_ALIGN_RIGHT, 0);
     lv_obj_align(w.batt, LV_ALIGN_TOP_RIGHT,
@@ -23918,6 +23974,11 @@ static void populateHeltecBottomNav(lv_obj_t *bar, int activeTarget) {
     // otherwise.
     const lv_font_t *const navIconFont = uiPortrait() ? &lv_font_montserrat_20
                                                       : &lv_font_montserrat_18;
+#elif defined(DEVICE_CROWPANEL_50)
+    // With the doubled bar (kBottomNavHeight). 24 rather than 28: it is the
+    // largest size the CrowPanels give an emoji face (emoji_font.cpp), and
+    // Chat, Nodes and Tools draw from it.
+    const lv_font_t *const navIconFont = &lv_font_montserrat_24;
 #else
     const lv_font_t *const navIconFont = &lv_font_montserrat_14;
 #endif
@@ -24177,6 +24238,8 @@ static void buildNavStatusCluster(lv_obj_t *bar, lv_obj_t **boxOut, lv_obj_t **g
 #if defined(DEVICE_TDISPLAY_P4)
     // Scaled with the P4's taller bar and larger icons (kBottomNavHeight).
     const lv_font_t *const statusFont = &lv_font_montserrat_14;
+#elif defined(DEVICE_CROWPANEL_50)
+    const lv_font_t *const statusFont = &lv_font_montserrat_20;   // the doubled bar
 #else
     const lv_font_t *const statusFont = &lv_font_montserrat_10;
 #endif
@@ -28264,6 +28327,10 @@ static void refreshNodesListRows() {
     const lv_font_t *nodesListFont = emojiFont(nodesBig ? &lv_font_montserrat_12
                                                         : &lv_font_montserrat_10);
     const int nodesListRowH = nodesBig ? 26 : 22;
+#elif defined(DEVICE_CROWPANEL_50)
+    // The 800x480 panel's list text (kMainScreenFont): named 18, drawn as 20.
+    const lv_font_t *nodesListFont = emojiFont(&lv_font_montserrat_18);
+    const int nodesListRowH = 40;
 #else
     const lv_font_t *nodesListFont = emojiFont(&lv_font_montserrat_10);
     const int nodesListRowH = 22;
@@ -30874,6 +30941,13 @@ static void openLiveToolsModal() {
     const lv_font_t *toolsFillFont =
         UI_LARGE_PANEL_PROFILE ? &lv_font_montserrat_28 : &lv_font_montserrat_16;
     const int toolsFillGap = UI_LARGE_PANEL_PROFILE ? 20 : 10;
+#elif defined(DEVICE_CROWPANEL_50)
+    // As P4 landscape: the grid takes the whole screen under the header rather
+    // than the 300 px block sized for a 320x240 panel, in either orientation.
+    // Named 20, drawn as 24 (hal/crowpanel_50_fonts.h).
+    constexpr bool toolsFill = true;
+    const lv_font_t *toolsFillFont = &lv_font_montserrat_20;
+    constexpr int toolsFillGap = 12;
 #else
     constexpr bool toolsFill = false;
     const lv_font_t *toolsFillFont = kChanModalRowFont;
@@ -38340,6 +38414,8 @@ static void refreshDmModal(bool force) {
     const lv_font_t *dmMsgFont = scaledChatFont(kMainScreenFont);
 #if defined(DEVICE_TLORA_PAGER_TFT)
     int dmListRowH = 24;
+#elif defined(DEVICE_CROWPANEL_50)
+    int dmListRowH = 40;   // its larger list font (kMainScreenFont)
 #else
     int dmListRowH = 22;
 #endif
@@ -38807,7 +38883,11 @@ static void openDmModal() {
 
     lv_obj_t *leftTitle = lv_label_create(leftPanel);
     lv_obj_set_width(leftTitle, lv_pct(100));
+#if defined(DEVICE_CROWPANEL_50)
+    lv_obj_set_style_text_font(leftTitle, &lv_font_montserrat_14, 0);   // drawn as 16
+#else
     lv_obj_set_style_text_font(leftTitle, &lv_font_montserrat_10, 0);
+#endif
     lv_obj_set_style_text_color(
         leftTitle,
         (s_cfg.uiMode == UI_MODE_LIGHT) ? lv_color_hex(0x1B243D) : lv_color_hex(0xD9E8FF),
@@ -38853,7 +38933,11 @@ static void openDmModal() {
 
     lv_obj_t *rightTitle = lv_label_create(rightPanel);
     lv_obj_set_width(rightTitle, lv_pct(100));
+#if defined(DEVICE_CROWPANEL_50)
+    lv_obj_set_style_text_font(rightTitle, &lv_font_montserrat_14, 0);   // drawn as 16
+#else
     lv_obj_set_style_text_font(rightTitle, &lv_font_montserrat_10, 0);
+#endif
     lv_obj_set_style_text_color(
         rightTitle,
         (s_cfg.uiMode == UI_MODE_LIGHT) ? lv_color_hex(0x1B243D) : lv_color_hex(0xD9E8FF),
@@ -38888,7 +38972,11 @@ static void openDmModal() {
     // new message leaves it alone.
     lv_obj_t *dmNewMsgBtn = lv_btn_create(rightPanel);
     lv_obj_set_width(dmNewMsgBtn, lv_pct(100));
+#if defined(DEVICE_CROWPANEL_50)
+    lv_obj_set_height(dmNewMsgBtn, 44);   // as the chat's, doubled
+#else
     lv_obj_set_height(dmNewMsgBtn, 24);
+#endif
     lv_obj_set_style_radius(dmNewMsgBtn, 4, 0);
     lv_obj_set_style_pad_all(dmNewMsgBtn, 0, 0);
     lv_obj_set_style_shadow_width(dmNewMsgBtn, 0, 0);
@@ -38899,7 +38987,11 @@ static void openDmModal() {
     lv_obj_add_event_cb(dmNewMsgBtn, onDmNewMessagePressed, LV_EVENT_CLICKED, nullptr);
 
     lv_obj_t *dmNewMsgLbl = lv_label_create(dmNewMsgBtn);
+#if defined(DEVICE_CROWPANEL_50)
+    lv_obj_set_style_text_font(dmNewMsgLbl, &lv_font_montserrat_18, 0);   // drawn as 20
+#else
     lv_obj_set_style_text_font(dmNewMsgLbl, &lv_font_montserrat_10, 0);
+#endif
     lv_obj_set_style_text_color(dmNewMsgLbl, lv_color_hex(0xE8F1FF), 0);
     lv_label_set_text(dmNewMsgLbl, TR("New Message"));
     lv_obj_center(dmNewMsgLbl);
@@ -39040,6 +39132,10 @@ static void openNodesModal() {
     // up rather than the P4's two, for a panel a third of its height.
     const lv_font_t *nodesDetailFont =
         emojiFont(nodesStacked ? &lv_font_montserrat_12 : &lv_font_montserrat_10);
+#elif defined(DEVICE_CROWPANEL_50)
+    // A size under the list's, as everywhere: the table has two columns to
+    // fit. Named 16, drawn as 18.
+    const lv_font_t *nodesDetailFont = emojiFont(&lv_font_montserrat_16);
 #else
     const lv_font_t *nodesDetailFont = emojiFont(&lv_font_montserrat_10);
 #endif
@@ -50111,6 +50207,11 @@ static void layoutScreenHeader(ScreenHeader &h) {
     // or two down where it does not ("Configuration" in the P4's upright 24 px
     // would otherwise run under it) -- only then is it cut short.
     static const lv_font_t *const kSmaller[] = {
+#if defined(DEVICE_CROWPANEL_50)
+        // Steps down from its doubled 32 px header. Only here: naming a font
+        // links it, and no other board's header starts above 24.
+        &lv_font_montserrat_28, &lv_font_montserrat_24, &lv_font_montserrat_20,
+#endif
         &lv_font_montserrat_18, &lv_font_montserrat_16,
         &lv_font_montserrat_14, &lv_font_montserrat_12,
     };
@@ -55374,6 +55475,11 @@ static void buildUi() {
     // name and clock (see selectorTextFont / clockTextFont below). The chat
     // list is what gives it up -- it is sized from what is left over.
     const int chatHeaderH = uiPortrait() ? 38 : 25;
+#elif defined(DEVICE_CROWPANEL_50)
+    // Twice the usual, fonts with it (below): the 5" has the room, and the
+    // header is read at arm's length. Every screen's header copies this one
+    // (s_chatHdrGeom), so they all grow together.
+    const int chatHeaderH = 50;
 #else
     const int chatHeaderH = 25;
 #endif
@@ -55568,7 +55674,15 @@ static void buildUi() {
 #if UI_TOUCH_ONLY_PROFILE
     const lv_font_t *headerIconFont = (chatHeaderH >= 25) ? &lv_font_montserrat_14 : &lv_font_montserrat_12;
 #endif
+#if defined(DEVICE_CROWPANEL_50)
+    // The doubled header (chatHeaderH): each face twice its usual size.
+    headerTextFont = &lv_font_montserrat_24;
+    clockTextFont = &lv_font_montserrat_32;
+    headerIconFont = &lv_font_montserrat_28;
+    const int headerPadX = 12;
+#else
     const int headerPadX = (chatHeaderH >= 25) ? 6 : 4;
+#endif
 #if UI_CHANNEL_LIST_DROPDOWN
     s_channelStrip = nullptr;
     s_channelList = nullptr;
@@ -55722,10 +55836,16 @@ static void buildUi() {
     lv_obj_set_size(s_chatHeaderBattBar,
 #if defined(DEVICE_CARDPUTER_LORA_HAT)
                     6,
+#elif defined(DEVICE_CROWPANEL_50)
+                    16,
 #else
                     (chatHeaderH >= 25) ? 8 : 7,
 #endif
+#if defined(DEVICE_CROWPANEL_50)
+                    16);
+#else
                     (chatHeaderH >= 25) ? 8 : 7);
+#endif
     lv_obj_align(s_chatHeaderBattBar, LV_ALIGN_RIGHT_MID, -headerPadX, 0);
     lv_obj_set_style_radius(s_chatHeaderBattBar, LV_RADIUS_CIRCLE, 0);
     lv_obj_set_style_bg_opa(s_chatHeaderBattBar, LV_OPA_COVER, 0);
@@ -55852,6 +55972,9 @@ static void buildUi() {
     channelNavFont = &lv_font_montserrat_14;
 #elif defined(DEVICE_TDECK) || defined(DEVICE_TDECK_PRO) || defined(DEVICE_M9)
     channelNavFont = &lv_font_montserrat_14; // nearest built-in to requested size 13
+#elif defined(DEVICE_CROWPANEL_50)
+    // Its list text as it is (kMainScreenFont, drawn as 20), not the 14 the
+    // other touch boards take: the 800x480 panel has the room.
 #elif UI_TOUCH_ONLY_PROFILE
     if (!useCompactVerticalHeltecSelector()) channelNavFont = &lv_font_montserrat_14; // keep vertical Heltec unchanged
 #endif
@@ -55872,7 +55995,12 @@ static void buildUi() {
         // button has settled.
         const int dropdownW = selectorBtnW;
 #else
+#if defined(DEVICE_CROWPANEL_50)
+        // Wider for its larger names (channelNavFont above).
+        const int dropdownW = min(max(chatW / 2, 120), 420);
+#else
         const int dropdownW = min(max(chatW / 2, 120), 260);
+#endif
 #endif
 
         // Behind the drawer and over everything else: a tap anywhere outside
@@ -55975,6 +56103,11 @@ static void buildUi() {
     // rows leave behind.
 #if UI_LARGE_PANEL_PROFILE
     const int chatBtnRowH = 56;
+    const lv_font_t *chatActionFont = &lv_font_montserrat_18;
+#elif defined(DEVICE_CROWPANEL_50)
+    // Twice the height and the text (named 18: drawn as 20, see
+    // hal/crowpanel_50_fonts.h), with the nav bar and header.
+    const int chatBtnRowH = 44;
     const lv_font_t *chatActionFont = &lv_font_montserrat_18;
 #else
     const int chatBtnRowH = 22;
