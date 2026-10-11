@@ -33661,6 +33661,31 @@ static lv_obj_t *buildLockCarousel(lv_obj_t *overlay, int top, int height) {
     lv_obj_clear_flag(msgPage, LV_OBJ_FLAG_SCROLLABLE);
     glanceAddPage(s_lockCarousel, msgPage, GLANCE_PAGE_MESSAGES);
 
+#if HOME_DASH_SHOW_ALL
+    // Everything at once, as on Home: the messages, then Home's widgets under
+    // them, each face a share of the band -- and no timer turning it
+    // (serviceLockCarousel()). The message budget is cut to the messages'
+    // share, worst case all one-line rows with a gap after each, so the last
+    // row cannot reach into the charts below.
+    {
+        constexpr int kShowAllGap = 4;
+        const int faces = 1 + (homeDashSideBySide() ? 2 : 3);
+        const int faceH = (height - kShowAllGap * (faces - 1)) / faces;
+        glanceBuildChartPage(s_lockCarousel, host);
+        glanceBuildNodePages(s_lockCarousel, host, faceH - kTdeckProBandInset);
+        for (int i = 0; i < (int)s_lockCarousel.pages; i++) {
+            lv_obj_t *page = s_lockCarousel.page[i];
+            if (!lvObjValid(page)) continue;
+            lv_obj_set_height(page, faceH);
+            lv_obj_set_y(page, i * (faceH + kShowAllGap));
+            lv_obj_clear_flag(page, LV_OBJ_FLAG_HIDDEN);
+        }
+        kTdeckProMsgTotalLines = max(1, (faceH + kTdeckProMsgGapY)
+                                        / (kTdeckProMsgLineH + kTdeckProMsgGapY));
+        return msgPage;
+    }
+#endif
+
     glanceBuildChartPage(s_lockCarousel, host);
     glanceBuildNodePages(s_lockCarousel, host, height - kTdeckProBandInset);
 
@@ -33692,12 +33717,23 @@ static void resetLockCarousel() {
 // they read when the page came round.
 static void refreshLockCarouselPage() {
     if (!lvObjValid(s_lockCarousel.host)) return;
+#if HOME_DASH_SHOW_ALL
+    // Every face is showing (buildLockCarousel()), so every face is repainted.
+    for (int i = 0; i < (int)s_lockCarousel.pages; i++) {
+        refreshGlancePage(s_lockCarousel, i);
+    }
+#else
     refreshGlancePage(s_lockCarousel, (int)s_lockCarousel.at);
+#endif
 }
 
 // The only thing that turns this carousel, driven from serviceLockScreen()
 // because that already runs every loop with the clock this wants.
 static void serviceLockCarousel(uint32_t nowMs) {
+#if HOME_DASH_SHOW_ALL
+    (void)nowMs;
+    return;   // every face is already showing
+#endif
     if (!lvObjValid(s_lockCarousel.host) || s_lockCarousel.pages < 2) return;
     if ((uint32_t)(nowMs - s_lockCarouselTurnedMs) < kLockCarouselDwellMs) return;
     s_lockCarouselTurnedMs = nowMs;
