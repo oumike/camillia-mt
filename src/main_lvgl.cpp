@@ -2063,7 +2063,7 @@ static const lv_font_t *kChannelChatFont = kMainScreenFont;
 // one face, including 10 -> 8 px. Boards below use fixed, display-specific sizes.
 #if defined(DEVICE_CARDPUTER_LORA_HAT) || defined(DEVICE_TLORA_PAGER_TFT) \
     || defined(DEVICE_TDECK_PRO) || defined(DEVICE_TDISPLAY_P4) \
-    || defined(DEVICE_CROWPANEL_35)
+    || defined(DEVICE_CROWPANEL)
 static const lv_font_t *explicitChatFont() {
 #if UI_LARGE_PANEL_PROFILE
     switch (s_cfg.fontSize) {
@@ -2082,7 +2082,7 @@ static const lv_font_t *explicitChatFont() {
         case FONT_SIZE_MEDIUM:
         default:               return &lv_font_montserrat_16;
     }
-#elif defined(DEVICE_CROWPANEL_35)
+#elif defined(DEVICE_CROWPANEL)
     // Preserve Medium while making Large/Extra Large readable on the 3.5" panel.
     switch (s_cfg.fontSize) {
         case FONT_SIZE_SMALL:  return &lv_font_montserrat_8;
@@ -2114,7 +2114,7 @@ static const lv_font_t *explicitChatFont() {
 static const lv_font_t *scaledChatFontBase(const lv_font_t *base) {
 #if defined(DEVICE_CARDPUTER_LORA_HAT) || defined(DEVICE_TLORA_PAGER_TFT) \
     || defined(DEVICE_TDECK_PRO) || defined(DEVICE_TDISPLAY_P4) \
-    || defined(DEVICE_CROWPANEL_35)
+    || defined(DEVICE_CROWPANEL)
     (void)base;
     return explicitChatFont();
 #else
@@ -14800,7 +14800,7 @@ static void refreshCfgModal() {
     const lv_font_t *cfgRowFont = &lv_font_montserrat_14;
     const int cfgPadTop = 6;
     const int cfgPadBottom = 6;
-#elif defined(DEVICE_TDISPLAY_P4) || defined(DEVICE_CROWPANEL_35)
+#elif defined(DEVICE_TDISPLAY_P4) || defined(DEVICE_CROWPANEL)
     // Roomier touch panels: readable text and taller tap targets.
     const lv_font_t *cfgRowFont = &lv_font_montserrat_16;
     const int cfgPadTop = 14;
@@ -14839,7 +14839,7 @@ static void refreshCfgModal() {
                         LV_EVENT_CLICKED,
                         (void *)(intptr_t)i);
         }
-#if defined(DEVICE_CROWPANEL_35)
+#if defined(DEVICE_CROWPANEL)
         lv_obj_set_style_min_height(row, 47, 0);
         lv_label_set_long_mode(row, LV_LABEL_LONG_WRAP);
 #else
@@ -50202,7 +50202,7 @@ static lv_obj_t *secondaryHeaderBtn(lv_obj_t *row, const char *text, lv_event_cb
     lv_obj_add_event_cb(btn, cb, LV_EVENT_CLICKED, nullptr);
 
     lv_obj_t *lbl = lv_label_create(btn);
-#if defined(DEVICE_CROWPANEL_35)
+#if defined(DEVICE_CROWPANEL)
     lv_obj_set_style_text_font(lbl, big ? STACK_BTN_FONT : &lv_font_montserrat_12, 0);
 #else
     lv_obj_set_style_text_font(lbl, big ? STACK_BTN_FONT : &lv_font_montserrat_10, 0);

@@ -16,6 +16,7 @@ ATTAKY_ENV_NAME="mesh-deck"
 M9_ENV_NAME="m9"
 WIO_TRACKER_L2_ENV_NAME="wio-tracker-l2"
 CROWPANEL_35_ENV_NAME="crowpanel-35"
+CROWPANEL_50_ENV_NAME="crowpanel-50"
 P4_AMOLED_SX1262_ENV_NAME="p4-amoled-sx1262"
 P4_AMOLED_LR2021_ENV_NAME="p4-amoled-lr2021"
 DEFAULT_PIO_CORE_DIR="${PLATFORMIO_CORE_DIR:-$HOME/.platformio}"
@@ -52,6 +53,7 @@ env_label() {
 		"$M9_ENV_NAME")            echo "Elecrow ThinkNode M9" ;;
 		"$WIO_TRACKER_L2_ENV_NAME") echo "Seeed Wio Tracker L2" ;;
 		"$CROWPANEL_35_ENV_NAME") echo "Elecrow CrowPanel Advance 3.5" ;;
+		"$CROWPANEL_50_ENV_NAME") echo "Elecrow CrowPanel Advance 5.0" ;;
 		"$P4_AMOLED_SX1262_ENV_NAME") echo "LilyGo T-Display P4 AMOLED (SX1262)" ;;
 		"$P4_AMOLED_LR2021_ENV_NAME") echo "LilyGo T-Display P4 AMOLED (LR2021)" ;;
 		*)                         echo "$1" ;;
@@ -120,6 +122,10 @@ prompt_for_device() {
 		options+=("$CROWPANEL_35_ENV_NAME")
 		labels+=("Elecrow CrowPanel Advance 3.5")
 	fi
+	if has_env "$CROWPANEL_50_ENV_NAME"; then
+		options+=("$CROWPANEL_50_ENV_NAME")
+		labels+=("Elecrow CrowPanel Advance 5.0")
+	fi
 	if has_env "$P4_AMOLED_SX1262_ENV_NAME"; then
 		options+=("$P4_AMOLED_SX1262_ENV_NAME")
 		labels+=("LilyGo T-Display P4 AMOLED (SX1262)")
@@ -157,7 +163,7 @@ prompt_for_device() {
 }
 
 show_usage() {
-	echo "Usage: $0 [--tdeck|-t] [--tdeck-pro|-p] [--debug|-d] [--cardputer|-C] [--pager|-P] [--heltec|-H] [--heltec-r8|-R] [--mesh-deck|-M] [--m9|-9] [--wio-tracker-l2] [--crowpanel-35] [--p4-amoled-sx1262|--p4-amoled-lr2021] [--erase|-E] [--fullclean|-F] [--just-build|-B]"
+	echo "Usage: $0 [--tdeck|-t] [--tdeck-pro|-p] [--debug|-d] [--cardputer|-C] [--pager|-P] [--heltec|-H] [--heltec-r8|-R] [--mesh-deck|-M] [--m9|-9] [--wio-tracker-l2] [--crowpanel-35] [--crowpanel-50] [--p4-amoled-sx1262|--p4-amoled-lr2021] [--erase|-E] [--fullclean|-F] [--just-build|-B]"
 	echo "  --tdeck, -t  Use T-Deck environment (tdeck)"
 	echo "  --tdeck-pro, -p  Use T-Deck Pro environment ($TDECK_PRO_ENV_NAME)"
 	echo "  --debug, -d   Use debug PlatformIO environment ($DEBUG_ENV_NAME)"
@@ -169,6 +175,7 @@ show_usage() {
 	echo "  --m9, -9      Use Elecrow ThinkNode M9 environment ($M9_ENV_NAME)"
 	echo "  --wio-tracker-l2  Use Seeed Wio Tracker L2 environment ($WIO_TRACKER_L2_ENV_NAME)"
 	echo "  --crowpanel-35  Use Elecrow CrowPanel Advance 3.5\" environment ($CROWPANEL_35_ENV_NAME)"
+	echo "  --crowpanel-50  Use Elecrow CrowPanel Advance 5.0\" environment ($CROWPANEL_50_ENV_NAME)"
 	echo "  --p4-amoled-sx1262  Use LilyGo T-Display P4 AMOLED SX1262 environment ($P4_AMOLED_SX1262_ENV_NAME)"
 	echo "  --p4-amoled-lr2021  Use LilyGo T-Display P4 AMOLED LR2021 environment ($P4_AMOLED_LR2021_ENV_NAME)"
 	echo "                If neither is provided, you'll be prompted to choose a device."
@@ -259,6 +266,9 @@ for arg in "$@"; do
 			;;
 		--crowpanel-35)
 			select_env_or_exit "$CROWPANEL_35_ENV_NAME" "Environment '$CROWPANEL_35_ENV_NAME' not found in platformio.ini"
+			;;
+		--crowpanel-50)
+			select_env_or_exit "$CROWPANEL_50_ENV_NAME" "Environment '$CROWPANEL_50_ENV_NAME' not found in platformio.ini"
 			;;
 		--p4-amoled-sx1262)
 			select_env_or_exit "$P4_AMOLED_SX1262_ENV_NAME" "Environment '$P4_AMOLED_SX1262_ENV_NAME' not found in platformio.ini"

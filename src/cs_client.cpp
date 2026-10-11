@@ -228,6 +228,16 @@ uint8_t Client::requestHops() const {
     return _hops + 1 > MAX_HOPS ? MAX_HOPS : (uint8_t)(_hops + 1);
 }
 
+// DISCOVER carries our channel IDs so the server announces just the ones we share,
+// even when it stores more than we can track.
+size_t Client::encodeMyDiscover(uint8_t *buf, size_t cap) const {
+    static_assert(MAX_LOCAL <= csp::MAX_DISCOVER_CHANNELS, "DISCOVER list too small");
+    uint32_t ids[MAX_LOCAL];
+    uint8_t n = 0;
+    for (int i = 0; i < _nChans; i++) if (_chanIds[i]) ids[n++] = _chanIds[i];
+    return csp::encodeDiscover(buf, cap, ids, n);
+}
+
 bool Client::poll(uint32_t nowMs, const std::function<Anchor(int chanIdx)> &anchorFor, Send &out) {
     if (_mode == MODE_OFF) return false;
 
@@ -237,7 +247,7 @@ bool Client::poll(uint32_t nowMs, const std::function<Anchor(int chanIdx)> &anch
         out.to = 0xFFFFFFFF;
         out.chanIdx = -1;
         out.hopLimit = DISCOVERY_HOPS;
-        out.len = csp::encodeDiscover(out.payload, sizeof(out.payload));
+        out.len = encodeMyDiscover(out.payload, sizeof(out.payload));
         return out.len > 0;
     }
 
@@ -257,7 +267,7 @@ bool Client::poll(uint32_t nowMs, const std::function<Anchor(int chanIdx)> &anch
         out.to = _server;
         out.chanIdx = -1;
         out.hopLimit = MAX_HOPS;
-        out.len = csp::encodeDiscover(out.payload, sizeof(out.payload));
+        out.len = encodeMyDiscover(out.payload, sizeof(out.payload));
         return out.len > 0;
     }
 

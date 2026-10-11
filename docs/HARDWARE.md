@@ -76,6 +76,34 @@ files are not copied between SD and flash. Runtime settings and identity/key
 material remain in NVS/Preferences. SD read/write and the new display/font
 behavior remain unverified on hardware.
 
+### Elecrow CrowPanel Advance 5.0 (WIP)
+
+`crowpanel-50` targets the 5.0" board (ESP32-S3-WROOM-1-N16R8) with an SX1262
+in the wireless-module slot. It runs the 3.5"'s touch UI, configuration sizing
+and chat fonts on an 800x480 panel, landscape by default with both portraits
+selectable at runtime.
+
+- **Display:** 800x480 IPS on a 16-bit RGB parallel bus, scanned out of a PSRAM
+  framebuffer at a 14 MHz pixel clock (Meshtastic's figure; Elecrow's demo runs
+  21 MHz). GT911 touch on I2C 15/16.
+- **PCA9557 expander at 0x18:** backlight enable (IO1), touch reset (IO2), and
+  the amplifier's two control lines (IO3/IO4). The backlight is on or off only,
+  so the brightness setting has two effective levels.
+- **Radio:** CS0, SCK5, MISO4, MOSI6, RST19, DIO1 20, BUSY2, from Meshtastic's
+  `elecrow-adv1-43-50-70-tft` env. GPIO19/20 are the S3's native USB pins, so
+  the console is UART0 through the CH340K.
+- **Function switch:** the two-position DIP switch on the back connects GPIO
+  4/5/6 and 19/20/2 to the wireless module, the SD card, or the speaker and
+  microphone, one at a time. Set it to the wireless module. That is also why
+  this target has **no SD card**: files live in the LittleFS partition.
+- **Buzzer** on GPIO8. No GPS (Meshtastic's GPS pins are the radio's here) and
+  no battery reading.
+
+Written against Elecrow's V1.0 schematic. Later revisions of the larger panels
+reportedly replace the PCA9557 with a small MCU; on one of those the boot log
+says the expander was not found, and the backlight and touch reset will not work.
+Untested on hardware.
+
 > **Notes.**
 > - **T-Deck Pro:** this initial port follows LilyGo and Meshtastic pin
 >   definitions but remains unverified on physical hardware.
@@ -164,6 +192,7 @@ Each board's full pin map and feature flags (`HAS_KEYBOARD`, `HAS_TOUCH`, `HAS_G
 | Seeed Wio Tracker L2 | [`src/hal/hw_wio_tracker_l2.h`](../src/hal/hw_wio_tracker_l2.h) |
 | LilyGo T-Display P4 | [`src/hal/hw_tdisplay_p4.h`](../src/hal/hw_tdisplay_p4.h) |
 | Elecrow CrowPanel Advance 3.5" | [`src/hal/hw_crowpanel_35.h`](../src/hal/hw_crowpanel_35.h) |
+| Elecrow CrowPanel Advance 5.0" | [`src/hal/hw_crowpanel_50.h`](../src/hal/hw_crowpanel_50.h) |
 
 ## Sources
 
@@ -178,6 +207,7 @@ Manufacturer spec pages used to verify the table above:
 - Heltec WiFi LoRa 32 V4 — <https://heltec.org/project/wifi-lora-32-v4/> and <https://wiki.heltec.org/docs/devices/open-source-hardware/esp32-series/lora-32/wifi-lora-32-v4/>
 - Elecrow ThinkNode M9 — <https://www.elecrow.com/thinknode-m9-meshcore-communication-terminal-with-full-keyboard-2-4inch-lcd-esp32-s3-lr1110-gps-2300mah.html>. The pin map itself came from the M9 V1.0 schematic rather than this page.
 - Elecrow CrowPanel Advance 3.5" — <https://www.elecrow.com/crowpanel-advance-3-5-hmi-esp32-ai-display-for-meshtastic-320x240-ips-artificial-intelligent-screen.html>. Pins from Meshtastic `variants/esp32s3/elecrow_panel` (`CROW_SELECT == 1`) and its `elecrow-adv-35-tft` env; SD wiring cross-checked against [Elecrow's V1.0 schematic](https://github.com/Elecrow-RD/CrowPanel-Advance-HMI-ESP32-AI-Display/blob/master/3.5/schematic/ESP32%20Display%203.5%20inch%20V1.0.sch).
+- Elecrow CrowPanel Advance 5.0" — pins from Meshtastic `variants/esp32s3/elecrow_panel` (`CROW_SELECT == 2`) and its `elecrow-adv1-43-50-70-tft` env, the display bus from Meshtastic device-ui's `LGFX_ELECROW70.h` and Elecrow's [5.0 factory code](https://github.com/Elecrow-RD/CrowPanel-Advance-HMI-ESP32-AI-Display/tree/master/5.0/factory_code), and the expander, buzzer and function switch from Elecrow's [V1.0 schematic](https://github.com/Elecrow-RD/CrowPanel-Advance-HMI-ESP32-AI-Display/blob/master/5.0/schematic/ESP32%20Display%205.0%20inch%20V1.0.pdf).
 - Seeed Wio Tracker L2 — vendor reference firmware and device-ui configuration;
 	the public pin and peripheral map is recorded in [issue #56](https://github.com/oumike/camillia-mt/issues/56).
 - LilyGo T-Display P4 — <https://lilygo.cc/products/t-display-p4>,

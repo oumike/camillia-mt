@@ -38,6 +38,11 @@
 //   DEVICE_WIO_TRACKER_L2       Seeed Wio Tracker L2 (NV3031B, gated rails)
 //   DEVICE_TDISPLAY_P4          LilyGO T-Display P4 (RM69A10 MIPI-DSI)
 //   DEVICE_CROWPANEL_35         Elecrow CrowPanel Advance 3.5" (ILI9488, SX1262)
+//   DEVICE_CROWPANEL_50         Elecrow CrowPanel Advance 5.0" (800x480 RGB, SX1262)
+//
+// DEVICE_CROWPANEL is defined for both CrowPanels: what they share -- the
+// touch-first UI and its sizing -- keys on it, and what differs (pins, panel,
+// rotation) keys on the size.
 // ════════════════════════════════════════════════════════════════════════════
 
 #if defined(DEVICE_TDECK)
@@ -69,11 +74,17 @@
 #  include "hw_tdisplay_p4.h"
 #elif defined(DEVICE_CROWPANEL_35)
 #  include "hw_crowpanel_35.h"
+#elif defined(DEVICE_CROWPANEL_50)
+#  include "hw_crowpanel_50.h"
 #else
 #  error "No DEVICE_* build flag set. Define one of: DEVICE_TDECK, DEVICE_TDECK_PRO, \
 DEVICE_TLORA_PAGER_TFT, DEVICE_CARDPUTER_LORA_HAT, DEVICE_HELTEC_V4_EXPANSION, \
 DEVICE_HELTEC_R8, DEVICE_MESH_DECK, DEVICE_M9, DEVICE_WIO_TRACKER_L2, \
-DEVICE_TDISPLAY_P4, DEVICE_CROWPANEL_35"
+DEVICE_TDISPLAY_P4, DEVICE_CROWPANEL_35, DEVICE_CROWPANEL_50"
+#endif
+
+#if defined(DEVICE_CROWPANEL_35) || defined(DEVICE_CROWPANEL_50)
+#  define DEVICE_CROWPANEL 1
 #endif
 
 #ifndef KB_INT_ACTIVE_LEVEL
@@ -104,6 +115,9 @@ DEVICE_TDISPLAY_P4, DEVICE_CROWPANEL_35"
 // two libraries do not number rotations the same way — so its value does not
 // carry over, and the panel is the only authority.
 #  define TFT_ROTATION_DEFAULT 3
+#elif defined(DEVICE_CROWPANEL_50)
+// The RGB panel is native 800x480 landscape.
+#  define TFT_ROTATION_DEFAULT 0
 #elif DEVICE_UI_VERTICAL
 #  define TFT_ROTATION_DEFAULT 0
 #else
@@ -159,6 +173,13 @@ DEVICE_TDISPLAY_P4, DEVICE_CROWPANEL_35"
 #  define HAS_RUNTIME_ORIENTATION 1
 #  define TFT_ROTATION_LANDSCAPE  3
 #  define TFT_ROTATION_PORTRAIT   0
+#elif defined(DEVICE_CROWPANEL_50)
+// Native 800x480 landscape at 0, LovyanGFX rotating the framebuffer and the
+// GT911 with it for 480x800 portrait. Which portrait comes out the right way
+// up is unconfirmed on hardware; Portrait 180 is the other one.
+#  define HAS_RUNTIME_ORIENTATION 1
+#  define TFT_ROTATION_LANDSCAPE  0
+#  define TFT_ROTATION_PORTRAIT   1
 #else
 #  define HAS_RUNTIME_ORIENTATION 0
 #endif
@@ -189,7 +210,7 @@ DEVICE_TDISPLAY_P4, DEVICE_CROWPANEL_35"
 #if defined(DEVICE_TDECK) || defined(DEVICE_TDECK_PRO) || defined(DEVICE_HELTEC_V4_EXPANSION) \
     || defined(DEVICE_CARDPUTER_LORA_HAT) || defined(DEVICE_MESH_DECK) \
     || defined(DEVICE_M9) || defined(DEVICE_WIO_TRACKER_L2) \
-    || defined(DEVICE_TDISPLAY_P4) || defined(DEVICE_CROWPANEL_35)
+    || defined(DEVICE_TDISPLAY_P4) || defined(DEVICE_CROWPANEL)
 #  define UI_CHANNEL_LIST_DROPDOWN 1
 #else
 #  define UI_CHANNEL_LIST_DROPDOWN 0
@@ -200,7 +221,7 @@ DEVICE_TDISPLAY_P4, DEVICE_CROWPANEL_35"
 // an on-screen keyboard and the roomier 320x240 touch layout. Keep this
 // separate from hardware-specific Heltec paths such as CHSC6X and VEXT.
 #if defined(DEVICE_HELTEC_V4_EXPANSION) || defined(DEVICE_WIO_TRACKER_L2) \
-    || defined(DEVICE_TDISPLAY_P4) || defined(DEVICE_CROWPANEL_35)
+    || defined(DEVICE_TDISPLAY_P4) || defined(DEVICE_CROWPANEL)
 #  define UI_TOUCH_ONLY_PROFILE 1
 #else
 #  define UI_TOUCH_ONLY_PROFILE 0
@@ -211,7 +232,7 @@ DEVICE_TDISPLAY_P4, DEVICE_CROWPANEL_35"
 // onboarding) span the full screen width with 2 px side padding, and the
 // on-screen keyboard drops its chrome, so the QWERTY rows spend their width on
 // tap targets. Introduced for the Wio Tracker L2; the CrowPanel 3.5 follows it.
-#if defined(DEVICE_WIO_TRACKER_L2) || defined(DEVICE_CROWPANEL_35)
+#if defined(DEVICE_WIO_TRACKER_L2) || defined(DEVICE_CROWPANEL)
 #  define UI_EDGE_TO_EDGE_TEXT_ENTRY 1
 #else
 #  define UI_EDGE_TO_EDGE_TEXT_ENTRY 0
@@ -356,7 +377,7 @@ DEVICE_TDISPLAY_P4, DEVICE_CROWPANEL_35"
     || defined(DEVICE_HELTEC_V4_EXPANSION) || defined(DEVICE_MESH_DECK) \
     || defined(DEVICE_M9) || defined(DEVICE_WIO_TRACKER_L2) \
     || defined(DEVICE_TDECK_PRO) || defined(DEVICE_TDISPLAY_P4) \
-    || defined(DEVICE_CROWPANEL_35)
+    || defined(DEVICE_CROWPANEL)
 #  define HAS_VNC_HOST 1
 #else
 #  define HAS_VNC_HOST 0
@@ -375,7 +396,7 @@ DEVICE_TDISPLAY_P4, DEVICE_CROWPANEL_35"
 // — but the NimBLE stack costs 30-40 KB of internal DRAM while it is running,
 // so BLE remains an explicit per-board opt-in.
 #if defined(DEVICE_HELTEC_V4_EXPANSION) || defined(DEVICE_WIO_TRACKER_L2) \
-    || defined(DEVICE_CROWPANEL_35)
+    || defined(DEVICE_CROWPANEL)
 #  define HAS_BLE_KEYBOARD 1
 #else
 #  define HAS_BLE_KEYBOARD 0

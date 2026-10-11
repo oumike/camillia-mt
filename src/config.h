@@ -20,7 +20,7 @@
 // still gets DEVICE_TDECK forced on underneath it, and because board.h tests
 // DEVICE_TDECK first, the build then silently compiles against the T-Deck pin
 // map — the real target's header is never included at all.
-#if !defined(DEVICE_TDECK) && !defined(DEVICE_TDECK_PRO) && !defined(DEVICE_TLORA_PAGER_TFT) && !defined(DEVICE_CARDPUTER_LORA_HAT) && !defined(DEVICE_HELTEC_V4_EXPANSION) && !defined(DEVICE_MESH_DECK) && !defined(DEVICE_M9) && !defined(DEVICE_WIO_TRACKER_L2) && !defined(DEVICE_TDISPLAY_P4) && !defined(DEVICE_CROWPANEL_35)
+#if !defined(DEVICE_TDECK) && !defined(DEVICE_TDECK_PRO) && !defined(DEVICE_TLORA_PAGER_TFT) && !defined(DEVICE_CARDPUTER_LORA_HAT) && !defined(DEVICE_HELTEC_V4_EXPANSION) && !defined(DEVICE_MESH_DECK) && !defined(DEVICE_M9) && !defined(DEVICE_WIO_TRACKER_L2) && !defined(DEVICE_TDISPLAY_P4) && !defined(DEVICE_CROWPANEL_35) && !defined(DEVICE_CROWPANEL_50)
 #  define DEVICE_TDECK 1
 #endif
 
@@ -175,7 +175,7 @@
 #define MY_HW_MODEL MESH_HW_MODEL_PRIVATE_HW
 #elif defined(DEVICE_WIO_TRACKER_L2)
 #define MY_HW_MODEL MESH_HW_MODEL_SEEED_WIO_TRACKER_L2
-#elif defined(DEVICE_CROWPANEL_35)
+#elif defined(DEVICE_CROWPANEL_35) || defined(DEVICE_CROWPANEL_50)
 #define MY_HW_MODEL MESH_HW_MODEL_CROWPANEL
 #elif defined(DEVICE_TDISPLAY_P4)
 // No Meshtastic HardwareModel has been allocated for the T-Display P4.

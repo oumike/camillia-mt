@@ -80,6 +80,7 @@ public:
     bool     holdOwnTx(uint32_t nowMs) const;
 
 private:
+    size_t encodeMyDiscover(uint8_t *buf, size_t cap) const;
     enum Waiting : uint8_t { WAIT_NONE, WAIT_DISCOVER, WAIT_REQUEST };
 
     void resetStates();
