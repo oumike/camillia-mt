@@ -807,6 +807,16 @@
 // until the message is read. Defaulting to anything else would silently change
 // what a device in the field does the moment it takes an update.
 #define MY_NOTIFY_LIGHT_TIMEOUT_S 0
+// How long a new message blinks in the chat and DM views once its conversation
+// is in front of the user, in seconds; 0 = it does not blink. 15 is what every
+// build before this setting did. The T-Deck Pro's paper never blinks (each
+// pulse would be a panel refresh), so it has no row for this.
+#define MY_CHAT_BLINK_S 15
+#if defined(DEVICE_TDECK_PRO)
+#define HAS_CHAT_BLINK 0
+#else
+#define HAS_CHAT_BLINK 1
+#endif
 #define MY_DEBUG_MONITOR    0
 #define MY_DBG_ACKS         MY_DEBUG_MONITOR
 #define MY_DBG_MESSAGES     MY_DEBUG_MONITOR

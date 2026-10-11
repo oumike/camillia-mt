@@ -144,6 +144,8 @@ LV_FONT_DECLARE(lv_font_eink_bold_18);
 #define APP_VERSION "unknown"
 #endif
 
+#include "hal/crowpanel_50_fonts.h"   // last: renames fonts for the rest of this file
+
 // LVGL runs entirely on the Arduino loopTask (lv_timer_handler below), and the
 // default 8 KB loopTask stack is not enough to rasterize an emoji under LVGL 9.
 //
@@ -240,6 +242,12 @@ static constexpr uint16_t kDrawBufLines = 32;
 // Cardputer has no PSRAM and AP web config can leave very little internal DRAM.
 // A smaller draw buffer trades redraw speed for RAM headroom where it matters.
 static constexpr uint16_t kDrawBufLines = 24;
+#elif defined(DEVICE_CROWPANEL_50)
+// 800 px wide: 40 lines would be 64 KB, more than the largest internal block
+// left once WiFi is up, and the PSRAM fallback renders into the same memory the
+// RGB panel is scanned out of -- slow, and the contention shows as the panel
+// tearing. 20 lines (32 KB) stays internal.
+static constexpr uint16_t kDrawBufLines = 20;
 #else
 static constexpr uint16_t kDrawBufLines = 40;
 #endif
@@ -1726,6 +1734,10 @@ static constexpr int kBottomNavHeight = 56;
 // Landscape keeps 42 -- or 30 with the keyboard expansion on (p4NavBarHeight()).
 // Nothing reads it before then.
 static int kBottomNavHeight = 42;
+#elif defined(DEVICE_CROWPANEL_50)
+// Twice the usual 28: an 800x480 panel has the height, and these are the
+// targets a finger aims at most.
+static constexpr int kBottomNavHeight = 56;
 #else
 static constexpr int kBottomNavHeight = 28;
 #endif
@@ -2041,6 +2053,15 @@ static constexpr int kMainScreenChannelBtnHeight = 48;
 static const lv_font_t *kMainScreenFont = &lv_font_montserrat_12;
 static constexpr int kMainScreenChannelBtnHeight = 24;
 #endif
+#elif defined(DEVICE_CROWPANEL_50)
+// The default below is sized for a 320x240 panel and read as tiny at 800x480:
+// list text (channel list, DM conversations, Nodes) and the channel buttons
+// twice as big. Named 18, drawn as 20 (hal/crowpanel_50_fonts.h).
+static constexpr bool kPagerWheelChatNav = false;
+static constexpr bool kUseScrollKeysForMainNav = false;
+static constexpr bool kModalCloseUsesEscape = false;
+static const lv_font_t *kMainScreenFont = &lv_font_montserrat_18;
+static constexpr int kMainScreenChannelBtnHeight = 44;
 #else
 static constexpr bool kPagerWheelChatNav = false;
 static constexpr bool kUseScrollKeysForMainNav = false;
@@ -2284,7 +2305,8 @@ static inline void lvObjDeleteSafe(lv_obj_t *&obj) {
 // object of each fresh message as they build it, and one timer pulses them all.
 // text_opa is inherited, so setting it on the row reaches every label inside a
 // bubble or IRC row without each style knowing about it. Paper never blinks:
-// every pulse would be a panel refresh.
+// every pulse would be a panel refresh. How long it lasts, or whether it happens
+// at all, is the Message Blink setting (cfgChatBlinkSecs()).
 struct ChatBlinkSet {
     lv_obj_t *objs[48];
     int       count;
@@ -2304,6 +2326,16 @@ static void chatBlinkApply(ChatBlinkSet &set, lv_opa_t opa) {
 
 static void chatBlinkTick(lv_timer_t *) {
     if (s_chatBlink.count == 0 && s_dmBlink.count == 0) {
+        s_chatBlinkDim = false;
+        return;
+    }
+    // Switched Off (on the device or from the web page) with rows mid-blink:
+    // they go steady now rather than blinking on until their time is up.
+    if (cfgChatBlinkSecs(s_cfg) == 0) {
+        chatBlinkApply(s_chatBlink, LV_OPA_COVER);
+        chatBlinkApply(s_dmBlink, LV_OPA_COVER);
+        s_chatBlink.count = 0;
+        s_dmBlink.count = 0;
         s_chatBlinkDim = false;
         return;
     }
@@ -2333,6 +2365,7 @@ static void chatBlinkTrack(ChatBlinkSet &set, lv_obj_t *row, bool fresh) {
     (void)set; (void)row; (void)fresh;
 #else
     if (!fresh || !row || set.count >= (int)(sizeof(set.objs) / sizeof(set.objs[0]))) return;
+    if (cfgChatBlinkSecs(s_cfg) == 0) return;   // Message Blink: Off
     static lv_timer_t *timer = nullptr;
     if (!timer) timer = lv_timer_create(chatBlinkTick, kChatBlinkPeriodMs, nullptr);
     set.objs[set.count++] = row;
@@ -3462,6 +3495,9 @@ enum CfgActionId {
     CFG_ACTION_CHAT_STYLE,
     CFG_ACTION_CHAT_NAMES,
     CFG_ACTION_CHAT_COLORS,
+    #if HAS_CHAT_BLINK
+    CFG_ACTION_CHAT_BLINK,
+    #endif
     CFG_ACTION_FONT_SIZE,
     CFG_ACTION_ORIENTATION,
     CFG_ACTION_LANGUAGE,       // UI language (issue #99)
@@ -5414,6 +5450,13 @@ static const char *cfgActionLabel(int actionId, char *buf, size_t bufLen) {
             snprintf(buf, bufLen, TR("Chat Colors: %s"),
                      s_cfg.chatColorsEnabled ? TR("On") : TR("Off"));
             break;
+        #if HAS_CHAT_BLINK
+        case CFG_ACTION_CHAT_BLINK: {
+            const uint8_t secs = cfgChatBlinkSecs(s_cfg);
+            if (secs == 0) snprintf(buf, bufLen, TR("Message Blink: %s"), TR("Off"));
+            else snprintf(buf, bufLen, TR("Message Blink: %u sec"), (unsigned)secs);
+        } break;
+        #endif
         case CFG_ACTION_FONT_SIZE:
             snprintf(buf, bufLen, TR("Font Size: %s"), fontSizeName(s_cfg.fontSize));
             break;
@@ -7548,6 +7591,10 @@ static inline void loadBootOrientation() {}
 static constexpr int kSideNavW = 68;
 #elif defined(DEVICE_TDISPLAY_P4)
 static constexpr int kSideNavW = 34;
+#elif defined(DEVICE_CROWPANEL_50)
+// Wider than the bottom bar is tall (56), unlike the other boards' column, so
+// its 24 px icons (navIconFont) have padding either side.
+static constexpr int kSideNavW = 72;
 #else
 // The bottom bar's height on these boards (kBottomNavHeight): the same 28 px
 // cell edge, turned on its side.
@@ -7888,6 +7935,16 @@ static const lv_font_t *kSleepOverlayTitleFont       = &lv_font_montserrat_18;
 static const lv_font_t *const kSleepOverlayNodeFont  = &lv_font_montserrat_14;
 static const lv_font_t *kSleepOverlayTimeFont        = &lv_font_montserrat_32;
 static const lv_font_t *kSleepOverlayWxFont          = &lv_font_montserrat_32;
+#elif defined(DEVICE_CROWPANEL_50)
+// Twice the usual faces, as its chat header is (the home dashboard and the lock
+// screen share this header), where the font set goes that high: title 18 -> 32,
+// node 14 -> 28 (named 24: hal/crowpanel_50_fonts.h puts every face but 32 and
+// 40 a step up), and the clock and temperature 32 -> 40, the largest there is.
+// The rows' positions follow from these (orientationApplyOverlayGeometry()).
+static const lv_font_t *const kSleepOverlayTitleFont = &lv_font_montserrat_32;
+static const lv_font_t *const kSleepOverlayNodeFont  = &lv_font_montserrat_24;
+static const lv_font_t *const kSleepOverlayTimeFont  = &lv_font_montserrat_40;
+static const lv_font_t *const kSleepOverlayWxFont    = &lv_font_montserrat_40;
 #else
 static const lv_font_t *const kSleepOverlayTitleFont = &lv_font_montserrat_18;
 static const lv_font_t *const kSleepOverlayNodeFont  = &lv_font_montserrat_14;
@@ -8006,7 +8063,11 @@ static constexpr int kTdeckProMsgTop        = 116;
 // (glanceBandTop()). Eight one-line messages run 134..296.
 static constexpr int kTdeckProMsgTop        = 134;
 #endif
+#if defined(DEVICE_CROWPANEL_50)
+static constexpr int kTdeckProMsgLineH      = 16;   // montserrat_12, drawn as 14 here
+#else
 static constexpr int kTdeckProMsgLineH      = 15;   // montserrat_12 line box
+#endif
 static constexpr int kTdeckProMsgMaxLines   = 2;    // per message
 #if HAS_RUNTIME_ORIENTATION
 static int kTdeckProMsgTotalLines           = 6;    // 320x240; 8 when portrait
@@ -8025,6 +8086,16 @@ static constexpr int kTdeckProMsgGapY       = 6;    // between messages, not lin
 // measured width is not something the gap should depend on.
 static constexpr int kTdeckProMsgGapPx     = 4;
 
+// The date and battery's face in the status band. Doubled on the CrowPanel 5",
+// with the rest of its header (named 24: see hal/crowpanel_50_fonts.h).
+static inline const lv_font_t *glanceBandFont() {
+#if defined(DEVICE_CROWPANEL_50)
+    return &lv_font_montserrat_24;
+#else
+    return &lv_font_montserrat_14;
+#endif
+}
+
 // The status band across the top: date pinned left, battery pinned right, both
 // at montserrat_14. The date used to be an 18 px centred line in the middle of
 // the stack, but a corner pinned opposite the battery reads as a status band
@@ -8041,6 +8112,23 @@ static int kTdeckProTimeTop                = 72;   // 32 px face, 35 px line box
 // is what the initialisers above already hold, so a board that never rotates
 // runs exactly the numbers it ran before this was a setting.
 static void orientationApplyOverlayGeometry() {
+#if defined(DEVICE_CROWPANEL_50)
+    // Its doubled faces (kSleepOverlay*Font, glanceBandFont()) in either
+    // orientation, each row placed under the line box of the one above -- read
+    // from the fonts rather than written down, so a face change moves them.
+    kTdeckProBandTop  = 8;
+    kTdeckProTitleTop = kTdeckProBandTop
+                      + (int)lv_font_get_line_height(glanceBandFont()) + 8;
+    kTdeckProNodeTop  = kTdeckProTitleTop
+                      + (int)lv_font_get_line_height(kSleepOverlayTitleFont) + 10;
+    kTdeckProTimeTop  = kTdeckProNodeTop
+                      + (int)lv_font_get_line_height(kSleepOverlayNodeFont) + 4;
+    kTdeckProMsgTop   = kTdeckProTimeTop
+                      + (int)lv_font_get_line_height(kSleepOverlayTimeFont) + 6;
+    // 480 px of height in landscape, 800 in portrait: room for more of them.
+    kTdeckProMsgTotalLines = uiPortrait() ? 24 : 12;
+    return;
+#endif
     if (!uiPortrait()) return;
     kTdeckProMsgTop        = 150;
     kTdeckProMsgTotalLines = 8;      // 240x320 has room for two more
@@ -8996,7 +9084,7 @@ static void buildGlanceHeader(lv_obj_t *parent, GlanceHeader &w,
     // percentage of the panel: a 92% box pinned to the left edge would reach
     // under the battery, and the two would collide the moment either grew.
     w.date = lv_label_create(parent);
-    lv_obj_set_style_text_font(w.date, &lv_font_montserrat_14, 0);
+    lv_obj_set_style_text_font(w.date, glanceBandFont(), 0);
     lv_obj_set_style_text_color(w.date, pal.ink, 0);
     lv_obj_set_style_text_align(w.date, LV_TEXT_ALIGN_LEFT, 0);
     // This band is the only row of the glance that reaches the top corners,
@@ -9019,7 +9107,7 @@ static void buildGlanceHeader(lv_obj_t *parent, GlanceHeader &w,
     // Right-aligned to the edge rather than centred, so "4.05V" and "9%" both
     // end in the same place instead of drifting with the reading.
     w.batt = lv_label_create(parent);
-    lv_obj_set_style_text_font(w.batt, &lv_font_montserrat_14, 0);
+    lv_obj_set_style_text_font(w.batt, glanceBandFont(), 0);
     lv_obj_set_style_text_color(w.batt, pal.ink, 0);
     lv_obj_set_style_text_align(w.batt, LV_TEXT_ALIGN_RIGHT, 0);
     lv_obj_align(w.batt, LV_ALIGN_TOP_RIGHT,
@@ -13366,7 +13454,7 @@ static void configureOnScreenKeyboard(lv_obj_t *keyboard) {
     lv_obj_set_style_pad_column(keyboard, 3, LV_PART_MAIN);
     lv_obj_set_style_pad_row(keyboard, 3, LV_PART_MAIN);
     lv_obj_set_style_pad_all(keyboard, 4, LV_PART_ITEMS);
-#elif defined(DEVICE_TDISPLAY_P4)
+#elif defined(DEVICE_TDISPLAY_P4) || defined(DEVICE_CROWPANEL_50)
     // A fixed height pinned to the bottom, the way a phone keyboard sits and
     // the way wadamesh's does -- not flex_grow. Growing into the rest of the
     // modal is what the 240x320 boards want, where the rest is about half the
@@ -13377,7 +13465,16 @@ static void configureOnScreenKeyboard(lv_obj_t *keyboard) {
     // shape, so it takes half the height, as wadamesh does there.
     const int screenH = (int)lv_disp_get_ver_res(NULL);
     lv_obj_set_flex_grow(keyboard, 0);
+#if defined(DEVICE_CROWPANEL_50)
+    // The same problem on the 5" upright (480x800), where growing took ~95% of
+    // the screen: 40% of the height there, half of it in landscape -- each
+    // about the keyboard on a phone held that way. Key labels at 20 px (named
+    // 18: hal/crowpanel_50_fonts.h) for keys this size.
+    lv_obj_set_height(keyboard, uiPortrait() ? (screenH * 2) / 5 : screenH / 2);
+    lv_obj_set_style_text_font(keyboard, &lv_font_montserrat_18, LV_PART_ITEMS);
+#else
     lv_obj_set_height(keyboard, uiPortrait() ? 150 : screenH / 2);
+#endif
 
     // What the keyboard gave up has to go somewhere. Where a sibling already
     // grows (the admin transcript) it takes it and the keyboard, created last,
@@ -14245,6 +14342,10 @@ static void initCfgActions() {
     s_cfgActions[s_cfgActionCount++] = CFG_ACTION_CHAT_COLORS;
     s_cfgActions[s_cfgActionCount++] = CFG_ACTION_OWNER_COLOR;
     s_cfgActions[s_cfgActionCount++] = CFG_ACTION_RESET_CHAT_COLORS;
+#endif
+#if HAS_CHAT_BLINK
+    // With the other rows about how chat looks: it is how a new message looks.
+    s_cfgActions[s_cfgActionCount++] = CFG_ACTION_CHAT_BLINK;
 #endif
     // Font Size scales the chat and DM text in every style, so every build gets
     // it — the Cardputer arguably most of all.
@@ -16491,6 +16592,48 @@ static void openCfgSliderModal(const CfgSliderPicker *spec, int startIdx) {
     if (hasCheck) refreshCfgSliderFocus();
 #endif
 }
+
+#if HAS_CHAT_BLINK
+// ── Message blink ────────────────────────────────────────────────────────────
+// Stop 0 is Off, stop n is n * kChatBlinkStepS seconds, up to kChatBlinkMaxS.
+
+static const char *cfgChatBlinkLabelFor(int idx) {
+    static char buf[24];
+    if (idx <= 0) return TR("Off");
+    snprintf(buf, sizeof(buf), TR("%u sec"), (unsigned)(idx * kChatBlinkStepS));
+    return buf;
+}
+
+static void cfgChatBlinkApply(int idx) {
+    s_cfg.chatBlinkSecs = cfgCoerceChatBlink((long)idx * kChatBlinkStepS);
+    persistConfigToPrefs();
+    const uint8_t secs = cfgChatBlinkSecs(s_cfg);
+    if (secs == 0) {
+        snprintf(s_cfgStatus, sizeof(s_cfgStatus), "%s", TR("New messages do not blink"));
+    } else {
+        snprintf(s_cfgStatus, sizeof(s_cfgStatus), TR("New messages blink for %u sec"),
+                 (unsigned)secs);
+    }
+    // Off stops anything blinking at the next tick (chatBlinkTick()); turning it
+    // on needs the view rebuilt so its new rows register.
+    s_lastRenderedChannel = -1;
+    s_lastRenderedCount = -1;
+    refreshChatView(true);
+}
+
+static void openCfgChatBlinkModal() {
+    const int startIdx = cfgChatBlinkSecs(s_cfg) / kChatBlinkStepS;
+    static const CfgSliderPicker kSpec = {
+        TR_NOOP("Message Blink"),
+        kChatBlinkMaxS / kChatBlinkStepS + 1,
+        cfgChatBlinkLabelFor,
+        cfgChatBlinkApply,
+        TR_NOOP("off"),
+        TR_NOOP("60 sec"),
+    };
+    openCfgSliderModal(&kSpec, startIdx);
+}
+#endif  // HAS_CHAT_BLINK
 
 // ── Location precision ───────────────────────────────────────────────────────
 
@@ -23844,6 +23987,11 @@ static void populateHeltecBottomNav(lv_obj_t *bar, int activeTarget) {
     // otherwise.
     const lv_font_t *const navIconFont = uiPortrait() ? &lv_font_montserrat_20
                                                       : &lv_font_montserrat_18;
+#elif defined(DEVICE_CROWPANEL_50)
+    // With the doubled bar (kBottomNavHeight). 24 rather than 28: it is the
+    // largest size the CrowPanels give an emoji face (emoji_font.cpp), and
+    // Chat, Nodes and Tools draw from it.
+    const lv_font_t *const navIconFont = &lv_font_montserrat_24;
 #else
     const lv_font_t *const navIconFont = &lv_font_montserrat_14;
 #endif
@@ -24103,6 +24251,8 @@ static void buildNavStatusCluster(lv_obj_t *bar, lv_obj_t **boxOut, lv_obj_t **g
 #if defined(DEVICE_TDISPLAY_P4)
     // Scaled with the P4's taller bar and larger icons (kBottomNavHeight).
     const lv_font_t *const statusFont = &lv_font_montserrat_14;
+#elif defined(DEVICE_CROWPANEL_50)
+    const lv_font_t *const statusFont = &lv_font_montserrat_20;   // the doubled bar
 #else
     const lv_font_t *const statusFont = &lv_font_montserrat_10;
 #endif
@@ -28190,6 +28340,10 @@ static void refreshNodesListRows() {
     const lv_font_t *nodesListFont = emojiFont(nodesBig ? &lv_font_montserrat_12
                                                         : &lv_font_montserrat_10);
     const int nodesListRowH = nodesBig ? 26 : 22;
+#elif defined(DEVICE_CROWPANEL_50)
+    // The 800x480 panel's list text (kMainScreenFont): named 18, drawn as 20.
+    const lv_font_t *nodesListFont = emojiFont(&lv_font_montserrat_18);
+    const int nodesListRowH = 40;
 #else
     const lv_font_t *nodesListFont = emojiFont(&lv_font_montserrat_10);
     const int nodesListRowH = 22;
@@ -30800,6 +30954,13 @@ static void openLiveToolsModal() {
     const lv_font_t *toolsFillFont =
         UI_LARGE_PANEL_PROFILE ? &lv_font_montserrat_28 : &lv_font_montserrat_16;
     const int toolsFillGap = UI_LARGE_PANEL_PROFILE ? 20 : 10;
+#elif defined(DEVICE_CROWPANEL_50)
+    // As P4 landscape: the grid takes the whole screen under the header rather
+    // than the 300 px block sized for a 320x240 panel, in either orientation.
+    // Named 20, drawn as 24 (hal/crowpanel_50_fonts.h).
+    constexpr bool toolsFill = true;
+    const lv_font_t *toolsFillFont = &lv_font_montserrat_20;
+    constexpr int toolsFillGap = 12;
 #else
     constexpr bool toolsFill = false;
     const lv_font_t *toolsFillFont = kChanModalRowFont;
@@ -30968,9 +31129,17 @@ static void openLiveToolsModal() {
         const int fillH = (int)lv_obj_get_content_height(body) - 2 * toolsFillGap;
         int rowH = (fillH - (kLiveToolRowsPerCol - 1) * toolsRowGap) / kLiveToolRowsPerCol;
         if (rowH < toolsRowH) rowH = toolsRowH;
+        const int gridW = (fillW > toolsContentW) ? fillW : toolsContentW;
         if (fillW > toolsContentW) lv_obj_set_width(grid, fillW);
+        // Cells in pixels, not kChanModalCellPct: two 49% cells and this gap
+        // only fit side by side where 2% of the grid covers the gap -- 600 px
+        // at a 12 px gap. Narrower (the CrowPanel 5" upright, 448 px) each cell
+        // wrapped onto a row of its own, and the grid became one column.
+        const int cellW = (gridW - toolsFillGap * (kChanModalCols - 1)) / kChanModalCols;
         for (int i = 0; i < LIVE_TOOL_COUNT; i++) {
-            if (s_liveToolsRows[i]) lv_obj_set_height(s_liveToolsRows[i], rowH);
+            if (!s_liveToolsRows[i]) continue;
+            lv_obj_set_height(s_liveToolsRows[i], rowH);
+            if (!toolsStacked) lv_obj_set_width(s_liveToolsRows[i], cellW);
         }
     }
 
@@ -32173,6 +32342,16 @@ static bool homeDashSideBySide() {
     return lv_disp_get_hor_res(NULL) >= 300;
 }
 
+// Every face of the dashboard's band on screen at once, stacked, rather than
+// one at a time in a carousel: the CrowPanel 5"'s 800x480 has the room for all
+// of them in either orientation, so there is nothing to turn. The lock screen's
+// carousel is unaffected.
+#if defined(DEVICE_CROWPANEL_50)
+#define HOME_DASH_SHOW_ALL 1
+#else
+#define HOME_DASH_SHOW_ALL 0
+#endif
+
 // Records a page as it is built. The face list is built in order rather than
 // indexed by a fixed enum, because the two carousels do not carry the same set:
 // the lock screen has a messages page the dashboard does not, and a wide panel
@@ -32904,6 +33083,10 @@ static void glanceCarouselGo(GlanceCarousel &c, int delta) {
 // serviceLockCarousel() and by nothing else.
 static void homeDashCarouselGo(int delta) {
     if (!homeDashboardVisible()) return;
+#if HOME_DASH_SHOW_ALL
+    (void)delta;
+    return;   // every face is already showing
+#endif
     // The cards go with the page. A swipe gets here without passing through
     // homeDashCursorKey(), so the outline would otherwise ride off on a face
     // that is no longer in front.
@@ -33179,6 +33362,21 @@ static void refreshHomeDashboard(bool force) {
     // The Tools chart modals keep their per-packet updates. You open those to
     // watch the radio; this one opens itself.
     if (force || minuteRolled) refreshGlancePage(s_homeCarousel, (int)s_homeCarousel.at);
+#elif HOME_DASH_SHOW_ALL
+    // Every face is in front, so every face is kept current: the charts on
+    // their own sequences, the node lists on the same arrived-or-minute gate.
+    refreshGlanceCharts(s_homeCarousel, force);
+    {
+        const bool arrived = (s_snrHist.seq != s_homeCarousel.nodeSeq);
+        if (force || minuteRolled || arrived) {
+            s_homeCarousel.nodeSeq = s_snrHist.seq;
+            for (int i = 0; i < (int)s_homeCarousel.pages; i++) {
+                if (s_homeCarousel.kind[i] != GLANCE_PAGE_CHARTS) {
+                    refreshGlancePage(s_homeCarousel, i);
+                }
+            }
+        }
+    }
 #else
     if (glanceFacing(s_homeCarousel) == GLANCE_PAGE_CHARTS) {
         refreshGlanceCharts(s_homeCarousel, force);
@@ -33317,7 +33515,11 @@ static void openHomeDashboard() {
     // ever runs under a chevron, and the chevrons sit outside the host — they
     // stay put while the pages slide beneath them, and are never clipped or
     // carried off screen with one.
+#if HOME_DASH_SHOW_ALL
+    const int arrowGutter = 0;   // no arrows: nothing turns
+#else
     const int arrowGutter = 11;
+#endif
     lv_obj_t *pageHost = lv_obj_create(s_homeDash);
     lv_obj_remove_style_all(pageHost);
     lv_obj_set_size(pageHost, widgetsW - (2 * arrowGutter), chartsH);
@@ -33336,6 +33538,7 @@ static void openHomeDashboard() {
     // turns. Labels rather than buttons: they mark the gesture instead of
     // offering a second way to perform it, and a tap target here would sit over
     // the pages and complicate what the swipe handler sees.
+#if !HOME_DASH_SHOW_ALL
     {
         const int arrowY = chartsTop
             + (chartsH - (int)lv_font_get_line_height(&lv_font_montserrat_12)) / 2;
@@ -33357,11 +33560,31 @@ static void openHomeDashboard() {
                          side == 0 ? widgetsX + 1 : -1, arrowY);
         }
     }
+#endif
 
+#if HOME_DASH_SHOW_ALL
+    // The band shared between the faces rather than each having all of it: the
+    // charts, then the node lists -- one face when they fit side by side, two
+    // when they do not. Worked out before the node faces are built, because a
+    // list card sizes its row count from the height it is given.
+    constexpr int kShowAllGap = 4;
+    const int showAllFaces = homeDashSideBySide() ? 2 : 3;
+    const int faceH = (chartsH - kShowAllGap * (showAllFaces - 1)) / showAllFaces;
+    glanceBuildChartPage(s_homeCarousel, pageHost);
+    glanceBuildNodePages(s_homeCarousel, pageHost, faceH - kTdeckProBandInset);
+    for (int i = 0; i < (int)s_homeCarousel.pages; i++) {
+        lv_obj_t *page = s_homeCarousel.page[i];
+        if (!lvObjValid(page)) continue;
+        lv_obj_set_height(page, faceH);
+        lv_obj_set_y(page, i * (faceH + kShowAllGap));
+        lv_obj_clear_flag(page, LV_OBJ_FLAG_HIDDEN);
+    }
+#else
     glanceBuildChartPage(s_homeCarousel, pageHost);
     // A card gets the band less its page's own padding, and that height is what
     // decides how many rows it fits.
     glanceBuildNodePages(s_homeCarousel, pageHost, chartsH - kTdeckProBandInset);
+#endif
     // Either list opens the Nodes screen. Here rather than in the page builder,
     // which has three layouts to return from and serves the lock screen too.
     homeDashMakeCardTarget(s_homeCarousel.nodeCard[0], nullptr, HOME_CURSOR_NODES_RECENT);
@@ -33371,7 +33594,9 @@ static void openHomeDashboard() {
     // Wio boards rotate on a setting, and landscape has one fewer face than
     // portrait. Left alone, coming back in landscape on page 2 would show a
     // page this build never made.
+#if !HOME_DASH_SHOW_ALL
     glanceShowPage(s_homeCarousel, s_homeCarousel.at);
+#endif
 
     s_homeGlanceMinuteKey = UINT32_MAX;   // force the first header paint
     refreshHomeDashboard(true);
@@ -33436,6 +33661,31 @@ static lv_obj_t *buildLockCarousel(lv_obj_t *overlay, int top, int height) {
     lv_obj_clear_flag(msgPage, LV_OBJ_FLAG_SCROLLABLE);
     glanceAddPage(s_lockCarousel, msgPage, GLANCE_PAGE_MESSAGES);
 
+#if HOME_DASH_SHOW_ALL
+    // Everything at once, as on Home: the messages, then Home's widgets under
+    // them, each face a share of the band -- and no timer turning it
+    // (serviceLockCarousel()). The message budget is cut to the messages'
+    // share, worst case all one-line rows with a gap after each, so the last
+    // row cannot reach into the charts below.
+    {
+        constexpr int kShowAllGap = 4;
+        const int faces = 1 + (homeDashSideBySide() ? 2 : 3);
+        const int faceH = (height - kShowAllGap * (faces - 1)) / faces;
+        glanceBuildChartPage(s_lockCarousel, host);
+        glanceBuildNodePages(s_lockCarousel, host, faceH - kTdeckProBandInset);
+        for (int i = 0; i < (int)s_lockCarousel.pages; i++) {
+            lv_obj_t *page = s_lockCarousel.page[i];
+            if (!lvObjValid(page)) continue;
+            lv_obj_set_height(page, faceH);
+            lv_obj_set_y(page, i * (faceH + kShowAllGap));
+            lv_obj_clear_flag(page, LV_OBJ_FLAG_HIDDEN);
+        }
+        kTdeckProMsgTotalLines = max(1, (faceH + kTdeckProMsgGapY)
+                                        / (kTdeckProMsgLineH + kTdeckProMsgGapY));
+        return msgPage;
+    }
+#endif
+
     glanceBuildChartPage(s_lockCarousel, host);
     glanceBuildNodePages(s_lockCarousel, host, height - kTdeckProBandInset);
 
@@ -33467,12 +33717,23 @@ static void resetLockCarousel() {
 // they read when the page came round.
 static void refreshLockCarouselPage() {
     if (!lvObjValid(s_lockCarousel.host)) return;
+#if HOME_DASH_SHOW_ALL
+    // Every face is showing (buildLockCarousel()), so every face is repainted.
+    for (int i = 0; i < (int)s_lockCarousel.pages; i++) {
+        refreshGlancePage(s_lockCarousel, i);
+    }
+#else
     refreshGlancePage(s_lockCarousel, (int)s_lockCarousel.at);
+#endif
 }
 
 // The only thing that turns this carousel, driven from serviceLockScreen()
 // because that already runs every loop with the clock this wants.
 static void serviceLockCarousel(uint32_t nowMs) {
+#if HOME_DASH_SHOW_ALL
+    (void)nowMs;
+    return;   // every face is already showing
+#endif
     if (!lvObjValid(s_lockCarousel.host) || s_lockCarousel.pages < 2) return;
     if ((uint32_t)(nowMs - s_lockCarouselTurnedMs) < kLockCarouselDwellMs) return;
     s_lockCarouselTurnedMs = nowMs;
@@ -38266,6 +38527,8 @@ static void refreshDmModal(bool force) {
     const lv_font_t *dmMsgFont = scaledChatFont(kMainScreenFont);
 #if defined(DEVICE_TLORA_PAGER_TFT)
     int dmListRowH = 24;
+#elif defined(DEVICE_CROWPANEL_50)
+    int dmListRowH = 40;   // its larger list font (kMainScreenFont)
 #else
     int dmListRowH = 22;
 #endif
@@ -38733,7 +38996,11 @@ static void openDmModal() {
 
     lv_obj_t *leftTitle = lv_label_create(leftPanel);
     lv_obj_set_width(leftTitle, lv_pct(100));
+#if defined(DEVICE_CROWPANEL_50)
+    lv_obj_set_style_text_font(leftTitle, &lv_font_montserrat_14, 0);   // drawn as 16
+#else
     lv_obj_set_style_text_font(leftTitle, &lv_font_montserrat_10, 0);
+#endif
     lv_obj_set_style_text_color(
         leftTitle,
         (s_cfg.uiMode == UI_MODE_LIGHT) ? lv_color_hex(0x1B243D) : lv_color_hex(0xD9E8FF),
@@ -38779,7 +39046,11 @@ static void openDmModal() {
 
     lv_obj_t *rightTitle = lv_label_create(rightPanel);
     lv_obj_set_width(rightTitle, lv_pct(100));
+#if defined(DEVICE_CROWPANEL_50)
+    lv_obj_set_style_text_font(rightTitle, &lv_font_montserrat_14, 0);   // drawn as 16
+#else
     lv_obj_set_style_text_font(rightTitle, &lv_font_montserrat_10, 0);
+#endif
     lv_obj_set_style_text_color(
         rightTitle,
         (s_cfg.uiMode == UI_MODE_LIGHT) ? lv_color_hex(0x1B243D) : lv_color_hex(0xD9E8FF),
@@ -38814,7 +39085,11 @@ static void openDmModal() {
     // new message leaves it alone.
     lv_obj_t *dmNewMsgBtn = lv_btn_create(rightPanel);
     lv_obj_set_width(dmNewMsgBtn, lv_pct(100));
+#if defined(DEVICE_CROWPANEL_50)
+    lv_obj_set_height(dmNewMsgBtn, 44);   // as the chat's, doubled
+#else
     lv_obj_set_height(dmNewMsgBtn, 24);
+#endif
     lv_obj_set_style_radius(dmNewMsgBtn, 4, 0);
     lv_obj_set_style_pad_all(dmNewMsgBtn, 0, 0);
     lv_obj_set_style_shadow_width(dmNewMsgBtn, 0, 0);
@@ -38825,7 +39100,11 @@ static void openDmModal() {
     lv_obj_add_event_cb(dmNewMsgBtn, onDmNewMessagePressed, LV_EVENT_CLICKED, nullptr);
 
     lv_obj_t *dmNewMsgLbl = lv_label_create(dmNewMsgBtn);
+#if defined(DEVICE_CROWPANEL_50)
+    lv_obj_set_style_text_font(dmNewMsgLbl, &lv_font_montserrat_18, 0);   // drawn as 20
+#else
     lv_obj_set_style_text_font(dmNewMsgLbl, &lv_font_montserrat_10, 0);
+#endif
     lv_obj_set_style_text_color(dmNewMsgLbl, lv_color_hex(0xE8F1FF), 0);
     lv_label_set_text(dmNewMsgLbl, TR("New Message"));
     lv_obj_center(dmNewMsgLbl);
@@ -38966,6 +39245,10 @@ static void openNodesModal() {
     // up rather than the P4's two, for a panel a third of its height.
     const lv_font_t *nodesDetailFont =
         emojiFont(nodesStacked ? &lv_font_montserrat_12 : &lv_font_montserrat_10);
+#elif defined(DEVICE_CROWPANEL_50)
+    // A size under the list's, as everywhere: the table has two columns to
+    // fit. Named 16, drawn as 18.
+    const lv_font_t *nodesDetailFont = emojiFont(&lv_font_montserrat_16);
 #else
     const lv_font_t *nodesDetailFont = emojiFont(&lv_font_montserrat_10);
 #endif
@@ -40748,6 +41031,15 @@ static void performCfgAction(int actionId) {
             s_lastRenderedCount = -1;
             refreshChatView(true);
             break;
+
+#if HAS_CHAT_BLINK
+        // A slider, like the light timeouts: Off at one end, a minute at the other.
+        case CFG_ACTION_CHAT_BLINK:
+            if (s_cfgDebugLog) Serial.println("[lvgl-cfg] exec CHAT_BLINK");
+            showActionPopup = false;   // the picker is the feedback
+            openCfgChatBlinkModal();
+            break;
+#endif
 
         case CFG_ACTION_FONT_SIZE:
             if (s_cfgDebugLog) Serial.println("[lvgl-cfg] exec FONT_SIZE");
@@ -48332,6 +48624,14 @@ static void drawBootSplash() {
     }
 
     const int cardMargin = 10;
+    // A card sized to what it holds, centred on a background with faint
+    // camellias in its corners, rather than one filling the panel: the boards
+    // whose screens are far bigger than the card's contents.
+#if defined(DEVICE_TDISPLAY_P4) || defined(DEVICE_CROWPANEL_50)
+#define SPLASH_FLOATING_CARD 1
+#else
+#define SPLASH_FLOATING_CARD 0
+#endif
 #if defined(DEVICE_TDISPLAY_P4)
     // The portrait card's width in both orientations, centred. Landscape used
     // to run the card end to end across 616 px with the same narrow stack of
@@ -48340,10 +48640,15 @@ static void drawBootSplash() {
     const int cardW = min(screenW - cardMargin * 2,
                           DEVICE_LCD_PORTRAIT_W / UI_PIXEL_SCALE - cardMargin * 2);
     const int cardX = (screenW - cardW) / 2;
+#elif defined(DEVICE_CROWPANEL_50)
+    // Room round the title and footer, which are drawn at the sizes of the
+    // 320 px boards, without stretching them across an 800 px panel.
+    const int cardW = min(screenW - cardMargin * 2, 360);
+    const int cardX = (screenW - cardW) / 2;
 #else
     const int cardX = cardMargin;
 #endif
-#if defined(DEVICE_TDISPLAY_P4)
+#if SPLASH_FLOATING_CARD
     // Sized to what it holds rather than to the canvas, and centred in it: on
     // the 596-tall canvas any fixed card left dead space above and below the
     // flower. Title block, a gap, the flower, a gap, the footer -- each measured
@@ -48380,7 +48685,7 @@ static void drawBootSplash() {
     const int cardY = 10;
     const int cardH = screenH - 20;
 #endif
-#if !defined(DEVICE_TDISPLAY_P4)
+#if !SPLASH_FLOATING_CARD
     const int cardW = screenW - cardMargin * 2;
 #endif
 
@@ -48510,7 +48815,7 @@ static void drawBootSplash() {
         splashDev().fillCircle(cx + leafInnerX, cy + leafInnerYRight, leafInnerR, fade(LEAF_LIGHT, cy + leafInnerYRight));
     };
 
-#if defined(DEVICE_TDISPLAY_P4)
+#if SPLASH_FLOATING_CARD
     // Four large, faint camellias behind the card, one centred on each corner
     // of the screen, so each shows as a partial bloom framing the card. Drawn
     // before the card, which covers whatever of them reaches it. Scaled to the
@@ -48747,6 +49052,7 @@ static void drawBootSplash() {
         bootSplashTick();
         delay(20);
     }
+#undef SPLASH_FLOATING_CARD
 }
 
 // ── Channel-button paint cache ───────────────────────────────────────────────
@@ -50028,6 +50334,11 @@ static void layoutScreenHeader(ScreenHeader &h) {
     // or two down where it does not ("Configuration" in the P4's upright 24 px
     // would otherwise run under it) -- only then is it cut short.
     static const lv_font_t *const kSmaller[] = {
+#if defined(DEVICE_CROWPANEL_50)
+        // Steps down from its doubled 32 px header. Only here: naming a font
+        // links it, and no other board's header starts above 24.
+        &lv_font_montserrat_28, &lv_font_montserrat_24, &lv_font_montserrat_20,
+#endif
         &lv_font_montserrat_18, &lv_font_montserrat_16,
         &lv_font_montserrat_14, &lv_font_montserrat_12,
     };
@@ -55291,6 +55602,11 @@ static void buildUi() {
     // name and clock (see selectorTextFont / clockTextFont below). The chat
     // list is what gives it up -- it is sized from what is left over.
     const int chatHeaderH = uiPortrait() ? 38 : 25;
+#elif defined(DEVICE_CROWPANEL_50)
+    // Twice the usual, fonts with it (below): the 5" has the room, and the
+    // header is read at arm's length. Every screen's header copies this one
+    // (s_chatHdrGeom), so they all grow together.
+    const int chatHeaderH = 50;
 #else
     const int chatHeaderH = 25;
 #endif
@@ -55485,7 +55801,15 @@ static void buildUi() {
 #if UI_TOUCH_ONLY_PROFILE
     const lv_font_t *headerIconFont = (chatHeaderH >= 25) ? &lv_font_montserrat_14 : &lv_font_montserrat_12;
 #endif
+#if defined(DEVICE_CROWPANEL_50)
+    // The doubled header (chatHeaderH): each face twice its usual size.
+    headerTextFont = &lv_font_montserrat_24;
+    clockTextFont = &lv_font_montserrat_32;
+    headerIconFont = &lv_font_montserrat_28;
+    const int headerPadX = 12;
+#else
     const int headerPadX = (chatHeaderH >= 25) ? 6 : 4;
+#endif
 #if UI_CHANNEL_LIST_DROPDOWN
     s_channelStrip = nullptr;
     s_channelList = nullptr;
@@ -55639,10 +55963,16 @@ static void buildUi() {
     lv_obj_set_size(s_chatHeaderBattBar,
 #if defined(DEVICE_CARDPUTER_LORA_HAT)
                     6,
+#elif defined(DEVICE_CROWPANEL_50)
+                    16,
 #else
                     (chatHeaderH >= 25) ? 8 : 7,
 #endif
+#if defined(DEVICE_CROWPANEL_50)
+                    16);
+#else
                     (chatHeaderH >= 25) ? 8 : 7);
+#endif
     lv_obj_align(s_chatHeaderBattBar, LV_ALIGN_RIGHT_MID, -headerPadX, 0);
     lv_obj_set_style_radius(s_chatHeaderBattBar, LV_RADIUS_CIRCLE, 0);
     lv_obj_set_style_bg_opa(s_chatHeaderBattBar, LV_OPA_COVER, 0);
@@ -55769,6 +56099,9 @@ static void buildUi() {
     channelNavFont = &lv_font_montserrat_14;
 #elif defined(DEVICE_TDECK) || defined(DEVICE_TDECK_PRO) || defined(DEVICE_M9)
     channelNavFont = &lv_font_montserrat_14; // nearest built-in to requested size 13
+#elif defined(DEVICE_CROWPANEL_50)
+    // Its list text as it is (kMainScreenFont, drawn as 20), not the 14 the
+    // other touch boards take: the 800x480 panel has the room.
 #elif UI_TOUCH_ONLY_PROFILE
     if (!useCompactVerticalHeltecSelector()) channelNavFont = &lv_font_montserrat_14; // keep vertical Heltec unchanged
 #endif
@@ -55789,7 +56122,12 @@ static void buildUi() {
         // button has settled.
         const int dropdownW = selectorBtnW;
 #else
+#if defined(DEVICE_CROWPANEL_50)
+        // Wider for its larger names (channelNavFont above).
+        const int dropdownW = min(max(chatW / 2, 120), 420);
+#else
         const int dropdownW = min(max(chatW / 2, 120), 260);
+#endif
 #endif
 
         // Behind the drawer and over everything else: a tap anywhere outside
@@ -55892,6 +56230,11 @@ static void buildUi() {
     // rows leave behind.
 #if UI_LARGE_PANEL_PROFILE
     const int chatBtnRowH = 56;
+    const lv_font_t *chatActionFont = &lv_font_montserrat_18;
+#elif defined(DEVICE_CROWPANEL_50)
+    // Twice the height and the text (named 18: drawn as 20, see
+    // hal/crowpanel_50_fonts.h), with the nav bar and header.
+    const int chatBtnRowH = 44;
     const lv_font_t *chatActionFont = &lv_font_montserrat_18;
 #else
     const int chatBtnRowH = 22;
@@ -57978,12 +58321,17 @@ static bool chatPanelInFront() {
     return true;
 }
 
-// How long a conversation's new messages blink once it is in front of the user.
-// A message arriving meanwhile starts the count again.
-static constexpr uint32_t kFreshSeenMs = 15000;
+// How long a conversation's new messages blink once it is in front of the user:
+// the Message Blink setting. A message arriving meanwhile starts the count
+// again. With the blink Off the marks still clear after the default 15 s, since
+// that is also when the channel list stops flagging the conversation.
+static uint32_t freshSeenMs() {
+    const uint32_t secs = cfgChatBlinkSecs(s_cfg);
+    return (secs ? secs : 15u) * 1000u;
+}
 
 // Tracks how long one conversation has been in front since its last new
-// message, and reports once when that reaches kFreshSeenMs.
+// message, and reports once when that reaches freshSeenMs().
 struct FreshSeenTimer {
     uint32_t sinceMs;
     uint32_t seq;
@@ -57995,14 +58343,14 @@ struct FreshSeenTimer {
             done = false;
             return false;
         }
-        if (done || (uint32_t)(now - sinceMs) < kFreshSeenMs) return false;
+        if (done || (uint32_t)(now - sinceMs) < freshSeenMs()) return false;
         done = true;
         return true;
     }
 };
 
 // New messages stay marked (and blinking) until the user has had their
-// conversation in front of them for kFreshSeenMs, or has left it sooner:
+// conversation in front of them for freshSeenMs(), or has left it sooner:
 // another channel, another screen, or the display going to sleep. Watching what
 // is in front each pass catches every way of leaving without hooking each one.
 static void serviceFreshMarks() {
