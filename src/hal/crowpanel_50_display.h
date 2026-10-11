@@ -5,9 +5,9 @@
 // An 800×480 RGB565 panel on the S3's LCD_CAM peripheral, scanned out of a
 // PSRAM framebuffer, with GT911 touch. Bus pins and timings are Elecrow's
 // (5.0/factory_code/LovyanGFX_Driver.h), which Meshtastic's LGFX_ELECROW70 uses
-// unchanged. The backlight and the touch reset are on the PCA9557 expander, so
-// this board gets its own LGFX_TDeck rather than another arm of display.h's
-// SPI class -- the same shape as the T-Deck Pro and T-Display P4 headers.
+// unchanged. The backlight and the touch reset belong to a PCA9557 (V1.0) or a
+// board MCU (V1.1+), so this board gets its own LGFX_TDeck rather than another
+// arm of display.h's SPI class -- the same shape as the T-Deck Pro and P4.
 // ════════════════════════════════════════════════════════════════════════════
 
 #include <LovyanGFX.hpp>
@@ -17,62 +17,145 @@
 
 #include "config.h"
 
-// The PCA9557's four registers are the TCA9534's: input, output, polarity,
-// configuration (1 = input). Outputs are kept in a shadow so one pin can change
-// without reading the port back.
-class CrowPanelIoExpander {
+// Whatever on this board owns the backlight and the touch reset: the PCA9557
+// on V1.0, the board MCU from V1.1 (hw_crowpanel_50.h). begin() works out which
+// by who answers, so one build runs either for display and touch.
+class CrowPanelBoardCtl {
 public:
-    bool begin() {
+    enum Kind : uint8_t { NONE, PCA9557, MCU };
+
+    Kind begin() {
         Wire.begin(TOUCH_SDA, TOUCH_SCL);
-        Wire.beginTransmission(CROWPANEL_IOEX_ADDR);
-        if (Wire.endTransmission() != 0) {
-            Serial.printf("[crowpanel] PCA9557 not found at 0x%02X: no backlight or touch reset\n",
-                          CROWPANEL_IOEX_ADDR);
-            return false;
+        if (probe(CROWPANEL_IOEX_ADDR)) {
+            _kind = PCA9557;
+            beginPca();
+            Serial.printf("[crowpanel] V1.0 board: PCA9557 at 0x%02X\n", CROWPANEL_IOEX_ADDR);
+#if !CROWPANEL_50_HW_V10
+            Serial.println("[crowpanel] this build expects V1.2+; on V1.0 the radio needs -DCROWPANEL_50_HW_V10=1");
+#endif
+        } else if (probe(CROWPANEL_MCU_ADDR)) {
+            _kind = MCU;
+            Serial.printf("[crowpanel] V1.1+ board: MCU at 0x%02X\n", CROWPANEL_MCU_ADDR);
+#if CROWPANEL_50_HW_V10
+            Serial.println("[crowpanel] this build is for V1.0; on V1.2+ the radio needs the default build");
+#endif
+        } else {
+            Serial.printf("[crowpanel] no backlight controller at 0x%02X or 0x%02X; I2C has:",
+                          CROWPANEL_IOEX_ADDR, CROWPANEL_MCU_ADDR);
+            for (uint8_t a = 0x08; a < 0x78; a++) {
+                if (probe(a)) Serial.printf(" 0x%02X", a);
+            }
+            Serial.println();
         }
-        _ok = true;
-        const uint8_t outputs = mask(CROWPANEL_IOEX_BL) | mask(CROWPANEL_IOEX_TP_RST)
-                              | mask(CROWPANEL_IOEX_AMP_MUTE) | mask(CROWPANEL_IOEX_AMP_SHUT);
-        // Levels first, then direction, so no pin glitches on the way to output.
-        // Elecrow's start-up state: backlight on, amplifier held off.
-        _out = mask(CROWPANEL_IOEX_BL) | mask(CROWPANEL_IOEX_TP_RST) | mask(CROWPANEL_IOEX_AMP_SHUT);
-        writeReg(kRegOutput, _out);
-        writeReg(kRegConfig, (uint8_t)~outputs);
-        return true;
+        return _kind;
     }
 
-    void set(uint8_t pin, bool high) {
-        if (!_ok) return;
-        const uint8_t next = high ? (uint8_t)(_out | mask(pin)) : (uint8_t)(_out & ~mask(pin));
-        if (next == _out) return;
-        _out = next;
-        writeReg(kRegOutput, _out);
+    // GT911 address select: INT held low through the controller's reset gives
+    // 0x5D, then INT is released to it (Elecrow's sequence on both revisions).
+    // Elecrow's V1.2 code repeats the MCU's wake command until the GT911
+    // answers rather than trusting one, so this does too, a bounded number of
+    // times. The GT911 can also come up at 0x14 if the strap is missed;
+    // LovyanGFX tries both.
+    void resetTouch() {
+        if (_kind == NONE) return;
+        for (int attempt = 1; attempt <= 5; attempt++) {
+            pinMode(TOUCH_INT, OUTPUT);
+            digitalWrite(TOUCH_INT, LOW);
+            if (_kind == PCA9557) {
+                pcaSet(CROWPANEL_IOEX_TP_RST, false);
+                delay(20);
+                pcaSet(CROWPANEL_IOEX_TP_RST, true);
+                delay(100);
+            } else {
+                mcuSendAlways(CROWPANEL_MCU_TOUCH_ON);
+                delay(120);
+            }
+            pinMode(TOUCH_INT, INPUT);
+            delay(100);
+            const bool at5d = probe(0x5D), at14 = probe(0x14);
+            if (at5d || at14) {
+                Serial.printf("[crowpanel] GT911 at 0x%02X after %d attempt%s\n",
+                              at5d ? 0x5D : 0x14, attempt, attempt == 1 ? "" : "s");
+                return;
+            }
+        }
+        Serial.println("[crowpanel] GT911 did not answer at 0x5D or 0x14: no touch");
     }
 
-    bool ok() const { return _ok; }
+    // 0 is off. V1.0's backlight only switches; the MCU dims, 255 brightest.
+    void setBacklight(uint8_t level) {
+        if (_kind == PCA9557) {
+            pcaSet(CROWPANEL_IOEX_BL, level > 0);
+        } else if (_kind == MCU) {
+            if (level == 0) {
+                mcuSend(CROWPANEL_MCU_BL_OFF);
+                return;
+            }
+            const uint8_t span = CROWPANEL_MCU_BL_MIN - CROWPANEL_MCU_BL_MAX;
+            const uint8_t cmd = (uint8_t)(CROWPANEL_MCU_BL_MIN - (uint32_t)(level - 1) * span / 254);
+            if (cmd != _lastMcu) {
+                Serial.printf("[crowpanel] backlight %u -> MCU %u\n", (unsigned)level, (unsigned)cmd);
+            }
+            mcuSend(cmd);
+        }
+    }
 
 private:
+    // PCA9557 registers, the TCA9534's: input, output, polarity, configuration
+    // (1 = input). Outputs are shadowed so one pin can change without a read.
     static constexpr uint8_t kRegOutput = 0x01;
     static constexpr uint8_t kRegConfig = 0x03;
 
     static uint8_t mask(uint8_t pin) { return (uint8_t)(1u << pin); }
 
-    void writeReg(uint8_t reg, uint8_t value) {
+    static bool probe(uint8_t addr) {
+        Wire.beginTransmission(addr);
+        return Wire.endTransmission() == 0;
+    }
+
+    void beginPca() {
+        const uint8_t outputs = mask(CROWPANEL_IOEX_BL) | mask(CROWPANEL_IOEX_TP_RST)
+                              | mask(CROWPANEL_IOEX_AMP_MUTE) | mask(CROWPANEL_IOEX_AMP_SHUT);
+        // Levels first, then direction, so no pin glitches on the way to output.
+        // Elecrow's start-up state: backlight on, amplifier held off.
+        _out = mask(CROWPANEL_IOEX_BL) | mask(CROWPANEL_IOEX_TP_RST) | mask(CROWPANEL_IOEX_AMP_SHUT);
+        pcaWrite(kRegOutput, _out);
+        pcaWrite(kRegConfig, (uint8_t)~outputs);
+    }
+
+    void pcaSet(uint8_t pin, bool high) {
+        const uint8_t next = high ? (uint8_t)(_out | mask(pin)) : (uint8_t)(_out & ~mask(pin));
+        if (next == _out) return;
+        _out = next;
+        pcaWrite(kRegOutput, _out);
+    }
+
+    void pcaWrite(uint8_t reg, uint8_t value) {
         Wire.beginTransmission(CROWPANEL_IOEX_ADDR);
         Wire.write(reg);
         Wire.write(value);
         Wire.endTransmission();
     }
 
+    void mcuSend(uint8_t cmd) {
+        if (cmd == _lastMcu) return;
+        if (mcuSendAlways(cmd)) _lastMcu = cmd;
+    }
+
+    bool mcuSendAlways(uint8_t cmd) {
+        Wire.beginTransmission(CROWPANEL_MCU_ADDR);
+        Wire.write(cmd);
+        return Wire.endTransmission() == 0;
+    }
+
+    Kind _kind = NONE;
     uint8_t _out = 0;
-    bool _ok = false;
+    int16_t _lastMcu = -1;
 };
 
-// The backlight driver's enable line is all there is: on or off, no dimming.
-// Brightness 0 turns it off (screen sleep), anything else on.
 class Light_CrowPanel50 : public lgfx::v1::ILight {
 public:
-    void setExpander(CrowPanelIoExpander *ioex) { _ioex = ioex; }
+    void setController(CrowPanelBoardCtl *ctl) { _ctl = ctl; }
 
     bool init(uint8_t brightness) override {
         setBrightness(brightness);
@@ -80,11 +163,11 @@ public:
     }
 
     void setBrightness(uint8_t brightness) override {
-        if (_ioex) _ioex->set(CROWPANEL_IOEX_BL, brightness > 0);
+        if (_ctl) _ctl->setBacklight(brightness);
     }
 
 private:
-    CrowPanelIoExpander *_ioex = nullptr;
+    CrowPanelBoardCtl *_ctl = nullptr;
 };
 
 class LGFX_TDeck : public lgfx::LGFX_Device {
@@ -92,22 +175,12 @@ class LGFX_TDeck : public lgfx::LGFX_Device {
     lgfx::Panel_RGB     _panel;
     Light_CrowPanel50   _light;
     lgfx::Touch_GT911   _touch;
-    CrowPanelIoExpander _ioex;
+    CrowPanelBoardCtl   _ctl;
 
 public:
     bool init_impl(bool use_reset, bool use_clear) override {
-        if (_ioex.begin()) {
-            // GT911 address select: INT low through the rising edge of reset
-            // gives 0x5D (Elecrow's and Meshtastic's sequence), then INT is
-            // released back to the controller.
-            pinMode(TOUCH_INT, OUTPUT);
-            digitalWrite(TOUCH_INT, LOW);
-            _ioex.set(CROWPANEL_IOEX_TP_RST, false);
-            delay(20);
-            _ioex.set(CROWPANEL_IOEX_TP_RST, true);
-            delay(100);
-            pinMode(TOUCH_INT, INPUT);
-        }
+        _ctl.begin();
+        _ctl.resetTouch();
         return LGFX_Device::init_impl(use_reset, use_clear);
     }
 
@@ -169,7 +242,7 @@ public:
         }
         _panel.setBus(&_bus);
 
-        _light.setExpander(&_ioex);
+        _light.setController(&_ctl);
         _panel.setLight(&_light);
 
         {
@@ -179,8 +252,8 @@ public:
             cfg.y_min = 0;
             cfg.y_max = TFT_PANEL_HEIGHT - 1;
             cfg.pin_int = -1;            // polled; INT is only the address strap
-            cfg.pin_rst = -1;            // on the expander, pulsed in init_impl()
-            cfg.bus_shared = true;       // the expander is on the same pins
+            cfg.pin_rst = -1;            // the board controller's, see resetTouch()
+            cfg.bus_shared = true;       // the backlight controller is on the same pins
             cfg.offset_rotation = 0;
             cfg.i2c_port = TOUCH_I2C_PORT;
             cfg.i2c_addr = TOUCH_ADDR;

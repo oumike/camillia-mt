@@ -9,7 +9,22 @@
 //   • SX1262 LoRa module in the J8/J9 wireless-module slot
 //   • No keyboard, trackball or free user button (GPIO0 is LoRa NSS)
 //
-// Pins follow Meshtastic's support and Elecrow's V1.0 schematic and code:
+// ── Hardware revisions ──────────────────────────────────────────────────────
+// V1.0 drives the backlight and the touch reset from a PCA9557 at 0x18, has a
+// passive buzzer on GPIO8 and puts the radio's NSS on GPIO0. From V1.1 a small
+// board MCU at 0x30 takes over the backlight, buzzer and speaker, and from
+// V1.2 (V1.3 changed only the touch FPC) the radio's NSS is GPIO8 -- Elecrow's
+// own V1.2/V1.3 LoRa example builds Module(8, 20, 19, 2).
+//
+// The display side tells the two apart at boot by which address answers. The
+// radio cannot: RadioLib takes its pins when the radio object is constructed,
+// before anything can probe I2C. So this build is for V1.2/V1.3, what Elecrow
+// sells now, and -DCROWPANEL_50_HW_V10=1 builds for V1.0 instead.
+#ifndef CROWPANEL_50_HW_V10
+#define CROWPANEL_50_HW_V10        0
+#endif
+//
+// Pins follow Meshtastic's support and Elecrow's schematic and code:
 //   meshtastic/firmware variants/esp32s3/elecrow_panel/variant.h (CROW_SELECT 2)
 //   meshtastic/firmware variants/esp32s3/elecrow_panel/platformio.ini
 //     [env:elecrow-adv1-43-50-70-tft]
@@ -17,6 +32,8 @@
 //   Elecrow-RD/CrowPanel-Advance-HMI-ESP32-AI-Display
 //     5.0/schematic/ESP32 Display 5.0 inch V1.0.pdf
 //     5.0/factory_code/LovyanGFX_Driver.h, factory_code.ino
+//   Elecrow-RD/CrowPanel-Advance-5-HMI-ESP32-S3-AI-Powered-IPS-Touch-Screen-800x480
+//     example/V1.2_and_V1.3/Arduino/lesson-05 (board MCU), lesson-07 (SX1262)
 //
 // ── The function switch ──────────────────────────────────────────────────────
 // GPIO 4/5/6 and 19/20/2 each reach three places -- the SD card, the wireless
@@ -36,7 +53,7 @@
 //    MISO/IO4 o   o IO15/NC
 //    MOSI/IO6 o   o NC/DIO2
 //         3V3 o   o IO2/BUSY
-//         GND o   o IO0/NSS
+//         GND o   o IO0/NSS     (IO8 from V1.2)
 //       5V/NC o   o NC/DIO3
 //            J9   J8
 //
@@ -46,13 +63,29 @@
 
 // ── Power & board peripherals ────────────────────────────────────────────────
 #define BOARD_POWERON             -1
-// A real passive buzzer on GPIO8 ("Passive buzzer", IO8_BEEP) -- unlike the
-// 3.5", where GPIO8 is the amplifier's MCLK.
+// V1.0 has a passive buzzer on GPIO8 ("Passive buzzer", IO8_BEEP). From V1.1
+// the buzzer belongs to the board MCU and GPIO8 is the radio's NSS, so there is
+// none to drive from here.
+#if CROWPANEL_50_HW_V10
 #define BOARD_BUZZER               8
+#else
+#define BOARD_BUZZER              -1
+#endif
 #define BOARD_VEXT_ENABLE         -1
 #define BOARD_VEXT_ON_LEVEL     HIGH
 
-// ── PCA9557 I/O expander ─────────────────────────────────────────────────────
+// ── Board MCU (V1.1 and later) ───────────────────────────────────────────────
+// Single-byte commands at 0x30, V1.2/V1.3 values (Elecrow's lesson-05):
+// 0 brightest .. 244 dimmest, 245 backlight off, 250 wakes the touch panel.
+// V1.1 used 0x05 (off) .. 0x10 (brightest) instead; 0x10 is near-full on the
+// newer scale too, which is why "on" is sent as that first.
+#define CROWPANEL_MCU_ADDR      0x30
+#define CROWPANEL_MCU_BL_MAX       0
+#define CROWPANEL_MCU_BL_MIN     244
+#define CROWPANEL_MCU_BL_OFF     245
+#define CROWPANEL_MCU_TOUCH_ON   250
+
+// ── PCA9557 I/O expander (V1.0) ──────────────────────────────────────────────
 // Register-compatible with the TCA9534 Meshtastic drives it as. IO0 is
 // open-drain on this part, which is why nothing uses it.
 #define CROWPANEL_IOEX_ADDR     0x18
@@ -71,7 +104,9 @@
 #define TFT_DC                    -1
 #define TFT_RST                   -1
 #define TFT_BL                    -1   // on the expander, not a GPIO
-#define TFT_BRIGHTNESS_DEFAULT   160
+// Full on by default. From V1.1 the board MCU dims by PWM, and anything below
+// full makes the backlight driver audibly whine; at full it is steady DC.
+#define TFT_BRIGHTNESS_DEFAULT   255
 #define TFT_PANEL_WIDTH          800
 #define TFT_PANEL_HEIGHT         480
 // Pixel clock. Elecrow's demo runs 21 MHz, Meshtastic 14 MHz. The lower one
@@ -83,7 +118,11 @@
 #define LORA_SPI_SCK               5
 #define LORA_SPI_MISO              4
 #define LORA_SPI_MOSI              6
+#if CROWPANEL_50_HW_V10
 #define LORA_CS                    0
+#else
+#define LORA_CS                    8
+#endif
 #define LORA_DIO1                 20
 #define LORA_RST                  19
 #define LORA_BUSY                  2

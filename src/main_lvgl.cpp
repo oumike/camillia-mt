@@ -240,6 +240,12 @@ static constexpr uint16_t kDrawBufLines = 32;
 // Cardputer has no PSRAM and AP web config can leave very little internal DRAM.
 // A smaller draw buffer trades redraw speed for RAM headroom where it matters.
 static constexpr uint16_t kDrawBufLines = 24;
+#elif defined(DEVICE_CROWPANEL_50)
+// 800 px wide: 40 lines would be 64 KB, more than the largest internal block
+// left once WiFi is up, and the PSRAM fallback renders into the same memory the
+// RGB panel is scanned out of -- slow, and the contention shows as the panel
+// tearing. 20 lines (32 KB) stays internal.
+static constexpr uint16_t kDrawBufLines = 20;
 #else
 static constexpr uint16_t kDrawBufLines = 40;
 #endif
