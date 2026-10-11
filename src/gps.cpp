@@ -1122,6 +1122,13 @@ void gpsLoop() {
 }
 
 void gpsSetEnabled(bool en) {
+#if GPS_RX < 0 && GPS_TX < 0
+    // No GPS wired. Opening UART1 anyway is not harmless: with -1 pins it takes
+    // the chip's default UART1 pins, which on the S3 are GPIO15/16 -- the
+    // CrowPanel 5"'s touch I2C bus, which then timed out on every read.
+    (void)en;
+    return;
+#endif
     if (en) {
         gpsPowerUp();               // no-op unless a previous disable cut power
         if (!_enabled) gpsBegin();

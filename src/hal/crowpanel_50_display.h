@@ -54,10 +54,10 @@ public:
     // 0x5D, then INT is released to it (Elecrow's sequence on both revisions).
     // Elecrow's V1.2 code repeats the MCU's wake command until the GT911
     // answers rather than trusting one, so this does too, a bounded number of
-    // times. The GT911 can also come up at 0x14 if the strap is missed;
-    // LovyanGFX tries both.
-    void resetTouch() {
-        if (_kind == NONE) return;
+    // times. The GT911 can also come up at 0x14 if the strap is missed, so
+    // this returns the address it answered at (0 if neither).
+    uint8_t resetTouch() {
+        if (_kind == NONE) return 0;
         for (int attempt = 1; attempt <= 5; attempt++) {
             pinMode(TOUCH_INT, OUTPUT);
             digitalWrite(TOUCH_INT, LOW);
@@ -76,10 +76,11 @@ public:
             if (at5d || at14) {
                 Serial.printf("[crowpanel] GT911 at 0x%02X after %d attempt%s\n",
                               at5d ? 0x5D : 0x14, attempt, attempt == 1 ? "" : "s");
-                return;
+                return at5d ? 0x5D : 0x14;
             }
         }
         Serial.println("[crowpanel] GT911 did not answer at 0x5D or 0x14: no touch");
+        return 0;
     }
 
     // 0 is off. V1.0's backlight only switches; the MCU dims, 255 brightest.
@@ -180,8 +181,17 @@ class LGFX_TDeck : public lgfx::LGFX_Device {
 public:
     bool init_impl(bool use_reset, bool use_clear) override {
         _ctl.begin();
-        _ctl.resetTouch();
-        return LGFX_Device::init_impl(use_reset, use_clear);
+        const uint8_t touchAddr = _ctl.resetTouch();
+        if (touchAddr) {
+            auto cfg = _touch.config();
+            cfg.i2c_addr = touchAddr;
+            _touch.config(cfg);
+        }
+        const bool ok = LGFX_Device::init_impl(use_reset, use_clear);
+        // LovyanGFX drops the touch device without a word when its own init of
+        // it fails, which looks exactly like a dead panel from outside.
+        Serial.printf("[crowpanel] touch driver %s\n", touch() ? "up" : "DISABLED (init failed)");
+        return ok;
     }
 
     LGFX_TDeck() {

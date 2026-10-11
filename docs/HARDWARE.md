@@ -86,23 +86,35 @@ selectable at runtime.
 - **Display:** 800x480 IPS on a 16-bit RGB parallel bus, scanned out of a PSRAM
   framebuffer at a 14 MHz pixel clock (Meshtastic's figure; Elecrow's demo runs
   21 MHz). GT911 touch on I2C 15/16.
-- **PCA9557 expander at 0x18:** backlight enable (IO1), touch reset (IO2), and
-  the amplifier's two control lines (IO3/IO4). The backlight is on or off only,
-  so the brightness setting has two effective levels.
-- **Radio:** CS0, SCK5, MISO4, MOSI6, RST19, DIO1 20, BUSY2, from Meshtastic's
-  `elecrow-adv1-43-50-70-tft` env. GPIO19/20 are the S3's native USB pins, so
-  the console is UART0 through the CH340K.
+- **Board revisions:** the build tells them apart at boot by which I2C address
+  answers, and logs which it found.
+  - **V1.1 and later** (what Elecrow sells now): a small board MCU at 0x30 runs
+    the backlight, buzzer and speaker. The backlight dims in steps, but anything
+    below full brightness is PWM and makes the backlight driver whine audibly,
+    so the default brightness is full.
+  - **V1.0:** a PCA9557 expander at 0x18 switches the backlight on or off (IO1),
+    resets the touch panel (IO2), and holds the amplifier's two control lines
+    (IO3/IO4). The brightness setting has two effective levels here, and there is
+    a passive buzzer on GPIO8.
+- **Radio:** SCK5, MISO4, MOSI6, RST19, DIO1 20, BUSY2, from Meshtastic's
+  `elecrow-adv1-43-50-70-tft` env. The radio's CS is **GPIO8 from V1.2** (from
+  Elecrow's own V1.2/V1.3 LoRa example) and GPIO0 on V1.0. RadioLib takes its
+  pins before anything can probe the board, so the default build is for
+  V1.2/V1.3, and `-DCROWPANEL_50_HW_V10=1` builds for V1.0. GPIO19/20 are the
+  S3's native USB pins, so the console is UART0 through the CH340K.
 - **Function switch:** the two-position DIP switch on the back connects GPIO
   4/5/6 and 19/20/2 to the wireless module, the SD card, or the speaker and
-  microphone, one at a time. Set it to the wireless module. That is also why
-  this target has **no SD card**: files live in the LittleFS partition.
-- **Buzzer** on GPIO8. No GPS (Meshtastic's GPS pins are the radio's here) and
-  no battery reading.
+  microphone, one at a time. Set it to the wireless module (S1 = 0, S0 = 1 in
+  Elecrow's table). That is also why this target has **no SD card**: files live
+  in the LittleFS partition.
+- **No GPS** (Meshtastic's GPS pins are the radio's here) and no battery
+  reading. The GPS code leaves UART1 closed on this board: opened with no pins,
+  it falls back to the S3's default UART1 pins, GPIO15/16, which are the touch
+  bus.
 
-Written against Elecrow's V1.0 schematic. Later revisions of the larger panels
-reportedly replace the PCA9557 with a small MCU; on one of those the boot log
-says the expander was not found, and the backlight and touch reset will not work.
-Untested on hardware.
+Tested on a V1.1+ board: display, backlight and touch work. The radio has not
+yet been seen on that board, and the UI is slow at this resolution (redraws of
+a few hundred milliseconds).
 
 > **Notes.**
 > - **T-Deck Pro:** this initial port follows LilyGo and Meshtastic pin
