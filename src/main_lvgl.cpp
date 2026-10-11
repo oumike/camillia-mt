@@ -13450,7 +13450,7 @@ static void configureOnScreenKeyboard(lv_obj_t *keyboard) {
     lv_obj_set_style_pad_column(keyboard, 3, LV_PART_MAIN);
     lv_obj_set_style_pad_row(keyboard, 3, LV_PART_MAIN);
     lv_obj_set_style_pad_all(keyboard, 4, LV_PART_ITEMS);
-#elif defined(DEVICE_TDISPLAY_P4)
+#elif defined(DEVICE_TDISPLAY_P4) || defined(DEVICE_CROWPANEL_50)
     // A fixed height pinned to the bottom, the way a phone keyboard sits and
     // the way wadamesh's does -- not flex_grow. Growing into the rest of the
     // modal is what the 240x320 boards want, where the rest is about half the
@@ -13461,7 +13461,16 @@ static void configureOnScreenKeyboard(lv_obj_t *keyboard) {
     // shape, so it takes half the height, as wadamesh does there.
     const int screenH = (int)lv_disp_get_ver_res(NULL);
     lv_obj_set_flex_grow(keyboard, 0);
+#if defined(DEVICE_CROWPANEL_50)
+    // The same problem on the 5" upright (480x800), where growing took ~95% of
+    // the screen: 40% of the height there, half of it in landscape -- each
+    // about the keyboard on a phone held that way. Key labels at 20 px (named
+    // 18: hal/crowpanel_50_fonts.h) for keys this size.
+    lv_obj_set_height(keyboard, uiPortrait() ? (screenH * 2) / 5 : screenH / 2);
+    lv_obj_set_style_text_font(keyboard, &lv_font_montserrat_18, LV_PART_ITEMS);
+#else
     lv_obj_set_height(keyboard, uiPortrait() ? 150 : screenH / 2);
+#endif
 
     // What the keyboard gave up has to go somewhere. Where a sibling already
     // grows (the admin transcript) it takes it and the keyboard, created last,
@@ -32321,6 +32330,16 @@ static bool homeDashSideBySide() {
     return lv_disp_get_hor_res(NULL) >= 300;
 }
 
+// Every face of the dashboard's band on screen at once, stacked, rather than
+// one at a time in a carousel: the CrowPanel 5"'s 800x480 has the room for all
+// of them in either orientation, so there is nothing to turn. The lock screen's
+// carousel is unaffected.
+#if defined(DEVICE_CROWPANEL_50)
+#define HOME_DASH_SHOW_ALL 1
+#else
+#define HOME_DASH_SHOW_ALL 0
+#endif
+
 // Records a page as it is built. The face list is built in order rather than
 // indexed by a fixed enum, because the two carousels do not carry the same set:
 // the lock screen has a messages page the dashboard does not, and a wide panel
@@ -33052,6 +33071,10 @@ static void glanceCarouselGo(GlanceCarousel &c, int delta) {
 // serviceLockCarousel() and by nothing else.
 static void homeDashCarouselGo(int delta) {
     if (!homeDashboardVisible()) return;
+#if HOME_DASH_SHOW_ALL
+    (void)delta;
+    return;   // every face is already showing
+#endif
     // The cards go with the page. A swipe gets here without passing through
     // homeDashCursorKey(), so the outline would otherwise ride off on a face
     // that is no longer in front.
@@ -33327,6 +33350,21 @@ static void refreshHomeDashboard(bool force) {
     // The Tools chart modals keep their per-packet updates. You open those to
     // watch the radio; this one opens itself.
     if (force || minuteRolled) refreshGlancePage(s_homeCarousel, (int)s_homeCarousel.at);
+#elif HOME_DASH_SHOW_ALL
+    // Every face is in front, so every face is kept current: the charts on
+    // their own sequences, the node lists on the same arrived-or-minute gate.
+    refreshGlanceCharts(s_homeCarousel, force);
+    {
+        const bool arrived = (s_snrHist.seq != s_homeCarousel.nodeSeq);
+        if (force || minuteRolled || arrived) {
+            s_homeCarousel.nodeSeq = s_snrHist.seq;
+            for (int i = 0; i < (int)s_homeCarousel.pages; i++) {
+                if (s_homeCarousel.kind[i] != GLANCE_PAGE_CHARTS) {
+                    refreshGlancePage(s_homeCarousel, i);
+                }
+            }
+        }
+    }
 #else
     if (glanceFacing(s_homeCarousel) == GLANCE_PAGE_CHARTS) {
         refreshGlanceCharts(s_homeCarousel, force);
@@ -33465,7 +33503,11 @@ static void openHomeDashboard() {
     // ever runs under a chevron, and the chevrons sit outside the host — they
     // stay put while the pages slide beneath them, and are never clipped or
     // carried off screen with one.
+#if HOME_DASH_SHOW_ALL
+    const int arrowGutter = 0;   // no arrows: nothing turns
+#else
     const int arrowGutter = 11;
+#endif
     lv_obj_t *pageHost = lv_obj_create(s_homeDash);
     lv_obj_remove_style_all(pageHost);
     lv_obj_set_size(pageHost, widgetsW - (2 * arrowGutter), chartsH);
@@ -33484,6 +33526,7 @@ static void openHomeDashboard() {
     // turns. Labels rather than buttons: they mark the gesture instead of
     // offering a second way to perform it, and a tap target here would sit over
     // the pages and complicate what the swipe handler sees.
+#if !HOME_DASH_SHOW_ALL
     {
         const int arrowY = chartsTop
             + (chartsH - (int)lv_font_get_line_height(&lv_font_montserrat_12)) / 2;
@@ -33505,11 +33548,31 @@ static void openHomeDashboard() {
                          side == 0 ? widgetsX + 1 : -1, arrowY);
         }
     }
+#endif
 
+#if HOME_DASH_SHOW_ALL
+    // The band shared between the faces rather than each having all of it: the
+    // charts, then the node lists -- one face when they fit side by side, two
+    // when they do not. Worked out before the node faces are built, because a
+    // list card sizes its row count from the height it is given.
+    constexpr int kShowAllGap = 4;
+    const int showAllFaces = homeDashSideBySide() ? 2 : 3;
+    const int faceH = (chartsH - kShowAllGap * (showAllFaces - 1)) / showAllFaces;
+    glanceBuildChartPage(s_homeCarousel, pageHost);
+    glanceBuildNodePages(s_homeCarousel, pageHost, faceH - kTdeckProBandInset);
+    for (int i = 0; i < (int)s_homeCarousel.pages; i++) {
+        lv_obj_t *page = s_homeCarousel.page[i];
+        if (!lvObjValid(page)) continue;
+        lv_obj_set_height(page, faceH);
+        lv_obj_set_y(page, i * (faceH + kShowAllGap));
+        lv_obj_clear_flag(page, LV_OBJ_FLAG_HIDDEN);
+    }
+#else
     glanceBuildChartPage(s_homeCarousel, pageHost);
     // A card gets the band less its page's own padding, and that height is what
     // decides how many rows it fits.
     glanceBuildNodePages(s_homeCarousel, pageHost, chartsH - kTdeckProBandInset);
+#endif
     // Either list opens the Nodes screen. Here rather than in the page builder,
     // which has three layouts to return from and serves the lock screen too.
     homeDashMakeCardTarget(s_homeCarousel.nodeCard[0], nullptr, HOME_CURSOR_NODES_RECENT);
@@ -33519,7 +33582,9 @@ static void openHomeDashboard() {
     // Wio boards rotate on a setting, and landscape has one fewer face than
     // portrait. Left alone, coming back in landscape on page 2 would show a
     // page this build never made.
+#if !HOME_DASH_SHOW_ALL
     glanceShowPage(s_homeCarousel, s_homeCarousel.at);
+#endif
 
     s_homeGlanceMinuteKey = UINT32_MAX;   // force the first header paint
     refreshHomeDashboard(true);
