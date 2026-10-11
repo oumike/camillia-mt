@@ -112,9 +112,10 @@ selectable at runtime.
   it falls back to the S3's default UART1 pins, GPIO15/16, which are the touch
   bus.
 
-Tested on a V1.1+ board: display, backlight and touch work. The radio has not
-yet been seen on that board, and the UI is slow at this resolution (redraws of
-a few hundred milliseconds).
+Tested on a V1.1+ board: display, backlight, touch and the SX1262 (on CS8, with
+the switch on the wireless module) all work. With the switch anywhere else the
+boot log says the radio was not found. The UI is slow at this resolution
+(redraws of a few hundred milliseconds).
 
 > **Notes.**
 > - **T-Deck Pro:** this initial port follows LilyGo and Meshtastic pin
