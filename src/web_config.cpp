@@ -5216,7 +5216,10 @@ static void sendConfigPage(const char *msg = "", bool lite = false) {
         html += "<label>Auto-favorite radius (";
         html += imperial ? "miles" : "km";
         html += ")<input name='autofav_range' type='number' min='0.05' max='500'"
-                " step='0.05' value='";
+                // 'any', not 0.05: the radius is stored in metres and shown
+                // converted, and 1 km in miles (0.62) is not a 0.05 step --
+                // the browser refused to submit the whole page over it.
+                " step='any' value='";
         html += rangeBuf;
         html += "'></label>";
 
@@ -5286,10 +5289,14 @@ static void sendConfigPage(const char *msg = "", bool lite = false) {
                         " style='display:inline-block;padding:.4em 1.2em;background:#3b82f6;"
                         "color:#fff;border-radius:3px;text-decoration:none;font-size:.95em'>"
                         "&#11015; Download Wardrive Log (CSV)</a></p>"
-                        "<form method='POST' action='/clear-wardrive' style='margin:0 0 1em'"
-                        " onsubmit=\"return confirm('Delete the wardrive log file? Download it first if you need it.')\">"
-                        "<button type='submit' style='background:#c0392b'>"
-                        "Clear Wardrive Log</button></form>";
+                        // This is inside the Save form, and forms cannot nest:
+                        // a <form> here was ignored by the browser and its
+                        // </form> closed the Save form instead, leaving Save All
+                        // outside any form, where it did nothing. So the button
+                        // names its own form, which is emitted after Save's.
+                        "<p style='margin:0 0 1em'>"
+                        "<button type='submit' form='wdclear' style='background:#c0392b'>"
+                        "Clear Wardrive Log</button></p>";
             }
         }
         sectionEnd(html, lite);
@@ -5319,6 +5326,16 @@ static void sendConfigPage(const char *msg = "", bool lite = false) {
     sendChunk(html);
 
     html += "<button type='submit' style='width:100%;margin-top:1.5em'>Save All</button></form>";
+    // The Clear Wardrive Log button above submits this, by its form attribute.
+    // Empty and invisible when there is no log to clear.
+    html += "<form id='wdclear' method='POST' action='/clear-wardrive'"
+            " onsubmit=\"return confirm('Delete the wardrive log file? Download it first if you need it.')\"></form>";
+    // A field the browser rejects stops the submit, and if it sits in a closed
+    // section the browser cannot show why: Save just does nothing. Open the
+    // section first so the message has somewhere to appear.
+    html += "<script>document.addEventListener('invalid',function(e){"
+            "for(var d=e.target.parentNode;d;d=d.parentNode)"
+            "if(d.tagName==='DETAILS')d.open=true;},true);</script>";
     sendChunk(html);
 
     if (lite) {
