@@ -1568,14 +1568,17 @@ size_t encodeMapReportEnvelope(uint32_t fromNode, const MapReportInfo &info,
     return n;
 }
 
-// Parse the inner MeshPacket bytes into an on-air header + ciphertext.
+// Parse the inner MeshPacket bytes into an on-air header + payload. The payload
+// is MeshPacket.encrypted when present, else MeshPacket.decoded — the encoded
+// Data a stock node publishes with MQTT encryption off — with plaintext set.
 static bool decodeMeshPacketInner(const uint8_t *buf, size_t len,
                                   MeshHdr &hdr, uint8_t *cipher, size_t cipherCap,
-                                  size_t &cipherLen) {
+                                  size_t &cipherLen, bool &plaintext) {
     memset(&hdr, 0, sizeof(hdr));
     cipherLen = 0;
+    plaintext = false;
     uint32_t hopLimit = 0, hopStart = 0, wantAck = 0;
-    bool haveCipher = false;
+    bool haveCipher = false, haveDecoded = false;
     size_t i = 0;
     while (i < len) {
         uint64_t tag; i = pbReadVarint(buf, len, i, tag); if (!i) break;
@@ -1603,11 +1606,18 @@ static bool decodeMeshPacketInner(const uint8_t *buf, size_t len,
         } else if (wtype == 2) {       // length-delimited
             uint64_t sz; i = pbReadVarint(buf, len, i, sz); if (!i) break;
             if (i + sz > len) break;
+            // The two are a oneof, so a well-formed packet carries one of them.
+            // Should both appear, the ciphertext wins: it is what went on air.
             if (field == MP_ENCRYPTED) {
                 if (sz > cipherCap) return false;
                 memcpy(cipher, buf + i, sz);
                 cipherLen = (size_t)sz;
                 haveCipher = true;
+            } else if (field == MP_DECODED && !haveCipher) {
+                if (sz > cipherCap) return false;
+                memcpy(cipher, buf + i, sz);
+                cipherLen = (size_t)sz;
+                haveDecoded = true;
             }
             i += sz;
         } else {
@@ -1615,7 +1625,8 @@ static bool decodeMeshPacketInner(const uint8_t *buf, size_t len,
             if (!i) break;
         }
     }
-    if (!haveCipher) return false;
+    if (!haveCipher && !haveDecoded) return false;
+    plaintext = !haveCipher;
     // Reassemble on-air flags, forcing via_mqtt on for downlinked packets.
     hdr.flags = (uint8_t)((hopLimit & 0x07) | (wantAck << 3) | 0x10 |
                           ((hopStart & 0x07) << 5));
@@ -1624,8 +1635,9 @@ static bool decodeMeshPacketInner(const uint8_t *buf, size_t len,
 
 bool decodeServiceEnvelope(const uint8_t *buf, size_t len,
                            MeshHdr &hdr, uint8_t *cipher, size_t cipherCap,
-                           size_t &cipherLen,
+                           size_t &cipherLen, bool &plaintext,
                            char *channelName, size_t channelNameCap) {
+    plaintext = false;
     if (channelName && channelNameCap) channelName[0] = '\0';
     const uint8_t *packetPtr = nullptr; size_t packetLen = 0;
     size_t i = 0;
@@ -1648,7 +1660,8 @@ bool decodeServiceEnvelope(const uint8_t *buf, size_t len,
         }
     }
     if (!packetPtr) return false;
-    return decodeMeshPacketInner(packetPtr, packetLen, hdr, cipher, cipherCap, cipherLen);
+    return decodeMeshPacketInner(packetPtr, packetLen, hdr, cipher, cipherCap, cipherLen,
+                                 plaintext);
 }
 
 const char *portnumName(uint32_t p) {
