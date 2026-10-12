@@ -53252,8 +53252,17 @@ static bool s_mqttDownlinkUiDirty = false;
 // received-style packet and run it through the normal RX pipeline so it displays
 // and (for router roles) rebroadcasts onto LoRa — gated by the channel's
 // downlink flag. Called from mqttBridgeLoop() on the main loop.
-static void mqttDownlinkInject(const MeshHdr &hdr, const uint8_t *cipher,
-                               size_t cipherLen, const char *chanName) {
+//
+// plaintext: the envelope's packet carried `decoded` Data rather than
+// ciphertext, as stock nodes publish with MQTT encryption off. Such a packet is
+// encrypted here with the named channel's key and stamped with its hash, so from
+// there on it is the encrypted form and takes the same path — decrypt, dedup
+// against the RF and encrypted-MQTT copies, and a relay that has on-air bytes
+// to send. Upstream does the same, re-encrypting on its way back to LoRa.
+static void mqttDownlinkInject(const MeshHdr &hdrIn, const uint8_t *cipherIn,
+                               size_t cipherLen, bool plaintext, const char *chanName) {
+    MeshHdr hdr = hdrIn;
+    const uint8_t *cipher = cipherIn;
     // Nothing from the broker enters the RX pipeline while a preset scan has the
     // radio parked on another preset. The bridge keeps its session — dropping a
     // downlink costs one packet, where dropping the session costs a reconnect —
@@ -53282,6 +53291,12 @@ static void mqttDownlinkInject(const MeshHdr &hdr, const uint8_t *cipher,
     // meant to reject them.
     const bool isPkiEnvelope = chanName && !strcmp(chanName, "PKI");
     if (isPkiEnvelope) {
+        // A PKI packet is only ever ciphertext; there is no key to check a
+        // "decoded" one against, so it would be an unauthenticated DM.
+        if (plaintext) {
+            Serial.println("[mqtt] downlink drop: decoded packet on PKI topic");
+            return;
+        }
         if (s_myNodeId == 0 || hdr.to != s_myNodeId) {
             Serial.println("[mqtt] downlink drop: PKI packet not addressed to us");
             return;
@@ -53321,8 +53336,38 @@ static void mqttDownlinkInject(const MeshHdr &hdr, const uint8_t *cipher,
                       CHANNEL_KEYS[idx].name);
         return;
     }
-    Serial.printf("[mqtt] downlink inject: channel='%s' from=%08lx\n",
-                  CHANNEL_KEYS[idx].name, (unsigned long)hdr.from);
+
+    uint8_t sealed[sizeof(((MeshPacket *)nullptr)->rawCipher)];
+    if (plaintext) {
+        uint32_t port = 0, reqId = 0; bool wantResp = false;
+        const uint8_t *pay = nullptr; size_t payLen = 0;
+        if (cipherLen == 0 || cipherLen > sizeof(sealed) ||
+            !decodeData(cipher, cipherLen, port, pay, payLen, reqId, wantResp)) {
+            Serial.printf("[mqtt] downlink drop: malformed decoded packet on '%s'\n",
+                          CHANNEL_KEYS[idx].name);
+            return;
+        }
+        // Upstream's rule: anyone on the broker can write a decoded packet, and
+        // nothing in it proves who sent it, so it never reaches admin handling.
+        if (port == ADMIN_APP) {
+            Serial.printf("[mqtt] downlink drop: decoded ADMIN packet from=%08lx\n",
+                          (unsigned long)hdr.from);
+            return;
+        }
+        if (!encryptPayload(hdr.id, hdr.from, CHANNEL_KEYS[idx].key,
+                            CHANNEL_KEYS[idx].keyLen, cipher, sealed, cipherLen)) {
+            Serial.println("[mqtt] downlink drop: could not encrypt decoded packet");
+            return;
+        }
+        cipher = sealed;
+        // A decoded packet's channel field is the sender's channel index, not
+        // the on-air hash decryptPacket() and the relay need.
+        hdr.channel = CHANNEL_KEYS[idx].hash;
+    }
+
+    Serial.printf("[mqtt] downlink inject: channel='%s' from=%08lx%s\n",
+                  CHANNEL_KEYS[idx].name, (unsigned long)hdr.from,
+                  plaintext ? " (decoded)" : "");
 
     // Reconstruct the decoded packet the same way MeshRadio::pollRx() does, then
     // hand it to the shared RX handler (decrypt/display + rebroadcast).

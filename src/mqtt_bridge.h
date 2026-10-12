@@ -47,8 +47,10 @@ void mqttBridgeConfigChanged();
 
 // Downlink sink: the bridge calls this with a decoded ServiceEnvelope so the app
 // can display and/or rebroadcast it. Set to nullptr (default) to ignore downlink.
+// plaintext: cipher holds an unencrypted encoded Data (the envelope's packet was
+// published "decoded"), not channel ciphertext.
 typedef void (*MqttInjectFn)(const MeshHdr &hdr, const uint8_t *cipher,
-                             size_t cipherLen, const char *chanName);
+                             size_t cipherLen, bool plaintext, const char *chanName);
 void mqttBridgeSetInject(MqttInjectFn fn);
 
 // The gateway that uplinked a packet this bridge delivered: the node whose id

@@ -458,11 +458,15 @@ size_t encodeMapReportEnvelope(uint32_t fromNode, const MapReportInfo &info,
 
 // Decode a ServiceEnvelope received from MQTT. Reconstructs the on-air header
 // (with the via_mqtt flag forced on) and copies MeshPacket.encrypted into
-// cipher[cipherCap]. channelName (may be nullptr) receives ServiceEnvelope
-// .channel_id. Returns false if no encrypted payload was present or on overflow.
+// cipher[cipherCap]. A packet with no encrypted field but a decoded one — what
+// stock nodes publish with MQTT encryption off — has the encoded Data copied
+// there instead, plaintext set, and hdr.channel as the sender wrote it (a
+// channel index, not a hash). channelName (may be nullptr) receives
+// ServiceEnvelope.channel_id. Returns false if neither payload was present or
+// on overflow.
 bool decodeServiceEnvelope(const uint8_t *buf, size_t len,
                            MeshHdr &hdr, uint8_t *cipher, size_t cipherCap,
-                           size_t &cipherLen,
+                           size_t &cipherLen, bool &plaintext,
                            char *channelName, size_t channelNameCap);
 
 // ── Hop limit ─────────────────────────────────────────────────
