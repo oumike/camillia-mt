@@ -2826,9 +2826,20 @@ being revisited.
 Direct messaging:
 
 - Open from the main screen (D on keyboard builds, DM bottom-nav button on Heltec)
+- Wherever the chat's channel list is a drawer (every board but the T-Lora
+  Pager and the large-panel P4 in landscape), the conversations are one too: the
+  screen opens on the most recent conversation, full width, with its peer named
+  in the header, and the list slides in from the left over the messages. It
+  opens the way the channel list does — **C** (**H** on the Cardputer), the DM
+  button again on the M9, or on touch a tap on the name in the header or a swipe
+  in from the left edge. Picking a conversation (Enter, or a tap) slides it away
+  again; a tap outside it, or C/H again, closes it. With no conversations yet it
+  opens on the list, at New DM
+- The Pager and the large-panel P4 in landscape keep the two panels side by side
 - Pressing Enter on New DM opens node picker
 - Enter on a conversation focuses the message panel (it stops there — Enter never
-  opens compose)
+  opens compose). On the drawer boards that is the list sliding away; Backspace
+  (T-Deck, T-Deck Pro) brings it back
 - Space opens compose for the focused DM (Space replaced Enter for new messages)
 - DM messages honor the Bubbles chat style: your messages are right-aligned in
   the accent/ack color, the other node's are left-aligned in their node color
@@ -2841,7 +2852,8 @@ Delete behavior:
   conversation?** dialog naming the peer and warning that the message history
   goes with it. Y or Enter confirms, N or the modal close key cancels, and the
   dialog swallows every other key while it is up. D does nothing on the New DM
-  row, or while the message panel has focus
+  row, or while the message panel has focus (on the drawer boards: while the
+  list is closed)
 - Heltec touch build: long-press a conversation row for 3 seconds to raise the
   same dialog; tap (Y)es or (N)o, or tap outside it to cancel
 - Deleting removes the conversation and its stored history, and cannot be

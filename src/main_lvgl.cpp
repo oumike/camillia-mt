@@ -1086,6 +1086,15 @@ static lv_obj_t *s_dmMsgList = nullptr;
 static lv_obj_t *s_dmConvTitle = nullptr;
 static lv_obj_t *s_dmMsgTitle = nullptr;
 static lv_obj_t *s_dmHintLabel = nullptr;
+// Where the conversations are a drawer (dmListIsDrawer()): the scrim behind it,
+// and the screen header's title, which names the conversation being read.
+// s_dmConvPanel is the drawer itself. Null on the two-pane layout.
+static lv_obj_t *s_dmDrawerScrim = nullptr;
+static lv_obj_t *s_dmHeaderTitle = nullptr;
+static bool s_dmDrawerOpen = false;
+// False until the screen's first placement, which is instant: the screen opens
+// with the drawer already where it belongs rather than sliding into it.
+static bool s_dmDrawerAnimReady = false;
 static lv_obj_t *s_dmNodePickerModal = nullptr;
 static lv_obj_t *s_dmNodePickerList = nullptr;
 static lv_obj_t *s_dmNodePickerTitle = nullptr;
@@ -7641,6 +7650,24 @@ static inline bool channelListIsDropdown() {
 #else
     return UI_CHANNEL_LIST_DROPDOWN != 0;
 #endif
+}
+
+// The drawers' slide (the channel list's, and the DM screen's conversation
+// list). Instant on the Pro, for the reason the dashboard carousel is
+// (HAS_HOME_CAROUSEL_ANIM): every animated frame there is an e-paper refresh.
+#if defined(DEVICE_TDECK_PRO)
+#define HAS_CHANNEL_DRAWER_ANIM 0
+#else
+#define HAS_CHANNEL_DRAWER_ANIM 1
+#endif
+static constexpr uint32_t kChannelDrawerSlideMs = 180;
+
+// The DM screen's conversations slide in the same way wherever the channels do:
+// a drawer over the messages rather than a pane beside them. The Pager and the
+// large-panel P4 in landscape keep the two panes, as they keep the channel
+// column.
+static inline bool dmListIsDrawer() {
+    return channelListIsDropdown();
 }
 
 // ── Status icon ink ──────────────────────────────────────────────────────────
@@ -25103,6 +25130,10 @@ static void closeDmModal() {
     s_dmConvTitle = nullptr;
     s_dmMsgTitle = nullptr;
     s_dmHintLabel = nullptr;
+    s_dmDrawerScrim = nullptr;
+    s_dmHeaderTitle = nullptr;
+    s_dmDrawerOpen = false;
+    s_dmDrawerAnimReady = false;
     s_dmConvCount = 0;
     s_dmSelection = -1;
     s_dmRenderedConvCount = -1;
@@ -29709,7 +29740,9 @@ static void executeNodesActionSelection() {
             for (int i = 0; i < s_dmConvCount; i++) {
                 if (s_dmConvNodeIds[i] == nodeId) {
                     s_dmSelection = i + 1;  // +1 because row 0 is "New DM"
-                    s_dmMsgPanelFocused = false;
+                    // Into the conversation itself where the list is a drawer;
+                    // on the two panes, the list keeps the keys as before.
+                    s_dmMsgPanelFocused = dmListIsDrawer();
                     refreshDmModal(true);
                     break;
                 }
@@ -37840,7 +37873,230 @@ static bool dmTakeDeferredRefresh() {
 }
 #endif
 
+// ── DM conversation drawer ───────────────────────────────────────────────────
+// The channel drawer's twin (channelDrawerSlide()), on the DM screen. It is not
+// a separate state: it is the conversation list having the keys. Open while
+// s_dmMsgPanelFocused is false -- the list's keys, the list in view -- and shut
+// while the messages have them, so every path that already moved focus between
+// the two panes (Enter, Backspace, the wheel click, a tap on a row, a delete)
+// opens and closes it without knowing it exists.
+static bool dmDrawerBuilt() {
+    return lvObjValid(s_dmModal) && lvObjValid(s_dmConvPanel) && lvObjValid(s_dmDrawerScrim)
+        && lvObjValid(s_dmMsgPanel);
+}
+
+#if HAS_CHANNEL_DRAWER_ANIM
+static void dmDrawerSlideXCb(void *obj, int32_t x) {
+    lv_obj_set_x((lv_obj_t *)obj, x);
+}
+
+static void dmDrawerSlideDone(lv_anim_t *a) {
+    lv_obj_t *drawer = (lv_obj_t *)a->var;
+    if (!s_dmDrawerOpen && lvObjValid(drawer)) {
+        lv_obj_add_flag(drawer, LV_OBJ_FLAG_HIDDEN);
+    }
+}
+#endif
+
+static void dmDrawerSlide(bool open) {
+    if (!dmDrawerBuilt()) return;
+
+    // Placed every time, even when it is not moving: the nav column's padding
+    // goes on the screen after the drawer is made (appendHeltecBottomNav()),
+    // and the Cardputer's hint line comes and goes under the pane with the
+    // delete prompt. Coordinates are the screen's content area, which starts
+    // its padding in from the display edge; the drawer sits flush against that
+    // edge, or against the nav column when it is on the left, over the message
+    // pane's full height.
+    lv_obj_update_layout(s_dmModal);
+    const int32_t padL = lv_obj_get_style_pad_left(s_dmModal, LV_PART_MAIN)
+                       + lv_obj_get_style_border_width(s_dmModal, LV_PART_MAIN);
+    const int32_t padT = lv_obj_get_style_pad_top(s_dmModal, LV_PART_MAIN)
+                       + lv_obj_get_style_border_width(s_dmModal, LV_PART_MAIN);
+    lv_obj_t *content = lv_obj_get_parent(s_dmMsgPanel);
+    const int32_t paneY = lv_obj_get_y(content);
+    const int32_t paneH = lv_obj_get_height(content);
+#if defined(DEVICE_TDECK_PRO)
+    // From the top of the screen, over the header, as the channel drawer is
+    // there: on 1-bit paper with no dim, a sheet the pane's height only looks
+    // like the pane got narrower.
+    lv_obj_set_y(s_dmConvPanel, -padT);
+    lv_obj_set_height(s_dmConvPanel, paneY + paneH + padT);
+#else
+    lv_obj_set_y(s_dmConvPanel, paneY);
+    lv_obj_set_height(s_dmConvPanel, paneH);
+#endif
+    const int32_t shownX = navSideInsetLeft() - padL;
+    const int32_t hiddenX = -padL - lv_obj_get_width(s_dmConvPanel) - 2;
+
+    lv_obj_set_pos(s_dmDrawerScrim, -padL, -padT);
+    // No scrim with nothing behind the drawer to go back to: tapping it could
+    // not shut the list (dmDrawerSetOpen()), and up it would cover the nav bar
+    // that is the touch boards' only way off this screen. Set on every pass,
+    // so the first conversation arriving with the list up brings it in.
+    if (open && s_dmConvCount > 0) lv_obj_clear_flag(s_dmDrawerScrim, LV_OBJ_FLAG_HIDDEN);
+    else                           lv_obj_add_flag(s_dmDrawerScrim, LV_OBJ_FLAG_HIDDEN);
+    if (open == s_dmDrawerOpen
+        && open != lv_obj_has_flag(s_dmConvPanel, LV_OBJ_FLAG_HIDDEN)) {
+        return;   // already where it was asked to be
+    }
+    s_dmDrawerOpen = open;
+
+    if (open) {
+        lv_obj_move_foreground(s_dmDrawerScrim);
+        if (lv_obj_has_flag(s_dmConvPanel, LV_OBJ_FLAG_HIDDEN)) {
+            lv_obj_set_x(s_dmConvPanel, hiddenX);
+            lv_obj_clear_flag(s_dmConvPanel, LV_OBJ_FLAG_HIDDEN);
+        }
+        lv_obj_move_foreground(s_dmConvPanel);
+        // The selection may be anywhere in a long list.
+        if (s_dmSelection > 0 && s_dmSelection <= s_dmConvCount
+            && lvObjValid(s_dmConvRows[s_dmSelection - 1])) {
+            lv_obj_scroll_to_view(s_dmConvRows[s_dmSelection - 1], LV_ANIM_OFF);
+        }
+    } else {
+        lv_obj_add_flag(s_dmDrawerScrim, LV_OBJ_FLAG_HIDDEN);
+    }
+
+#if HAS_CHANNEL_DRAWER_ANIM
+    lv_anim_delete(s_dmConvPanel, dmDrawerSlideXCb);
+    if (s_dmDrawerAnimReady) {
+        lv_anim_t a;
+        lv_anim_init(&a);
+        lv_anim_set_var(&a, s_dmConvPanel);
+        lv_anim_set_exec_cb(&a, dmDrawerSlideXCb);
+        lv_anim_set_values(&a, lv_obj_get_x(s_dmConvPanel), open ? shownX : hiddenX);
+        lv_anim_set_duration(&a, kChannelDrawerSlideMs);
+        lv_anim_set_path_cb(&a, lv_anim_path_ease_out);
+        lv_anim_set_completed_cb(&a, dmDrawerSlideDone);
+        lv_anim_start(&a);
+        return;
+    }
+#endif
+    lv_obj_set_x(s_dmConvPanel, open ? shownX : hiddenX);
+    if (!open) lv_obj_add_flag(s_dmConvPanel, LV_OBJ_FLAG_HIDDEN);
+}
+
+// Brings the drawer to where the focus says it belongs.
+static void dmDrawerSync() {
+    if (!dmDrawerBuilt()) return;
+    dmDrawerSlide(!(s_dmMsgPanelFocused && s_dmSelection > 0));
+}
+
+// Asked for by name: the toggle key, a tap on the header or the scrim, a swipe.
+// Shutting it needs a conversation to show behind it. From the New DM row that
+// is the top one; with no conversations at all there is nothing to show, and
+// the list stays.
+static void dmDrawerSetOpen(bool open) {
+    if (!dmDrawerBuilt()) return;
+    if (open) {
+        s_dmMsgPanelFocused = false;
+        refreshDmPanelFocusStyles();
+        return;
+    }
+    if (s_dmSelection <= 0) {
+        if (s_dmConvCount <= 0) return;
+        s_dmSelection = 1;
+        s_dmMsgPanelFocused = true;
+        refreshDmModal(true);
+        return;
+    }
+    s_dmMsgPanelFocused = true;
+    refreshDmPanelFocusStyles();
+}
+
+static void onDmDrawerScrimPressed(lv_event_t *e) {
+    LV_UNUSED(e);
+    dmDrawerSetOpen(false);
+}
+
+#if HAS_TOUCH
+static void onDmHeaderTitlePressed(lv_event_t *e) {
+    LV_UNUSED(e);
+    // Only ever opens in practice: while the drawer is up the scrim covers the
+    // header, and the tap closes it from there.
+    dmDrawerSetOpen(!s_dmDrawerOpen);
+}
+#endif
+
+#if HAS_TOUCH && UI_CHANNEL_LIST_DROPDOWN
+// The edge swipe's half for this screen (channelDrawerIndevCb()): the DM screen
+// has to be the one in front, with nothing of its own over it.
+static bool dmDrawerCanOpenFromEdge() {
+    if (!dmDrawerBuilt() || s_dmDrawerOpen) return false;
+    if (s_composeModal || s_dmNodePickerModal || s_dmDelModal) return false;
+    lv_obj_t *parent = lv_obj_get_parent(s_dmModal);
+    if (!parent) return false;
+    const int32_t from = lv_obj_get_index(s_dmModal);
+    if (from < 0) return false;
+    const int32_t dispW = lv_disp_get_hor_res(NULL);
+    const int32_t dispH = lv_disp_get_ver_res(NULL);
+    const uint32_t n = lv_obj_get_child_count(parent);
+    for (uint32_t i = (uint32_t)from + 1; i < n; i++) {
+        lv_obj_t *o = lv_obj_get_child(parent, (int32_t)i);
+        if (!o || lv_obj_has_flag(o, LV_OBJ_FLAG_HIDDEN)) continue;
+        if (lv_obj_get_width(o) >= dispW * 3 / 4 && lv_obj_get_height(o) >= dispH / 2) {
+            return false;
+        }
+    }
+    return true;
+}
+#endif
+
+// The header names the conversation being read, as the chat's names its
+// channel; the screen's own name when there is none.
+static void dmRefreshHeaderTitle(const DmConv *selected) {
+    if (!lvObjValid(s_dmHeaderTitle) || !dmDrawerBuilt()) return;
+    if (!selected) {
+        screenHeaderSetTitle(s_dmHeaderTitle, TR("Direct Messages"));
+        return;
+    }
+    char name[64];
+    chatSenderLabel(selected->nodeId, name, sizeof(name));
+    if (!name[0] && liveShortNameUsable(selected->shortName)) {
+        snprintf(name, sizeof(name), "%s", selected->shortName);
+    }
+    if (!name[0]) snprintf(name, sizeof(name), "!%08lX", (unsigned long)selected->nodeId);
+    screenHeaderSetTitle(s_dmHeaderTitle, name);
+}
+
+// The key legend under the messages. One place for it: the screen sets it on
+// open, and refreshDmModal() puts it back after the delete flow has borrowed
+// the line.
+static const char *dmHintText() {
+    static char buf[128];
+    const bool drawer = dmListIsDrawer();
+#if defined(DEVICE_CARDPUTER_LORA_HAT)
+    LV_UNUSED(drawer);
+    buf[0] = '\0';   // no static legend here (openDmModal())
+#elif defined(DEVICE_TDECK)
+    snprintf(buf, sizeof(buf), "%s",
+             drawer ? TR("J/K = Select   Enter = Open   C = List   Space = Compose   D = Delete")
+                    : TR("J/K = Select   Space = Compose   Enter = Focus   D = Delete"));
+#elif defined(DEVICE_TLORA_PAGER_TFT)
+    LV_UNUSED(drawer);
+    snprintf(buf, sizeof(buf), "%s",
+             TR("Up/Down = Select   Space = Compose   Enter = Focus   D = Delete"));
+#elif UI_TOUCH_ONLY_PROFILE
+    snprintf(buf, sizeof(buf), "%s",
+             drawer ? TR("Tap name = List   Long-press 3s = Delete   DM below = Back")
+                    : TR("Tap = Open   Long-press 3s = Delete   DM below = Back"));
+#elif defined(DEVICE_M9)
+    snprintf(buf, sizeof(buf),
+             drawer ? TR("Up/Down = Select   Enter = Open   DM = List   Space = Compose   %s = Delete   %s = Back")
+                    : TR("Up/Down = Select   Space = Compose   Enter = Focus   %s = Delete   %s = Back"),
+             dmDeleteTriggerLabel(), modalCloseKeyLabel());
+#else
+    snprintf(buf, sizeof(buf),
+             drawer ? TR("Up/Down = Select   Enter = Open   C = List   Space = Compose   %s = Delete   %s = Back")
+                    : TR("Up/Down = Select   Space = Compose   Enter = Focus   %s = Delete   %s = Back"),
+             dmDeleteTriggerLabel(), modalCloseKeyLabel());
+#endif
+    return buf;
+}
+
 static void refreshDmPanelFocusStyles() {
+    dmDrawerSync();
     if (!s_dmConvTitle || !s_dmMsgTitle) return;
 
     // The panes have no frame now -- one rule divides them -- so the pane with
@@ -37867,6 +38123,10 @@ static void refreshDmPanelFocusStyles() {
 static void onDmConversationPressed(lv_event_t *e) {
     int idx = (int)(intptr_t)lv_event_get_user_data(e);
     if (idx < 0 || idx > s_dmConvCount) return;
+    // The end of a hold-to-delete: in the drawer rows answer on CLICKED, which
+    // LVGL still sends on that release, and it would shut the drawer behind the
+    // prompt the hold just raised.
+    if (s_dmDelModal) return;
     s_dmSelection = idx;
     s_dmMsgPanelFocused = (idx > 0);
 #if UI_TOUCH_ONLY_PROFILE
@@ -38129,6 +38389,9 @@ static void activateDmNodePickerSelection() {
     for (int i = 0; i < s_dmConvCount; i++) {
         if (s_dmConvNodeIds[i] == selectedNodeId) {
             s_dmSelection = i + 1;  // +1 because row 0 is "New DM"
+            // Into the new conversation where the list is a drawer, as from
+            // Nodes (executeNodesActionSelection()).
+            if (dmListIsDrawer()) s_dmMsgPanelFocused = true;
             break;
         }
     }
@@ -38435,6 +38698,8 @@ static void refreshDmModal(bool force) {
         s_dmMsgPanel = nullptr;
         s_dmMsgList = nullptr;
         s_dmHintLabel = nullptr;
+        s_dmDrawerScrim = nullptr;
+        s_dmHeaderTitle = nullptr;
         return;
     }
 
@@ -38462,7 +38727,6 @@ static void refreshDmModal(bool force) {
         }
     }
 
-    memset(s_dmConvRows, 0, sizeof(s_dmConvRows));
     memset(s_dmConvNodeIds, 0, sizeof(s_dmConvNodeIds));
     s_dmConvCount = 0;
 
@@ -38519,6 +38783,9 @@ static void refreshDmModal(bool force) {
         return;
     }
 
+    // Cleared with the rows, not before the early-out above: the drawer reads
+    // them between rebuilds to scroll the selection into view (dmDrawerSlide()).
+    memset(s_dmConvRows, 0, sizeof(s_dmConvRows));
     lv_obj_clean(s_dmConvList);
     chatBlinkForget(s_dmBlink, openDmPeerNodeId());
     lv_obj_clean(s_dmMsgList);
@@ -38633,7 +38900,12 @@ static void refreshDmModal(bool force) {
             lv_obj_set_style_bg_opa(row, selectedRow ? LV_OPA_70 : LV_OPA_40, 0);
 #endif
             lv_obj_set_style_shadow_width(row, 0, 0);
-            lv_obj_add_event_cb(row, onDmConversationPressed, LV_EVENT_PRESSED, (void *)(intptr_t)rowIdx);
+            // In the drawer a tap on a row also shuts it, so it waits for the
+            // tap to finish: on PRESSED, dragging the list to scroll it would
+            // pick whichever row the finger landed on and slam the drawer.
+            lv_obj_add_event_cb(row, onDmConversationPressed,
+                                dmListIsDrawer() ? LV_EVENT_CLICKED : LV_EVENT_PRESSED,
+                                (void *)(intptr_t)rowIdx);
             lv_obj_add_event_cb(row, onDmConversationPressState, LV_EVENT_PRESSED, (void *)(intptr_t)rowIdx);
             lv_obj_add_event_cb(row, onDmConversationPressState, LV_EVENT_PRESSING, (void *)(intptr_t)rowIdx);
             lv_obj_add_event_cb(row, onDmConversationPressState, LV_EVENT_RELEASED, (void *)(intptr_t)rowIdx);
@@ -38868,24 +39140,7 @@ static void refreshDmModal(bool force) {
         if (s_dmDeleteFlashMsg[0]) {
             lv_label_set_text(s_dmHintLabel, s_dmDeleteFlashMsg);
         } else {
-#if defined(DEVICE_CARDPUTER_LORA_HAT)
-            lv_label_set_text(s_dmHintLabel, "");   // no static legend here
-#elif defined(DEVICE_TDECK)
-            lv_label_set_text(s_dmHintLabel,
-                                  TR("J/K = Select   Space = Compose   Enter = Focus   D = Delete"));
-#elif defined(DEVICE_TLORA_PAGER_TFT)
-            lv_label_set_text(s_dmHintLabel,
-                                  TR("Up/Down = Select   Space = Compose   Enter = Focus   D = Delete"));
-#elif UI_TOUCH_ONLY_PROFILE
-            lv_label_set_text_fmt(s_dmHintLabel,
-                                  TR("Tap = Open   Long-press 3s = Delete"
-                                  "   DM below = Back"));
-#else
-            lv_label_set_text_fmt(s_dmHintLabel,
-                                  TR("Up/Down = Select   Space = Compose   Enter = Focus   %s = Delete   %s = Back"),
-                                  dmDeleteTriggerLabel(),
-                                  modalCloseKeyLabel());
-#endif
+            lv_label_set_text(s_dmHintLabel, dmHintText());
         }
 #if defined(DEVICE_CARDPUTER_LORA_HAT)
         // The line exists only while the delete flow is talking. Hiding rather
@@ -38897,6 +39152,7 @@ static void refreshDmModal(bool force) {
 #endif
     }
 
+    dmRefreshHeaderTitle(selected);
     refreshDmPanelFocusStyles();
 }
 
@@ -38910,6 +39166,10 @@ static void openDmModal() {
         s_dmConvTitle = nullptr;
         s_dmMsgTitle = nullptr;
         s_dmHintLabel = nullptr;
+        s_dmDrawerScrim = nullptr;
+        s_dmHeaderTitle = nullptr;
+        s_dmDrawerOpen = false;
+        s_dmDrawerAnimReady = false;
     }
     if (!s_rootScreen || s_dmModal) return;
     if (s_composeModal) closeComposePrompt();
@@ -38931,19 +39191,28 @@ static void openDmModal() {
     // Less the nav column where the bar is one (Left/Right): the panes are
     // sized absolutely, and appendHeltecBottomNav() reserves it as padding.
     int contentW = modalW - 8 - (navIsSideColumn() ? kSideNavW : 0);
+    // Where the conversations are a drawer, the messages have the whole width
+    // and the list slides in over them from the left (dmDrawerSlide()).
+    const bool dmDrawer = dmListIsDrawer();
     // Conversations over messages, both full width, instead of side by side:
     // the P4 held upright is 284 px wide -- too narrow to split -- and has the
     // height to stack into, the same way its Nodes screen does. The Heltec V4
     // and the Wio Tracker upright (240 px) take the same layout.
 #if defined(DEVICE_TDISPLAY_P4) || defined(DEVICE_HELTEC_V4_EXPANSION) \
     || defined(DEVICE_WIO_TRACKER_L2)
-    const bool dmStacked = uiPortrait();
+    const bool dmStacked = !dmDrawer && uiPortrait();
 #else
     const bool dmStacked = false;
 #endif
-    int leftW = dmStacked ? contentW : max(96, (contentW * 38) / 100);
+    // The drawer is as wide as the channel drawer (buildUi()).
+#if defined(DEVICE_CROWPANEL_50)
+    const int drawerW = min(max(contentW / 2, 120), 420);
+#else
+    const int drawerW = min(max(contentW / 2, 120), 260);
+#endif
+    int leftW = dmDrawer ? drawerW : (dmStacked ? contentW : max(96, (contentW * 38) / 100));
     // Side by side: a 3 px gap either side of the 1 px rule between the panes.
-    int rightW = dmStacked ? contentW : (contentW - leftW - 7);
+    int rightW = (dmDrawer || dmStacked) ? contentW : (contentW - leftW - 7);
 
     s_dmModal = lv_obj_create(s_rootScreen);
     lv_obj_set_size(s_dmModal, modalW, modalH);
@@ -38959,7 +39228,19 @@ static void openDmModal() {
     lv_obj_set_flex_flow(s_dmModal, LV_FLEX_FLOW_COLUMN);
     lv_obj_set_flex_align(s_dmModal, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_START);
 
-    buildScreenHeader(s_dmModal, TR("Direct Messages"));
+    lv_obj_t *dmTitle = buildScreenHeader(s_dmModal, TR("Direct Messages"));
+    if (dmDrawer) {
+        // Retitled with the conversation being read (dmRefreshHeaderTitle()).
+        s_dmHeaderTitle = dmTitle;
+#if HAS_TOUCH
+        // A tap on the name opens the drawer, as on the chat's channel name.
+        if (dmTitle) {
+            lv_obj_add_flag(dmTitle, LV_OBJ_FLAG_CLICKABLE);
+            lv_obj_set_ext_click_area(dmTitle, 6);
+            lv_obj_add_event_cb(dmTitle, onDmHeaderTitlePressed, LV_EVENT_CLICKED, nullptr);
+        }
+#endif
+    }
 
     lv_obj_t *content = lv_obj_create(s_dmModal);
     lv_obj_set_width(content, lv_pct(100));
@@ -38980,33 +39261,84 @@ static void openDmModal() {
     }
     lv_obj_set_flex_align(content, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_START);
 
-    lv_obj_t *leftPanel = lv_obj_create(content);
+    lv_obj_t *leftPanel = nullptr;
+    if (dmDrawer) {
+        // Behind the drawer and over everything else on the screen, the header
+        // and nav bar included: a tap anywhere off the list shuts it. Built
+        // first so the drawer, raised after it on every open, sits on top. No
+        // dim on the Pro, where a partial opacity dithers. As the channel
+        // drawer's (buildUi()).
+        s_dmDrawerScrim = lv_obj_create(s_dmModal);
+        lv_obj_remove_style_all(s_dmDrawerScrim);
+        lv_obj_add_flag(s_dmDrawerScrim, LV_OBJ_FLAG_IGNORE_LAYOUT);
+        lv_obj_set_size(s_dmDrawerScrim, modalW, modalH);
+        lv_obj_set_style_bg_color(s_dmDrawerScrim, lv_color_black(), 0);
+#if defined(DEVICE_TDECK_PRO)
+        lv_obj_set_style_bg_opa(s_dmDrawerScrim, LV_OPA_TRANSP, 0);
+#else
+        lv_obj_set_style_bg_opa(s_dmDrawerScrim, LV_OPA_40, 0);
+#endif
+        lv_obj_add_flag(s_dmDrawerScrim,
+                        (lv_obj_flag_t)(LV_OBJ_FLAG_CLICKABLE | LV_OBJ_FLAG_HIDDEN));
+        lv_obj_clear_flag(s_dmDrawerScrim, LV_OBJ_FLAG_SCROLLABLE);
+        lv_obj_add_event_cb(s_dmDrawerScrim, onDmDrawerScrimPressed, LV_EVENT_CLICKED, nullptr);
+
+        // The drawer: out of the screen's flex column, hidden until it opens,
+        // and placed by dmDrawerSlide() each time it moves. Styled as the
+        // channel drawer is.
+        leftPanel = lv_obj_create(s_dmModal);
+        lv_obj_add_flag(leftPanel,
+                        (lv_obj_flag_t)(LV_OBJ_FLAG_IGNORE_LAYOUT | LV_OBJ_FLAG_HIDDEN));
+        lv_obj_set_size(leftPanel, leftW, lv_pct(100));
+#if defined(DEVICE_TDECK_PRO)
+        lv_obj_set_style_bg_color(leftPanel, lv_color_make(255, 255, 255), 0);
+        lv_obj_set_style_bg_opa(leftPanel, LV_OPA_COVER, 0);
+        lv_obj_set_style_border_width(leftPanel, 2, 0);
+        lv_obj_set_style_border_color(leftPanel, lv_color_make(0, 0, 0), 0);
+        lv_obj_set_style_border_side(leftPanel,
+            (lv_border_side_t)(LV_BORDER_SIDE_RIGHT | LV_BORDER_SIDE_BOTTOM), 0);
+#else
+        lv_obj_set_style_bg_color(leftPanel, lv_color_hex(0x0F2A5C), 0);
+        lv_obj_set_style_bg_opa(leftPanel, LV_OPA_COVER, 0);
+        lv_obj_set_style_border_width(leftPanel, 1, 0);
+        lv_obj_set_style_border_color(leftPanel, lv_color_hex(0x335D9D), 0);
+        lv_obj_set_style_border_side(leftPanel, LV_BORDER_SIDE_RIGHT, 0);
+#endif
+        lv_obj_set_style_radius(leftPanel, 0, 0);
+        lv_obj_set_style_pad_all(leftPanel, 4, 0);
+    } else {
+        leftPanel = lv_obj_create(content);
+        lv_obj_set_width(leftPanel, leftW);
+        // Stacked: the conversation list takes the top 40%, the messages the rest.
+        lv_obj_set_height(leftPanel, dmStacked ? lv_pct(40) : lv_pct(100));
+        // No box round either pane: a single rule between them does the dividing.
+        lv_obj_set_style_bg_opa(leftPanel, LV_OPA_TRANSP, 0);
+        lv_obj_set_style_border_width(leftPanel, 0, 0);
+        lv_obj_set_style_pad_all(leftPanel, 2, 0);
+    }
     s_dmConvPanel = leftPanel;
-    lv_obj_set_width(leftPanel, leftW);
-    // Stacked: the conversation list takes the top 40%, the messages the rest.
-    lv_obj_set_height(leftPanel, dmStacked ? lv_pct(40) : lv_pct(100));
     lv_obj_clear_flag(leftPanel, LV_OBJ_FLAG_SCROLLABLE);
-    // No box round either pane: a single rule between them does the dividing.
-    lv_obj_set_style_bg_opa(leftPanel, LV_OPA_TRANSP, 0);
-    lv_obj_set_style_border_width(leftPanel, 0, 0);
-    lv_obj_set_style_pad_all(leftPanel, 2, 0);
     lv_obj_set_style_pad_row(leftPanel, 2, 0);
     lv_obj_set_flex_flow(leftPanel, LV_FLEX_FLOW_COLUMN);
     lv_obj_set_flex_align(leftPanel, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_START);
 
-    lv_obj_t *leftTitle = lv_label_create(leftPanel);
-    lv_obj_set_width(leftTitle, lv_pct(100));
+    // The drawer needs no title: being open says the list has the keys. The
+    // panes' titles are what say which one has them (refreshDmPanelFocusStyles()).
+    if (!dmDrawer) {
+        lv_obj_t *leftTitle = lv_label_create(leftPanel);
+        lv_obj_set_width(leftTitle, lv_pct(100));
 #if defined(DEVICE_CROWPANEL_50)
-    lv_obj_set_style_text_font(leftTitle, &lv_font_montserrat_14, 0);   // drawn as 16
+        lv_obj_set_style_text_font(leftTitle, &lv_font_montserrat_14, 0);   // drawn as 16
 #else
-    lv_obj_set_style_text_font(leftTitle, &lv_font_montserrat_10, 0);
+        lv_obj_set_style_text_font(leftTitle, &lv_font_montserrat_10, 0);
 #endif
-    lv_obj_set_style_text_color(
-        leftTitle,
-        (s_cfg.uiMode == UI_MODE_LIGHT) ? lv_color_hex(0x1B243D) : lv_color_hex(0xD9E8FF),
-        0);
-    lv_label_set_text(leftTitle, TR("Conversations"));
-    s_dmConvTitle = leftTitle;
+        lv_obj_set_style_text_color(
+            leftTitle,
+            (s_cfg.uiMode == UI_MODE_LIGHT) ? lv_color_hex(0x1B243D) : lv_color_hex(0xD9E8FF),
+            0);
+        lv_label_set_text(leftTitle, TR("Conversations"));
+        s_dmConvTitle = leftTitle;
+    }
 
     s_dmConvList = lv_obj_create(leftPanel);
     lv_obj_set_width(s_dmConvList, lv_pct(100));
@@ -39026,7 +39358,7 @@ static void openDmModal() {
     lv_obj_set_flex_flow(s_dmConvList, LV_FLEX_FLOW_COLUMN);
     lv_obj_set_flex_align(s_dmConvList, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_START);
 
-    buildPaneRule(content, dmStacked);
+    if (!dmDrawer) buildPaneRule(content, dmStacked);
 
     lv_obj_t *rightPanel = lv_obj_create(content);
     s_dmMsgPanel = rightPanel;
@@ -39044,19 +39376,22 @@ static void openDmModal() {
     lv_obj_set_flex_flow(rightPanel, LV_FLEX_FLOW_COLUMN);
     lv_obj_set_flex_align(rightPanel, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_START);
 
-    lv_obj_t *rightTitle = lv_label_create(rightPanel);
-    lv_obj_set_width(rightTitle, lv_pct(100));
+    // The header names the conversation where the list is a drawer.
+    if (!dmDrawer) {
+        lv_obj_t *rightTitle = lv_label_create(rightPanel);
+        lv_obj_set_width(rightTitle, lv_pct(100));
 #if defined(DEVICE_CROWPANEL_50)
-    lv_obj_set_style_text_font(rightTitle, &lv_font_montserrat_14, 0);   // drawn as 16
+        lv_obj_set_style_text_font(rightTitle, &lv_font_montserrat_14, 0);   // drawn as 16
 #else
-    lv_obj_set_style_text_font(rightTitle, &lv_font_montserrat_10, 0);
+        lv_obj_set_style_text_font(rightTitle, &lv_font_montserrat_10, 0);
 #endif
-    lv_obj_set_style_text_color(
-        rightTitle,
-        (s_cfg.uiMode == UI_MODE_LIGHT) ? lv_color_hex(0x1B243D) : lv_color_hex(0xD9E8FF),
-        0);
-    lv_label_set_text(rightTitle, TR("Messages"));
-    s_dmMsgTitle = rightTitle;
+        lv_obj_set_style_text_color(
+            rightTitle,
+            (s_cfg.uiMode == UI_MODE_LIGHT) ? lv_color_hex(0x1B243D) : lv_color_hex(0xD9E8FF),
+            0);
+        lv_label_set_text(rightTitle, TR("Messages"));
+        s_dmMsgTitle = rightTitle;
+    }
 
     s_dmMsgList = lv_obj_create(rightPanel);
     lv_obj_set_width(s_dmMsgList, lv_pct(100));
@@ -39118,29 +39453,14 @@ static void openDmModal() {
         hint,
         (s_cfg.uiMode == UI_MODE_LIGHT) ? lv_color_hex(0x334E75) : lv_color_hex(0xA7C7FF),
         0);
+    lv_label_set_text(hint, dmHintText());
 #if defined(DEVICE_CARDPUTER_LORA_HAT)
     // No static key legend on this build: a 240x135 panel cannot spare a
     // permanent line for it. The label itself stays, because the delete flow
     // has nowhere else to prompt — refreshDmModal() unhides it for "Confirm
     // delete" and the result, then hides it again. A hidden object is skipped
     // by the flex layout, so it costs no height while there is nothing to say.
-    lv_label_set_text(hint, "");
     lv_obj_add_flag(hint, LV_OBJ_FLAG_HIDDEN);
-#elif defined(DEVICE_TDECK)
-    lv_label_set_text(hint,
-                          TR("J/K = Select   Space = Compose   Enter = Focus   D = Delete"));
-#elif defined(DEVICE_TLORA_PAGER_TFT)
-    lv_label_set_text(hint,
-                          TR("Up/Down = Select   Space = Compose   Enter = Focus   D = Delete"));
-#elif UI_TOUCH_ONLY_PROFILE
-    lv_label_set_text_fmt(hint,
-                          TR("Tap = Open   Long-press 3s = Delete"
-                          "   DM below = Back"));
-#else
-    lv_label_set_text_fmt(hint,
-                          TR("Up/Down = Select   Space = Compose   Enter = Focus   %s = Delete   %s = Back"),
-                          dmDeleteTriggerLabel(),
-                          modalCloseKeyLabel());
 #endif
 
     s_dmRenderedConvCount = -1;
@@ -39148,11 +39468,21 @@ static void openDmModal() {
     s_dmRenderedMsgCount = -1;
     s_dmRenderedUnreadTotal = -1;
     s_dmMsgPanelFocused = false;
-    refreshDmModal(true);
+    // With a drawer, the screen opens on the most recent conversation, the list
+    // shut; only with none to show does it open on the list. (Row 0 is New DM.)
+    s_dmDrawerOpen = false;
+    s_dmDrawerAnimReady = false;
+    if (dmDrawer && DMs.count() > 0) {
+        s_dmSelection = 1;
+        s_dmMsgPanelFocused = true;
+    }
 
 #if UI_TOUCH_NAV_BAR
     appendHeltecBottomNav(s_dmModal, HELTEC_NAV_DM);
 #endif
+    // After the nav bar, whose padding the drawer is placed against.
+    refreshDmModal(true);
+    s_dmDrawerAnimReady = true;
 }
 
 static void openNodesModal() {
@@ -43385,10 +43715,13 @@ static void openNavDirectMessagesShortcut() {
     if (!prepareGlobalNavigation()) return;
     if (s_dmModal && lvObjAlive(s_dmModal)) {
         // Already there: drop back to the conversation list rather than
-        // reopening, which would discard the list state for no reason.
+        // reopening, which would discard the list state for no reason. Where
+        // the list is a drawer, a second press slides it in, and a third out
+        // again -- the M9's Messages button does the same with the channels.
         closeDmNodePicker();
         lv_obj_move_foreground(s_dmModal);
         refreshDmModal(true);
+        if (dmDrawerBuilt()) dmDrawerSetOpen(!s_dmDrawerOpen);
         return;
     }
     openDmModal();
@@ -45807,6 +46140,18 @@ static void pumpKeyboardInput() {
 
             if (isModalCloseKey(k)) {
                 closeDmModal();
+                continue;
+            }
+
+            // The drawer's key, the one that opens the channel list on the chat
+            // screen (legendChannelListTextRaw()): H on the Cardputer, C on the
+            // other keyboards.
+#if defined(DEVICE_CARDPUTER_LORA_HAT)
+            if ((k == 'h' || k == 'H') && dmDrawerBuilt()) {
+#else
+            if ((k == 'c' || k == 'C') && dmDrawerBuilt()) {
+#endif
+                dmDrawerSetOpen(!s_dmDrawerOpen);
                 continue;
             }
 
@@ -49603,15 +49948,8 @@ static void refreshChannelSelectorLabel() {
 
 #if UI_CHANNEL_LIST_DROPDOWN
 // ── Channel drawer ───────────────────────────────────────────────────────────
-// The slide itself. Instant on the Pro, for the reason the dashboard carousel
-// is (HAS_HOME_CAROUSEL_ANIM): every animated frame there is an e-paper refresh.
-#if defined(DEVICE_TDECK_PRO)
-#define HAS_CHANNEL_DRAWER_ANIM 0
-#else
-#define HAS_CHANNEL_DRAWER_ANIM 1
-#endif
-static constexpr uint32_t kChannelDrawerSlideMs = 180;
-
+// The slide itself (HAS_CHANNEL_DRAWER_ANIM, kChannelDrawerSlideMs: defined
+// beside channelListIsDropdown(), for the DM screen's drawer too).
 #if HAS_CHANNEL_DRAWER_ANIM
 static void channelDrawerSlideXCb(void *obj, int32_t x) {
     lv_obj_set_x((lv_obj_t *)obj, x);
@@ -49740,6 +50078,17 @@ static void channelDrawerIndevCb(lv_event_t *e) {
     const lv_dir_t dir = lv_indev_get_gesture_dir(indev);
     const bool fromEdge = s_channelDrawerEdgePress;
     s_channelDrawerEdgePress = false;
+    // The DM screen's drawer first: while that screen is up, the chat (and so
+    // the channel drawer) is underneath it and channelDrawerCanOpenFromEdge()
+    // says no anyway.
+    if (dir == LV_DIR_RIGHT && fromEdge && dmDrawerCanOpenFromEdge()) {
+        dmDrawerSetOpen(true);
+        return;
+    }
+    if (dir == LV_DIR_LEFT && s_dmDrawerOpen && dmDrawerBuilt()) {
+        dmDrawerSetOpen(false);
+        return;
+    }
     if (dir == LV_DIR_RIGHT && fromEdge && !isChannelDropdownVisible()
         && channelDrawerCanOpenFromEdge()) {
         setChannelDropdownVisible(true);
