@@ -1311,6 +1311,10 @@ static int s_nodesFilterLen = 0;
 // favorites. Set and cleared only through the Search dialog and the Clear
 // button (applyNodesFilterText()), never by typing on the list itself.
 static bool s_nodesFilterOpen = false;
+// Keyboard builds: the cursor is on the Search / Clear button rather than a
+// row. Up from the first row puts it there and Down takes it back; Enter
+// presses the button. Touch-only builds tap the button and never set this.
+static bool s_nodesSearchBtnFocused = false;
 // Locate is compiled out on the Cardputer, for the same reason Message Actions
 // is (see HAS_MESSAGE_ACTIONS below): no PSRAM, and decoding a PNG into a
 // full-panel image object is exactly the allocation that board has no room to
@@ -2847,6 +2851,7 @@ static void onNodesFilterKeyboardEvent(lv_event_t *e);
 static void onNodesFilterInputEvent(lv_event_t *e);
 static void nodesClampRenderWindow();
 static lv_obj_t *selectedNodesRowObj();
+static void refreshNodesHint();
 static void refreshNodesListRows();
 static void refreshNodesListSelection();
 static void refreshNodesDetails();
@@ -25195,6 +25200,7 @@ static void closeNodesModal() {
     s_nodesHintLabel = nullptr;
     s_nodesFilterBtn = nullptr;
     s_nodesFilterBtnLabel = nullptr;
+    s_nodesSearchBtnFocused = false;
     s_nodesFilterDialog = nullptr;
     s_nodesFilterInput = nullptr;
     s_nodesFilterKeyboard = nullptr;
@@ -25466,6 +25472,7 @@ static void applyNodesFilterText(const char *text) {
     }
 
     // A different set of rows: start at its top, with the keys on the list.
+    s_nodesSearchBtnFocused = false;
     s_nodesSelected = 0;
     s_nodesRenderStart = 0;
     if (s_nodesInfoFocused) {
@@ -25687,11 +25694,41 @@ static void nodesSearchButtonActivate() {
     }
 }
 
+// Label for what the button does now, and the cursor drawn the way a selected
+// row draws it, so moving Up from the first row reads as one list.
 static void refreshNodesSearchButton() {
-    if (!lvObjValid(s_nodesFilterBtnLabel)) return;
-    lv_label_set_text(s_nodesFilterBtnLabel,
-                      s_nodesFilterOpen ? TR("Clear search") : TR("Search"));
+    if (lvObjValid(s_nodesFilterBtnLabel)) {
+        lv_label_set_text(s_nodesFilterBtnLabel,
+                          s_nodesFilterOpen ? TR("Clear search") : TR("Search"));
+    }
+    if (!lvObjValid(s_nodesFilterBtn)) return;
+    const bool focused = s_nodesSearchBtnFocused;
+#if defined(DEVICE_TDECK_PRO)
+    lv_obj_set_style_border_width(s_nodesFilterBtn, focused ? 3 : 1, 0);
+#else
+    lv_obj_set_style_bg_color(s_nodesFilterBtn,
+                              lv_color_hex(focused ? 0x2A4E8F : 0x16386F), 0);
+    lv_obj_set_style_border_width(s_nodesFilterBtn, focused ? 2 : 1, 0);
+    lv_obj_set_style_border_color(s_nodesFilterBtn,
+                                  lv_color_hex(focused ? 0x90B4FF : 0x5C86C6), 0);
+#endif
 }
+
+#if !UI_TOUCH_ONLY_PROFILE
+// Moves the keyboard cursor between the Search / Clear button and the rows.
+static void nodesSetSearchBtnFocus(bool focused) {
+    if (focused == s_nodesSearchBtnFocused) return;
+    s_nodesSearchBtnFocused = focused;
+    refreshNodesSearchButton();
+    refreshNodesListSelection();
+    refreshNodesHint();
+    if (focused && lvObjValid(s_nodesList)) {
+        lv_obj_scroll_to_y(s_nodesList, 0, LV_ANIM_OFF);
+    } else if (lv_obj_t *selectedRow = selectedNodesRowObj()) {
+        lv_obj_scroll_to_view(selectedRow, LV_ANIM_OFF);
+    }
+}
+#endif
 
 static void onNodesFilterButtonPressed(lv_event_t *e) {
     LV_UNUSED(e);
@@ -28500,6 +28537,11 @@ static void refreshNodesHint() {
         // the list's legend up over a panel it no longer drives.
         lv_label_set_text_fmt(s_nodesHintLabel, TR("%s=Scroll  A=Actions  %s=List"),
                               navKeys, modalCloseKeyLabel());
+    } else if (s_nodesSearchBtnFocused) {
+        lv_label_set_text_fmt(s_nodesHintLabel,
+                              s_nodesFilterOpen ? TR("Enter=Clear search  %s=Back")
+                                                : TR("Enter=Search  %s=Back"),
+                              modalCloseKeyLabel());
     } else if (s_nodesFilterOpen) {
         // Showing search results. Space presses the button, which reads Clear
         // now; Bksp does too, ahead of Back, since on most boards Backspace is
@@ -28702,7 +28744,8 @@ static void refreshNodesListSelection() {
     for (int i = 0; i < s_nodesListRowCount; i++) {
         lv_obj_t *row = s_nodesListRows[i];
         if (!row) continue;
-        bool selected = (s_nodesRenderedFilteredIdx[i] == s_nodesSelected);
+        bool selected = !s_nodesSearchBtnFocused
+                        && (s_nodesRenderedFilteredIdx[i] == s_nodesSelected);
         // Archived rows are dimmed: they are a record of nodes that have left
         // the table, and should not read as part of the live mesh at a glance.
         // Resolved back through the filtered index the row was built from.
@@ -29074,6 +29117,11 @@ static void onNodeSnapshotPressed(lv_event_t *e) {
         closeNodesActionMenu();
     }
     s_nodesSelected = idx;
+    if (s_nodesSearchBtnFocused) {
+        s_nodesSearchBtnFocused = false;
+        refreshNodesSearchButton();
+        refreshNodesHint();
+    }
     nodesClampRenderWindow();
     refreshNodesListSelection();
     refreshNodesDetails();
@@ -39696,8 +39744,10 @@ static void openNodesModal() {
         }
     }
 
-    // Each visit opens on the favorites, with no search carried over.
+    // Each visit opens on the favorites, with no search carried over, and
+    // the cursor on the first row rather than the Search button.
     s_nodesFilterOpen = false;
+    s_nodesSearchBtnFocused = false;
     s_nodesFilterLen = 0;
     s_nodesFilter[0] = '\0';
     snapshotNodesForModal();
@@ -46586,9 +46636,9 @@ static void pumpKeyboardInput() {
             }
 
             // Actions moved off Enter and onto A when Enter became "focus the
-            // details".
+            // details". Not from the Search button: no node is under the cursor.
             if (k == 'a' || k == 'A') {
-                openNodesActionMenu();
+                if (!s_nodesSearchBtnFocused) openNodesActionMenu();
                 continue;
             }
 
@@ -46605,6 +46655,13 @@ static void pumpKeyboardInput() {
                 continue;
             }
             if (k == KEY_ENTER || k == KEY_ROLLER) {
+                // On the Search / Clear button, Enter presses it. Clear (and a
+                // finished search) puts the cursor back on the first row;
+                // Cancel leaves it on the button.
+                if (s_nodesSearchBtnFocused) {
+                    nodesSearchButtonActivate();
+                    continue;
+                }
                 // Enter hands the keys to the details; the Pager's wheel click
                 // toggles, matching how it swaps panels on Config and DM.
                 const bool wantFocus = (k == KEY_ROLLER) ? !s_nodesInfoFocused : true;
@@ -46631,13 +46688,28 @@ static void pumpKeyboardInput() {
             }
 
             if (k == KEY_SCROLL_UP || k == KEY_SCROLL_DN) {
-                int nextSelected = s_nodesSelected;
-                if (invertScrollNav) {
-                    // Pager wheel orientation: UP should move to the next row.
-                    nextSelected += (k == KEY_SCROLL_UP) ? 1 : -1;
-                } else {
-                    nextSelected += (k == KEY_SCROLL_UP) ? -1 : 1;
+                // Pager wheel orientation: UP should move to the next row.
+                const int step = invertScrollNav ? ((k == KEY_SCROLL_UP) ? 1 : -1)
+                                                 : ((k == KEY_SCROLL_UP) ? -1 : 1);
+#if !UI_TOUCH_ONLY_PROFILE
+                // The Search / Clear button sits above the first row: Up from
+                // there (or from an empty list) moves onto it, Down moves back.
+                if (s_nodesSearchBtnFocused) {
+                    if (step > 0 && s_nodesFilteredCount > 0) {
+                        s_nodesSelected = 0;
+                        nodesClampRenderWindow();
+                        refreshNodesListRows();
+                        refreshNodesDetails();
+                        nodesSetSearchBtnFocus(false);
+                    }
+                    continue;
                 }
+                if (step < 0 && s_nodesSelected <= 0) {
+                    nodesSetSearchBtnFocus(true);
+                    continue;
+                }
+#endif
+                int nextSelected = s_nodesSelected + step;
 
                 if (nextSelected < 0) nextSelected = 0;
                 if (nextSelected >= s_nodesFilteredCount) nextSelected = s_nodesFilteredCount - 1;

@@ -2821,6 +2821,9 @@ being revisited.
 - Search (or Enter) shows the matches; Cancel (or the close key) leaves the list
   as it was. The header reads `Nodes [text] (matches)`
 - Up/Down, Enter and A work on the results as they do on the favorites
+- On keyboard builds the screen opens with the cursor on the first node. Up from
+  the first node (or from an empty list) moves the cursor onto the Search /
+  Clear search button, Down moves it back, and Enter presses the button
 - The button reads **Clear search** while results are shown. It, Space, or
   Backspace from the list returns to the favorites. The hint line names whichever
   keys are live
