@@ -25551,7 +25551,13 @@ static lv_obj_t *nodesFilterDialogBtn(lv_obj_t *row, const char *text, lv_event_
 static void openNodesFilterDialog() {
     if (!s_nodesModal || s_nodesFilterDialog) return;
 
+    // Only the touch-only builds can be without a physical keyboard (every
+    // other board has one built in), and only they carry the on-screen one.
+#if UI_TOUCH_ONLY_PROFILE
     const bool onScreenKeyboard = !keyboardAttached();
+#else
+    const bool onScreenKeyboard = false;
+#endif
     const int dispW = lv_disp_get_hor_res(NULL);
     const int dispH = lv_disp_get_ver_res(NULL);
 
@@ -25652,12 +25658,14 @@ static void openNodesFilterDialog() {
     nodesFilterDialogBtn(btnRow, TR("Search"), onNodesFilterSearchPressed, true);
 
     if (onScreenKeyboard) {
+#if UI_TOUCH_ONLY_PROFILE
         s_nodesFilterKeyboard = lv_keyboard_create(box);
         configureOnScreenKeyboard(s_nodesFilterKeyboard);
         lv_keyboard_set_mode(s_nodesFilterKeyboard, LV_KEYBOARD_MODE_TEXT_LOWER);
         lv_keyboard_set_textarea(s_nodesFilterKeyboard, s_nodesFilterInput);
         lv_obj_add_event_cb(s_nodesFilterKeyboard, onNodesFilterKeyboardEvent, LV_EVENT_READY, nullptr);
         lv_obj_add_event_cb(s_nodesFilterKeyboard, onNodesFilterKeyboardEvent, LV_EVENT_CANCEL, nullptr);
+#endif
     } else {
         lv_obj_t *hint = lv_label_create(box);
         lv_obj_set_width(hint, lv_pct(100));
