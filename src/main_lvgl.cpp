@@ -1086,6 +1086,15 @@ static lv_obj_t *s_dmMsgList = nullptr;
 static lv_obj_t *s_dmConvTitle = nullptr;
 static lv_obj_t *s_dmMsgTitle = nullptr;
 static lv_obj_t *s_dmHintLabel = nullptr;
+// Where the conversations are a drawer (dmListIsDrawer()): the scrim behind it,
+// and the screen header's title, which names the conversation being read.
+// s_dmConvPanel is the drawer itself. Null on the two-pane layout.
+static lv_obj_t *s_dmDrawerScrim = nullptr;
+static lv_obj_t *s_dmHeaderTitle = nullptr;
+static bool s_dmDrawerOpen = false;
+// False until the screen's first placement, which is instant: the screen opens
+// with the drawer already where it belongs rather than sliding into it.
+static bool s_dmDrawerAnimReady = false;
 static lv_obj_t *s_dmNodePickerModal = nullptr;
 static lv_obj_t *s_dmNodePickerList = nullptr;
 static lv_obj_t *s_dmNodePickerTitle = nullptr;
@@ -1244,7 +1253,9 @@ static SemaphoreHandle_t s_nodesMapFsMutex = nullptr;
 static lv_obj_t *s_nodesList = nullptr;
 static lv_obj_t *s_nodesTitleLabel = nullptr;
 static lv_obj_t *s_nodesHintLabel = nullptr;
+// The Search / Clear button above the node list, and its label.
 static lv_obj_t *s_nodesFilterBtn = nullptr;
+static lv_obj_t *s_nodesFilterBtnLabel = nullptr;
 static lv_obj_t *s_nodesFilterDialog = nullptr;
 static lv_obj_t *s_nodesFilterInput = nullptr;
 static lv_obj_t *s_nodesFilterKeyboard = nullptr;
@@ -1295,13 +1306,15 @@ static int s_nodesSelected = -1;
 static constexpr int kNodesFilterMax = 24;
 static char s_nodesFilter[kNodesFilterMax + 1] = {};
 static int s_nodesFilterLen = 0;
-// Armed: the filter is applied to the list and the header shows its brackets.
+// A search is in force: the list shows every node (live, plus archived when
+// that half is shown) matching s_nodesFilter. Without one the list shows only
+// favorites. Set and cleared only through the Search dialog and the Clear
+// button (applyNodesFilterText()), never by typing on the list itself.
 static bool s_nodesFilterOpen = false;
-// Capturing: typed characters go into the filter text. Split from the flag above
-// so Enter can commit a filter — leaving the rows narrowed while handing the
-// keyboard back to the list, where the navigation keys move the cursor and A
-// opens Actions instead of typing an "a".
-static bool s_nodesFilterEditing = false;
+// Keyboard builds: the cursor is on the Search / Clear button rather than a
+// row. Up from the first row puts it there and Down takes it back; Enter
+// presses the button. Touch-only builds tap the button and never set this.
+static bool s_nodesSearchBtnFocused = false;
 // Locate is compiled out on the Cardputer, for the same reason Message Actions
 // is (see HAS_MESSAGE_ACTIONS below): no PSRAM, and decoding a PNG into a
 // full-panel image object is exactly the allocation that board has no room to
@@ -2832,13 +2845,17 @@ static void applyNodesFilterText(const char *text);
 static void openNodesFilterDialog();
 static void closeNodesFilterDialog();
 static void onNodesFilterButtonPressed(lv_event_t *e);
+static void nodesSearchButtonActivate();
+static void refreshNodesSearchButton();
 static void onNodesFilterKeyboardEvent(lv_event_t *e);
 static void onNodesFilterInputEvent(lv_event_t *e);
 static void nodesClampRenderWindow();
 static lv_obj_t *selectedNodesRowObj();
+static void refreshNodesHint();
 static void refreshNodesListRows();
 static void refreshNodesListSelection();
 static void refreshNodesDetails();
+static void refreshNodesPanelFocusStyles();
 static void onNodeSnapshotPressed(lv_event_t *e);
 #if UI_TOUCH_ONLY_PROFILE
 static void onNodeSnapshotClicked(lv_event_t *e);
@@ -7641,6 +7658,24 @@ static inline bool channelListIsDropdown() {
 #else
     return UI_CHANNEL_LIST_DROPDOWN != 0;
 #endif
+}
+
+// The drawers' slide (the channel list's, and the DM screen's conversation
+// list). Instant on the Pro, for the reason the dashboard carousel is
+// (HAS_HOME_CAROUSEL_ANIM): every animated frame there is an e-paper refresh.
+#if defined(DEVICE_TDECK_PRO)
+#define HAS_CHANNEL_DRAWER_ANIM 0
+#else
+#define HAS_CHANNEL_DRAWER_ANIM 1
+#endif
+static constexpr uint32_t kChannelDrawerSlideMs = 180;
+
+// The DM screen's conversations slide in the same way wherever the channels do:
+// a drawer over the messages rather than a pane beside them. The Pager and the
+// large-panel P4 in landscape keep the two panes, as they keep the channel
+// column.
+static inline bool dmListIsDrawer() {
+    return channelListIsDropdown();
 }
 
 // ── Status icon ink ──────────────────────────────────────────────────────────
@@ -25103,6 +25138,10 @@ static void closeDmModal() {
     s_dmConvTitle = nullptr;
     s_dmMsgTitle = nullptr;
     s_dmHintLabel = nullptr;
+    s_dmDrawerScrim = nullptr;
+    s_dmHeaderTitle = nullptr;
+    s_dmDrawerOpen = false;
+    s_dmDrawerAnimReady = false;
     s_dmConvCount = 0;
     s_dmSelection = -1;
     s_dmRenderedConvCount = -1;
@@ -25160,6 +25199,8 @@ static void closeNodesModal() {
     s_nodesTitleLabel = nullptr;
     s_nodesHintLabel = nullptr;
     s_nodesFilterBtn = nullptr;
+    s_nodesFilterBtnLabel = nullptr;
+    s_nodesSearchBtnFocused = false;
     s_nodesFilterDialog = nullptr;
     s_nodesFilterInput = nullptr;
     s_nodesFilterKeyboard = nullptr;
@@ -25183,7 +25224,6 @@ static void closeNodesModal() {
     s_nodesFilteredCount = 0;
     s_nodesSelected = -1;
     s_nodesFilterOpen = false;
-    s_nodesFilterEditing = false;
     s_nodesFilterLen = 0;
     s_nodesFilter[0] = '\0';
     s_nodesRenderStart = 0;
@@ -25285,15 +25325,15 @@ static bool nodesArchiveVisible() {
     return nodeArchiveSlotExists() && nodeArchiveAvailable() && s_cfg.nodeArchiveShow;
 }
 
+// Keeps any search in force: this is also called to rebuild the list while the
+// screen is up (a favorite toggled, a node restored or deleted), and those
+// should not throw away what the user searched for. openNodesModal() starts
+// each visit with no search.
 static void snapshotNodesForModal() {
     s_nodesSnapshotCount = 0;
     s_nodesArchivedCount = 0;
     s_nodesFilteredCount = 0;
     s_nodesSelected = -1;
-    s_nodesFilterOpen = false;
-    s_nodesFilterEditing = false;
-    s_nodesFilterLen = 0;
-    s_nodesFilter[0] = '\0';
 
     int total = Nodes.count();
     if (total < 0) total = 0;
@@ -25374,7 +25414,7 @@ static void nodesApplyFilter() {
         // unsearchable by the name the user actually knows.
         const NodeEntry *n = (i < s_nodesSnapshotCount) ? Nodes.find(nodeId) : nullptr;
         const ArchivedNode *a = nodesArchivedAt(i);
-        bool match = true;
+        bool match;
 
         if (s_nodesFilterOpen && s_nodesFilterLen > 0) {
             char nodeIdText[16];
@@ -25384,6 +25424,11 @@ static void nodesApplyFilter() {
                  || (n && dmNodePickerContainsNoCase(n->shortName, s_nodesFilter))
                  || (a && dmNodePickerContainsNoCase(a->longName, s_nodesFilter))
                  || (a && dmNodePickerContainsNoCase(a->shortName, s_nodesFilter));
+        } else {
+            // No search: favorites only. Archived rows never qualify: the
+            // favorite flag lives on the table entry, and favorites are never
+            // evicted from it.
+            match = (n && n->favorite);
         }
 
         if (match) {
@@ -25408,8 +25453,11 @@ static void nodesApplyFilter() {
 
 static void applyNodesFilterText(const char *text) {
     if (!text) text = "";
-
+    // Surrounding blanks are not part of a name anyone searches for, and a
+    // query of nothing but blanks is no query: it clears the search.
+    while (*text == ' ') text++;
     size_t len = strlen(text);
+    while (len > 0 && text[len - 1] == ' ') len--;
     if (len > kNodesFilterMax) len = kNodesFilterMax;
 
     if (len > 0) {
@@ -25422,17 +25470,23 @@ static void applyNodesFilterText(const char *text) {
         s_nodesFilterLen = 0;
         s_nodesFilter[0] = '\0';
     }
-    // The dialog returns finished text, so the filter arrives committed.
-    s_nodesFilterEditing = false;
+
+    // A different set of rows: start at its top, with the keys on the list.
+    s_nodesSearchBtnFocused = false;
+    s_nodesSelected = 0;
+    s_nodesRenderStart = 0;
+    if (s_nodesInfoFocused) {
+        s_nodesInfoFocused = false;
+        refreshNodesPanelFocusStyles();
+    }
 
     nodesApplyFilter();
     refreshNodesListRows();
     refreshNodesListSelection();
     refreshNodesDetails();
+    refreshNodesSearchButton();
 
-    if (lv_obj_t *selectedRow = selectedNodesRowObj()) {
-        lv_obj_scroll_to_view(selectedRow, LV_ANIM_OFF);
-    }
+    if (lvObjValid(s_nodesList)) lv_obj_scroll_to_y(s_nodesList, 0, LV_ANIM_OFF);
 }
 
 static void closeNodesFilterDialog() {
@@ -25460,43 +25514,125 @@ static void onNodesFilterInputEvent(lv_event_t *e) {
     closeNodesFilterDialog();
 }
 
+static void onNodesFilterCancelPressed(lv_event_t *e) {
+    LV_UNUSED(e);
+    closeNodesFilterDialog();
+}
+
+static void onNodesFilterSearchPressed(lv_event_t *e) {
+    LV_UNUSED(e);
+    const char *text = (s_nodesFilterInput) ? lv_textarea_get_text(s_nodesFilterInput) : "";
+    applyNodesFilterText(text);
+    closeNodesFilterDialog();
+}
+
+static lv_obj_t *nodesFilterDialogBtn(lv_obj_t *row, const char *text, lv_event_cb_t cb,
+                                      bool primary) {
+    lv_obj_t *btn = lv_btn_create(row);
+    lv_obj_set_flex_grow(btn, 1);
+    lv_obj_set_height(btn, UI_TOUCH_ONLY_PROFILE ? max(28, kStackBtnH) : 22);
+    lv_obj_set_style_radius(btn, 4, 0);
+    lv_obj_set_style_shadow_width(btn, 0, 0);
+    lv_obj_set_style_pad_ver(btn, 1, 0);
+    lv_obj_set_style_bg_color(btn, lv_color_hex(primary ? 0x2A4E8F : 0x16386F), 0);
+    lv_obj_set_style_bg_opa(btn, primary ? LV_OPA_COVER : LV_OPA_70, 0);
+    lv_obj_set_style_border_width(btn, 1, 0);
+    lv_obj_set_style_border_color(btn, lv_color_hex(primary ? 0x90B4FF : 0x335D9D), 0);
+    lv_obj_add_event_cb(btn, cb, LV_EVENT_CLICKED, nullptr);
+
+    lv_obj_t *lbl = lv_label_create(btn);
+    lv_obj_set_style_text_font(lbl, UI_TOUCH_ONLY_PROFILE ? STACK_BTN_FONT
+                                                          : &lv_font_montserrat_12, 0);
+    lv_obj_set_style_text_color(lbl, lv_color_hex(0xE8F1FF), 0);
+    lv_label_set_text(lbl, text);
+    lv_obj_center(lbl);
+    return btn;
+}
+
+// The Search dialog: a text field, Cancel and Search. On every board now, not
+// only the touch ones. With an on-screen keyboard it takes the whole panel,
+// for the keyboard's sake; with a physical one (every keyboard board, and the
+// T-Display P4 with its expansion attached) it is a card over the list, and
+// pumpKeyboardInput() types into it — Enter is Search and the close key is
+// Cancel, which the hint line names for boards whose buttons cannot be tapped.
 static void openNodesFilterDialog() {
-#if UI_TOUCH_ONLY_PROFILE
     if (!s_nodesModal || s_nodesFilterDialog) return;
 
-    int dialogW = lv_disp_get_hor_res(NULL);
-    int dialogH = lv_disp_get_ver_res(NULL);
-    if (dialogW < 180) dialogW = lv_obj_get_width(s_nodesModal);
-    if (dialogH < 120) dialogH = lv_obj_get_height(s_nodesModal);
+    // Only the touch-only builds can be without a physical keyboard (every
+    // other board has one built in), and only they carry the on-screen one.
+#if UI_TOUCH_ONLY_PROFILE
+    const bool onScreenKeyboard = !keyboardAttached();
+#else
+    const bool onScreenKeyboard = false;
+#endif
+    const int dispW = lv_disp_get_hor_res(NULL);
+    const int dispH = lv_disp_get_ver_res(NULL);
 
+    // The whole panel either way, so nothing on the screen underneath takes a
+    // tap while the dialog is up. With a physical keyboard the panel is a dim
+    // backdrop and the dialog proper is a card centred on it.
     s_nodesFilterDialog = lv_obj_create(s_rootScreen);
-    lv_obj_set_size(s_nodesFilterDialog, dialogW, dialogH);
+    if (!s_nodesFilterDialog) {
+        logLvglMemDiag("nodes search aborted (low LVGL mem)");
+        return;
+    }
+    {
+        int dialogW = dispW;
+        int dialogH = dispH;
+        if (dialogW < 180) dialogW = lv_obj_get_width(s_nodesModal);
+        if (dialogH < 120) dialogH = lv_obj_get_height(s_nodesModal);
+        lv_obj_set_size(s_nodesFilterDialog, dialogW, dialogH);
+    }
     lv_obj_align(s_nodesFilterDialog, LV_ALIGN_TOP_LEFT, 0, 0);
     lv_obj_clear_flag(s_nodesFilterDialog, LV_OBJ_FLAG_SCROLLABLE);
     lv_obj_add_flag(s_nodesFilterDialog, LV_OBJ_FLAG_CLICKABLE);
     lv_obj_add_flag(s_nodesFilterDialog, LV_OBJ_FLAG_FLOATING);
-    lv_obj_set_style_bg_color(s_nodesFilterDialog, lv_color_hex(0x0E285B), 0);
-    lv_obj_set_style_bg_opa(s_nodesFilterDialog, LV_OPA_COVER, 0);
-    lv_obj_set_style_border_width(s_nodesFilterDialog, 1, 0);
-    lv_obj_set_style_border_color(s_nodesFilterDialog, lv_color_hex(0x5C86C6), 0);
-    lv_obj_set_style_pad_all(s_nodesFilterDialog, 4, 0);
-#if UI_EDGE_TO_EDGE_TEXT_ENTRY
-    lv_obj_set_style_pad_left(s_nodesFilterDialog, 2, 0);
-    lv_obj_set_style_pad_right(s_nodesFilterDialog, 2, 0);
-#endif
-    lv_obj_set_style_pad_row(s_nodesFilterDialog, 3, 0);
-    lv_obj_set_flex_flow(s_nodesFilterDialog, LV_FLEX_FLOW_COLUMN);
-    lv_obj_set_flex_align(s_nodesFilterDialog, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_START);
+    lv_obj_set_style_radius(s_nodesFilterDialog, 0, 0);
 
-    lv_obj_t *title = lv_label_create(s_nodesFilterDialog);
+    lv_obj_t *box = s_nodesFilterDialog;
+    if (onScreenKeyboard) {
+        lv_obj_set_style_border_width(box, 1, 0);
+    } else {
+        lv_obj_set_style_bg_color(s_nodesFilterDialog, lv_color_hex(0x000000), 0);
+        lv_obj_set_style_bg_opa(s_nodesFilterDialog, LV_OPA_50, 0);
+        lv_obj_set_style_border_width(s_nodesFilterDialog, 0, 0);
+        lv_obj_set_style_pad_all(s_nodesFilterDialog, 0, 0);
+
+        box = lv_obj_create(s_nodesFilterDialog);
+        if (!box) {
+            logLvglMemDiag("nodes search aborted (low LVGL mem)");
+            closeNodesFilterDialog();
+            return;
+        }
+        lv_obj_set_size(box, min(dispW - 16, 300), LV_SIZE_CONTENT);
+        lv_obj_center(box);
+        lv_obj_clear_flag(box, LV_OBJ_FLAG_SCROLLABLE);
+        lv_obj_set_style_radius(box, 6, 0);
+        lv_obj_set_style_border_width(box, 2, 0);
+    }
+    lv_obj_set_style_bg_color(box, lv_color_hex(0x0E285B), 0);
+    lv_obj_set_style_bg_opa(box, LV_OPA_COVER, 0);
+    lv_obj_set_style_border_color(box, lv_color_hex(0x5C86C6), 0);
+    lv_obj_set_style_pad_all(box, 4, 0);
+#if UI_EDGE_TO_EDGE_TEXT_ENTRY
+    if (onScreenKeyboard) {
+        lv_obj_set_style_pad_left(box, 2, 0);
+        lv_obj_set_style_pad_right(box, 2, 0);
+    }
+#endif
+    lv_obj_set_style_pad_row(box, 4, 0);
+    lv_obj_set_flex_flow(box, LV_FLEX_FLOW_COLUMN);
+    lv_obj_set_flex_align(box, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_START);
+
+    lv_obj_t *title = lv_label_create(box);
     lv_obj_set_width(title, lv_pct(100));
     lv_obj_set_style_text_font(title, &lv_font_montserrat_12, 0);
     lv_obj_set_style_text_color(title, lv_color_hex(0xD9E8FF), 0);
-    lv_label_set_text(title, TR("Filter Nodes"));
+    lv_label_set_text(title, TR("Search Nodes"));
 
-    s_nodesFilterInput = lv_textarea_create(s_nodesFilterDialog);
+    s_nodesFilterInput = lv_textarea_create(box);
     if (!s_nodesFilterInput) {
-        logLvglMemDiag("nodes filter aborted (low LVGL mem)");
+        logLvglMemDiag("nodes search aborted (low LVGL mem)");
         closeNodesFilterDialog();
         return;
     }
@@ -25512,33 +25648,143 @@ static void openNodesFilterDialog() {
     lv_obj_set_style_pad_right(s_nodesFilterInput, 3, 0);
     lv_textarea_set_one_line(s_nodesFilterInput, true);
     lv_textarea_set_max_length(s_nodesFilterInput, kNodesFilterMax);
-    lv_textarea_set_placeholder_text(s_nodesFilterInput, TR("Type to filter nodes"));
-    if (s_nodesFilterOpen && s_nodesFilterLen > 0) {
-        lv_textarea_set_text(s_nodesFilterInput, s_nodesFilter);
-    } else {
-        lv_textarea_set_text(s_nodesFilterInput, "");
-    }
-    lv_textarea_set_cursor_pos(s_nodesFilterInput, LV_TEXTAREA_CURSOR_LAST);
+    lv_textarea_set_placeholder_text(s_nodesFilterInput, TR("Name or !id"));
+    lv_textarea_set_text(s_nodesFilterInput, "");
+    lv_obj_add_state(s_nodesFilterInput, LV_STATE_FOCUSED);
     lv_obj_add_event_cb(s_nodesFilterInput, onNodesFilterInputEvent, LV_EVENT_READY, nullptr);
 
-    // Not with a physical keyboard attached (the T-Display P4's expansion):
-    // keys typed on it reach this field through pumpKeyboardInput(), and an
-    // on-screen one would only take half the panel. Checked as this opens.
-    if (!keyboardAttached()) {
-        s_nodesFilterKeyboard = lv_keyboard_create(s_nodesFilterDialog);
+    lv_obj_t *btnRow = lv_obj_create(box);
+    lv_obj_remove_style_all(btnRow);
+    lv_obj_set_width(btnRow, lv_pct(100));
+    lv_obj_set_height(btnRow, LV_SIZE_CONTENT);
+    lv_obj_clear_flag(btnRow, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_set_style_pad_column(btnRow, 6, 0);
+    lv_obj_set_flex_flow(btnRow, LV_FLEX_FLOW_ROW);
+    lv_obj_set_flex_align(btnRow, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+    nodesFilterDialogBtn(btnRow, TR("Cancel"), onNodesFilterCancelPressed, false);
+    nodesFilterDialogBtn(btnRow, TR("Search"), onNodesFilterSearchPressed, true);
+
+    if (onScreenKeyboard) {
+#if UI_TOUCH_ONLY_PROFILE
+        s_nodesFilterKeyboard = lv_keyboard_create(box);
         configureOnScreenKeyboard(s_nodesFilterKeyboard);
         lv_keyboard_set_mode(s_nodesFilterKeyboard, LV_KEYBOARD_MODE_TEXT_LOWER);
         lv_keyboard_set_textarea(s_nodesFilterKeyboard, s_nodesFilterInput);
         lv_obj_add_event_cb(s_nodesFilterKeyboard, onNodesFilterKeyboardEvent, LV_EVENT_READY, nullptr);
         lv_obj_add_event_cb(s_nodesFilterKeyboard, onNodesFilterKeyboardEvent, LV_EVENT_CANCEL, nullptr);
+#endif
+    } else {
+        lv_obj_t *hint = lv_label_create(box);
+        lv_obj_set_width(hint, lv_pct(100));
+        lv_obj_set_style_text_font(hint, &lv_font_montserrat_10, 0);
+        lv_obj_set_style_text_color(hint, lv_color_hex(0xA7C7FF), 0);
+        lv_label_set_text_fmt(hint, TR("Enter=Search  %s=Cancel"), modalCloseKeyLabel());
     }
     lv_obj_move_foreground(s_nodesFilterDialog);
+}
+
+// The button above the list: Search while the list shows favorites, Clear
+// while it shows search results. Space does the same on keyboard boards.
+static void nodesSearchButtonActivate() {
+    if (!s_nodesModal) return;
+    if (s_nodesFilterOpen) {
+        applyNodesFilterText("");
+    } else {
+        openNodesFilterDialog();
+    }
+}
+
+// Label for what the button does now, and the cursor drawn the way a selected
+// row draws it, so moving Up from the first row reads as one list.
+static void refreshNodesSearchButton() {
+    if (lvObjValid(s_nodesFilterBtnLabel)) {
+        lv_label_set_text(s_nodesFilterBtnLabel,
+                          s_nodesFilterOpen ? TR("Clear search") : TR("Search"));
+    }
+    if (!lvObjValid(s_nodesFilterBtn)) return;
+    const bool focused = s_nodesSearchBtnFocused;
+#if defined(DEVICE_TDECK_PRO)
+    lv_obj_set_style_border_width(s_nodesFilterBtn, focused ? 3 : 1, 0);
+#else
+    lv_obj_set_style_bg_color(s_nodesFilterBtn,
+                              lv_color_hex(focused ? 0x2A4E8F : 0x16386F), 0);
+    lv_obj_set_style_border_width(s_nodesFilterBtn, focused ? 2 : 1, 0);
+    lv_obj_set_style_border_color(s_nodesFilterBtn,
+                                  lv_color_hex(focused ? 0x90B4FF : 0x5C86C6), 0);
 #endif
 }
 
+#if !UI_TOUCH_ONLY_PROFILE
+// Moves the keyboard cursor between the Search / Clear button and the rows.
+static void nodesSetSearchBtnFocus(bool focused) {
+    if (focused == s_nodesSearchBtnFocused) return;
+    s_nodesSearchBtnFocused = focused;
+    refreshNodesSearchButton();
+    refreshNodesListSelection();
+    refreshNodesHint();
+    if (focused && lvObjValid(s_nodesList)) {
+        lv_obj_scroll_to_y(s_nodesList, 0, LV_ANIM_OFF);
+    } else if (lv_obj_t *selectedRow = selectedNodesRowObj()) {
+        lv_obj_scroll_to_view(selectedRow, LV_ANIM_OFF);
+    }
+}
+#endif
+
 static void onNodesFilterButtonPressed(lv_event_t *e) {
     LV_UNUSED(e);
-    openNodesFilterDialog();
+    nodesSearchButtonActivate();
+}
+
+// Builds the Search / Clear button at the top of the list pane and turns the
+// pane into a column, so the list under it takes the remaining height.
+static void buildNodesSearchButton(lv_obj_t *listPanel) {
+    lv_obj_set_flex_flow(listPanel, LV_FLEX_FLOW_COLUMN);
+    lv_obj_set_flex_align(listPanel, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_START,
+                          LV_FLEX_ALIGN_START);
+    lv_obj_set_style_pad_row(listPanel, 3, 0);
+
+#if defined(DEVICE_CROWPANEL_50)
+    const int btnH = 40;
+    const lv_font_t *btnFont = &lv_font_montserrat_16;
+#elif UI_TOUCH_ONLY_PROFILE
+    // A finger target: the stacked layout's button height where it has one.
+    const int btnH = toolStackLayout() ? kStackBtnH : 28;
+    const lv_font_t *btnFont = toolStackLayout() ? STACK_BTN_FONT : &lv_font_montserrat_12;
+#elif defined(DEVICE_TLORA_PAGER_TFT) || defined(DEVICE_TDECK_PRO)
+    const int btnH = 22;
+    const lv_font_t *btnFont = &lv_font_montserrat_12;
+#else
+    const int btnH = 20;
+    const lv_font_t *btnFont = &lv_font_montserrat_10;
+#endif
+
+    s_nodesFilterBtn = lv_btn_create(listPanel);
+    if (!s_nodesFilterBtn) return;
+    lv_obj_set_width(s_nodesFilterBtn, lv_pct(96));
+    lv_obj_set_height(s_nodesFilterBtn, btnH);
+    lv_obj_set_style_radius(s_nodesFilterBtn, 4, 0);
+    lv_obj_set_style_pad_hor(s_nodesFilterBtn, 3, 0);
+    lv_obj_set_style_pad_ver(s_nodesFilterBtn, 1, 0);
+    lv_obj_set_style_shadow_width(s_nodesFilterBtn, 0, 0);
+    lv_obj_set_style_border_width(s_nodesFilterBtn, 1, 0);
+#if defined(DEVICE_TDECK_PRO)
+    const lv_color_t textColor = lv_color_make(0, 0, 0);
+    lv_obj_set_style_bg_opa(s_nodesFilterBtn, LV_OPA_TRANSP, 0);
+    lv_obj_set_style_border_color(s_nodesFilterBtn, lv_color_make(0, 0, 0), 0);
+#else
+    const lv_color_t textColor = lv_color_hex(0xE8F1FF);
+    lv_obj_set_style_bg_color(s_nodesFilterBtn, lv_color_hex(0x16386F), 0);
+    lv_obj_set_style_bg_opa(s_nodesFilterBtn, LV_OPA_COVER, 0);
+    lv_obj_set_style_border_color(s_nodesFilterBtn, lv_color_hex(0x5C86C6), 0);
+#endif
+    lv_obj_add_event_cb(s_nodesFilterBtn, onNodesFilterButtonPressed, LV_EVENT_CLICKED, nullptr);
+
+    s_nodesFilterBtnLabel = lv_label_create(s_nodesFilterBtn);
+    lv_obj_set_style_text_font(s_nodesFilterBtnLabel, btnFont, 0);
+    lv_obj_set_style_text_color(s_nodesFilterBtnLabel, textColor, 0);
+    lv_label_set_long_mode(s_nodesFilterBtnLabel, LV_LABEL_LONG_CLIP);
+    lv_obj_center(s_nodesFilterBtnLabel);
+    refreshNodesSearchButton();
 }
 
 static bool nodesSnapshotContains(uint32_t nodeId) {
@@ -28274,9 +28520,9 @@ static bool clearNodeDbOnSd() {
 static void refreshNodesHint() {
     if (!s_nodesHintLabel) return;
 #if UI_TOUCH_ONLY_PROFILE
-    // One line for every state, because none of the three states below can be
-    // reached without a keyboard: there is no Space to open the filter and no
-    // Enter to focus the info panel. Naming the way out matters more here than
+    // One line for every state, because the keyboard states below cannot be
+    // reached without a keyboard: search is the button above the list, and
+    // there is no Enter to focus the info panel. Naming the way out matters more here than
     // on the keyboard builds — it is the nav button, not a key, and this screen
     // is closed by tapping the Nodes button that is already lit underneath it.
     lv_label_set_text(s_nodesHintLabel, TR("Tap a node for actions   Nodes below = Back"));
@@ -28291,22 +28537,21 @@ static void refreshNodesHint() {
         // the list's legend up over a panel it no longer drives.
         lv_label_set_text_fmt(s_nodesHintLabel, TR("%s=Scroll  A=Actions  %s=List"),
                               navKeys, modalCloseKeyLabel());
-    } else if (s_nodesFilterEditing) {
+    } else if (s_nodesSearchBtnFocused) {
         lv_label_set_text_fmt(s_nodesHintLabel,
-                              TR("Type=Filter  Enter=Done  Bksp=Edit/Exit  %s=Back"),
+                              s_nodesFilterOpen ? TR("Enter=Clear search  %s=Back")
+                                                : TR("Enter=Search  %s=Back"),
                               modalCloseKeyLabel());
     } else if (s_nodesFilterOpen) {
-        // Committed: the list is still filtered, but the shortcuts are live
-        // again. Naming Bksp is what tells the reader the filter is still
-        // editable rather than stuck — "Edit/Exit" for the same reason the
-        // editing state says it, since on most boards Backspace is also the
-        // close key and only reaches Back once the filter is unwound.
+        // Showing search results. Space presses the button, which reads Clear
+        // now; Bksp does too, ahead of Back, since on most boards Backspace is
+        // also the close key and should unwind the search before the screen.
         lv_label_set_text_fmt(s_nodesHintLabel,
-                              TR("Enter=Info  A=Actions  Bksp=Edit/Exit  %s=Back"),
+                              TR("Enter=Info  A=Actions  Space=Clear  %s=Back"),
                               modalCloseKeyLabel());
     } else {
         lv_label_set_text_fmt(s_nodesHintLabel,
-                              TR("Enter=Info  A=Actions  Space=Filter  %s=Back"),
+                              TR("Enter=Info  A=Actions  Space=Search  %s=Back"),
                               modalCloseKeyLabel());
     }
 #endif   // !UI_TOUCH_ONLY_PROFILE
@@ -28350,24 +28595,16 @@ static void refreshNodesListRows() {
 #endif
 
     if (s_nodesTitleLabel) {
-        // One total: live plus archived, which is the number of nodes this
-        // device knows about. With the archived half hidden it is the live count
-        // and the title is exactly what it always was.
-        const int nodeCount = nodesRowCountTotal();
-        // The one qualifier kept. The index caps how far back the archive scan
-        // reaches, so when it filled before the start of the file this is a
-        // floor rather than a total — and the real figure would need exactly the
-        // full read the cap exists to avoid. Nothing archived, nothing to
-        // qualify.
-        const char *more = (s_nodesArchivedCount > 0 && nodeArchiveIndexTruncated()) ? "+" : "";
+        // Favorites, or the matches for a search, counted as the list holds them.
         char titleText[80];
         if (s_nodesFilterOpen) {
-            // Brackets appear as soon as the filter is armed (even empty) so the
-            // user has a visual cue that filtering is on; text fills in as typed.
+            // Floor marker as before: a truncated archive scan means there may
+            // be more matches than the index reached.
+            const char *more = (s_nodesArchivedCount > 0 && nodeArchiveIndexTruncated()) ? "+" : "";
             snprintf(titleText, sizeof(titleText), TR("Nodes [%s] (%d%s)"),
-                     s_nodesFilter, nodeCount, more);
+                     s_nodesFilter, s_nodesFilteredCount, more);
         } else {
-            snprintf(titleText, sizeof(titleText), TR("Nodes (%d%s)"), nodeCount, more);
+            snprintf(titleText, sizeof(titleText), TR("Favorites (%d)"), s_nodesFilteredCount);
         }
         screenHeaderSetTitle(s_nodesTitleLabel, titleText);
     }
@@ -28389,7 +28626,7 @@ static void refreshNodesListRows() {
             snprintf(noMatch, sizeof(noMatch), TR("No matches for: %s"), s_nodesFilter);
             lv_label_set_text(empty, noMatch);
         } else {
-            lv_label_set_text(empty, TR("No nodes seen"));
+            lv_label_set_text(empty, TR("No favorites yet. Search to find a node."));
         }
         return;
     }
@@ -28507,7 +28744,8 @@ static void refreshNodesListSelection() {
     for (int i = 0; i < s_nodesListRowCount; i++) {
         lv_obj_t *row = s_nodesListRows[i];
         if (!row) continue;
-        bool selected = (s_nodesRenderedFilteredIdx[i] == s_nodesSelected);
+        bool selected = !s_nodesSearchBtnFocused
+                        && (s_nodesRenderedFilteredIdx[i] == s_nodesSelected);
         // Archived rows are dimmed: they are a record of nodes that have left
         // the table, and should not read as part of the live mesh at a glance.
         // Resolved back through the filtered index the row was built from.
@@ -28879,6 +29117,11 @@ static void onNodeSnapshotPressed(lv_event_t *e) {
         closeNodesActionMenu();
     }
     s_nodesSelected = idx;
+    if (s_nodesSearchBtnFocused) {
+        s_nodesSearchBtnFocused = false;
+        refreshNodesSearchButton();
+        refreshNodesHint();
+    }
     nodesClampRenderWindow();
     refreshNodesListSelection();
     refreshNodesDetails();
@@ -29709,7 +29952,9 @@ static void executeNodesActionSelection() {
             for (int i = 0; i < s_dmConvCount; i++) {
                 if (s_dmConvNodeIds[i] == nodeId) {
                     s_dmSelection = i + 1;  // +1 because row 0 is "New DM"
-                    s_dmMsgPanelFocused = false;
+                    // Into the conversation itself where the list is a drawer;
+                    // on the two panes, the list keeps the keys as before.
+                    s_dmMsgPanelFocused = dmListIsDrawer();
                     refreshDmModal(true);
                     break;
                 }
@@ -37840,7 +38085,230 @@ static bool dmTakeDeferredRefresh() {
 }
 #endif
 
+// ── DM conversation drawer ───────────────────────────────────────────────────
+// The channel drawer's twin (channelDrawerSlide()), on the DM screen. It is not
+// a separate state: it is the conversation list having the keys. Open while
+// s_dmMsgPanelFocused is false -- the list's keys, the list in view -- and shut
+// while the messages have them, so every path that already moved focus between
+// the two panes (Enter, Backspace, the wheel click, a tap on a row, a delete)
+// opens and closes it without knowing it exists.
+static bool dmDrawerBuilt() {
+    return lvObjValid(s_dmModal) && lvObjValid(s_dmConvPanel) && lvObjValid(s_dmDrawerScrim)
+        && lvObjValid(s_dmMsgPanel);
+}
+
+#if HAS_CHANNEL_DRAWER_ANIM
+static void dmDrawerSlideXCb(void *obj, int32_t x) {
+    lv_obj_set_x((lv_obj_t *)obj, x);
+}
+
+static void dmDrawerSlideDone(lv_anim_t *a) {
+    lv_obj_t *drawer = (lv_obj_t *)a->var;
+    if (!s_dmDrawerOpen && lvObjValid(drawer)) {
+        lv_obj_add_flag(drawer, LV_OBJ_FLAG_HIDDEN);
+    }
+}
+#endif
+
+static void dmDrawerSlide(bool open) {
+    if (!dmDrawerBuilt()) return;
+
+    // Placed every time, even when it is not moving: the nav column's padding
+    // goes on the screen after the drawer is made (appendHeltecBottomNav()),
+    // and the Cardputer's hint line comes and goes under the pane with the
+    // delete prompt. Coordinates are the screen's content area, which starts
+    // its padding in from the display edge; the drawer sits flush against that
+    // edge, or against the nav column when it is on the left, over the message
+    // pane's full height.
+    lv_obj_update_layout(s_dmModal);
+    const int32_t padL = lv_obj_get_style_pad_left(s_dmModal, LV_PART_MAIN)
+                       + lv_obj_get_style_border_width(s_dmModal, LV_PART_MAIN);
+    const int32_t padT = lv_obj_get_style_pad_top(s_dmModal, LV_PART_MAIN)
+                       + lv_obj_get_style_border_width(s_dmModal, LV_PART_MAIN);
+    lv_obj_t *content = lv_obj_get_parent(s_dmMsgPanel);
+    const int32_t paneY = lv_obj_get_y(content);
+    const int32_t paneH = lv_obj_get_height(content);
+#if defined(DEVICE_TDECK_PRO)
+    // From the top of the screen, over the header, as the channel drawer is
+    // there: on 1-bit paper with no dim, a sheet the pane's height only looks
+    // like the pane got narrower.
+    lv_obj_set_y(s_dmConvPanel, -padT);
+    lv_obj_set_height(s_dmConvPanel, paneY + paneH + padT);
+#else
+    lv_obj_set_y(s_dmConvPanel, paneY);
+    lv_obj_set_height(s_dmConvPanel, paneH);
+#endif
+    const int32_t shownX = navSideInsetLeft() - padL;
+    const int32_t hiddenX = -padL - lv_obj_get_width(s_dmConvPanel) - 2;
+
+    lv_obj_set_pos(s_dmDrawerScrim, -padL, -padT);
+    // No scrim with nothing behind the drawer to go back to: tapping it could
+    // not shut the list (dmDrawerSetOpen()), and up it would cover the nav bar
+    // that is the touch boards' only way off this screen. Set on every pass,
+    // so the first conversation arriving with the list up brings it in.
+    if (open && s_dmConvCount > 0) lv_obj_clear_flag(s_dmDrawerScrim, LV_OBJ_FLAG_HIDDEN);
+    else                           lv_obj_add_flag(s_dmDrawerScrim, LV_OBJ_FLAG_HIDDEN);
+    if (open == s_dmDrawerOpen
+        && open != lv_obj_has_flag(s_dmConvPanel, LV_OBJ_FLAG_HIDDEN)) {
+        return;   // already where it was asked to be
+    }
+    s_dmDrawerOpen = open;
+
+    if (open) {
+        lv_obj_move_foreground(s_dmDrawerScrim);
+        if (lv_obj_has_flag(s_dmConvPanel, LV_OBJ_FLAG_HIDDEN)) {
+            lv_obj_set_x(s_dmConvPanel, hiddenX);
+            lv_obj_clear_flag(s_dmConvPanel, LV_OBJ_FLAG_HIDDEN);
+        }
+        lv_obj_move_foreground(s_dmConvPanel);
+        // The selection may be anywhere in a long list.
+        if (s_dmSelection > 0 && s_dmSelection <= s_dmConvCount
+            && lvObjValid(s_dmConvRows[s_dmSelection - 1])) {
+            lv_obj_scroll_to_view(s_dmConvRows[s_dmSelection - 1], LV_ANIM_OFF);
+        }
+    } else {
+        lv_obj_add_flag(s_dmDrawerScrim, LV_OBJ_FLAG_HIDDEN);
+    }
+
+#if HAS_CHANNEL_DRAWER_ANIM
+    lv_anim_delete(s_dmConvPanel, dmDrawerSlideXCb);
+    if (s_dmDrawerAnimReady) {
+        lv_anim_t a;
+        lv_anim_init(&a);
+        lv_anim_set_var(&a, s_dmConvPanel);
+        lv_anim_set_exec_cb(&a, dmDrawerSlideXCb);
+        lv_anim_set_values(&a, lv_obj_get_x(s_dmConvPanel), open ? shownX : hiddenX);
+        lv_anim_set_duration(&a, kChannelDrawerSlideMs);
+        lv_anim_set_path_cb(&a, lv_anim_path_ease_out);
+        lv_anim_set_completed_cb(&a, dmDrawerSlideDone);
+        lv_anim_start(&a);
+        return;
+    }
+#endif
+    lv_obj_set_x(s_dmConvPanel, open ? shownX : hiddenX);
+    if (!open) lv_obj_add_flag(s_dmConvPanel, LV_OBJ_FLAG_HIDDEN);
+}
+
+// Brings the drawer to where the focus says it belongs.
+static void dmDrawerSync() {
+    if (!dmDrawerBuilt()) return;
+    dmDrawerSlide(!(s_dmMsgPanelFocused && s_dmSelection > 0));
+}
+
+// Asked for by name: the toggle key, a tap on the header or the scrim, a swipe.
+// Shutting it needs a conversation to show behind it. From the New DM row that
+// is the top one; with no conversations at all there is nothing to show, and
+// the list stays.
+static void dmDrawerSetOpen(bool open) {
+    if (!dmDrawerBuilt()) return;
+    if (open) {
+        s_dmMsgPanelFocused = false;
+        refreshDmPanelFocusStyles();
+        return;
+    }
+    if (s_dmSelection <= 0) {
+        if (s_dmConvCount <= 0) return;
+        s_dmSelection = 1;
+        s_dmMsgPanelFocused = true;
+        refreshDmModal(true);
+        return;
+    }
+    s_dmMsgPanelFocused = true;
+    refreshDmPanelFocusStyles();
+}
+
+static void onDmDrawerScrimPressed(lv_event_t *e) {
+    LV_UNUSED(e);
+    dmDrawerSetOpen(false);
+}
+
+#if HAS_TOUCH
+static void onDmHeaderTitlePressed(lv_event_t *e) {
+    LV_UNUSED(e);
+    // Only ever opens in practice: while the drawer is up the scrim covers the
+    // header, and the tap closes it from there.
+    dmDrawerSetOpen(!s_dmDrawerOpen);
+}
+#endif
+
+#if HAS_TOUCH && UI_CHANNEL_LIST_DROPDOWN
+// The edge swipe's half for this screen (channelDrawerIndevCb()): the DM screen
+// has to be the one in front, with nothing of its own over it.
+static bool dmDrawerCanOpenFromEdge() {
+    if (!dmDrawerBuilt() || s_dmDrawerOpen) return false;
+    if (s_composeModal || s_dmNodePickerModal || s_dmDelModal) return false;
+    lv_obj_t *parent = lv_obj_get_parent(s_dmModal);
+    if (!parent) return false;
+    const int32_t from = lv_obj_get_index(s_dmModal);
+    if (from < 0) return false;
+    const int32_t dispW = lv_disp_get_hor_res(NULL);
+    const int32_t dispH = lv_disp_get_ver_res(NULL);
+    const uint32_t n = lv_obj_get_child_count(parent);
+    for (uint32_t i = (uint32_t)from + 1; i < n; i++) {
+        lv_obj_t *o = lv_obj_get_child(parent, (int32_t)i);
+        if (!o || lv_obj_has_flag(o, LV_OBJ_FLAG_HIDDEN)) continue;
+        if (lv_obj_get_width(o) >= dispW * 3 / 4 && lv_obj_get_height(o) >= dispH / 2) {
+            return false;
+        }
+    }
+    return true;
+}
+#endif
+
+// The header names the conversation being read, as the chat's names its
+// channel; the screen's own name when there is none.
+static void dmRefreshHeaderTitle(const DmConv *selected) {
+    if (!lvObjValid(s_dmHeaderTitle) || !dmDrawerBuilt()) return;
+    if (!selected) {
+        screenHeaderSetTitle(s_dmHeaderTitle, TR("Direct Messages"));
+        return;
+    }
+    char name[64];
+    chatSenderLabel(selected->nodeId, name, sizeof(name));
+    if (!name[0] && liveShortNameUsable(selected->shortName)) {
+        snprintf(name, sizeof(name), "%s", selected->shortName);
+    }
+    if (!name[0]) snprintf(name, sizeof(name), "!%08lX", (unsigned long)selected->nodeId);
+    screenHeaderSetTitle(s_dmHeaderTitle, name);
+}
+
+// The key legend under the messages. One place for it: the screen sets it on
+// open, and refreshDmModal() puts it back after the delete flow has borrowed
+// the line.
+static const char *dmHintText() {
+    static char buf[128];
+    const bool drawer = dmListIsDrawer();
+#if defined(DEVICE_CARDPUTER_LORA_HAT)
+    LV_UNUSED(drawer);
+    buf[0] = '\0';   // no static legend here (openDmModal())
+#elif defined(DEVICE_TDECK)
+    snprintf(buf, sizeof(buf), "%s",
+             drawer ? TR("J/K = Select   Enter = Open   C = List   Space = Compose   D = Delete")
+                    : TR("J/K = Select   Space = Compose   Enter = Focus   D = Delete"));
+#elif defined(DEVICE_TLORA_PAGER_TFT)
+    LV_UNUSED(drawer);
+    snprintf(buf, sizeof(buf), "%s",
+             TR("Up/Down = Select   Space = Compose   Enter = Focus   D = Delete"));
+#elif UI_TOUCH_ONLY_PROFILE
+    snprintf(buf, sizeof(buf), "%s",
+             drawer ? TR("Tap name = List   Long-press 3s = Delete   DM below = Back")
+                    : TR("Tap = Open   Long-press 3s = Delete   DM below = Back"));
+#elif defined(DEVICE_M9)
+    snprintf(buf, sizeof(buf),
+             drawer ? TR("Up/Down = Select   Enter = Open   DM = List   Space = Compose   %s = Delete   %s = Back")
+                    : TR("Up/Down = Select   Space = Compose   Enter = Focus   %s = Delete   %s = Back"),
+             dmDeleteTriggerLabel(), modalCloseKeyLabel());
+#else
+    snprintf(buf, sizeof(buf),
+             drawer ? TR("Up/Down = Select   Enter = Open   C = List   Space = Compose   %s = Delete   %s = Back")
+                    : TR("Up/Down = Select   Space = Compose   Enter = Focus   %s = Delete   %s = Back"),
+             dmDeleteTriggerLabel(), modalCloseKeyLabel());
+#endif
+    return buf;
+}
+
 static void refreshDmPanelFocusStyles() {
+    dmDrawerSync();
     if (!s_dmConvTitle || !s_dmMsgTitle) return;
 
     // The panes have no frame now -- one rule divides them -- so the pane with
@@ -37867,6 +38335,10 @@ static void refreshDmPanelFocusStyles() {
 static void onDmConversationPressed(lv_event_t *e) {
     int idx = (int)(intptr_t)lv_event_get_user_data(e);
     if (idx < 0 || idx > s_dmConvCount) return;
+    // The end of a hold-to-delete: in the drawer rows answer on CLICKED, which
+    // LVGL still sends on that release, and it would shut the drawer behind the
+    // prompt the hold just raised.
+    if (s_dmDelModal) return;
     s_dmSelection = idx;
     s_dmMsgPanelFocused = (idx > 0);
 #if UI_TOUCH_ONLY_PROFILE
@@ -38129,6 +38601,9 @@ static void activateDmNodePickerSelection() {
     for (int i = 0; i < s_dmConvCount; i++) {
         if (s_dmConvNodeIds[i] == selectedNodeId) {
             s_dmSelection = i + 1;  // +1 because row 0 is "New DM"
+            // Into the new conversation where the list is a drawer, as from
+            // Nodes (executeNodesActionSelection()).
+            if (dmListIsDrawer()) s_dmMsgPanelFocused = true;
             break;
         }
     }
@@ -38435,6 +38910,8 @@ static void refreshDmModal(bool force) {
         s_dmMsgPanel = nullptr;
         s_dmMsgList = nullptr;
         s_dmHintLabel = nullptr;
+        s_dmDrawerScrim = nullptr;
+        s_dmHeaderTitle = nullptr;
         return;
     }
 
@@ -38462,7 +38939,6 @@ static void refreshDmModal(bool force) {
         }
     }
 
-    memset(s_dmConvRows, 0, sizeof(s_dmConvRows));
     memset(s_dmConvNodeIds, 0, sizeof(s_dmConvNodeIds));
     s_dmConvCount = 0;
 
@@ -38519,6 +38995,9 @@ static void refreshDmModal(bool force) {
         return;
     }
 
+    // Cleared with the rows, not before the early-out above: the drawer reads
+    // them between rebuilds to scroll the selection into view (dmDrawerSlide()).
+    memset(s_dmConvRows, 0, sizeof(s_dmConvRows));
     lv_obj_clean(s_dmConvList);
     chatBlinkForget(s_dmBlink, openDmPeerNodeId());
     lv_obj_clean(s_dmMsgList);
@@ -38633,7 +39112,12 @@ static void refreshDmModal(bool force) {
             lv_obj_set_style_bg_opa(row, selectedRow ? LV_OPA_70 : LV_OPA_40, 0);
 #endif
             lv_obj_set_style_shadow_width(row, 0, 0);
-            lv_obj_add_event_cb(row, onDmConversationPressed, LV_EVENT_PRESSED, (void *)(intptr_t)rowIdx);
+            // In the drawer a tap on a row also shuts it, so it waits for the
+            // tap to finish: on PRESSED, dragging the list to scroll it would
+            // pick whichever row the finger landed on and slam the drawer.
+            lv_obj_add_event_cb(row, onDmConversationPressed,
+                                dmListIsDrawer() ? LV_EVENT_CLICKED : LV_EVENT_PRESSED,
+                                (void *)(intptr_t)rowIdx);
             lv_obj_add_event_cb(row, onDmConversationPressState, LV_EVENT_PRESSED, (void *)(intptr_t)rowIdx);
             lv_obj_add_event_cb(row, onDmConversationPressState, LV_EVENT_PRESSING, (void *)(intptr_t)rowIdx);
             lv_obj_add_event_cb(row, onDmConversationPressState, LV_EVENT_RELEASED, (void *)(intptr_t)rowIdx);
@@ -38868,24 +39352,7 @@ static void refreshDmModal(bool force) {
         if (s_dmDeleteFlashMsg[0]) {
             lv_label_set_text(s_dmHintLabel, s_dmDeleteFlashMsg);
         } else {
-#if defined(DEVICE_CARDPUTER_LORA_HAT)
-            lv_label_set_text(s_dmHintLabel, "");   // no static legend here
-#elif defined(DEVICE_TDECK)
-            lv_label_set_text(s_dmHintLabel,
-                                  TR("J/K = Select   Space = Compose   Enter = Focus   D = Delete"));
-#elif defined(DEVICE_TLORA_PAGER_TFT)
-            lv_label_set_text(s_dmHintLabel,
-                                  TR("Up/Down = Select   Space = Compose   Enter = Focus   D = Delete"));
-#elif UI_TOUCH_ONLY_PROFILE
-            lv_label_set_text_fmt(s_dmHintLabel,
-                                  TR("Tap = Open   Long-press 3s = Delete"
-                                  "   DM below = Back"));
-#else
-            lv_label_set_text_fmt(s_dmHintLabel,
-                                  TR("Up/Down = Select   Space = Compose   Enter = Focus   %s = Delete   %s = Back"),
-                                  dmDeleteTriggerLabel(),
-                                  modalCloseKeyLabel());
-#endif
+            lv_label_set_text(s_dmHintLabel, dmHintText());
         }
 #if defined(DEVICE_CARDPUTER_LORA_HAT)
         // The line exists only while the delete flow is talking. Hiding rather
@@ -38897,6 +39364,7 @@ static void refreshDmModal(bool force) {
 #endif
     }
 
+    dmRefreshHeaderTitle(selected);
     refreshDmPanelFocusStyles();
 }
 
@@ -38910,6 +39378,10 @@ static void openDmModal() {
         s_dmConvTitle = nullptr;
         s_dmMsgTitle = nullptr;
         s_dmHintLabel = nullptr;
+        s_dmDrawerScrim = nullptr;
+        s_dmHeaderTitle = nullptr;
+        s_dmDrawerOpen = false;
+        s_dmDrawerAnimReady = false;
     }
     if (!s_rootScreen || s_dmModal) return;
     if (s_composeModal) closeComposePrompt();
@@ -38931,19 +39403,28 @@ static void openDmModal() {
     // Less the nav column where the bar is one (Left/Right): the panes are
     // sized absolutely, and appendHeltecBottomNav() reserves it as padding.
     int contentW = modalW - 8 - (navIsSideColumn() ? kSideNavW : 0);
+    // Where the conversations are a drawer, the messages have the whole width
+    // and the list slides in over them from the left (dmDrawerSlide()).
+    const bool dmDrawer = dmListIsDrawer();
     // Conversations over messages, both full width, instead of side by side:
     // the P4 held upright is 284 px wide -- too narrow to split -- and has the
     // height to stack into, the same way its Nodes screen does. The Heltec V4
     // and the Wio Tracker upright (240 px) take the same layout.
 #if defined(DEVICE_TDISPLAY_P4) || defined(DEVICE_HELTEC_V4_EXPANSION) \
     || defined(DEVICE_WIO_TRACKER_L2)
-    const bool dmStacked = uiPortrait();
+    const bool dmStacked = !dmDrawer && uiPortrait();
 #else
     const bool dmStacked = false;
 #endif
-    int leftW = dmStacked ? contentW : max(96, (contentW * 38) / 100);
+    // The drawer is as wide as the channel drawer (buildUi()).
+#if defined(DEVICE_CROWPANEL_50)
+    const int drawerW = min(max(contentW / 2, 120), 420);
+#else
+    const int drawerW = min(max(contentW / 2, 120), 260);
+#endif
+    int leftW = dmDrawer ? drawerW : (dmStacked ? contentW : max(96, (contentW * 38) / 100));
     // Side by side: a 3 px gap either side of the 1 px rule between the panes.
-    int rightW = dmStacked ? contentW : (contentW - leftW - 7);
+    int rightW = (dmDrawer || dmStacked) ? contentW : (contentW - leftW - 7);
 
     s_dmModal = lv_obj_create(s_rootScreen);
     lv_obj_set_size(s_dmModal, modalW, modalH);
@@ -38959,7 +39440,19 @@ static void openDmModal() {
     lv_obj_set_flex_flow(s_dmModal, LV_FLEX_FLOW_COLUMN);
     lv_obj_set_flex_align(s_dmModal, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_START);
 
-    buildScreenHeader(s_dmModal, TR("Direct Messages"));
+    lv_obj_t *dmTitle = buildScreenHeader(s_dmModal, TR("Direct Messages"));
+    if (dmDrawer) {
+        // Retitled with the conversation being read (dmRefreshHeaderTitle()).
+        s_dmHeaderTitle = dmTitle;
+#if HAS_TOUCH
+        // A tap on the name opens the drawer, as on the chat's channel name.
+        if (dmTitle) {
+            lv_obj_add_flag(dmTitle, LV_OBJ_FLAG_CLICKABLE);
+            lv_obj_set_ext_click_area(dmTitle, 6);
+            lv_obj_add_event_cb(dmTitle, onDmHeaderTitlePressed, LV_EVENT_CLICKED, nullptr);
+        }
+#endif
+    }
 
     lv_obj_t *content = lv_obj_create(s_dmModal);
     lv_obj_set_width(content, lv_pct(100));
@@ -38980,33 +39473,84 @@ static void openDmModal() {
     }
     lv_obj_set_flex_align(content, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_START);
 
-    lv_obj_t *leftPanel = lv_obj_create(content);
+    lv_obj_t *leftPanel = nullptr;
+    if (dmDrawer) {
+        // Behind the drawer and over everything else on the screen, the header
+        // and nav bar included: a tap anywhere off the list shuts it. Built
+        // first so the drawer, raised after it on every open, sits on top. No
+        // dim on the Pro, where a partial opacity dithers. As the channel
+        // drawer's (buildUi()).
+        s_dmDrawerScrim = lv_obj_create(s_dmModal);
+        lv_obj_remove_style_all(s_dmDrawerScrim);
+        lv_obj_add_flag(s_dmDrawerScrim, LV_OBJ_FLAG_IGNORE_LAYOUT);
+        lv_obj_set_size(s_dmDrawerScrim, modalW, modalH);
+        lv_obj_set_style_bg_color(s_dmDrawerScrim, lv_color_black(), 0);
+#if defined(DEVICE_TDECK_PRO)
+        lv_obj_set_style_bg_opa(s_dmDrawerScrim, LV_OPA_TRANSP, 0);
+#else
+        lv_obj_set_style_bg_opa(s_dmDrawerScrim, LV_OPA_40, 0);
+#endif
+        lv_obj_add_flag(s_dmDrawerScrim,
+                        (lv_obj_flag_t)(LV_OBJ_FLAG_CLICKABLE | LV_OBJ_FLAG_HIDDEN));
+        lv_obj_clear_flag(s_dmDrawerScrim, LV_OBJ_FLAG_SCROLLABLE);
+        lv_obj_add_event_cb(s_dmDrawerScrim, onDmDrawerScrimPressed, LV_EVENT_CLICKED, nullptr);
+
+        // The drawer: out of the screen's flex column, hidden until it opens,
+        // and placed by dmDrawerSlide() each time it moves. Styled as the
+        // channel drawer is.
+        leftPanel = lv_obj_create(s_dmModal);
+        lv_obj_add_flag(leftPanel,
+                        (lv_obj_flag_t)(LV_OBJ_FLAG_IGNORE_LAYOUT | LV_OBJ_FLAG_HIDDEN));
+        lv_obj_set_size(leftPanel, leftW, lv_pct(100));
+#if defined(DEVICE_TDECK_PRO)
+        lv_obj_set_style_bg_color(leftPanel, lv_color_make(255, 255, 255), 0);
+        lv_obj_set_style_bg_opa(leftPanel, LV_OPA_COVER, 0);
+        lv_obj_set_style_border_width(leftPanel, 2, 0);
+        lv_obj_set_style_border_color(leftPanel, lv_color_make(0, 0, 0), 0);
+        lv_obj_set_style_border_side(leftPanel,
+            (lv_border_side_t)(LV_BORDER_SIDE_RIGHT | LV_BORDER_SIDE_BOTTOM), 0);
+#else
+        lv_obj_set_style_bg_color(leftPanel, lv_color_hex(0x0F2A5C), 0);
+        lv_obj_set_style_bg_opa(leftPanel, LV_OPA_COVER, 0);
+        lv_obj_set_style_border_width(leftPanel, 1, 0);
+        lv_obj_set_style_border_color(leftPanel, lv_color_hex(0x335D9D), 0);
+        lv_obj_set_style_border_side(leftPanel, LV_BORDER_SIDE_RIGHT, 0);
+#endif
+        lv_obj_set_style_radius(leftPanel, 0, 0);
+        lv_obj_set_style_pad_all(leftPanel, 4, 0);
+    } else {
+        leftPanel = lv_obj_create(content);
+        lv_obj_set_width(leftPanel, leftW);
+        // Stacked: the conversation list takes the top 40%, the messages the rest.
+        lv_obj_set_height(leftPanel, dmStacked ? lv_pct(40) : lv_pct(100));
+        // No box round either pane: a single rule between them does the dividing.
+        lv_obj_set_style_bg_opa(leftPanel, LV_OPA_TRANSP, 0);
+        lv_obj_set_style_border_width(leftPanel, 0, 0);
+        lv_obj_set_style_pad_all(leftPanel, 2, 0);
+    }
     s_dmConvPanel = leftPanel;
-    lv_obj_set_width(leftPanel, leftW);
-    // Stacked: the conversation list takes the top 40%, the messages the rest.
-    lv_obj_set_height(leftPanel, dmStacked ? lv_pct(40) : lv_pct(100));
     lv_obj_clear_flag(leftPanel, LV_OBJ_FLAG_SCROLLABLE);
-    // No box round either pane: a single rule between them does the dividing.
-    lv_obj_set_style_bg_opa(leftPanel, LV_OPA_TRANSP, 0);
-    lv_obj_set_style_border_width(leftPanel, 0, 0);
-    lv_obj_set_style_pad_all(leftPanel, 2, 0);
     lv_obj_set_style_pad_row(leftPanel, 2, 0);
     lv_obj_set_flex_flow(leftPanel, LV_FLEX_FLOW_COLUMN);
     lv_obj_set_flex_align(leftPanel, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_START);
 
-    lv_obj_t *leftTitle = lv_label_create(leftPanel);
-    lv_obj_set_width(leftTitle, lv_pct(100));
+    // The drawer needs no title: being open says the list has the keys. The
+    // panes' titles are what say which one has them (refreshDmPanelFocusStyles()).
+    if (!dmDrawer) {
+        lv_obj_t *leftTitle = lv_label_create(leftPanel);
+        lv_obj_set_width(leftTitle, lv_pct(100));
 #if defined(DEVICE_CROWPANEL_50)
-    lv_obj_set_style_text_font(leftTitle, &lv_font_montserrat_14, 0);   // drawn as 16
+        lv_obj_set_style_text_font(leftTitle, &lv_font_montserrat_14, 0);   // drawn as 16
 #else
-    lv_obj_set_style_text_font(leftTitle, &lv_font_montserrat_10, 0);
+        lv_obj_set_style_text_font(leftTitle, &lv_font_montserrat_10, 0);
 #endif
-    lv_obj_set_style_text_color(
-        leftTitle,
-        (s_cfg.uiMode == UI_MODE_LIGHT) ? lv_color_hex(0x1B243D) : lv_color_hex(0xD9E8FF),
-        0);
-    lv_label_set_text(leftTitle, TR("Conversations"));
-    s_dmConvTitle = leftTitle;
+        lv_obj_set_style_text_color(
+            leftTitle,
+            (s_cfg.uiMode == UI_MODE_LIGHT) ? lv_color_hex(0x1B243D) : lv_color_hex(0xD9E8FF),
+            0);
+        lv_label_set_text(leftTitle, TR("Conversations"));
+        s_dmConvTitle = leftTitle;
+    }
 
     s_dmConvList = lv_obj_create(leftPanel);
     lv_obj_set_width(s_dmConvList, lv_pct(100));
@@ -39026,7 +39570,7 @@ static void openDmModal() {
     lv_obj_set_flex_flow(s_dmConvList, LV_FLEX_FLOW_COLUMN);
     lv_obj_set_flex_align(s_dmConvList, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_START);
 
-    buildPaneRule(content, dmStacked);
+    if (!dmDrawer) buildPaneRule(content, dmStacked);
 
     lv_obj_t *rightPanel = lv_obj_create(content);
     s_dmMsgPanel = rightPanel;
@@ -39044,19 +39588,22 @@ static void openDmModal() {
     lv_obj_set_flex_flow(rightPanel, LV_FLEX_FLOW_COLUMN);
     lv_obj_set_flex_align(rightPanel, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_START);
 
-    lv_obj_t *rightTitle = lv_label_create(rightPanel);
-    lv_obj_set_width(rightTitle, lv_pct(100));
+    // The header names the conversation where the list is a drawer.
+    if (!dmDrawer) {
+        lv_obj_t *rightTitle = lv_label_create(rightPanel);
+        lv_obj_set_width(rightTitle, lv_pct(100));
 #if defined(DEVICE_CROWPANEL_50)
-    lv_obj_set_style_text_font(rightTitle, &lv_font_montserrat_14, 0);   // drawn as 16
+        lv_obj_set_style_text_font(rightTitle, &lv_font_montserrat_14, 0);   // drawn as 16
 #else
-    lv_obj_set_style_text_font(rightTitle, &lv_font_montserrat_10, 0);
+        lv_obj_set_style_text_font(rightTitle, &lv_font_montserrat_10, 0);
 #endif
-    lv_obj_set_style_text_color(
-        rightTitle,
-        (s_cfg.uiMode == UI_MODE_LIGHT) ? lv_color_hex(0x1B243D) : lv_color_hex(0xD9E8FF),
-        0);
-    lv_label_set_text(rightTitle, TR("Messages"));
-    s_dmMsgTitle = rightTitle;
+        lv_obj_set_style_text_color(
+            rightTitle,
+            (s_cfg.uiMode == UI_MODE_LIGHT) ? lv_color_hex(0x1B243D) : lv_color_hex(0xD9E8FF),
+            0);
+        lv_label_set_text(rightTitle, TR("Messages"));
+        s_dmMsgTitle = rightTitle;
+    }
 
     s_dmMsgList = lv_obj_create(rightPanel);
     lv_obj_set_width(s_dmMsgList, lv_pct(100));
@@ -39118,29 +39665,14 @@ static void openDmModal() {
         hint,
         (s_cfg.uiMode == UI_MODE_LIGHT) ? lv_color_hex(0x334E75) : lv_color_hex(0xA7C7FF),
         0);
+    lv_label_set_text(hint, dmHintText());
 #if defined(DEVICE_CARDPUTER_LORA_HAT)
     // No static key legend on this build: a 240x135 panel cannot spare a
     // permanent line for it. The label itself stays, because the delete flow
     // has nowhere else to prompt — refreshDmModal() unhides it for "Confirm
     // delete" and the result, then hides it again. A hidden object is skipped
     // by the flex layout, so it costs no height while there is nothing to say.
-    lv_label_set_text(hint, "");
     lv_obj_add_flag(hint, LV_OBJ_FLAG_HIDDEN);
-#elif defined(DEVICE_TDECK)
-    lv_label_set_text(hint,
-                          TR("J/K = Select   Space = Compose   Enter = Focus   D = Delete"));
-#elif defined(DEVICE_TLORA_PAGER_TFT)
-    lv_label_set_text(hint,
-                          TR("Up/Down = Select   Space = Compose   Enter = Focus   D = Delete"));
-#elif UI_TOUCH_ONLY_PROFILE
-    lv_label_set_text_fmt(hint,
-                          TR("Tap = Open   Long-press 3s = Delete"
-                          "   DM below = Back"));
-#else
-    lv_label_set_text_fmt(hint,
-                          TR("Up/Down = Select   Space = Compose   Enter = Focus   %s = Delete   %s = Back"),
-                          dmDeleteTriggerLabel(),
-                          modalCloseKeyLabel());
 #endif
 
     s_dmRenderedConvCount = -1;
@@ -39148,11 +39680,21 @@ static void openDmModal() {
     s_dmRenderedMsgCount = -1;
     s_dmRenderedUnreadTotal = -1;
     s_dmMsgPanelFocused = false;
-    refreshDmModal(true);
+    // With a drawer, the screen opens on the most recent conversation, the list
+    // shut; only with none to show does it open on the list. (Row 0 is New DM.)
+    s_dmDrawerOpen = false;
+    s_dmDrawerAnimReady = false;
+    if (dmDrawer && DMs.count() > 0) {
+        s_dmSelection = 1;
+        s_dmMsgPanelFocused = true;
+    }
 
 #if UI_TOUCH_NAV_BAR
     appendHeltecBottomNav(s_dmModal, HELTEC_NAV_DM);
 #endif
+    // After the nav bar, whose padding the drawer is placed against.
+    refreshDmModal(true);
+    s_dmDrawerAnimReady = true;
 }
 
 static void openNodesModal() {
@@ -39202,6 +39744,12 @@ static void openNodesModal() {
         }
     }
 
+    // Each visit opens on the favorites, with no search carried over, and
+    // the cursor on the first row rather than the Search button.
+    s_nodesFilterOpen = false;
+    s_nodesSearchBtnFocused = false;
+    s_nodesFilterLen = 0;
+    s_nodesFilter[0] = '\0';
     snapshotNodesForModal();
 
     int modalW = lv_disp_get_hor_res(NULL);
@@ -39299,14 +39847,9 @@ static void openNodesModal() {
     lv_obj_set_flex_flow(s_nodesModal, LV_FLEX_FLOW_COLUMN);
     lv_obj_set_flex_align(s_nodesModal, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_START);
 
-    // Retitled with the count (and the filter, while one is armed) by
-    // refreshNodesModal(), through screenHeaderSetTitle().
+    // Retitled with the count (and the search, while one is in force) by
+    // refreshNodesListRows(), through screenHeaderSetTitle().
     s_nodesTitleLabel = buildScreenHeader(s_nodesModal, "");
-
-#if UI_TOUCH_ONLY_PROFILE
-    s_nodesFilterBtn = secondaryHeaderBtn(buildSecondaryHeader(s_nodesModal),
-                                          TR("Filter"), onNodesFilterButtonPressed);
-#endif
 
     lv_obj_t *content = lv_obj_create(s_nodesModal);
     lv_obj_set_width(content, lv_pct(100));
@@ -39352,8 +39895,11 @@ static void openNodesModal() {
     lv_obj_set_style_pad_top(listPanel, 2, 0);
     lv_obj_set_style_pad_bottom(listPanel, 2, 0);
 
+    buildNodesSearchButton(listPanel);
+
     s_nodesList = lv_obj_create(listPanel);
-    lv_obj_set_size(s_nodesList, lv_pct(100), lv_pct(100));
+    lv_obj_set_width(s_nodesList, lv_pct(100));
+    lv_obj_set_flex_grow(s_nodesList, 1);
     lv_obj_add_flag(s_nodesList, LV_OBJ_FLAG_SCROLLABLE);
     setupVScroll(s_nodesList);
     lv_obj_set_scrollbar_mode(s_nodesList, LV_SCROLLBAR_MODE_AUTO);
@@ -39534,8 +40080,11 @@ static void openNodesModal() {
     lv_obj_set_style_pad_top(listPanel, 2, 0);
     lv_obj_set_style_pad_bottom(listPanel, 2, 0);
 
+    buildNodesSearchButton(listPanel);
+
     s_nodesList = lv_obj_create(listPanel);
-    lv_obj_set_size(s_nodesList, lv_pct(100), lv_pct(100));
+    lv_obj_set_width(s_nodesList, lv_pct(100));
+    lv_obj_set_flex_grow(s_nodesList, 1);
     lv_obj_add_flag(s_nodesList, LV_OBJ_FLAG_SCROLLABLE);
     setupVScroll(s_nodesList);
     lv_obj_set_scrollbar_mode(s_nodesList, LV_SCROLLBAR_MODE_AUTO);
@@ -43385,10 +43934,13 @@ static void openNavDirectMessagesShortcut() {
     if (!prepareGlobalNavigation()) return;
     if (s_dmModal && lvObjAlive(s_dmModal)) {
         // Already there: drop back to the conversation list rather than
-        // reopening, which would discard the list state for no reason.
+        // reopening, which would discard the list state for no reason. Where
+        // the list is a drawer, a second press slides it in, and a third out
+        // again -- the M9's Messages button does the same with the channels.
         closeDmNodePicker();
         lv_obj_move_foreground(s_dmModal);
         refreshDmModal(true);
+        if (dmDrawerBuilt()) dmDrawerSetOpen(!s_dmDrawerOpen);
         return;
     }
     openDmModal();
@@ -45810,6 +46362,18 @@ static void pumpKeyboardInput() {
                 continue;
             }
 
+            // The drawer's key, the one that opens the channel list on the chat
+            // screen (legendChannelListTextRaw()): H on the Cardputer, C on the
+            // other keyboards.
+#if defined(DEVICE_CARDPUTER_LORA_HAT)
+            if ((k == 'h' || k == 'H') && dmDrawerBuilt()) {
+#else
+            if ((k == 'c' || k == 'C') && dmDrawerBuilt()) {
+#endif
+                dmDrawerSetOpen(!s_dmDrawerOpen);
+                continue;
+            }
+
             if (k == KEY_ROLLER && s_dmSelection > 0) {
                 s_dmMsgPanelFocused = !s_dmMsgPanelFocused;
                 refreshDmPanelFocusStyles();
@@ -46018,10 +46582,10 @@ static void pumpKeyboardInput() {
             continue;
         }
 
-        // The touch build's filter dialog, typed into from a physical keyboard
-        // (the T-Display P4's expansion). Every key is the dialog's while it is
-        // up, as with the other text fields -- the Nodes screen under it has an
-        // inline filter of its own that letters would otherwise reach.
+        // The Nodes Search dialog, typed into from a physical keyboard. Every
+        // key is the dialog's while it is up, as with the other text fields --
+        // the Nodes screen under it has Space and A shortcuts that letters
+        // would otherwise reach.
         if (s_nodesFilterDialog) {
             if (k == KEY_ENTER) {
                 applyNodesFilterText(s_nodesFilterInput
@@ -46055,59 +46619,26 @@ static void pumpKeyboardInput() {
                 continue;
             }
 
-            if ((k == KEY_BACKSPACE || k == KEY_BACKSPACE_HOLD) && s_nodesFilterOpen) {
-                // Reopens a committed filter rather than discarding it: a typo
-                // stays one keystroke from being fixed, and the unwind chain
-                // (edit down to empty, disarm, then Back) is the one this screen
-                // already had.
-                s_nodesFilterEditing = true;
-                if (s_nodesFilterLen > 0) {
-                    s_nodesFilter[--s_nodesFilterLen] = '\0';
-                } else {
-                    s_nodesFilterOpen = false;
-                    s_nodesFilterEditing = false;
-                }
-                nodesApplyFilter();
-                refreshNodesListRows();
-                refreshNodesListSelection();
-                refreshNodesDetails();
+            // Backspace leaves search results for the favorites before it
+            // reaches Back, which on most boards is the same key. From the
+            // details it steps out to the list first, as Back does there.
+            if ((k == KEY_BACKSPACE || k == KEY_BACKSPACE_HOLD) && s_nodesFilterOpen
+                && !s_nodesInfoFocused) {
+                applyNodesFilterText("");
                 continue;
             }
 
-            // The filter is entered explicitly with the spacebar; the space
-            // itself is never added to the filter text. Letters no longer
-            // start the filter on their own — they only append once it's open.
-            // Space is also the way back into a filter Enter has committed.
+            // Space presses the Search / Clear button above the list: it opens
+            // the Search dialog, or clears the search in force.
             if (k == ' ') {
-                if (!s_nodesFilterOpen || !s_nodesFilterEditing) {
-                    s_nodesFilterOpen = true;
-                    s_nodesFilterEditing = true;
-                    nodesApplyFilter();
-                    refreshNodesListRows();
-                    refreshNodesListSelection();
-                    refreshNodesDetails();
-                }
-                continue;
-            }
-
-            if (k > 0x20 && k < 0x7F && s_nodesFilterEditing) {
-                if (s_nodesFilterLen < kNodesFilterMax) {
-                    s_nodesFilter[s_nodesFilterLen++] = k;
-                    s_nodesFilter[s_nodesFilterLen] = '\0';
-                }
-                nodesApplyFilter();
-                refreshNodesListRows();
-                refreshNodesListSelection();
-                refreshNodesDetails();
+                nodesSearchButtonActivate();
                 continue;
             }
 
             // Actions moved off Enter and onto A when Enter became "focus the
-            // details". Guarded on the filter only while it is being typed into:
-            // once Enter commits it, the rows stay narrowed but A is a shortcut
-            // again rather than a character.
-            if (!s_nodesFilterEditing && (k == 'a' || k == 'A')) {
-                openNodesActionMenu();
+            // details". Not from the Search button: no node is under the cursor.
+            if (k == 'a' || k == 'A') {
+                if (!s_nodesSearchBtnFocused) openNodesActionMenu();
                 continue;
             }
 
@@ -46124,13 +46655,11 @@ static void pumpKeyboardInput() {
                 continue;
             }
             if (k == KEY_ENTER || k == KEY_ROLLER) {
-                // While the filter is being typed into, a confirm gesture means
-                // "done typing" and nothing else: the rows keep the filter and
-                // the keyboard goes back to the list. A second Enter then
-                // focuses the details as usual.
-                if (s_nodesFilterEditing) {
-                    s_nodesFilterEditing = false;
-                    refreshNodesHint();
+                // On the Search / Clear button, Enter presses it. Clear (and a
+                // finished search) puts the cursor back on the first row;
+                // Cancel leaves it on the button.
+                if (s_nodesSearchBtnFocused) {
+                    nodesSearchButtonActivate();
                     continue;
                 }
                 // Enter hands the keys to the details; the Pager's wheel click
@@ -46159,13 +46688,28 @@ static void pumpKeyboardInput() {
             }
 
             if (k == KEY_SCROLL_UP || k == KEY_SCROLL_DN) {
-                int nextSelected = s_nodesSelected;
-                if (invertScrollNav) {
-                    // Pager wheel orientation: UP should move to the next row.
-                    nextSelected += (k == KEY_SCROLL_UP) ? 1 : -1;
-                } else {
-                    nextSelected += (k == KEY_SCROLL_UP) ? -1 : 1;
+                // Pager wheel orientation: UP should move to the next row.
+                const int step = invertScrollNav ? ((k == KEY_SCROLL_UP) ? 1 : -1)
+                                                 : ((k == KEY_SCROLL_UP) ? -1 : 1);
+#if !UI_TOUCH_ONLY_PROFILE
+                // The Search / Clear button sits above the first row: Up from
+                // there (or from an empty list) moves onto it, Down moves back.
+                if (s_nodesSearchBtnFocused) {
+                    if (step > 0 && s_nodesFilteredCount > 0) {
+                        s_nodesSelected = 0;
+                        nodesClampRenderWindow();
+                        refreshNodesListRows();
+                        refreshNodesDetails();
+                        nodesSetSearchBtnFocus(false);
+                    }
+                    continue;
                 }
+                if (step < 0 && s_nodesSelected <= 0) {
+                    nodesSetSearchBtnFocus(true);
+                    continue;
+                }
+#endif
+                int nextSelected = s_nodesSelected + step;
 
                 if (nextSelected < 0) nextSelected = 0;
                 if (nextSelected >= s_nodesFilteredCount) nextSelected = s_nodesFilteredCount - 1;
@@ -49603,15 +50147,8 @@ static void refreshChannelSelectorLabel() {
 
 #if UI_CHANNEL_LIST_DROPDOWN
 // ── Channel drawer ───────────────────────────────────────────────────────────
-// The slide itself. Instant on the Pro, for the reason the dashboard carousel
-// is (HAS_HOME_CAROUSEL_ANIM): every animated frame there is an e-paper refresh.
-#if defined(DEVICE_TDECK_PRO)
-#define HAS_CHANNEL_DRAWER_ANIM 0
-#else
-#define HAS_CHANNEL_DRAWER_ANIM 1
-#endif
-static constexpr uint32_t kChannelDrawerSlideMs = 180;
-
+// The slide itself (HAS_CHANNEL_DRAWER_ANIM, kChannelDrawerSlideMs: defined
+// beside channelListIsDropdown(), for the DM screen's drawer too).
 #if HAS_CHANNEL_DRAWER_ANIM
 static void channelDrawerSlideXCb(void *obj, int32_t x) {
     lv_obj_set_x((lv_obj_t *)obj, x);
@@ -49740,6 +50277,17 @@ static void channelDrawerIndevCb(lv_event_t *e) {
     const lv_dir_t dir = lv_indev_get_gesture_dir(indev);
     const bool fromEdge = s_channelDrawerEdgePress;
     s_channelDrawerEdgePress = false;
+    // The DM screen's drawer first: while that screen is up, the chat (and so
+    // the channel drawer) is underneath it and channelDrawerCanOpenFromEdge()
+    // says no anyway.
+    if (dir == LV_DIR_RIGHT && fromEdge && dmDrawerCanOpenFromEdge()) {
+        dmDrawerSetOpen(true);
+        return;
+    }
+    if (dir == LV_DIR_LEFT && s_dmDrawerOpen && dmDrawerBuilt()) {
+        dmDrawerSetOpen(false);
+        return;
+    }
     if (dir == LV_DIR_RIGHT && fromEdge && !isChannelDropdownVisible()
         && channelDrawerCanOpenFromEdge()) {
         setChannelDropdownVisible(true);
