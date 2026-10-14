@@ -2711,6 +2711,13 @@ fields including map position details.
 - **While search results are shown the button reads Clear search.** Tap it, or
   press Space or Backspace, to return to the favorites. Every visit to the screen
   starts on the favorites
+- **All**, the button above Search, lists every node at once (live, plus
+  archived while **Show Archived Nodes** is on). The title reads
+  `All nodes (n)`; Clear search returns to the favorites
+- **Wildcards:** `*` matches any run of characters and `?` any one character.
+  A query with a wildcard must match the whole name or id, so `mi*` finds names
+  starting with "mi", `*base` names ending in "base", and `!1a2b*` ids starting
+  with `1a2b`. Without a wildcard a query matches anywhere in the name, as before
 - **The node list is on the left, the selected node's details on the right.** The
   list gets a real share of the width — about 45% — because its rows carry the
   node's **long name**, ellipsized when it does not fit. A node with no long name
@@ -2818,12 +2825,17 @@ being revisited.
   on keyboard builds) opens a dialog with a text field, Cancel and Search
 - Matching is case-insensitive on the long name, short name and node id
   (`!1a2b3c4d`). Archived nodes are searched only while Show Archived Nodes is on
+- `*` (any run) and `?` (any one character) are wildcards; a query containing
+  one must match the whole field (`mi*`, `*base`, `!1a2b*`). `*` alone is what
+  the **All** button searches for
+- **All**, above Search, shows every node; the header reads `All nodes (n)`
 - Search (or Enter) shows the matches; Cancel (or the close key) leaves the list
   as it was. The header reads `Nodes [text] (matches)`
 - Up/Down, Enter and A work on the results as they do on the favorites
 - On keyboard builds the screen opens with the cursor on the first node. Up from
   the first node (or from an empty list) moves the cursor onto the Search /
-  Clear search button, Down moves it back, and Enter presses the button
+  Clear search button, Up again onto All, Down walks back, and Enter presses
+  the button
 - The button reads **Clear search** while results are shown. It, Space, or
   Backspace from the list returns to the favorites. The hint line names whichever
   keys are live

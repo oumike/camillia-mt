@@ -1256,6 +1256,8 @@ static lv_obj_t *s_nodesHintLabel = nullptr;
 // The Search / Clear button above the node list, and its label.
 static lv_obj_t *s_nodesFilterBtn = nullptr;
 static lv_obj_t *s_nodesFilterBtnLabel = nullptr;
+// The All button above that: a search for "*", every node the list can show.
+static lv_obj_t *s_nodesAllBtn = nullptr;
 static lv_obj_t *s_nodesFilterDialog = nullptr;
 static lv_obj_t *s_nodesFilterInput = nullptr;
 static lv_obj_t *s_nodesFilterKeyboard = nullptr;
@@ -1311,10 +1313,13 @@ static int s_nodesFilterLen = 0;
 // favorites. Set and cleared only through the Search dialog and the Clear
 // button (applyNodesFilterText()), never by typing on the list itself.
 static bool s_nodesFilterOpen = false;
-// Keyboard builds: the cursor is on the Search / Clear button rather than a
-// row. Up from the first row puts it there and Down takes it back; Enter
-// presses the button. Touch-only builds tap the button and never set this.
+// Keyboard builds: the cursor is on the All or Search / Clear button above the
+// list rather than a row. Up from the first row puts it on Search, Up again on
+// All, and Down walks back; Enter presses the button. s_nodesAllBtnFocused
+// says which of the two, and is only meaningful while s_nodesSearchBtnFocused
+// is set. Touch-only builds tap the buttons and never set either.
 static bool s_nodesSearchBtnFocused = false;
+static bool s_nodesAllBtnFocused = false;
 // Locate is compiled out on the Cardputer, for the same reason Message Actions
 // is (see HAS_MESSAGE_ACTIONS below): no PSRAM, and decoding a PNG into a
 // full-panel image object is exactly the allocation that board has no room to
@@ -1357,18 +1362,14 @@ static constexpr int kNodesActionDelete = kNodesActionBaseCount + 1;
 // Delete, which grey out, this row is not built at all unless the peer is
 // confirmed: a disabled "Admin" on a stranger's node is an invitation to try,
 // and trying means unauthorized admin packets across the mesh and the broker.
-// "Use as chat server" appends after Delete for the same reason, and before
-// Admin, which has to stay last.
-static constexpr int kNodesActionChatServer = kNodesActionDelete + 1;
-static constexpr int kNodesActionAdmin = kNodesActionChatServer + 1;
+static constexpr int kNodesActionAdmin = kNodesActionDelete + 1;
 static constexpr int kNodesActionCount = kNodesActionAdmin + 1;
 // Set when the menu opens, from AdminPeerList. The row exists only while true,
 // which is why activeActionCount() rather than kNodesActionCount is what every
 // navigation and shortcut path counts against.
 static bool s_nodesActionAdminEnabled = false;
 #else
-static constexpr int kNodesActionChatServer = kNodesActionDelete + 1;
-static constexpr int kNodesActionCount = kNodesActionChatServer + 1;
+static constexpr int kNodesActionCount = kNodesActionDelete + 1;
 #endif
 static lv_obj_t *s_nodesActionModal = nullptr;
 static int s_nodesActionSelection = 0;
@@ -1395,8 +1396,6 @@ static constexpr char kNodesActionShortcuts[kNodesActionCount] = {
     // destructive action, which is why it opens a confirmation rather than
     // doing anything.
     'E',
-    // 'C' for (C)hat Server: free in both menus.
-    'C',
 #if HAS_ADMIN_TERMINAL
     'A',
 #endif
@@ -1419,8 +1418,6 @@ static bool s_nodesActionDeleteEnabled = false;
 // Share needs something to share: a node in the table with a real name, and
 // not this one (its own NodeInfo has its own send).
 static bool s_nodesActionShareEnabled = false;
-// Any other node can be made the chat server; this one cannot.
-static bool s_nodesActionChatServerEnabled = false;
 #if HAS_NODE_LOCATE
 // Locate needs a position to show. The row is built either way — a menu whose
 // contents move around depending on the node is harder to learn than one with a
@@ -1571,7 +1568,6 @@ static inline bool nodesActionRowDisabled(int idx) {
 #endif
     if (idx == kNodesActionDelete && !s_nodesActionDeleteEnabled) return true;
     if (idx == kNodesActionShare && !s_nodesActionShareEnabled) return true;
-    if (idx == kNodesActionChatServer && !s_nodesActionChatServerEnabled) return true;
     return false;
 }
 
@@ -25200,7 +25196,9 @@ static void closeNodesModal() {
     s_nodesHintLabel = nullptr;
     s_nodesFilterBtn = nullptr;
     s_nodesFilterBtnLabel = nullptr;
+    s_nodesAllBtn = nullptr;
     s_nodesSearchBtnFocused = false;
+    s_nodesAllBtnFocused = false;
     s_nodesFilterDialog = nullptr;
     s_nodesFilterInput = nullptr;
     s_nodesFilterKeyboard = nullptr;
@@ -25401,6 +25399,51 @@ static lv_obj_t *selectedNodesRowObj() {
     return nullptr;
 }
 
+static inline char nodesAsciiLower(char c) {
+    return (c >= 'A' && c <= 'Z') ? (char)(c - 'A' + 'a') : c;
+}
+
+// Case-insensitive glob over the whole of text: '*' is any run (even none) and
+// '?' is any one character -- a whole UTF-8 sequence, so it stands for an emoji
+// as readily as a letter. Backtracks only to the last '*', which is enough.
+static bool nodesGlobMatchNoCase(const char *text, const char *pat) {
+    if (!text) text = "";
+    const char *starPat = nullptr;
+    const char *starText = nullptr;
+    while (*text) {
+        if (*pat == '*') {
+            starPat = pat++;
+            starText = text;
+        } else if (*pat == '?') {
+            pat++;
+            text++;
+            while ((*(const uint8_t *)text & 0xC0) == 0x80) text++;
+        } else if (*pat && nodesAsciiLower(*pat) == nodesAsciiLower(*text)) {
+            pat++;
+            text++;
+        } else if (starPat) {
+            pat = starPat + 1;
+            text = ++starText;
+        } else {
+            return false;
+        }
+    }
+    while (*pat == '*') pat++;
+    return !*pat;
+}
+
+// A query with no wildcard keeps matching anywhere in the text, as it always
+// has. One with a wildcard is a pattern for the whole text, so "mi*" means
+// starts with "mi" and "*" means everything.
+static bool nodesFilterMatches(const char *text, const char *query) {
+    if (strpbrk(query, "*?")) return nodesGlobMatchNoCase(text, query);
+    return dmNodePickerContainsNoCase(text, query);
+}
+
+static bool nodesFilterIsAll() {
+    return s_nodesFilterOpen && strcmp(s_nodesFilter, "*") == 0;
+}
+
 static void nodesApplyFilter() {
     s_nodesFilteredCount = 0;
 
@@ -25419,11 +25462,11 @@ static void nodesApplyFilter() {
         if (s_nodesFilterOpen && s_nodesFilterLen > 0) {
             char nodeIdText[16];
             snprintf(nodeIdText, sizeof(nodeIdText), "!%08lX", (unsigned long)nodeId);
-            match = dmNodePickerContainsNoCase(nodeIdText, s_nodesFilter)
-                 || (n && dmNodePickerContainsNoCase(n->longName, s_nodesFilter))
-                 || (n && dmNodePickerContainsNoCase(n->shortName, s_nodesFilter))
-                 || (a && dmNodePickerContainsNoCase(a->longName, s_nodesFilter))
-                 || (a && dmNodePickerContainsNoCase(a->shortName, s_nodesFilter));
+            match = nodesFilterMatches(nodeIdText, s_nodesFilter)
+                 || (n && nodesFilterMatches(n->longName, s_nodesFilter))
+                 || (n && nodesFilterMatches(n->shortName, s_nodesFilter))
+                 || (a && nodesFilterMatches(a->longName, s_nodesFilter))
+                 || (a && nodesFilterMatches(a->shortName, s_nodesFilter));
         } else {
             // No search: favorites only. Archived rows never qualify: the
             // favorite flag lives on the table entry, and favorites are never
@@ -25473,6 +25516,7 @@ static void applyNodesFilterText(const char *text) {
 
     // A different set of rows: start at its top, with the keys on the list.
     s_nodesSearchBtnFocused = false;
+    s_nodesAllBtnFocused = false;
     s_nodesSelected = 0;
     s_nodesRenderStart = 0;
     if (s_nodesInfoFocused) {
@@ -25648,7 +25692,7 @@ static void openNodesFilterDialog() {
     lv_obj_set_style_pad_right(s_nodesFilterInput, 3, 0);
     lv_textarea_set_one_line(s_nodesFilterInput, true);
     lv_textarea_set_max_length(s_nodesFilterInput, kNodesFilterMax);
-    lv_textarea_set_placeholder_text(s_nodesFilterInput, TR("Name or !id"));
+    lv_textarea_set_placeholder_text(s_nodesFilterInput, TR("Name or !id, * and ? ok"));
     lv_textarea_set_text(s_nodesFilterInput, "");
     lv_obj_add_state(s_nodesFilterInput, LV_STATE_FOCUSED);
     lv_obj_add_event_cb(s_nodesFilterInput, onNodesFilterInputEvent, LV_EVENT_READY, nullptr);
@@ -25694,6 +25738,29 @@ static void nodesSearchButtonActivate() {
     }
 }
 
+// The All button: every node, by way of the "*" pattern.
+static void nodesAllButtonActivate() {
+    if (!s_nodesModal) return;
+    applyNodesFilterText("*");
+}
+
+// Enter on the keyboard cursor's button, whichever of the two it is on.
+static void nodesFocusedButtonActivate() {
+    if (s_nodesAllBtnFocused) nodesAllButtonActivate();
+    else                      nodesSearchButtonActivate();
+}
+
+static void styleNodesTopButton(lv_obj_t *btn, bool focused) {
+    if (!lvObjValid(btn)) return;
+#if defined(DEVICE_TDECK_PRO)
+    lv_obj_set_style_border_width(btn, focused ? 3 : 1, 0);
+#else
+    lv_obj_set_style_bg_color(btn, lv_color_hex(focused ? 0x2A4E8F : 0x16386F), 0);
+    lv_obj_set_style_border_width(btn, focused ? 2 : 1, 0);
+    lv_obj_set_style_border_color(btn, lv_color_hex(focused ? 0x90B4FF : 0x5C86C6), 0);
+#endif
+}
+
 // Label for what the button does now, and the cursor drawn the way a selected
 // row draws it, so moving Up from the first row reads as one list.
 static void refreshNodesSearchButton() {
@@ -25701,24 +25768,18 @@ static void refreshNodesSearchButton() {
         lv_label_set_text(s_nodesFilterBtnLabel,
                           s_nodesFilterOpen ? TR("Clear search") : TR("Search"));
     }
-    if (!lvObjValid(s_nodesFilterBtn)) return;
-    const bool focused = s_nodesSearchBtnFocused;
-#if defined(DEVICE_TDECK_PRO)
-    lv_obj_set_style_border_width(s_nodesFilterBtn, focused ? 3 : 1, 0);
-#else
-    lv_obj_set_style_bg_color(s_nodesFilterBtn,
-                              lv_color_hex(focused ? 0x2A4E8F : 0x16386F), 0);
-    lv_obj_set_style_border_width(s_nodesFilterBtn, focused ? 2 : 1, 0);
-    lv_obj_set_style_border_color(s_nodesFilterBtn,
-                                  lv_color_hex(focused ? 0x90B4FF : 0x5C86C6), 0);
-#endif
+    styleNodesTopButton(s_nodesAllBtn, s_nodesSearchBtnFocused && s_nodesAllBtnFocused);
+    styleNodesTopButton(s_nodesFilterBtn, s_nodesSearchBtnFocused && !s_nodesAllBtnFocused);
 }
 
 #if !UI_TOUCH_ONLY_PROFILE
-// Moves the keyboard cursor between the Search / Clear button and the rows.
-static void nodesSetSearchBtnFocus(bool focused) {
-    if (focused == s_nodesSearchBtnFocused) return;
+// Moves the keyboard cursor between the buttons above the list and the rows.
+// allBtn picks All over Search / Clear when focused is set.
+static void nodesSetSearchBtnFocus(bool focused, bool allBtn = false) {
+    if (!focused) allBtn = false;
+    if (focused == s_nodesSearchBtnFocused && allBtn == s_nodesAllBtnFocused) return;
     s_nodesSearchBtnFocused = focused;
+    s_nodesAllBtnFocused = allBtn;
     refreshNodesSearchButton();
     refreshNodesListSelection();
     refreshNodesHint();
@@ -25735,8 +25796,47 @@ static void onNodesFilterButtonPressed(lv_event_t *e) {
     nodesSearchButtonActivate();
 }
 
-// Builds the Search / Clear button at the top of the list pane and turns the
-// pane into a column, so the list under it takes the remaining height.
+static void onNodesAllButtonPressed(lv_event_t *e) {
+    LV_UNUSED(e);
+    nodesAllButtonActivate();
+}
+
+// One of the buttons above the list, full width; returns its label.
+static lv_obj_t *buildNodesTopButton(lv_obj_t *listPanel, lv_obj_t **btnOut, int btnH,
+                                     const lv_font_t *btnFont, lv_event_cb_t cb) {
+    lv_obj_t *btn = lv_btn_create(listPanel);
+    *btnOut = btn;
+    if (!btn) return nullptr;
+    lv_obj_set_width(btn, lv_pct(96));
+    lv_obj_set_height(btn, btnH);
+    lv_obj_set_style_radius(btn, 4, 0);
+    lv_obj_set_style_pad_hor(btn, 3, 0);
+    lv_obj_set_style_pad_ver(btn, 1, 0);
+    lv_obj_set_style_shadow_width(btn, 0, 0);
+    lv_obj_set_style_border_width(btn, 1, 0);
+#if defined(DEVICE_TDECK_PRO)
+    const lv_color_t textColor = lv_color_make(0, 0, 0);
+    lv_obj_set_style_bg_opa(btn, LV_OPA_TRANSP, 0);
+    lv_obj_set_style_border_color(btn, lv_color_make(0, 0, 0), 0);
+#else
+    const lv_color_t textColor = lv_color_hex(0xE8F1FF);
+    lv_obj_set_style_bg_color(btn, lv_color_hex(0x16386F), 0);
+    lv_obj_set_style_bg_opa(btn, LV_OPA_COVER, 0);
+    lv_obj_set_style_border_color(btn, lv_color_hex(0x5C86C6), 0);
+#endif
+    lv_obj_add_event_cb(btn, cb, LV_EVENT_CLICKED, nullptr);
+
+    lv_obj_t *lbl = lv_label_create(btn);
+    lv_obj_set_style_text_font(lbl, btnFont, 0);
+    lv_obj_set_style_text_color(lbl, textColor, 0);
+    lv_label_set_long_mode(lbl, LV_LABEL_LONG_CLIP);
+    lv_obj_center(lbl);
+    return lbl;
+}
+
+// Builds the All and Search / Clear buttons at the top of the list pane and
+// turns the pane into a column, so the list under them takes the remaining
+// height.
 static void buildNodesSearchButton(lv_obj_t *listPanel) {
     lv_obj_set_flex_flow(listPanel, LV_FLEX_FLOW_COLUMN);
     lv_obj_set_flex_align(listPanel, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_START,
@@ -25758,32 +25858,12 @@ static void buildNodesSearchButton(lv_obj_t *listPanel) {
     const lv_font_t *btnFont = &lv_font_montserrat_10;
 #endif
 
-    s_nodesFilterBtn = lv_btn_create(listPanel);
-    if (!s_nodesFilterBtn) return;
-    lv_obj_set_width(s_nodesFilterBtn, lv_pct(96));
-    lv_obj_set_height(s_nodesFilterBtn, btnH);
-    lv_obj_set_style_radius(s_nodesFilterBtn, 4, 0);
-    lv_obj_set_style_pad_hor(s_nodesFilterBtn, 3, 0);
-    lv_obj_set_style_pad_ver(s_nodesFilterBtn, 1, 0);
-    lv_obj_set_style_shadow_width(s_nodesFilterBtn, 0, 0);
-    lv_obj_set_style_border_width(s_nodesFilterBtn, 1, 0);
-#if defined(DEVICE_TDECK_PRO)
-    const lv_color_t textColor = lv_color_make(0, 0, 0);
-    lv_obj_set_style_bg_opa(s_nodesFilterBtn, LV_OPA_TRANSP, 0);
-    lv_obj_set_style_border_color(s_nodesFilterBtn, lv_color_make(0, 0, 0), 0);
-#else
-    const lv_color_t textColor = lv_color_hex(0xE8F1FF);
-    lv_obj_set_style_bg_color(s_nodesFilterBtn, lv_color_hex(0x16386F), 0);
-    lv_obj_set_style_bg_opa(s_nodesFilterBtn, LV_OPA_COVER, 0);
-    lv_obj_set_style_border_color(s_nodesFilterBtn, lv_color_hex(0x5C86C6), 0);
-#endif
-    lv_obj_add_event_cb(s_nodesFilterBtn, onNodesFilterButtonPressed, LV_EVENT_CLICKED, nullptr);
-
-    s_nodesFilterBtnLabel = lv_label_create(s_nodesFilterBtn);
-    lv_obj_set_style_text_font(s_nodesFilterBtnLabel, btnFont, 0);
-    lv_obj_set_style_text_color(s_nodesFilterBtnLabel, textColor, 0);
-    lv_label_set_long_mode(s_nodesFilterBtnLabel, LV_LABEL_LONG_CLIP);
-    lv_obj_center(s_nodesFilterBtnLabel);
+    if (lv_obj_t *allLbl = buildNodesTopButton(listPanel, &s_nodesAllBtn, btnH, btnFont,
+                                               onNodesAllButtonPressed)) {
+        lv_label_set_text(allLbl, TR("All"));
+    }
+    s_nodesFilterBtnLabel = buildNodesTopButton(listPanel, &s_nodesFilterBtn, btnH, btnFont,
+                                                onNodesFilterButtonPressed);
     refreshNodesSearchButton();
 }
 
@@ -28537,6 +28617,9 @@ static void refreshNodesHint() {
         // the list's legend up over a panel it no longer drives.
         lv_label_set_text_fmt(s_nodesHintLabel, TR("%s=Scroll  A=Actions  %s=List"),
                               navKeys, modalCloseKeyLabel());
+    } else if (s_nodesSearchBtnFocused && s_nodesAllBtnFocused) {
+        lv_label_set_text_fmt(s_nodesHintLabel, TR("Enter=Show all  %s=Back"),
+                              modalCloseKeyLabel());
     } else if (s_nodesSearchBtnFocused) {
         lv_label_set_text_fmt(s_nodesHintLabel,
                               s_nodesFilterOpen ? TR("Enter=Clear search  %s=Back")
@@ -28597,7 +28680,11 @@ static void refreshNodesListRows() {
     if (s_nodesTitleLabel) {
         // Favorites, or the matches for a search, counted as the list holds them.
         char titleText[80];
-        if (s_nodesFilterOpen) {
+        if (nodesFilterIsAll()) {
+            const char *more = (s_nodesArchivedCount > 0 && nodeArchiveIndexTruncated()) ? "+" : "";
+            snprintf(titleText, sizeof(titleText), TR("All nodes (%d%s)"),
+                     s_nodesFilteredCount, more);
+        } else if (s_nodesFilterOpen) {
             // Floor marker as before: a truncated archive scan means there may
             // be more matches than the index reached.
             const char *more = (s_nodesArchivedCount > 0 && nodeArchiveIndexTruncated()) ? "+" : "";
@@ -28621,12 +28708,14 @@ static void refreshNodesListRows() {
         lv_obj_set_width(empty, lv_pct(100));
         lv_obj_set_style_text_font(empty, nodesListFont, 0);
         lv_obj_set_style_text_color(empty, lv_color_hex(0xD9E8FF), 0);
-        if (s_nodesFilterOpen && s_nodesFilterLen > 0) {
+        if (nodesFilterIsAll()) {
+            lv_label_set_text(empty, TR("No nodes yet."));
+        } else if (s_nodesFilterOpen && s_nodesFilterLen > 0) {
             char noMatch[64];
             snprintf(noMatch, sizeof(noMatch), TR("No matches for: %s"), s_nodesFilter);
             lv_label_set_text(empty, noMatch);
         } else {
-            lv_label_set_text(empty, TR("No favorites yet. Search to find a node."));
+            lv_label_set_text(empty, TR("No favorites yet. All or Search finds nodes."));
         }
         return;
     }
@@ -29119,6 +29208,7 @@ static void onNodeSnapshotPressed(lv_event_t *e) {
     s_nodesSelected = idx;
     if (s_nodesSearchBtnFocused) {
         s_nodesSearchBtnFocused = false;
+        s_nodesAllBtnFocused = false;
         refreshNodesSearchButton();
         refreshNodesHint();
     }
@@ -29878,19 +29968,6 @@ static void executeNodesActionSelection() {
     }
 #endif
 
-    if (s_nodesActionSelection == kNodesActionChatServer) {
-        // Pins this node as the chat server: set manually, never replaced.
-        const uint32_t nodeId = s_nodesActionNodeId;
-        if (!s_nodesActionChatServerEnabled || nodeId == 0) return;
-        closeNodesActionMenu();
-        chatServerSetManual(nodeId);
-        char who[16], line[64];
-        liveNodeLabel(nodeId, who, sizeof(who), false);
-        snprintf(line, sizeof(line), TR("Chat server set to %s"), who);
-        csLive(line, TFT_GREEN);
-        return;
-    }
-
     if (s_nodesActionSelection == kNodesActionShare) {
         if (!s_nodesActionShareEnabled) return;
         const uint32_t shareId = s_nodesActionNodeId;
@@ -30157,7 +30234,6 @@ static void openNodesActionMenuFor(uint32_t nodeId, bool msgMode, uint32_t packe
     s_nodesActionDeleteEnabled = (actionNode != nullptr);
     s_nodesActionShareEnabled = actionNode && actionNode->hasName
                                 && nodeId != s_myNodeId;
-    s_nodesActionChatServerEnabled = (nodeId != s_myNodeId);
 #if HAS_NODE_LOCATE
     // A node the table has never had a position for has nothing to point at, so
     // Locate is greyed rather than opening an empty map. (0, 0) is a real place
@@ -30196,7 +30272,6 @@ static void openNodesActionMenuFor(uint32_t nodeId, bool msgMode, uint32_t packe
     #endif
         TR_NOOP("Share"),
         TR_NOOP("Delete"),
-        TR_NOOP("Chat Server"),
     #if HAS_ADMIN_TERMINAL
         TR_NOOP("Admin"),
     #endif
@@ -30217,7 +30292,6 @@ static void openNodesActionMenuFor(uint32_t nodeId, bool msgMode, uint32_t packe
 #endif
         TR_NOOP("S(h)are"),
         TR_NOOP("Del(e)te"),
-        TR_NOOP("(C)hat Server"),
 #if HAS_ADMIN_TERMINAL
         TR_NOOP("(A)dmin"),
 #endif
@@ -39748,6 +39822,7 @@ static void openNodesModal() {
     // the cursor on the first row rather than the Search button.
     s_nodesFilterOpen = false;
     s_nodesSearchBtnFocused = false;
+    s_nodesAllBtnFocused = false;
     s_nodesFilterLen = 0;
     s_nodesFilter[0] = '\0';
     snapshotNodesForModal();
@@ -46655,11 +46730,11 @@ static void pumpKeyboardInput() {
                 continue;
             }
             if (k == KEY_ENTER || k == KEY_ROLLER) {
-                // On the Search / Clear button, Enter presses it. Clear (and a
-                // finished search) puts the cursor back on the first row;
-                // Cancel leaves it on the button.
+                // On a button above the list, Enter presses it. Clear, All
+                // (and a finished search) put the cursor back on the first
+                // row; Cancel leaves it on the button.
                 if (s_nodesSearchBtnFocused) {
-                    nodesSearchButtonActivate();
+                    nodesFocusedButtonActivate();
                     continue;
                 }
                 // Enter hands the keys to the details; the Pager's wheel click
@@ -46692,10 +46767,15 @@ static void pumpKeyboardInput() {
                 const int step = invertScrollNav ? ((k == KEY_SCROLL_UP) ? 1 : -1)
                                                  : ((k == KEY_SCROLL_UP) ? -1 : 1);
 #if !UI_TOUCH_ONLY_PROFILE
-                // The Search / Clear button sits above the first row: Up from
-                // there (or from an empty list) moves onto it, Down moves back.
+                // The All and Search / Clear buttons sit above the first row:
+                // Up from there (or from an empty list) moves onto Search, Up
+                // again onto All, and Down walks back.
                 if (s_nodesSearchBtnFocused) {
-                    if (step > 0 && s_nodesFilteredCount > 0) {
+                    if (step < 0 && !s_nodesAllBtnFocused) {
+                        nodesSetSearchBtnFocus(true, true);
+                    } else if (step > 0 && s_nodesAllBtnFocused) {
+                        nodesSetSearchBtnFocus(true, false);
+                    } else if (step > 0 && s_nodesFilteredCount > 0) {
                         s_nodesSelected = 0;
                         nodesClampRenderWindow();
                         refreshNodesListRows();
