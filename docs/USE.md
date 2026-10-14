@@ -339,8 +339,8 @@ These apply to all keyboard builds, including `tdeck`, `tdeck-pro`,
   step through messages and Enter opens [Message Actions](#message-actions).
   Left goes back to the list, where Up and Down switch channels again. Portrait,
   whose list is a drawer, is unchanged
-- **The Nodes filter takes typing.** Enter applies the filter, and Backspace on
-  an empty field closes the dialog
+- **The Nodes Search dialog takes typing.** Enter searches, and Backspace on
+  an empty field cancels the dialog
 - **Caps Lock lights the expansion's indicator LEDs** while it is on
 - **F7 turns the keyboard light on and off.** The choice is kept across reboots,
   and the light also goes out and comes back with the screen
@@ -934,7 +934,7 @@ reset actions. Announcing to the mesh has moved to Live → Tools → Announce.
 - Keyboard builds: I opens/focuses the info panel within Config
 - Import, both Clear Nodes rows, and Factory Reset require a second Enter
   confirmation
-- **Space filters the rows**, the same way it does on the Nodes screen. Press
+- **Space filters the rows**. Press
   Space to arm the filter, then type to narrow the list; the header shows
   `[what you typed]` and how many rows match. Backspace edits the filter and
   disarms it once empty, Up/Down and Enter work normally on whatever is left,
@@ -1214,7 +1214,7 @@ does.
 from the last returns to the first — with nearly thirty themes in the list, the
 bottom of it is otherwise a long way from the top.
 
-**Space filters the rows**, the same way it does on the CFG and Nodes screens.
+**Space filters the rows**, the same way it does on the CFG screen.
 Press Space to arm the filter, then type to narrow the list to themes whose names
 contain what you typed, case-insensitively — `dark` for every dark variant, `sun`
 for `Sunset Ridge`. The line under the title shows `[what you typed]` and how many
@@ -2695,9 +2695,22 @@ it. With the master **WiFi** row off nothing can start, so the picker says
 
 ## Nodes screen
 
-Nodes shows discovered nodes and detail fields, including map position details.
+Nodes shows your favorite nodes, and any node you search for, with detail
+fields including map position details.
 
 - Open from the main screen (N on keyboard builds, Nodes bottom-nav button on Heltec)
+- **The list shows only favorites** until you search. The title reads
+  `Favorites (n)`. Favorite a node from its actions menu (A, or tap it) while it
+  is in search results and it joins the favorites
+- **Search** is the button at the top of the list (Space on keyboard builds). It
+  opens a dialog with a text field, **Cancel** and **Search**. Type part of a long
+  name, a short name or a node id (`!1a2b`) and press Search (or Enter); the list
+  then shows every matching node, favorite or not, and the title reads
+  `Nodes [what you typed] (matches)`. Archived nodes are included only while
+  **Show Archived Nodes** is on. Searching for nothing just closes the dialog
+- **While search results are shown the button reads Clear search.** Tap it, or
+  press Space or Backspace, to return to the favorites. Every visit to the screen
+  starts on the favorites
 - **The node list is on the left, the selected node's details on the right.** The
   list gets a real share of the width — about 45% — because its rows carry the
   node's **long name**, ellipsized when it does not fit. A node with no long name
@@ -2710,9 +2723,7 @@ Nodes shows discovered nodes and detail fields, including map position details.
   focused panel is the one with the bright border. The close key steps back out
   to the list; from the list it closes the screen
 - **A opens the actions menu** for the selected node, from either panel. (It used
-  to be Enter, which now focuses the details.) While you are typing a filter,
-  letters are filter text; press Enter to commit the filter and A works again on
-  the narrowed list
+  to be Enter, which now focuses the details.)
 - **Locate** in that menu shows where the node is — see [Locate](#locate)
 - On the T-Lora Pager the wheel click toggles between the two panels, the same
   way it swaps panels on Config and DM
@@ -2721,8 +2732,8 @@ Nodes shows discovered nodes and detail fields, including map position details.
 **Cardputer keeps the original layout**: a narrow column of short names on the
 right with the details taking the left. Four sections of aligned fields need
 width for two columns and height for roughly seventeen rows, and 240x135 has
-neither. Everything else on this screen — the filter, the selection, Enter for
-details focus, A for actions — works there the same way.
+neither. Everything else on this screen — the selection, Enter for
+details focus, A for actions, Space for Search — works there the same way.
 
 It also lists **at most 50 nodes** rather than 250, because it is the one board
 with no PSRAM to keep the table in. The list is otherwise identical; it just
@@ -2801,23 +2812,18 @@ limitations. The pre-download controls still present in Web Config are legacy;
 the live Locate viewport does not consume those files while the cache design is
 being revisited.
 
-### Filtering nodes
+### Searching nodes
 
-- Space starts the filter. Filter brackets `[ ]` appear in the header as a visual
-  cue that filtering is on, even before you type anything
-- Once the filter is armed, type to narrow the list; the text shows inside the
-  brackets (`NODES [text] (count)`)
-- Typing a letter on its own no longer starts the filter — only Space does
-- Backspace edits the filter text; backspacing past the last character closes the
-  filter and clears the brackets
-- **Enter commits the filter.** The rows stay narrowed and the brackets stay in
-  the header, but the keyboard goes back to the list: Up/Down move the cursor
-  over the matching nodes and A opens the actions menu for the selected one
-  instead of typing an `a`. A second Enter focuses the details panel, the same
-  as it does with no filter
-- With a committed filter, Backspace goes back to editing the text (it does not
-  discard it), and Space does the same — so you can narrow, act, and re-narrow
-  without leaving the screen. The hint line names whichever keys are live
+- The list shows favorites only. **Search** (the button above the list, or Space
+  on keyboard builds) opens a dialog with a text field, Cancel and Search
+- Matching is case-insensitive on the long name, short name and node id
+  (`!1a2b3c4d`). Archived nodes are searched only while Show Archived Nodes is on
+- Search (or Enter) shows the matches; Cancel (or the close key) leaves the list
+  as it was. The header reads `Nodes [text] (matches)`
+- Up/Down, Enter and A work on the results as they do on the favorites
+- The button reads **Clear search** while results are shown. It, Space, or
+  Backspace from the list returns to the favorites. The hint line names whichever
+  keys are live
 
 ![Node details screen](screenshots/RiCa_screen_20260730_194331.png)
 

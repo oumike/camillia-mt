@@ -1253,7 +1253,9 @@ static SemaphoreHandle_t s_nodesMapFsMutex = nullptr;
 static lv_obj_t *s_nodesList = nullptr;
 static lv_obj_t *s_nodesTitleLabel = nullptr;
 static lv_obj_t *s_nodesHintLabel = nullptr;
+// The Search / Clear button above the node list, and its label.
 static lv_obj_t *s_nodesFilterBtn = nullptr;
+static lv_obj_t *s_nodesFilterBtnLabel = nullptr;
 static lv_obj_t *s_nodesFilterDialog = nullptr;
 static lv_obj_t *s_nodesFilterInput = nullptr;
 static lv_obj_t *s_nodesFilterKeyboard = nullptr;
@@ -1304,13 +1306,11 @@ static int s_nodesSelected = -1;
 static constexpr int kNodesFilterMax = 24;
 static char s_nodesFilter[kNodesFilterMax + 1] = {};
 static int s_nodesFilterLen = 0;
-// Armed: the filter is applied to the list and the header shows its brackets.
+// A search is in force: the list shows every node (live, plus archived when
+// that half is shown) matching s_nodesFilter. Without one the list shows only
+// favorites. Set and cleared only through the Search dialog and the Clear
+// button (applyNodesFilterText()), never by typing on the list itself.
 static bool s_nodesFilterOpen = false;
-// Capturing: typed characters go into the filter text. Split from the flag above
-// so Enter can commit a filter — leaving the rows narrowed while handing the
-// keyboard back to the list, where the navigation keys move the cursor and A
-// opens Actions instead of typing an "a".
-static bool s_nodesFilterEditing = false;
 // Locate is compiled out on the Cardputer, for the same reason Message Actions
 // is (see HAS_MESSAGE_ACTIONS below): no PSRAM, and decoding a PNG into a
 // full-panel image object is exactly the allocation that board has no room to
@@ -2841,6 +2841,8 @@ static void applyNodesFilterText(const char *text);
 static void openNodesFilterDialog();
 static void closeNodesFilterDialog();
 static void onNodesFilterButtonPressed(lv_event_t *e);
+static void nodesSearchButtonActivate();
+static void refreshNodesSearchButton();
 static void onNodesFilterKeyboardEvent(lv_event_t *e);
 static void onNodesFilterInputEvent(lv_event_t *e);
 static void nodesClampRenderWindow();
@@ -2848,6 +2850,7 @@ static lv_obj_t *selectedNodesRowObj();
 static void refreshNodesListRows();
 static void refreshNodesListSelection();
 static void refreshNodesDetails();
+static void refreshNodesPanelFocusStyles();
 static void onNodeSnapshotPressed(lv_event_t *e);
 #if UI_TOUCH_ONLY_PROFILE
 static void onNodeSnapshotClicked(lv_event_t *e);
@@ -25191,6 +25194,7 @@ static void closeNodesModal() {
     s_nodesTitleLabel = nullptr;
     s_nodesHintLabel = nullptr;
     s_nodesFilterBtn = nullptr;
+    s_nodesFilterBtnLabel = nullptr;
     s_nodesFilterDialog = nullptr;
     s_nodesFilterInput = nullptr;
     s_nodesFilterKeyboard = nullptr;
@@ -25214,7 +25218,6 @@ static void closeNodesModal() {
     s_nodesFilteredCount = 0;
     s_nodesSelected = -1;
     s_nodesFilterOpen = false;
-    s_nodesFilterEditing = false;
     s_nodesFilterLen = 0;
     s_nodesFilter[0] = '\0';
     s_nodesRenderStart = 0;
@@ -25316,15 +25319,15 @@ static bool nodesArchiveVisible() {
     return nodeArchiveSlotExists() && nodeArchiveAvailable() && s_cfg.nodeArchiveShow;
 }
 
+// Keeps any search in force: this is also called to rebuild the list while the
+// screen is up (a favorite toggled, a node restored or deleted), and those
+// should not throw away what the user searched for. openNodesModal() starts
+// each visit with no search.
 static void snapshotNodesForModal() {
     s_nodesSnapshotCount = 0;
     s_nodesArchivedCount = 0;
     s_nodesFilteredCount = 0;
     s_nodesSelected = -1;
-    s_nodesFilterOpen = false;
-    s_nodesFilterEditing = false;
-    s_nodesFilterLen = 0;
-    s_nodesFilter[0] = '\0';
 
     int total = Nodes.count();
     if (total < 0) total = 0;
@@ -25405,7 +25408,7 @@ static void nodesApplyFilter() {
         // unsearchable by the name the user actually knows.
         const NodeEntry *n = (i < s_nodesSnapshotCount) ? Nodes.find(nodeId) : nullptr;
         const ArchivedNode *a = nodesArchivedAt(i);
-        bool match = true;
+        bool match;
 
         if (s_nodesFilterOpen && s_nodesFilterLen > 0) {
             char nodeIdText[16];
@@ -25415,6 +25418,11 @@ static void nodesApplyFilter() {
                  || (n && dmNodePickerContainsNoCase(n->shortName, s_nodesFilter))
                  || (a && dmNodePickerContainsNoCase(a->longName, s_nodesFilter))
                  || (a && dmNodePickerContainsNoCase(a->shortName, s_nodesFilter));
+        } else {
+            // No search: favorites only. Archived rows never qualify: the
+            // favorite flag lives on the table entry, and favorites are never
+            // evicted from it.
+            match = (n && n->favorite);
         }
 
         if (match) {
@@ -25439,8 +25447,11 @@ static void nodesApplyFilter() {
 
 static void applyNodesFilterText(const char *text) {
     if (!text) text = "";
-
+    // Surrounding blanks are not part of a name anyone searches for, and a
+    // query of nothing but blanks is no query: it clears the search.
+    while (*text == ' ') text++;
     size_t len = strlen(text);
+    while (len > 0 && text[len - 1] == ' ') len--;
     if (len > kNodesFilterMax) len = kNodesFilterMax;
 
     if (len > 0) {
@@ -25453,17 +25464,22 @@ static void applyNodesFilterText(const char *text) {
         s_nodesFilterLen = 0;
         s_nodesFilter[0] = '\0';
     }
-    // The dialog returns finished text, so the filter arrives committed.
-    s_nodesFilterEditing = false;
+
+    // A different set of rows: start at its top, with the keys on the list.
+    s_nodesSelected = 0;
+    s_nodesRenderStart = 0;
+    if (s_nodesInfoFocused) {
+        s_nodesInfoFocused = false;
+        refreshNodesPanelFocusStyles();
+    }
 
     nodesApplyFilter();
     refreshNodesListRows();
     refreshNodesListSelection();
     refreshNodesDetails();
+    refreshNodesSearchButton();
 
-    if (lv_obj_t *selectedRow = selectedNodesRowObj()) {
-        lv_obj_scroll_to_view(selectedRow, LV_ANIM_OFF);
-    }
+    if (lvObjValid(s_nodesList)) lv_obj_scroll_to_y(s_nodesList, 0, LV_ANIM_OFF);
 }
 
 static void closeNodesFilterDialog() {
@@ -25491,43 +25507,119 @@ static void onNodesFilterInputEvent(lv_event_t *e) {
     closeNodesFilterDialog();
 }
 
+static void onNodesFilterCancelPressed(lv_event_t *e) {
+    LV_UNUSED(e);
+    closeNodesFilterDialog();
+}
+
+static void onNodesFilterSearchPressed(lv_event_t *e) {
+    LV_UNUSED(e);
+    const char *text = (s_nodesFilterInput) ? lv_textarea_get_text(s_nodesFilterInput) : "";
+    applyNodesFilterText(text);
+    closeNodesFilterDialog();
+}
+
+static lv_obj_t *nodesFilterDialogBtn(lv_obj_t *row, const char *text, lv_event_cb_t cb,
+                                      bool primary) {
+    lv_obj_t *btn = lv_btn_create(row);
+    lv_obj_set_flex_grow(btn, 1);
+    lv_obj_set_height(btn, UI_TOUCH_ONLY_PROFILE ? max(28, kStackBtnH) : 22);
+    lv_obj_set_style_radius(btn, 4, 0);
+    lv_obj_set_style_shadow_width(btn, 0, 0);
+    lv_obj_set_style_pad_ver(btn, 1, 0);
+    lv_obj_set_style_bg_color(btn, lv_color_hex(primary ? 0x2A4E8F : 0x16386F), 0);
+    lv_obj_set_style_bg_opa(btn, primary ? LV_OPA_COVER : LV_OPA_70, 0);
+    lv_obj_set_style_border_width(btn, 1, 0);
+    lv_obj_set_style_border_color(btn, lv_color_hex(primary ? 0x90B4FF : 0x335D9D), 0);
+    lv_obj_add_event_cb(btn, cb, LV_EVENT_CLICKED, nullptr);
+
+    lv_obj_t *lbl = lv_label_create(btn);
+    lv_obj_set_style_text_font(lbl, UI_TOUCH_ONLY_PROFILE ? STACK_BTN_FONT
+                                                          : &lv_font_montserrat_12, 0);
+    lv_obj_set_style_text_color(lbl, lv_color_hex(0xE8F1FF), 0);
+    lv_label_set_text(lbl, text);
+    lv_obj_center(lbl);
+    return btn;
+}
+
+// The Search dialog: a text field, Cancel and Search. On every board now, not
+// only the touch ones. With an on-screen keyboard it takes the whole panel,
+// for the keyboard's sake; with a physical one (every keyboard board, and the
+// T-Display P4 with its expansion attached) it is a card over the list, and
+// pumpKeyboardInput() types into it — Enter is Search and the close key is
+// Cancel, which the hint line names for boards whose buttons cannot be tapped.
 static void openNodesFilterDialog() {
-#if UI_TOUCH_ONLY_PROFILE
     if (!s_nodesModal || s_nodesFilterDialog) return;
 
-    int dialogW = lv_disp_get_hor_res(NULL);
-    int dialogH = lv_disp_get_ver_res(NULL);
-    if (dialogW < 180) dialogW = lv_obj_get_width(s_nodesModal);
-    if (dialogH < 120) dialogH = lv_obj_get_height(s_nodesModal);
+    const bool onScreenKeyboard = !keyboardAttached();
+    const int dispW = lv_disp_get_hor_res(NULL);
+    const int dispH = lv_disp_get_ver_res(NULL);
 
+    // The whole panel either way, so nothing on the screen underneath takes a
+    // tap while the dialog is up. With a physical keyboard the panel is a dim
+    // backdrop and the dialog proper is a card centred on it.
     s_nodesFilterDialog = lv_obj_create(s_rootScreen);
-    lv_obj_set_size(s_nodesFilterDialog, dialogW, dialogH);
+    if (!s_nodesFilterDialog) {
+        logLvglMemDiag("nodes search aborted (low LVGL mem)");
+        return;
+    }
+    {
+        int dialogW = dispW;
+        int dialogH = dispH;
+        if (dialogW < 180) dialogW = lv_obj_get_width(s_nodesModal);
+        if (dialogH < 120) dialogH = lv_obj_get_height(s_nodesModal);
+        lv_obj_set_size(s_nodesFilterDialog, dialogW, dialogH);
+    }
     lv_obj_align(s_nodesFilterDialog, LV_ALIGN_TOP_LEFT, 0, 0);
     lv_obj_clear_flag(s_nodesFilterDialog, LV_OBJ_FLAG_SCROLLABLE);
     lv_obj_add_flag(s_nodesFilterDialog, LV_OBJ_FLAG_CLICKABLE);
     lv_obj_add_flag(s_nodesFilterDialog, LV_OBJ_FLAG_FLOATING);
-    lv_obj_set_style_bg_color(s_nodesFilterDialog, lv_color_hex(0x0E285B), 0);
-    lv_obj_set_style_bg_opa(s_nodesFilterDialog, LV_OPA_COVER, 0);
-    lv_obj_set_style_border_width(s_nodesFilterDialog, 1, 0);
-    lv_obj_set_style_border_color(s_nodesFilterDialog, lv_color_hex(0x5C86C6), 0);
-    lv_obj_set_style_pad_all(s_nodesFilterDialog, 4, 0);
-#if UI_EDGE_TO_EDGE_TEXT_ENTRY
-    lv_obj_set_style_pad_left(s_nodesFilterDialog, 2, 0);
-    lv_obj_set_style_pad_right(s_nodesFilterDialog, 2, 0);
-#endif
-    lv_obj_set_style_pad_row(s_nodesFilterDialog, 3, 0);
-    lv_obj_set_flex_flow(s_nodesFilterDialog, LV_FLEX_FLOW_COLUMN);
-    lv_obj_set_flex_align(s_nodesFilterDialog, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_START);
+    lv_obj_set_style_radius(s_nodesFilterDialog, 0, 0);
 
-    lv_obj_t *title = lv_label_create(s_nodesFilterDialog);
+    lv_obj_t *box = s_nodesFilterDialog;
+    if (onScreenKeyboard) {
+        lv_obj_set_style_border_width(box, 1, 0);
+    } else {
+        lv_obj_set_style_bg_color(s_nodesFilterDialog, lv_color_hex(0x000000), 0);
+        lv_obj_set_style_bg_opa(s_nodesFilterDialog, LV_OPA_50, 0);
+        lv_obj_set_style_border_width(s_nodesFilterDialog, 0, 0);
+        lv_obj_set_style_pad_all(s_nodesFilterDialog, 0, 0);
+
+        box = lv_obj_create(s_nodesFilterDialog);
+        if (!box) {
+            logLvglMemDiag("nodes search aborted (low LVGL mem)");
+            closeNodesFilterDialog();
+            return;
+        }
+        lv_obj_set_size(box, min(dispW - 16, 300), LV_SIZE_CONTENT);
+        lv_obj_center(box);
+        lv_obj_clear_flag(box, LV_OBJ_FLAG_SCROLLABLE);
+        lv_obj_set_style_radius(box, 6, 0);
+        lv_obj_set_style_border_width(box, 2, 0);
+    }
+    lv_obj_set_style_bg_color(box, lv_color_hex(0x0E285B), 0);
+    lv_obj_set_style_bg_opa(box, LV_OPA_COVER, 0);
+    lv_obj_set_style_border_color(box, lv_color_hex(0x5C86C6), 0);
+    lv_obj_set_style_pad_all(box, 4, 0);
+#if UI_EDGE_TO_EDGE_TEXT_ENTRY
+    if (onScreenKeyboard) {
+        lv_obj_set_style_pad_left(box, 2, 0);
+        lv_obj_set_style_pad_right(box, 2, 0);
+    }
+#endif
+    lv_obj_set_style_pad_row(box, 4, 0);
+    lv_obj_set_flex_flow(box, LV_FLEX_FLOW_COLUMN);
+    lv_obj_set_flex_align(box, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_START);
+
+    lv_obj_t *title = lv_label_create(box);
     lv_obj_set_width(title, lv_pct(100));
     lv_obj_set_style_text_font(title, &lv_font_montserrat_12, 0);
     lv_obj_set_style_text_color(title, lv_color_hex(0xD9E8FF), 0);
-    lv_label_set_text(title, TR("Filter Nodes"));
+    lv_label_set_text(title, TR("Search Nodes"));
 
-    s_nodesFilterInput = lv_textarea_create(s_nodesFilterDialog);
+    s_nodesFilterInput = lv_textarea_create(box);
     if (!s_nodesFilterInput) {
-        logLvglMemDiag("nodes filter aborted (low LVGL mem)");
+        logLvglMemDiag("nodes search aborted (low LVGL mem)");
         closeNodesFilterDialog();
         return;
     }
@@ -25543,33 +25635,111 @@ static void openNodesFilterDialog() {
     lv_obj_set_style_pad_right(s_nodesFilterInput, 3, 0);
     lv_textarea_set_one_line(s_nodesFilterInput, true);
     lv_textarea_set_max_length(s_nodesFilterInput, kNodesFilterMax);
-    lv_textarea_set_placeholder_text(s_nodesFilterInput, TR("Type to filter nodes"));
-    if (s_nodesFilterOpen && s_nodesFilterLen > 0) {
-        lv_textarea_set_text(s_nodesFilterInput, s_nodesFilter);
-    } else {
-        lv_textarea_set_text(s_nodesFilterInput, "");
-    }
-    lv_textarea_set_cursor_pos(s_nodesFilterInput, LV_TEXTAREA_CURSOR_LAST);
+    lv_textarea_set_placeholder_text(s_nodesFilterInput, TR("Name or !id"));
+    lv_textarea_set_text(s_nodesFilterInput, "");
+    lv_obj_add_state(s_nodesFilterInput, LV_STATE_FOCUSED);
     lv_obj_add_event_cb(s_nodesFilterInput, onNodesFilterInputEvent, LV_EVENT_READY, nullptr);
 
-    // Not with a physical keyboard attached (the T-Display P4's expansion):
-    // keys typed on it reach this field through pumpKeyboardInput(), and an
-    // on-screen one would only take half the panel. Checked as this opens.
-    if (!keyboardAttached()) {
-        s_nodesFilterKeyboard = lv_keyboard_create(s_nodesFilterDialog);
+    lv_obj_t *btnRow = lv_obj_create(box);
+    lv_obj_remove_style_all(btnRow);
+    lv_obj_set_width(btnRow, lv_pct(100));
+    lv_obj_set_height(btnRow, LV_SIZE_CONTENT);
+    lv_obj_clear_flag(btnRow, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_set_style_pad_column(btnRow, 6, 0);
+    lv_obj_set_flex_flow(btnRow, LV_FLEX_FLOW_ROW);
+    lv_obj_set_flex_align(btnRow, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+    nodesFilterDialogBtn(btnRow, TR("Cancel"), onNodesFilterCancelPressed, false);
+    nodesFilterDialogBtn(btnRow, TR("Search"), onNodesFilterSearchPressed, true);
+
+    if (onScreenKeyboard) {
+        s_nodesFilterKeyboard = lv_keyboard_create(box);
         configureOnScreenKeyboard(s_nodesFilterKeyboard);
         lv_keyboard_set_mode(s_nodesFilterKeyboard, LV_KEYBOARD_MODE_TEXT_LOWER);
         lv_keyboard_set_textarea(s_nodesFilterKeyboard, s_nodesFilterInput);
         lv_obj_add_event_cb(s_nodesFilterKeyboard, onNodesFilterKeyboardEvent, LV_EVENT_READY, nullptr);
         lv_obj_add_event_cb(s_nodesFilterKeyboard, onNodesFilterKeyboardEvent, LV_EVENT_CANCEL, nullptr);
+    } else {
+        lv_obj_t *hint = lv_label_create(box);
+        lv_obj_set_width(hint, lv_pct(100));
+        lv_obj_set_style_text_font(hint, &lv_font_montserrat_10, 0);
+        lv_obj_set_style_text_color(hint, lv_color_hex(0xA7C7FF), 0);
+        lv_label_set_text_fmt(hint, TR("Enter=Search  %s=Cancel"), modalCloseKeyLabel());
     }
     lv_obj_move_foreground(s_nodesFilterDialog);
-#endif
+}
+
+// The button above the list: Search while the list shows favorites, Clear
+// while it shows search results. Space does the same on keyboard boards.
+static void nodesSearchButtonActivate() {
+    if (!s_nodesModal) return;
+    if (s_nodesFilterOpen) {
+        applyNodesFilterText("");
+    } else {
+        openNodesFilterDialog();
+    }
+}
+
+static void refreshNodesSearchButton() {
+    if (!lvObjValid(s_nodesFilterBtnLabel)) return;
+    lv_label_set_text(s_nodesFilterBtnLabel,
+                      s_nodesFilterOpen ? TR("Clear search") : TR("Search"));
 }
 
 static void onNodesFilterButtonPressed(lv_event_t *e) {
     LV_UNUSED(e);
-    openNodesFilterDialog();
+    nodesSearchButtonActivate();
+}
+
+// Builds the Search / Clear button at the top of the list pane and turns the
+// pane into a column, so the list under it takes the remaining height.
+static void buildNodesSearchButton(lv_obj_t *listPanel) {
+    lv_obj_set_flex_flow(listPanel, LV_FLEX_FLOW_COLUMN);
+    lv_obj_set_flex_align(listPanel, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_START,
+                          LV_FLEX_ALIGN_START);
+    lv_obj_set_style_pad_row(listPanel, 3, 0);
+
+#if defined(DEVICE_CROWPANEL_50)
+    const int btnH = 40;
+    const lv_font_t *btnFont = &lv_font_montserrat_16;
+#elif UI_TOUCH_ONLY_PROFILE
+    // A finger target: the stacked layout's button height where it has one.
+    const int btnH = toolStackLayout() ? kStackBtnH : 28;
+    const lv_font_t *btnFont = toolStackLayout() ? STACK_BTN_FONT : &lv_font_montserrat_12;
+#elif defined(DEVICE_TLORA_PAGER_TFT) || defined(DEVICE_TDECK_PRO)
+    const int btnH = 22;
+    const lv_font_t *btnFont = &lv_font_montserrat_12;
+#else
+    const int btnH = 20;
+    const lv_font_t *btnFont = &lv_font_montserrat_10;
+#endif
+
+    s_nodesFilterBtn = lv_btn_create(listPanel);
+    if (!s_nodesFilterBtn) return;
+    lv_obj_set_width(s_nodesFilterBtn, lv_pct(96));
+    lv_obj_set_height(s_nodesFilterBtn, btnH);
+    lv_obj_set_style_radius(s_nodesFilterBtn, 4, 0);
+    lv_obj_set_style_pad_hor(s_nodesFilterBtn, 3, 0);
+    lv_obj_set_style_pad_ver(s_nodesFilterBtn, 1, 0);
+    lv_obj_set_style_shadow_width(s_nodesFilterBtn, 0, 0);
+    lv_obj_set_style_border_width(s_nodesFilterBtn, 1, 0);
+#if defined(DEVICE_TDECK_PRO)
+    const lv_color_t textColor = lv_color_make(0, 0, 0);
+    lv_obj_set_style_bg_opa(s_nodesFilterBtn, LV_OPA_TRANSP, 0);
+    lv_obj_set_style_border_color(s_nodesFilterBtn, lv_color_make(0, 0, 0), 0);
+#else
+    const lv_color_t textColor = lv_color_hex(0xE8F1FF);
+    lv_obj_set_style_bg_color(s_nodesFilterBtn, lv_color_hex(0x16386F), 0);
+    lv_obj_set_style_bg_opa(s_nodesFilterBtn, LV_OPA_COVER, 0);
+    lv_obj_set_style_border_color(s_nodesFilterBtn, lv_color_hex(0x5C86C6), 0);
+#endif
+    lv_obj_add_event_cb(s_nodesFilterBtn, onNodesFilterButtonPressed, LV_EVENT_CLICKED, nullptr);
+
+    s_nodesFilterBtnLabel = lv_label_create(s_nodesFilterBtn);
+    lv_obj_set_style_text_font(s_nodesFilterBtnLabel, btnFont, 0);
+    lv_obj_set_style_text_color(s_nodesFilterBtnLabel, textColor, 0);
+    lv_label_set_long_mode(s_nodesFilterBtnLabel, LV_LABEL_LONG_CLIP);
+    lv_obj_center(s_nodesFilterBtnLabel);
+    refreshNodesSearchButton();
 }
 
 static bool nodesSnapshotContains(uint32_t nodeId) {
@@ -28305,9 +28475,9 @@ static bool clearNodeDbOnSd() {
 static void refreshNodesHint() {
     if (!s_nodesHintLabel) return;
 #if UI_TOUCH_ONLY_PROFILE
-    // One line for every state, because none of the three states below can be
-    // reached without a keyboard: there is no Space to open the filter and no
-    // Enter to focus the info panel. Naming the way out matters more here than
+    // One line for every state, because the keyboard states below cannot be
+    // reached without a keyboard: search is the button above the list, and
+    // there is no Enter to focus the info panel. Naming the way out matters more here than
     // on the keyboard builds — it is the nav button, not a key, and this screen
     // is closed by tapping the Nodes button that is already lit underneath it.
     lv_label_set_text(s_nodesHintLabel, TR("Tap a node for actions   Nodes below = Back"));
@@ -28322,22 +28492,16 @@ static void refreshNodesHint() {
         // the list's legend up over a panel it no longer drives.
         lv_label_set_text_fmt(s_nodesHintLabel, TR("%s=Scroll  A=Actions  %s=List"),
                               navKeys, modalCloseKeyLabel());
-    } else if (s_nodesFilterEditing) {
-        lv_label_set_text_fmt(s_nodesHintLabel,
-                              TR("Type=Filter  Enter=Done  Bksp=Edit/Exit  %s=Back"),
-                              modalCloseKeyLabel());
     } else if (s_nodesFilterOpen) {
-        // Committed: the list is still filtered, but the shortcuts are live
-        // again. Naming Bksp is what tells the reader the filter is still
-        // editable rather than stuck — "Edit/Exit" for the same reason the
-        // editing state says it, since on most boards Backspace is also the
-        // close key and only reaches Back once the filter is unwound.
+        // Showing search results. Space presses the button, which reads Clear
+        // now; Bksp does too, ahead of Back, since on most boards Backspace is
+        // also the close key and should unwind the search before the screen.
         lv_label_set_text_fmt(s_nodesHintLabel,
-                              TR("Enter=Info  A=Actions  Bksp=Edit/Exit  %s=Back"),
+                              TR("Enter=Info  A=Actions  Space=Clear  %s=Back"),
                               modalCloseKeyLabel());
     } else {
         lv_label_set_text_fmt(s_nodesHintLabel,
-                              TR("Enter=Info  A=Actions  Space=Filter  %s=Back"),
+                              TR("Enter=Info  A=Actions  Space=Search  %s=Back"),
                               modalCloseKeyLabel());
     }
 #endif   // !UI_TOUCH_ONLY_PROFILE
@@ -28381,24 +28545,16 @@ static void refreshNodesListRows() {
 #endif
 
     if (s_nodesTitleLabel) {
-        // One total: live plus archived, which is the number of nodes this
-        // device knows about. With the archived half hidden it is the live count
-        // and the title is exactly what it always was.
-        const int nodeCount = nodesRowCountTotal();
-        // The one qualifier kept. The index caps how far back the archive scan
-        // reaches, so when it filled before the start of the file this is a
-        // floor rather than a total — and the real figure would need exactly the
-        // full read the cap exists to avoid. Nothing archived, nothing to
-        // qualify.
-        const char *more = (s_nodesArchivedCount > 0 && nodeArchiveIndexTruncated()) ? "+" : "";
+        // Favorites, or the matches for a search, counted as the list holds them.
         char titleText[80];
         if (s_nodesFilterOpen) {
-            // Brackets appear as soon as the filter is armed (even empty) so the
-            // user has a visual cue that filtering is on; text fills in as typed.
+            // Floor marker as before: a truncated archive scan means there may
+            // be more matches than the index reached.
+            const char *more = (s_nodesArchivedCount > 0 && nodeArchiveIndexTruncated()) ? "+" : "";
             snprintf(titleText, sizeof(titleText), TR("Nodes [%s] (%d%s)"),
-                     s_nodesFilter, nodeCount, more);
+                     s_nodesFilter, s_nodesFilteredCount, more);
         } else {
-            snprintf(titleText, sizeof(titleText), TR("Nodes (%d%s)"), nodeCount, more);
+            snprintf(titleText, sizeof(titleText), TR("Favorites (%d)"), s_nodesFilteredCount);
         }
         screenHeaderSetTitle(s_nodesTitleLabel, titleText);
     }
@@ -28420,7 +28576,7 @@ static void refreshNodesListRows() {
             snprintf(noMatch, sizeof(noMatch), TR("No matches for: %s"), s_nodesFilter);
             lv_label_set_text(empty, noMatch);
         } else {
-            lv_label_set_text(empty, TR("No nodes seen"));
+            lv_label_set_text(empty, TR("No favorites yet. Search to find a node."));
         }
         return;
     }
@@ -39532,6 +39688,10 @@ static void openNodesModal() {
         }
     }
 
+    // Each visit opens on the favorites, with no search carried over.
+    s_nodesFilterOpen = false;
+    s_nodesFilterLen = 0;
+    s_nodesFilter[0] = '\0';
     snapshotNodesForModal();
 
     int modalW = lv_disp_get_hor_res(NULL);
@@ -39629,14 +39789,9 @@ static void openNodesModal() {
     lv_obj_set_flex_flow(s_nodesModal, LV_FLEX_FLOW_COLUMN);
     lv_obj_set_flex_align(s_nodesModal, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_START);
 
-    // Retitled with the count (and the filter, while one is armed) by
-    // refreshNodesModal(), through screenHeaderSetTitle().
+    // Retitled with the count (and the search, while one is in force) by
+    // refreshNodesListRows(), through screenHeaderSetTitle().
     s_nodesTitleLabel = buildScreenHeader(s_nodesModal, "");
-
-#if UI_TOUCH_ONLY_PROFILE
-    s_nodesFilterBtn = secondaryHeaderBtn(buildSecondaryHeader(s_nodesModal),
-                                          TR("Filter"), onNodesFilterButtonPressed);
-#endif
 
     lv_obj_t *content = lv_obj_create(s_nodesModal);
     lv_obj_set_width(content, lv_pct(100));
@@ -39682,8 +39837,11 @@ static void openNodesModal() {
     lv_obj_set_style_pad_top(listPanel, 2, 0);
     lv_obj_set_style_pad_bottom(listPanel, 2, 0);
 
+    buildNodesSearchButton(listPanel);
+
     s_nodesList = lv_obj_create(listPanel);
-    lv_obj_set_size(s_nodesList, lv_pct(100), lv_pct(100));
+    lv_obj_set_width(s_nodesList, lv_pct(100));
+    lv_obj_set_flex_grow(s_nodesList, 1);
     lv_obj_add_flag(s_nodesList, LV_OBJ_FLAG_SCROLLABLE);
     setupVScroll(s_nodesList);
     lv_obj_set_scrollbar_mode(s_nodesList, LV_SCROLLBAR_MODE_AUTO);
@@ -39864,8 +40022,11 @@ static void openNodesModal() {
     lv_obj_set_style_pad_top(listPanel, 2, 0);
     lv_obj_set_style_pad_bottom(listPanel, 2, 0);
 
+    buildNodesSearchButton(listPanel);
+
     s_nodesList = lv_obj_create(listPanel);
-    lv_obj_set_size(s_nodesList, lv_pct(100), lv_pct(100));
+    lv_obj_set_width(s_nodesList, lv_pct(100));
+    lv_obj_set_flex_grow(s_nodesList, 1);
     lv_obj_add_flag(s_nodesList, LV_OBJ_FLAG_SCROLLABLE);
     setupVScroll(s_nodesList);
     lv_obj_set_scrollbar_mode(s_nodesList, LV_SCROLLBAR_MODE_AUTO);
@@ -46363,10 +46524,10 @@ static void pumpKeyboardInput() {
             continue;
         }
 
-        // The touch build's filter dialog, typed into from a physical keyboard
-        // (the T-Display P4's expansion). Every key is the dialog's while it is
-        // up, as with the other text fields -- the Nodes screen under it has an
-        // inline filter of its own that letters would otherwise reach.
+        // The Nodes Search dialog, typed into from a physical keyboard. Every
+        // key is the dialog's while it is up, as with the other text fields --
+        // the Nodes screen under it has Space and A shortcuts that letters
+        // would otherwise reach.
         if (s_nodesFilterDialog) {
             if (k == KEY_ENTER) {
                 applyNodesFilterText(s_nodesFilterInput
@@ -46400,58 +46561,25 @@ static void pumpKeyboardInput() {
                 continue;
             }
 
-            if ((k == KEY_BACKSPACE || k == KEY_BACKSPACE_HOLD) && s_nodesFilterOpen) {
-                // Reopens a committed filter rather than discarding it: a typo
-                // stays one keystroke from being fixed, and the unwind chain
-                // (edit down to empty, disarm, then Back) is the one this screen
-                // already had.
-                s_nodesFilterEditing = true;
-                if (s_nodesFilterLen > 0) {
-                    s_nodesFilter[--s_nodesFilterLen] = '\0';
-                } else {
-                    s_nodesFilterOpen = false;
-                    s_nodesFilterEditing = false;
-                }
-                nodesApplyFilter();
-                refreshNodesListRows();
-                refreshNodesListSelection();
-                refreshNodesDetails();
+            // Backspace leaves search results for the favorites before it
+            // reaches Back, which on most boards is the same key. From the
+            // details it steps out to the list first, as Back does there.
+            if ((k == KEY_BACKSPACE || k == KEY_BACKSPACE_HOLD) && s_nodesFilterOpen
+                && !s_nodesInfoFocused) {
+                applyNodesFilterText("");
                 continue;
             }
 
-            // The filter is entered explicitly with the spacebar; the space
-            // itself is never added to the filter text. Letters no longer
-            // start the filter on their own — they only append once it's open.
-            // Space is also the way back into a filter Enter has committed.
+            // Space presses the Search / Clear button above the list: it opens
+            // the Search dialog, or clears the search in force.
             if (k == ' ') {
-                if (!s_nodesFilterOpen || !s_nodesFilterEditing) {
-                    s_nodesFilterOpen = true;
-                    s_nodesFilterEditing = true;
-                    nodesApplyFilter();
-                    refreshNodesListRows();
-                    refreshNodesListSelection();
-                    refreshNodesDetails();
-                }
-                continue;
-            }
-
-            if (k > 0x20 && k < 0x7F && s_nodesFilterEditing) {
-                if (s_nodesFilterLen < kNodesFilterMax) {
-                    s_nodesFilter[s_nodesFilterLen++] = k;
-                    s_nodesFilter[s_nodesFilterLen] = '\0';
-                }
-                nodesApplyFilter();
-                refreshNodesListRows();
-                refreshNodesListSelection();
-                refreshNodesDetails();
+                nodesSearchButtonActivate();
                 continue;
             }
 
             // Actions moved off Enter and onto A when Enter became "focus the
-            // details". Guarded on the filter only while it is being typed into:
-            // once Enter commits it, the rows stay narrowed but A is a shortcut
-            // again rather than a character.
-            if (!s_nodesFilterEditing && (k == 'a' || k == 'A')) {
+            // details".
+            if (k == 'a' || k == 'A') {
                 openNodesActionMenu();
                 continue;
             }
@@ -46469,15 +46597,6 @@ static void pumpKeyboardInput() {
                 continue;
             }
             if (k == KEY_ENTER || k == KEY_ROLLER) {
-                // While the filter is being typed into, a confirm gesture means
-                // "done typing" and nothing else: the rows keep the filter and
-                // the keyboard goes back to the list. A second Enter then
-                // focuses the details as usual.
-                if (s_nodesFilterEditing) {
-                    s_nodesFilterEditing = false;
-                    refreshNodesHint();
-                    continue;
-                }
                 // Enter hands the keys to the details; the Pager's wheel click
                 // toggles, matching how it swaps panels on Config and DM.
                 const bool wantFocus = (k == KEY_ROLLER) ? !s_nodesInfoFocused : true;
