@@ -1258,6 +1258,9 @@ static lv_obj_t *s_nodesFilterBtn = nullptr;
 static lv_obj_t *s_nodesFilterBtnLabel = nullptr;
 // The All button above that: a search for "*", every node the list can show.
 static lv_obj_t *s_nodesAllBtn = nullptr;
+// Map, above All: every located node on one map (see openNodesMapModal()).
+// Only on the boards that have Locate's map engine; stays null elsewhere.
+static lv_obj_t *s_nodesMapBtn = nullptr;
 static lv_obj_t *s_nodesFilterDialog = nullptr;
 static lv_obj_t *s_nodesFilterInput = nullptr;
 static lv_obj_t *s_nodesFilterKeyboard = nullptr;
@@ -1313,13 +1316,17 @@ static int s_nodesFilterLen = 0;
 // favorites. Set and cleared only through the Search dialog and the Clear
 // button (applyNodesFilterText()), never by typing on the list itself.
 static bool s_nodesFilterOpen = false;
-// Keyboard builds: the cursor is on the All or Search / Clear button above the
-// list rather than a row. Up from the first row puts it on Search, Up again on
-// All, and Down walks back; Enter presses the button. s_nodesAllBtnFocused
-// says which of the two, and is only meaningful while s_nodesSearchBtnFocused
-// is set. Touch-only builds tap the buttons and never set either.
+// Keyboard builds: the cursor is on one of the buttons above the list rather
+// than a row. Up from the first row puts it on Search, Up again on All, again
+// on Map where there is one, and Down walks back; Enter presses the button.
+// s_nodesTopBtn says which, and is only meaningful while
+// s_nodesSearchBtnFocused is set. Touch-only builds tap the buttons and never
+// set either.
+static constexpr int kNodesTopSearch = 0;
+static constexpr int kNodesTopAll = 1;
+static constexpr int kNodesTopMap = 2;
 static bool s_nodesSearchBtnFocused = false;
-static bool s_nodesAllBtnFocused = false;
+static int s_nodesTopBtn = kNodesTopSearch;
 // Locate is compiled out on the Cardputer, for the same reason Message Actions
 // is (see HAS_MESSAGE_ACTIONS below): no PSRAM, and decoding a PNG into a
 // full-panel image object is exactly the allocation that board has no room to
@@ -2927,6 +2934,7 @@ static void nodesArchivedDetailInvalidate();
 static void refreshNodesMap(const NodeEntry *node);
 #if HAS_NODE_LOCATE
 static void openNodeLocateModal(uint32_t nodeId);
+static void openNodesMapModal();
 static void closeNodeLocateModal();
 static void nodeLocateOnDetailMapUpdated();
 static void serviceNodeLocateLiveMap(uint32_t nowMs);
@@ -25307,8 +25315,9 @@ static void closeNodesModal() {
     s_nodesFilterBtn = nullptr;
     s_nodesFilterBtnLabel = nullptr;
     s_nodesAllBtn = nullptr;
+    s_nodesMapBtn = nullptr;
     s_nodesSearchBtnFocused = false;
-    s_nodesAllBtnFocused = false;
+    s_nodesTopBtn = kNodesTopSearch;
     s_nodesFilterDialog = nullptr;
     s_nodesFilterInput = nullptr;
     s_nodesFilterKeyboard = nullptr;
@@ -25626,7 +25635,7 @@ static void applyNodesFilterText(const char *text) {
 
     // A different set of rows: start at its top, with the keys on the list.
     s_nodesSearchBtnFocused = false;
-    s_nodesAllBtnFocused = false;
+    s_nodesTopBtn = kNodesTopSearch;
     s_nodesSelected = 0;
     s_nodesRenderStart = 0;
     if (s_nodesInfoFocused) {
@@ -25854,10 +25863,30 @@ static void nodesAllButtonActivate() {
     applyNodesFilterText("*");
 }
 
-// Enter on the keyboard cursor's button, whichever of the two it is on.
+// The Map button: every node with a position, on one map.
+static void nodesMapButtonActivate() {
+#if HAS_NODE_LOCATE
+    if (!s_nodesModal) return;
+    openNodesMapModal();
+#endif
+}
+
+// The topmost button the keyboard cursor can reach above the list.
+static int nodesTopBtnLast() {
+#if HAS_NODE_LOCATE
+    return kNodesTopMap;
+#else
+    return kNodesTopAll;
+#endif
+}
+
+// Enter on the keyboard cursor's button, whichever one it is on.
 static void nodesFocusedButtonActivate() {
-    if (s_nodesAllBtnFocused) nodesAllButtonActivate();
-    else                      nodesSearchButtonActivate();
+    switch (s_nodesTopBtn) {
+        case kNodesTopMap: nodesMapButtonActivate();    break;
+        case kNodesTopAll: nodesAllButtonActivate();    break;
+        default:           nodesSearchButtonActivate(); break;
+    }
 }
 
 static void styleNodesTopButton(lv_obj_t *btn, bool focused) {
@@ -25878,18 +25907,20 @@ static void refreshNodesSearchButton() {
         lv_label_set_text(s_nodesFilterBtnLabel,
                           s_nodesFilterOpen ? TR("Clear search") : TR("Search"));
     }
-    styleNodesTopButton(s_nodesAllBtn, s_nodesSearchBtnFocused && s_nodesAllBtnFocused);
-    styleNodesTopButton(s_nodesFilterBtn, s_nodesSearchBtnFocused && !s_nodesAllBtnFocused);
+    styleNodesTopButton(s_nodesMapBtn, s_nodesSearchBtnFocused && s_nodesTopBtn == kNodesTopMap);
+    styleNodesTopButton(s_nodesAllBtn, s_nodesSearchBtnFocused && s_nodesTopBtn == kNodesTopAll);
+    styleNodesTopButton(s_nodesFilterBtn,
+                        s_nodesSearchBtnFocused && s_nodesTopBtn == kNodesTopSearch);
 }
 
 #if !UI_TOUCH_ONLY_PROFILE
 // Moves the keyboard cursor between the buttons above the list and the rows.
-// allBtn picks All over Search / Clear when focused is set.
-static void nodesSetSearchBtnFocus(bool focused, bool allBtn = false) {
-    if (!focused) allBtn = false;
-    if (focused == s_nodesSearchBtnFocused && allBtn == s_nodesAllBtnFocused) return;
+// btn picks which button (kNodesTop*) when focused is set.
+static void nodesSetSearchBtnFocus(bool focused, int btn = kNodesTopSearch) {
+    if (!focused) btn = kNodesTopSearch;
+    if (focused == s_nodesSearchBtnFocused && btn == s_nodesTopBtn) return;
     s_nodesSearchBtnFocused = focused;
-    s_nodesAllBtnFocused = allBtn;
+    s_nodesTopBtn = btn;
     refreshNodesSearchButton();
     refreshNodesListSelection();
     refreshNodesHint();
@@ -25910,6 +25941,13 @@ static void onNodesAllButtonPressed(lv_event_t *e) {
     LV_UNUSED(e);
     nodesAllButtonActivate();
 }
+
+#if HAS_NODE_LOCATE
+static void onNodesMapButtonPressed(lv_event_t *e) {
+    LV_UNUSED(e);
+    nodesMapButtonActivate();
+}
+#endif
 
 // One of the buttons above the list, full width; returns its label.
 static lv_obj_t *buildNodesTopButton(lv_obj_t *listPanel, lv_obj_t **btnOut, int btnH,
@@ -25944,7 +25982,7 @@ static lv_obj_t *buildNodesTopButton(lv_obj_t *listPanel, lv_obj_t **btnOut, int
     return lbl;
 }
 
-// Builds the All and Search / Clear buttons at the top of the list pane and
+// Builds the Map, All and Search / Clear buttons at the top of the list pane and
 // turns the pane into a column, so the list under them takes the remaining
 // height.
 static void buildNodesSearchButton(lv_obj_t *listPanel) {
@@ -25968,6 +26006,12 @@ static void buildNodesSearchButton(lv_obj_t *listPanel) {
     const lv_font_t *btnFont = &lv_font_montserrat_10;
 #endif
 
+#if HAS_NODE_LOCATE
+    if (lv_obj_t *mapLbl = buildNodesTopButton(listPanel, &s_nodesMapBtn, btnH, btnFont,
+                                               onNodesMapButtonPressed)) {
+        lv_label_set_text(mapLbl, TR("Map"));
+    }
+#endif
     if (lv_obj_t *allLbl = buildNodesTopButton(listPanel, &s_nodesAllBtn, btnH, btnFont,
                                                onNodesAllButtonPressed)) {
         lv_label_set_text(allLbl, TR("All"));
@@ -27233,6 +27277,36 @@ static NodeLocateTileJob s_nodeLocateTileCompleted;
 static size_t s_nodeLocateTileCompletedBytes = 0;
 static uint8_t *s_nodeLocateTilePng = nullptr;
 
+// ── Node map (Nodes -> Map) ──
+// The same modal with every located node on it instead of one pin. On colour
+// panels the nodes are a heat map; on the 1 bpp T-Deck Pro, which has no
+// colours to ramp through, each node is a black dot in a white ring.
+//
+// The overlay is painted into the tile canvas itself, once per pixel, whenever
+// that pixel is written: after a clear, after a pan (only the strip the shift
+// exposed), and after each tile lands (only that tile). The canvas is
+// memmove'd on pan, so heat already painted travels with the map under it and
+// never needs repainting. What makes that work is s_nodeMapHeat: a per-pixel
+// intensity for the current view, rebuilt whenever the view moves. Rebuilding
+// costs one small kernel stamp per node, far less than a tile decode.
+static bool s_nodeLocateAllNodes = false;
+struct NodeMapPoint {
+    float lat;
+    float lon;
+};
+static NodeMapPoint s_nodeMapPoints[MAX_NODES];
+static int s_nodeMapPointCount = 0;
+// Viewport positions of the points for the view s_nodeMapHeat was built for.
+static int16_t s_nodeMapScreenX[MAX_NODES];
+static int16_t s_nodeMapScreenY[MAX_NODES];
+static uint8_t *s_nodeMapHeat = nullptr;   // s_locateMapW x s_locateMapH
+static int s_nodeMapHeatZoom = -1;
+static double s_nodeMapHeatCenterX = 0.0;
+static double s_nodeMapHeatCenterY = 0.0;
+
+static void nodeMapRebuildOverlay();
+static void nodeMapPaintRect(int x0, int y0, int x1, int y1);
+
 static void closeNodeLocateModal() {
     lv_draw_buf_t *canvasBuf = s_nodeLocateCanvasBuf;
     s_nodeLocateGeneration++;
@@ -27264,6 +27338,13 @@ static void closeNodeLocateModal() {
     s_nodeLocateHasPixels = false;
     s_locateNodeLat = 0.0f;
     s_locateNodeLon = 0.0f;
+    s_nodeLocateAllNodes = false;
+    s_nodeMapPointCount = 0;
+    if (s_nodeMapHeat) {
+        heap_caps_free(s_nodeMapHeat);
+        s_nodeMapHeat = nullptr;
+    }
+    s_nodeMapHeatZoom = -1;
 }
 
 static double nodeLocateWorldSize(int zoom) {
@@ -27374,6 +27455,12 @@ static void nodeLocateClearLiveCanvas() {
     if (!s_nodeLocateCanvas || !lvObjValid(s_nodeLocateCanvas)) return;
     lv_canvas_fill_bg(s_nodeLocateCanvas, nodeLocateCanvasBgColor(), LV_OPA_COVER);
     s_nodeLocateHasPixels = false;
+    if (s_nodeLocateAllNodes) {
+        nodeMapRebuildOverlay();
+        nodeMapPaintRect(0, 0, s_locateMapW, s_locateMapH);
+        lv_draw_buf_flush_cache(s_nodeLocateCanvasBuf, nullptr);
+        lv_obj_invalidate(s_nodeLocateCanvas);
+    }
 }
 
 static void nodeLocateShiftLiveCanvas(int dx, int dy) {
@@ -27415,6 +27502,22 @@ static void nodeLocateShiftLiveCanvas(int dx, int dy) {
         } else if (dest != src) {
             memmove(dest, src, (size_t)s_locateMapW * sizeof(uint16_t));
         }
+    }
+
+    if (s_nodeLocateAllNodes) {
+        // Only the newly exposed strips: everything else carried its overlay
+        // along with it. The side strips stop short of the top/bottom one, so
+        // a diagonal pan does not paint its corner twice.
+        nodeMapRebuildOverlay();
+        int keptY0 = 0;
+        int keptY1 = s_locateMapH;
+        if (dy > 0) { nodeMapPaintRect(0, 0, s_locateMapW, dy); keptY0 = dy; }
+        if (dy < 0) {
+            nodeMapPaintRect(0, s_locateMapH + dy, s_locateMapW, s_locateMapH);
+            keptY1 = s_locateMapH + dy;
+        }
+        if (dx > 0) nodeMapPaintRect(0, keptY0, dx, keptY1);
+        if (dx < 0) nodeMapPaintRect(s_locateMapW + dx, keptY0, s_locateMapW, keptY1);
     }
 
     lv_draw_buf_flush_cache(s_nodeLocateCanvasBuf, nullptr);
@@ -27834,6 +27937,10 @@ static bool nodeLocateComposeTile(const NodeLocateTileJob &job, size_t pngBytes)
 #if defined(DEVICE_TDECK_PRO)
     nodeLocateDitherTile(job);
 #endif
+    if (s_nodeLocateAllNodes) {
+        nodeMapPaintRect(job.drawX, job.drawY,
+                         job.drawX + kNodeLocateTilePx, job.drawY + kNodeLocateTilePx);
+    }
     lv_image_cache_drop(&source);
     lv_draw_buf_flush_cache(s_nodeLocateCanvasBuf, nullptr);
 
@@ -27890,9 +27997,16 @@ static void serviceNodeLocateLiveMap(uint32_t nowMs) {
     }
 }
 
-// Puts the node back under the middle of the map box at the current zoom.
+static void nodeMapFitAll();
+
+// Puts the node back under the middle of the map box at the current zoom. On
+// the node map, frames every node again instead.
 static void nodeLocateCenterOnNode() {
     if (s_locateMapW <= 0 || s_locateMapH <= 0) return;
+    if (s_nodeLocateAllNodes) {
+        nodeMapFitAll();
+        return;
+    }
     nodeLocateLatLonToWorld(s_locateNodeLat, s_locateNodeLon, s_nodeLocateZoom,
                             s_nodeLocateCenterWorldX, s_nodeLocateCenterWorldY);
     nodeLocateNormalizeCenter();
@@ -27972,17 +28086,13 @@ static void onNodeLocateBackdropPressed(lv_event_t *e) {
     closeNodeLocateModal();
 }
 
-static void openNodeLocateModal(uint32_t nodeId) {
-    if (!s_rootScreen || nodeId == 0) return;
-    if (s_nodeLocateModal || s_nodeLocateBackdrop) return;
-
-    const NodeEntry *node = Nodes.find(nodeId);
-    if (!node || !node->hasPosition || (node->latI == 0 && node->lonI == 0)) return;
-
-    const float lat = (float)node->latI / 10000000.0f;
-    const float lon = (float)node->lonI / 10000000.0f;
-
-    s_nodeLocateNodeId = nodeId;
+// Builds the modal around titleText: map box, canvas, chips, controls, and the
+// pin when there is one node to show. Sets s_locateMapW/H; the caller picks the
+// view and requests tiles. Returns false when nothing was built.
+static bool nodeLocateBuildModal(const char *titleText, bool allNodes) {
+    if (!s_rootScreen) return false;
+    if (s_nodeLocateModal || s_nodeLocateBackdrop) return false;
+    s_nodeLocateAllNodes = allNodes;
 
     const int scrW = lv_disp_get_hor_res(NULL);
     const int scrH = lv_disp_get_ver_res(NULL);
@@ -28051,17 +28161,13 @@ static void openNodeLocateModal(uint32_t nodeId) {
                           LV_FLEX_ALIGN_CENTER);
     lv_obj_move_foreground(s_nodeLocateBackdrop);
 
-    char who[40];
-    nodesActionTitleLabel(nodeId, who, sizeof(who));
     lv_obj_t *title = lv_label_create(s_nodeLocateModal);
     lv_obj_set_width(title, lv_pct(100));
     lv_obj_set_style_text_font(title, &lv_font_montserrat_12, 0);
     lv_obj_set_style_text_color(title, titleColor, 0);
     lv_obj_set_style_text_align(title, LV_TEXT_ALIGN_CENTER, 0);
     lv_label_set_long_mode(title, LV_LABEL_LONG_DOT);
-    char titleBuf[56];
-    snprintf(titleBuf, sizeof(titleBuf), TR("Locate: %s"), who);
-    setLabelTextEmojiSafe(title, titleBuf);
+    setLabelTextEmojiSafe(title, titleText);
 
     // The map area. Its own container so the renderer can position the image and
     // the pin in coordinates that belong to nobody else.
@@ -28142,43 +28248,46 @@ static void openNodeLocateModal(uint32_t nodeId) {
     lv_label_set_text(attribution, TR("(c) OpenStreetMap"));
     lv_obj_align(attribution, LV_ALIGN_BOTTOM_LEFT, 2, -2);
 
-    // A map pin rather than a dot: a round head over a short stem, tip down.
-    // Built from two plain objects because there is no pin glyph to lean on —
-    // this build already falls back LV_SYMBOL_GPS to LV_SYMBOL_DRIVE — and a
-    // canvas would cost a buffer for something this simple.
-    //
-    // Red with a white outline on both parts. The outline is what keeps it
-    // readable over dark map features; red alone disappears into a highway.
-    s_nodeLocateMarker = lv_obj_create(s_nodeLocateTileLayer);
-    lv_obj_remove_style_all(s_nodeLocateMarker);
-    lv_obj_clear_flag(s_nodeLocateMarker, LV_OBJ_FLAG_SCROLLABLE);
-    lv_obj_set_size(s_nodeLocateMarker, kLocatePinW, kLocatePinH);
-    lv_obj_clear_flag(s_nodeLocateMarker, LV_OBJ_FLAG_CLICKABLE);
+    // The node map draws its nodes into the canvas instead (nodeMapPaintRect()).
+    if (!allNodes) {
+        // A map pin rather than a dot: a round head over a short stem, tip down.
+        // Built from two plain objects because there is no pin glyph to lean on —
+        // this build already falls back LV_SYMBOL_GPS to LV_SYMBOL_DRIVE — and a
+        // canvas would cost a buffer for something this simple.
+        //
+        // Red with a white outline on both parts. The outline is what keeps it
+        // readable over dark map features; red alone disappears into a highway.
+        s_nodeLocateMarker = lv_obj_create(s_nodeLocateTileLayer);
+        lv_obj_remove_style_all(s_nodeLocateMarker);
+        lv_obj_clear_flag(s_nodeLocateMarker, LV_OBJ_FLAG_SCROLLABLE);
+        lv_obj_set_size(s_nodeLocateMarker, kLocatePinW, kLocatePinH);
+        lv_obj_clear_flag(s_nodeLocateMarker, LV_OBJ_FLAG_CLICKABLE);
 
-    lv_obj_t *pinHead = lv_obj_create(s_nodeLocateMarker);
-    lv_obj_remove_style_all(pinHead);
-    lv_obj_clear_flag(pinHead, LV_OBJ_FLAG_SCROLLABLE);
-    lv_obj_set_size(pinHead, kLocatePinW, kLocatePinW);
-    lv_obj_set_pos(pinHead, 0, 0);
-    lv_obj_set_style_radius(pinHead, LV_RADIUS_CIRCLE, 0);
-    lv_obj_set_style_bg_color(pinHead, lv_color_hex(0xE04A4A), 0);
-    lv_obj_set_style_bg_opa(pinHead, LV_OPA_COVER, 0);
-    lv_obj_set_style_border_width(pinHead, 2, 0);
-    lv_obj_set_style_border_color(pinHead, lv_color_hex(0xFFFFFF), 0);
+        lv_obj_t *pinHead = lv_obj_create(s_nodeLocateMarker);
+        lv_obj_remove_style_all(pinHead);
+        lv_obj_clear_flag(pinHead, LV_OBJ_FLAG_SCROLLABLE);
+        lv_obj_set_size(pinHead, kLocatePinW, kLocatePinW);
+        lv_obj_set_pos(pinHead, 0, 0);
+        lv_obj_set_style_radius(pinHead, LV_RADIUS_CIRCLE, 0);
+        lv_obj_set_style_bg_color(pinHead, lv_color_hex(0xE04A4A), 0);
+        lv_obj_set_style_bg_opa(pinHead, LV_OPA_COVER, 0);
+        lv_obj_set_style_border_width(pinHead, 2, 0);
+        lv_obj_set_style_border_color(pinHead, lv_color_hex(0xFFFFFF), 0);
 
-    lv_obj_t *pinStem = lv_obj_create(s_nodeLocateMarker);
-    lv_obj_remove_style_all(pinStem);
-    lv_obj_clear_flag(pinStem, LV_OBJ_FLAG_SCROLLABLE);
-    lv_obj_set_size(pinStem, 5, kLocatePinH - kLocatePinW + 2);
-    // Overlapping the head by two rows hides the seam between them.
-    lv_obj_set_pos(pinStem, (kLocatePinW - 5) / 2, kLocatePinW - 2);
-    lv_obj_set_style_radius(pinStem, 1, 0);
-    lv_obj_set_style_bg_color(pinStem, lv_color_hex(0xE04A4A), 0);
-    lv_obj_set_style_bg_opa(pinStem, LV_OPA_COVER, 0);
-    lv_obj_set_style_border_width(pinStem, 1, 0);
-    lv_obj_set_style_border_color(pinStem, lv_color_hex(0xFFFFFF), 0);
+        lv_obj_t *pinStem = lv_obj_create(s_nodeLocateMarker);
+        lv_obj_remove_style_all(pinStem);
+        lv_obj_clear_flag(pinStem, LV_OBJ_FLAG_SCROLLABLE);
+        lv_obj_set_size(pinStem, 5, kLocatePinH - kLocatePinW + 2);
+        // Overlapping the head by two rows hides the seam between them.
+        lv_obj_set_pos(pinStem, (kLocatePinW - 5) / 2, kLocatePinW - 2);
+        lv_obj_set_style_radius(pinStem, 1, 0);
+        lv_obj_set_style_bg_color(pinStem, lv_color_hex(0xE04A4A), 0);
+        lv_obj_set_style_bg_opa(pinStem, LV_OPA_COVER, 0);
+        lv_obj_set_style_border_width(pinStem, 1, 0);
+        lv_obj_set_style_border_color(pinStem, lv_color_hex(0xFFFFFF), 0);
 
-    lv_obj_add_flag(s_nodeLocateMarker, LV_OBJ_FLAG_HIDDEN);
+        lv_obj_add_flag(s_nodeLocateMarker, LV_OBJ_FLAG_HIDDEN);
+    }
 
 #if HAS_TOUCH
     // Compact zoom / center controls overlaid on the map. Smaller buttons leave
@@ -28263,10 +28372,28 @@ static void openNodeLocateModal(uint32_t nodeId) {
     }
 #endif
 
-    // Zoom 13 is the default. The selected node is the canonical view center,
-    // so its pin starts exactly at the center of the map viewport.
     s_locateMapW = mapW;
     s_locateMapH = mapH;
+    return true;
+}
+
+static void openNodeLocateModal(uint32_t nodeId) {
+    if (nodeId == 0) return;
+    const NodeEntry *node = Nodes.find(nodeId);
+    if (!node || !node->hasPosition || (node->latI == 0 && node->lonI == 0)) return;
+
+    const float lat = (float)node->latI / 10000000.0f;
+    const float lon = (float)node->lonI / 10000000.0f;
+
+    char who[40];
+    nodesActionTitleLabel(nodeId, who, sizeof(who));
+    char titleBuf[56];
+    snprintf(titleBuf, sizeof(titleBuf), TR("Locate: %s"), who);
+    if (!nodeLocateBuildModal(titleBuf, false)) return;
+    s_nodeLocateNodeId = nodeId;
+
+    // Zoom 13 is the default. The selected node is the canonical view center,
+    // so its pin starts exactly at the center of the map viewport.
     s_locateNodeLat = lat;
     s_locateNodeLon = lon;
     s_nodeLocateZoom = kNodeLocateZoomDefault;
@@ -28278,6 +28405,287 @@ static void openNodeLocateModal(uint32_t nodeId) {
     else nodeLocateUpdateLiveMarker();
 
     // Bottom status text removed so the map can take the reclaimed space.
+}
+// ── Node map overlay ──
+// Heat kernel radius in pixels. Fixed on screen rather than in metres, so a
+// node reads as the same size blob at every zoom and clusters merge as the
+// map zooms out -- which is what makes it a density map.
+static constexpr int kNodeMapHeatR = 18;
+// One node's peak intensity. Lone nodes land mid-ramp (teal-green); two
+// overlapping go yellow-orange and three or more saturate to red.
+static constexpr int kNodeMapHeatPeak = 110;
+#if !defined(DEVICE_TDECK_PRO)
+static uint8_t s_nodeMapKernel[(2 * kNodeMapHeatR + 1) * (2 * kNodeMapHeatR + 1)];
+static bool s_nodeMapKernelReady = false;
+
+static void nodeMapBuildKernel() {
+    if (s_nodeMapKernelReady) return;
+    const int side = 2 * kNodeMapHeatR + 1;
+    const float r2 = (float)(kNodeMapHeatR * kNodeMapHeatR);
+    for (int y = -kNodeMapHeatR; y <= kNodeMapHeatR; y++) {
+        for (int x = -kNodeMapHeatR; x <= kNodeMapHeatR; x++) {
+            float f = 1.0f - (float)(x * x + y * y) / r2;
+            // Quartic falloff: a soft edge without a Gaussian's long tail.
+            f = (f > 0.0f) ? f * f : 0.0f;
+            s_nodeMapKernel[(y + kNodeMapHeatR) * side + (x + kNodeMapHeatR)] =
+                (uint8_t)lroundf(f * (float)kNodeMapHeatPeak);
+        }
+    }
+    s_nodeMapKernelReady = true;
+}
+#endif
+
+// Positions the points and rebuilds the intensity buffer for the current view.
+// A no-op when the view has not moved since the last build.
+static void nodeMapRebuildOverlay() {
+    if (!s_nodeLocateAllNodes || s_locateMapW <= 0 || s_locateMapH <= 0) return;
+    if (s_nodeLocateZoom == s_nodeMapHeatZoom
+        && s_nodeLocateCenterWorldX == s_nodeMapHeatCenterX
+        && s_nodeLocateCenterWorldY == s_nodeMapHeatCenterY) {
+        return;
+    }
+    s_nodeMapHeatZoom = s_nodeLocateZoom;
+    s_nodeMapHeatCenterX = s_nodeLocateCenterWorldX;
+    s_nodeMapHeatCenterY = s_nodeLocateCenterWorldY;
+
+    const double worldSize = nodeLocateWorldSize(s_nodeLocateZoom);
+    for (int i = 0; i < s_nodeMapPointCount; i++) {
+        double wx = 0.0;
+        double wy = 0.0;
+        nodeLocateLatLonToWorld(s_nodeMapPoints[i].lat, s_nodeMapPoints[i].lon,
+                                s_nodeLocateZoom, wx, wy);
+        double dx = wx - s_nodeLocateCenterWorldX;
+        if (dx > worldSize * 0.5) dx -= worldSize;
+        if (dx < -worldSize * 0.5) dx += worldSize;
+        const double sx = (double)s_locateMapW * 0.5 + dx;
+        const double sy = (double)s_locateMapH * 0.5 + (wy - s_nodeLocateCenterWorldY);
+        // Kept while any of its blob could reach the viewport.
+        if (sx < -kNodeMapHeatR || sx > s_locateMapW + kNodeMapHeatR
+            || sy < -kNodeMapHeatR || sy > s_locateMapH + kNodeMapHeatR) {
+            s_nodeMapScreenX[i] = INT16_MIN;
+            s_nodeMapScreenY[i] = INT16_MIN;
+        } else {
+            s_nodeMapScreenX[i] = (int16_t)lround(sx);
+            s_nodeMapScreenY[i] = (int16_t)lround(sy);
+        }
+    }
+
+#if !defined(DEVICE_TDECK_PRO)
+    const size_t heatBytes = (size_t)s_locateMapW * (size_t)s_locateMapH;
+    if (!s_nodeMapHeat) {
+        s_nodeMapHeat = (uint8_t *)heap_caps_malloc(heatBytes,
+                                                    MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+        if (!s_nodeMapHeat) {
+            s_nodeMapHeat = (uint8_t *)heap_caps_malloc(heatBytes, MALLOC_CAP_8BIT);
+        }
+        // Without it the map still shows every node as a dot, just no heat.
+        if (!s_nodeMapHeat) Serial.println("[map] node heat buffer unavailable");
+    }
+    if (!s_nodeMapHeat) return;
+    memset(s_nodeMapHeat, 0, heatBytes);
+    nodeMapBuildKernel();
+    const int side = 2 * kNodeMapHeatR + 1;
+    for (int i = 0; i < s_nodeMapPointCount; i++) {
+        if (s_nodeMapScreenX[i] == INT16_MIN) continue;
+        const int cx = s_nodeMapScreenX[i];
+        const int cy = s_nodeMapScreenY[i];
+        const int y0 = max(0, cy - kNodeMapHeatR);
+        const int y1 = min(s_locateMapH - 1, cy + kNodeMapHeatR);
+        const int x0 = max(0, cx - kNodeMapHeatR);
+        const int x1 = min(s_locateMapW - 1, cx + kNodeMapHeatR);
+        for (int y = y0; y <= y1; y++) {
+            uint8_t *row = s_nodeMapHeat + (size_t)y * s_locateMapW;
+            const uint8_t *k = s_nodeMapKernel
+                               + (y - cy + kNodeMapHeatR) * side + (kNodeMapHeatR - cx);
+            for (int x = x0; x <= x1; x++) {
+                const int v = row[x] + k[x];
+                row[x] = (uint8_t)(v > 255 ? 255 : v);
+            }
+        }
+    }
+#endif
+}
+
+#if !defined(DEVICE_TDECK_PRO)
+// Intensity to colour: blue, cyan, green, yellow, red at 0, 64, 128, 192, 255.
+static void nodeMapHeatColor(uint8_t v, uint8_t &r, uint8_t &g, uint8_t &b) {
+    static constexpr uint8_t kStops[5][3] = {
+        { 48,  96, 255},
+        {  0, 224, 255},
+        { 64, 236,  72},
+        {255, 224,   0},
+        {255,  48,  32},
+    };
+    const int seg = (v >= 255) ? 3 : v / 64;
+    const int t = (v >= 255) ? 64 : v - seg * 64;   // 0..64 within the segment
+    r = (uint8_t)(kStops[seg][0] + (kStops[seg + 1][0] - kStops[seg][0]) * t / 64);
+    g = (uint8_t)(kStops[seg][1] + (kStops[seg + 1][1] - kStops[seg][1]) * t / 64);
+    b = (uint8_t)(kStops[seg][2] + (kStops[seg + 1][2] - kStops[seg][2]) * t / 64);
+}
+#endif
+
+// Paints the overlay over canvas pixels [x0,x1) x [y0,y1) that have just been
+// written. Each pixel must be painted exactly once after it is written, or the
+// heat would build up on it.
+static void nodeMapPaintRect(int x0, int y0, int x1, int y1) {
+    if (!s_nodeLocateAllNodes || !s_nodeLocateCanvasBuf) return;
+    if (x0 < 0) x0 = 0;
+    if (y0 < 0) y0 = 0;
+    if (x1 > s_locateMapW) x1 = s_locateMapW;
+    if (y1 > s_locateMapH) y1 = s_locateMapH;
+    if (x0 >= x1 || y0 >= y1) return;
+    const uint32_t stride = s_nodeLocateCanvasBuf->header.stride;
+
+#if !defined(DEVICE_TDECK_PRO)
+    if (s_nodeMapHeat) {
+        for (int y = y0; y < y1; y++) {
+            uint16_t *px = (uint16_t *)(s_nodeLocateCanvasBuf->data + y * stride);
+            const uint8_t *heat = s_nodeMapHeat + (size_t)y * s_locateMapW;
+            for (int x = x0; x < x1; x++) {
+                const uint8_t v = heat[x];
+                if (!v) continue;
+                // Fades in from nothing at the blob's edge and stops short of
+                // opaque, so the streets under a hot spot still show.
+                const int a = (v * 3 > 190) ? 190 : v * 3;
+                uint8_t hr, hg, hb;
+                nodeMapHeatColor(v, hr, hg, hb);
+                const uint16_t p = px[x];
+                const int r = ((p >> 11) & 0x1F) << 3;
+                const int g = ((p >> 5) & 0x3F) << 2;
+                const int b = (p & 0x1F) << 3;
+                const int nr = r + (hr - r) * a / 255;
+                const int ng = g + (hg - g) * a / 255;
+                const int nb = b + (hb - b) * a / 255;
+                px[x] = (uint16_t)(((nr >> 3) << 11) | ((ng >> 2) << 5) | (nb >> 3));
+            }
+        }
+    }
+#endif
+
+    // A crisp dot on each node, so single nodes are pinpointed rather than
+    // only implied by their blob. Outlines first, then cores, so one node's
+    // outline never cuts into a neighbour's core.
+#if defined(DEVICE_TDECK_PRO)
+    // Black core in a white ring: the ring is what separates it from the
+    // dithered map, which is black and white too.
+    static constexpr int kRingR2 = 25;
+    static constexpr int kCoreR2 = 10;
+    static constexpr uint16_t kRingPx = 0xFFFF;
+    static constexpr uint16_t kCorePx = 0x0000;
+#else
+    static constexpr int kRingR2 = 8;
+    static constexpr int kCoreR2 = 3;
+    static constexpr uint16_t kRingPx = 0x10C5;   // near-black navy
+    static constexpr uint16_t kCorePx = 0xFFFF;
+#endif
+    for (int pass = 0; pass < 2; pass++) {
+        const int r2 = pass ? kCoreR2 : kRingR2;
+        const uint16_t color = pass ? kCorePx : kRingPx;
+        const int r = (int)ceilf(sqrtf((float)r2));
+        for (int i = 0; i < s_nodeMapPointCount; i++) {
+            if (s_nodeMapScreenX[i] == INT16_MIN) continue;
+            const int cx = s_nodeMapScreenX[i];
+            const int cy = s_nodeMapScreenY[i];
+            const int dy0 = max(y0, cy - r);
+            const int dy1 = min(y1 - 1, cy + r);
+            const int dx0 = max(x0, cx - r);
+            const int dx1 = min(x1 - 1, cx + r);
+            for (int y = dy0; y <= dy1; y++) {
+                uint16_t *px = (uint16_t *)(s_nodeLocateCanvasBuf->data + y * stride);
+                for (int x = dx0; x <= dx1; x++) {
+                    const int ddx = x - cx;
+                    const int ddy = y - cy;
+                    if (ddx * ddx + ddy * ddy <= r2) px[x] = color;
+                }
+            }
+        }
+    }
+}
+
+// Frames every node: the closest zoom at which their bounding box fits inside
+// the viewport with a margin, centred on it. Does not try to handle a set of
+// nodes straddling the antimeridian, which frames as the long way round.
+static void nodeMapFitAll() {
+    if (s_locateMapW <= 0 || s_locateMapH <= 0) return;
+    // Close enough to see streets, without opening a lone node at building level.
+    static constexpr int kFitZoomMax = 15;
+    static constexpr int kFitMargin = 28;
+
+    if (s_nodeMapPointCount == 0) {
+        // Nothing to frame. Our own position if we have one, else the world.
+        if (s_cfg.latI != 0 || s_cfg.lonI != 0) {
+            s_nodeLocateZoom = kNodeLocateZoomDefault;
+            nodeLocateLatLonToWorld((double)s_cfg.latI / 1e7, (double)s_cfg.lonI / 1e7,
+                                    s_nodeLocateZoom, s_nodeLocateCenterWorldX,
+                                    s_nodeLocateCenterWorldY);
+        } else {
+            s_nodeLocateZoom = kNodeLocateZoomMin;
+            nodeLocateLatLonToWorld(0.0, 0.0, s_nodeLocateZoom,
+                                    s_nodeLocateCenterWorldX, s_nodeLocateCenterWorldY);
+        }
+        nodeLocateNormalizeCenter();
+        nodeLocateRequestLiveTiles(0, true);
+        return;
+    }
+
+    double minX = 0.0, maxX = 0.0, minY = 0.0, maxY = 0.0;
+    for (int i = 0; i < s_nodeMapPointCount; i++) {
+        double wx = 0.0;
+        double wy = 0.0;
+        nodeLocateLatLonToWorld(s_nodeMapPoints[i].lat, s_nodeMapPoints[i].lon, 0, wx, wy);
+        if (i == 0 || wx < minX) minX = wx;
+        if (i == 0 || wx > maxX) maxX = wx;
+        if (i == 0 || wy < minY) minY = wy;
+        if (i == 0 || wy > maxY) maxY = wy;
+    }
+
+    const double fitW = (double)max(1, s_locateMapW - 2 * kFitMargin);
+    const double fitH = (double)max(1, s_locateMapH - 2 * kFitMargin);
+    int zoom = kNodeLocateZoomMin;
+    for (int z = kFitZoomMax; z > kNodeLocateZoomMin; z--) {
+        const double scale = ldexp(1.0, z);
+        if ((maxX - minX) * scale <= fitW && (maxY - minY) * scale <= fitH) {
+            zoom = z;
+            break;
+        }
+    }
+    s_nodeLocateZoom = zoom;
+    const double scale = ldexp(1.0, zoom);
+    s_nodeLocateCenterWorldX = (minX + maxX) * 0.5 * scale;
+    s_nodeLocateCenterWorldY = (minY + maxY) * 0.5 * scale;
+    nodeLocateNormalizeCenter();
+    nodeLocateRequestLiveTiles(0, true);
+}
+
+// Nodes -> Map. Every node in the table with a position, at once.
+static void openNodesMapModal() {
+    // Checked before the points are touched: they belong to an open map.
+    if (!s_rootScreen || s_nodeLocateModal || s_nodeLocateBackdrop) return;
+    s_nodeMapPointCount = 0;
+    const int total = min(Nodes.count(), (int)MAX_NODES);
+    for (int i = 0; i < total; i++) {
+        const NodeEntry *n = Nodes.at(i);
+        if (!n || n->nodeId == 0 || !n->hasPosition) continue;
+        if (n->latI == 0 && n->lonI == 0) continue;
+        s_nodeMapPoints[s_nodeMapPointCount].lat = (float)n->latI / 10000000.0f;
+        s_nodeMapPoints[s_nodeMapPointCount].lon = (float)n->lonI / 10000000.0f;
+        s_nodeMapPointCount++;
+    }
+    const int located = s_nodeMapPointCount;
+
+    char titleBuf[48];
+    snprintf(titleBuf, sizeof(titleBuf), TR("Node map: %d located"), located);
+    if (!nodeLocateBuildModal(titleBuf, true)) {
+        s_nodeMapPointCount = 0;
+        return;
+    }
+    s_nodeMapHeatZoom = -1;
+    s_nodeLocateHasPixels = false;
+    if (s_nodeLocateCanvasBuf) {
+        nodeMapFitAll();
+    } else {
+        nodeLocateUpdateLiveMarker();
+    }
 }
 #endif  // HAS_NODE_LOCATE
 
@@ -28727,7 +29135,10 @@ static void refreshNodesHint() {
         // the list's legend up over a panel it no longer drives.
         lv_label_set_text_fmt(s_nodesHintLabel, TR("%s=Scroll  A=Actions  %s=List"),
                               navKeys, modalCloseKeyLabel());
-    } else if (s_nodesSearchBtnFocused && s_nodesAllBtnFocused) {
+    } else if (s_nodesSearchBtnFocused && s_nodesTopBtn == kNodesTopMap) {
+        lv_label_set_text_fmt(s_nodesHintLabel, TR("Enter=Map  %s=Back"),
+                              modalCloseKeyLabel());
+    } else if (s_nodesSearchBtnFocused && s_nodesTopBtn == kNodesTopAll) {
         lv_label_set_text_fmt(s_nodesHintLabel, TR("Enter=Show all  %s=Back"),
                               modalCloseKeyLabel());
     } else if (s_nodesSearchBtnFocused) {
@@ -29318,7 +29729,7 @@ static void onNodeSnapshotPressed(lv_event_t *e) {
     s_nodesSelected = idx;
     if (s_nodesSearchBtnFocused) {
         s_nodesSearchBtnFocused = false;
-        s_nodesAllBtnFocused = false;
+        s_nodesTopBtn = kNodesTopSearch;
         refreshNodesSearchButton();
         refreshNodesHint();
     }
@@ -39932,7 +40343,7 @@ static void openNodesModal() {
     // the cursor on the first row rather than the Search button.
     s_nodesFilterOpen = false;
     s_nodesSearchBtnFocused = false;
-    s_nodesAllBtnFocused = false;
+    s_nodesTopBtn = kNodesTopSearch;
     s_nodesFilterLen = 0;
     s_nodesFilter[0] = '\0';
     snapshotNodesForModal();
@@ -46877,14 +47288,14 @@ static void pumpKeyboardInput() {
                 const int step = invertScrollNav ? ((k == KEY_SCROLL_UP) ? 1 : -1)
                                                  : ((k == KEY_SCROLL_UP) ? -1 : 1);
 #if !UI_TOUCH_ONLY_PROFILE
-                // The All and Search / Clear buttons sit above the first row:
-                // Up from there (or from an empty list) moves onto Search, Up
-                // again onto All, and Down walks back.
+                // The Map, All and Search / Clear buttons sit above the first
+                // row: Up from there (or from an empty list) moves onto Search,
+                // Up again onto All, then Map, and Down walks back.
                 if (s_nodesSearchBtnFocused) {
-                    if (step < 0 && !s_nodesAllBtnFocused) {
-                        nodesSetSearchBtnFocus(true, true);
-                    } else if (step > 0 && s_nodesAllBtnFocused) {
-                        nodesSetSearchBtnFocus(true, false);
+                    if (step < 0 && s_nodesTopBtn < nodesTopBtnLast()) {
+                        nodesSetSearchBtnFocus(true, s_nodesTopBtn + 1);
+                    } else if (step > 0 && s_nodesTopBtn > kNodesTopSearch) {
+                        nodesSetSearchBtnFocus(true, s_nodesTopBtn - 1);
                     } else if (step > 0 && s_nodesFilteredCount > 0) {
                         s_nodesSelected = 0;
                         nodesClampRenderWindow();
