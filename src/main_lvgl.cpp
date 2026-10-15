@@ -13565,19 +13565,133 @@ static void configureOnScreenKeyboard(lv_obj_t *keyboard) {
 // DMs are left alone. openComposePromptForDm() flips the target after this has
 // already run once, and calls it again; there the peer is named by the screen
 // the composer opened over, and a channel name would be an outright lie.
+//
+// The icon in front says the same thing at a glance: a pencil for a new
+// channel message, the return arrow for a reply, an envelope for a DM. It sits
+// outside TR() so translations keep keying on the bare words.
 static void composeSetTitle(bool isReply) {
     if (!lvObjValid(s_composeTitle)) return;
     const char *kind = isReply ? TR("Reply") : TR("New Message");
+    const char *icon = isReply ? LV_SYMBOL_NEW_LINE : LV_SYMBOL_EDIT;
+    char text[80];
     if (s_composeTarget == COMPOSE_TARGET_DM) {
-        lv_label_set_text(s_composeTitle, kind);
+        snprintf(text, sizeof(text), "%s  %s", isReply ? icon : LV_SYMBOL_ENVELOPE, kind);
+        lv_label_set_text(s_composeTitle, text);
         return;
     }
     const char *chan = channelName(s_composeChannelIdx);
     if (!chan || !chan[0]) chan = TR("Channel");
-    char text[64];
-    snprintf(text, sizeof(text), "%s: %s", kind, chan);
+    snprintf(text, sizeof(text), "%s  %s: %s", icon, kind, chan);
     lv_label_set_text(s_composeTitle, text);
 }
+
+// ── Composer look ────────────────────────────────────────────────────────────
+// Every colour below is read from s_ui, the palette the active theme derives,
+// rather than from the dark-navy hex values the hex remap table translates. So
+// the composer is drawn in the theme's own roles -- panel, raised surface,
+// accent, text -- and a custom theme gets the same treatment as a preset.
+//
+// None of this moves anything: radii, colours and a glow only. The sizes above
+// and below are measured to the pixel on several panels, and a restyle that
+// changed a single row height would undo that work.
+//
+// The T-Deck Pro has no themes; its s_ui is the paper palette, black on white,
+// so the same calls come out as a clean black-and-white card. The glow, which
+// is a translucent shadow, has nothing to draw on 1 bpp and is left off there.
+
+// The card itself. A rounded panel with an accent-tinted edge and, where the
+// card does not fill the panel, a soft accent glow around it -- the only place
+// the composer reaches outside its own box, and what lifts it off the screen
+// it opened over.
+static void composeStyleModal(lv_obj_t *modal, int modalW, int modalH) {
+    if (!modal) return;
+    const bool fullW = modalW >= (int)lv_disp_get_hor_res(NULL);
+    const bool fullH = modalH >= (int)lv_disp_get_ver_res(NULL);
+    lv_obj_set_style_bg_color(modal, lvColorFrom565(s_ui.panelBg), 0);
+    lv_obj_set_style_bg_opa(modal, LV_OPA_COVER, 0);
+    lv_obj_set_style_border_width(modal, 1, 0);
+    lv_obj_set_style_border_color(modal, lvColorFrom565(s_ui.dividerHi), 0);
+    // Square when it runs edge to edge: rounding a corner against the panel's
+    // own edge just shows the screen underneath in four slivers.
+    lv_obj_set_style_radius(modal, fullW ? 0 : 6, 0);
+#if HAS_UI_THEMES
+    if (!fullW && !fullH) {
+        lv_obj_set_style_shadow_color(modal, lvColorFrom565(s_ui.accent), 0);
+        lv_obj_set_style_shadow_width(modal, 16, 0);
+        lv_obj_set_style_shadow_spread(modal, 0, 0);
+        lv_obj_set_style_shadow_opa(modal, LV_OPA_40, 0);
+    } else {
+        lv_obj_set_style_shadow_width(modal, 0, 0);
+    }
+#else
+    lv_obj_set_style_shadow_width(modal, 0, 0);
+#endif
+}
+
+static void composeStyleTitle(lv_obj_t *title) {
+    if (!title) return;
+    lv_obj_set_style_text_color(title, lvColorFrom565(s_ui.accent), 0);
+}
+
+// The message box: the theme's input surface, rounded to match the card, an
+// edge that turns accent while it has focus, an accent caret, and a placeholder
+// in the dim text colour rather than LVGL's default grey.
+static void composeStyleInput(lv_obj_t *ta) {
+    if (!ta) return;
+    lv_obj_set_style_text_color(ta, lvColorFrom565(s_ui.textMain), 0);
+    lv_obj_set_style_bg_color(ta, lvColorFrom565(s_ui.inputBg), 0);
+    lv_obj_set_style_bg_opa(ta, LV_OPA_COVER, 0);
+    lv_obj_set_style_radius(ta, 5, 0);
+    lv_obj_set_style_border_width(ta, 1, 0);
+    lv_obj_set_style_border_color(ta, lvColorFrom565(s_ui.dividerHi), 0);
+    lv_obj_set_style_border_color(ta, lvColorFrom565(s_ui.accent), LV_STATE_FOCUSED);
+    lv_obj_set_style_border_color(ta, lvColorFrom565(s_ui.accent), LV_STATE_FOCUS_KEY);
+    lv_obj_set_style_outline_width(ta, 0, LV_STATE_FOCUSED);
+    lv_obj_set_style_outline_width(ta, 0, LV_STATE_FOCUS_KEY);
+    lv_obj_set_style_text_color(ta, lvColorFrom565(s_ui.textDim), LV_PART_TEXTAREA_PLACEHOLDER);
+    // showTextareaCursor() has already set the caret up; only its colour moves.
+    lv_obj_set_style_border_color(ta, lvColorFrom565(s_ui.cursor), LV_PART_CURSOR);
+}
+
+// The quoted message a reply answers, drawn as a quote: a raised strip with an
+// accent bar down its left edge, the way the chat draws a reply. Border and
+// padding are horizontal only, so the strip keeps the height it was given.
+static void composeStyleQuote(lv_obj_t *obj) {
+    if (!obj) return;
+    lv_obj_set_style_bg_color(obj, lvColorFrom565(s_ui.panelAlt), 0);
+    lv_obj_set_style_bg_opa(obj, LV_OPA_COVER, 0);
+    lv_obj_set_style_radius(obj, 3, 0);
+    lv_obj_set_style_border_side(obj, LV_BORDER_SIDE_LEFT, 0);
+    lv_obj_set_style_border_width(obj, 3, 0);
+    lv_obj_set_style_border_color(obj, lvColorFrom565(s_ui.accent), 0);
+    lv_obj_set_style_pad_left(obj, 6, 0);
+    lv_obj_set_style_text_color(obj, lvColorFrom565(s_ui.textDim), 0);
+}
+
+// Footer text: the key legend and the character count.
+static void composeStyleMeta(lv_obj_t *lbl) {
+    if (!lbl) return;
+    lv_obj_set_style_text_color(lbl, lvColorFrom565(s_ui.textDim), 0);
+}
+
+#if UI_TOUCH_ONLY_PROFILE
+// Touch buttons. Send is the one filled in the accent; Cancel and the emoji
+// opener are quiet raised surfaces, so the eye lands on the thing you came to
+// press. Pressed darkens toward the card rather than LVGL's stock recolour.
+static void composeStyleButton(lv_obj_t *btn, bool primary) {
+    if (!btn) return;
+    const uint16_t face = primary ? s_ui.accent : s_ui.panelStrong;
+    lv_obj_set_style_bg_color(btn, lvColorFrom565(face), 0);
+    lv_obj_set_style_bg_opa(btn, LV_OPA_COVER, 0);
+    lv_obj_set_style_bg_color(btn, lvColorFrom565(blend565(face, s_ui.panelBg, 90)),
+                              LV_STATE_PRESSED);
+    lv_obj_set_style_radius(btn, 6, 0);
+    lv_obj_set_style_border_width(btn, primary ? 0 : 1, 0);
+    lv_obj_set_style_border_color(btn, lvColorFrom565(s_ui.dividerHi), 0);
+    lv_obj_set_style_shadow_width(btn, 0, 0);
+    lv_obj_set_style_text_color(btn, lvColorFrom565(primary ? s_ui.textOnAccent : s_ui.textMain), 0);
+}
+#endif
 
 #if defined(DEVICE_TLORA_PAGER_TFT)
 // Paints the emoji button for the current focus, and puts the caret back where
@@ -13716,10 +13830,7 @@ static void openComposePrompt(uint32_t replyPacketId,
 #endif
     lv_obj_clear_flag(s_composeModal, LV_OBJ_FLAG_SCROLLABLE);
     lv_obj_add_flag(s_composeModal, LV_OBJ_FLAG_CLICKABLE);
-    lv_obj_set_style_bg_color(s_composeModal, lv_color_hex(0x0E285B), 0);
-    lv_obj_set_style_bg_opa(s_composeModal, LV_OPA_COVER, 0);
-    lv_obj_set_style_border_width(s_composeModal, 1, 0);
-    lv_obj_set_style_border_color(s_composeModal, lv_color_hex(0x5C86C6), 0);
+    composeStyleModal(s_composeModal, modalW, modalH);
     lv_obj_set_style_pad_all(s_composeModal, 4, 0);
 #if UI_EDGE_TO_EDGE_TEXT_ENTRY
     lv_obj_set_style_pad_left(s_composeModal, 2, 0);
@@ -13733,7 +13844,7 @@ static void openComposePrompt(uint32_t replyPacketId,
     lv_obj_t *title = lv_label_create(s_composeModal);
     lv_obj_set_width(title, lv_pct(100));
     lv_obj_set_style_text_font(title, &lv_font_montserrat_10, 0);
-    lv_obj_set_style_text_color(title, lv_color_hex(0xD9E8FF), 0);
+    composeStyleTitle(title);
     // Ellipsised, not wrapped. Channel names are user-set and can be long, and
     // the default wrap would take a second line out of an input box that is
     // measured to the pixel on these panels.
@@ -13748,7 +13859,7 @@ static void openComposePrompt(uint32_t replyPacketId,
         lv_obj_set_width(replyLbl, lv_pct(100));
         lv_obj_set_height(replyLbl, lv_font_get_line_height(&lv_font_montserrat_10));
         lv_obj_set_style_text_font(replyLbl, emojiFont(&lv_font_montserrat_10), 0);
-        lv_obj_set_style_text_color(replyLbl, lv_color_hex(0xA7C7FF), 0);
+        composeStyleQuote(replyLbl);
         lv_label_set_long_mode(replyLbl, LV_LABEL_LONG_DOT);
         setLabelTextEmojiSafe(replyLbl, preview[0] ? preview : "(message)");
     }
@@ -13761,11 +13872,6 @@ static void openComposePrompt(uint32_t replyPacketId,
     }
     lv_obj_set_width(s_composeInput, lv_pct(100));
     lv_obj_set_style_text_font(s_composeInput, emojiFont(&lv_font_montserrat_14), 0);
-    lv_obj_set_style_text_color(s_composeInput, lv_color_hex(0xE8F1FF), 0);
-    lv_obj_set_style_bg_color(s_composeInput, lv_color_hex(0x102B61), 0);
-    lv_obj_set_style_bg_opa(s_composeInput, LV_OPA_COVER, 0);
-    lv_obj_set_style_border_width(s_composeInput, 1, 0);
-    lv_obj_set_style_border_color(s_composeInput, lv_color_hex(0x4C76BA), 0);
 #if defined(DEVICE_TDISPLAY_P4)
     // Wrapping, several lines tall, so a message reads as you write it rather
     // than scrolling sideways out of a single line. Four in portrait, where
@@ -13805,6 +13911,7 @@ static void openComposePrompt(uint32_t replyPacketId,
     lv_textarea_set_max_length(s_composeInput, MESH_TEXT_MAX_LEN);
     lv_textarea_set_placeholder_text(s_composeInput, TR("Type message..."));
     showTextareaCursor(s_composeInput);
+    composeStyleInput(s_composeInput);
     lv_obj_add_event_cb(s_composeInput, onComposeInputChanged, LV_EVENT_VALUE_CHANGED, nullptr);
     accentAttach(s_composeInput);
     spellAttach(s_composeInput);
@@ -13812,7 +13919,7 @@ static void openComposePrompt(uint32_t replyPacketId,
     s_composeCharCount = lv_label_create(s_composeModal);
     lv_obj_set_width(s_composeCharCount, lv_pct(100));
     lv_obj_set_style_text_font(s_composeCharCount, &lv_font_montserrat_10, 0);
-    lv_obj_set_style_text_color(s_composeCharCount, lv_color_hex(0xA7C7FF), 0);
+    composeStyleMeta(s_composeCharCount);
     lv_obj_set_style_text_align(s_composeCharCount, LV_TEXT_ALIGN_RIGHT, 0);
 
     lv_obj_t *row = lv_obj_create(s_composeModal);
@@ -13831,6 +13938,7 @@ static void openComposePrompt(uint32_t replyPacketId,
     // Cancel/Send keep the room.
     lv_obj_t *emojiBtn = lv_btn_create(row);
     lv_obj_set_size(emojiBtn, 34, lv_pct(100));
+    composeStyleButton(emojiBtn, /*primary=*/false);
     lv_obj_add_event_cb(emojiBtn, [](lv_event_t *) { openEmojiPicker(false); },
                         LV_EVENT_CLICKED, nullptr);
     lv_obj_t *emojiLbl = lv_label_create(emojiBtn);
@@ -13842,18 +13950,20 @@ static void openComposePrompt(uint32_t replyPacketId,
     lv_obj_set_flex_grow(cancelBtn, 1);
     lv_obj_set_height(cancelBtn, lv_pct(100));
     lv_obj_add_event_cb(cancelBtn, onComposeCancelPressed, LV_EVENT_CLICKED, nullptr);
+    composeStyleButton(cancelBtn, /*primary=*/false);
     lv_obj_t *cancelLbl = lv_label_create(cancelBtn);
     lv_obj_set_style_text_font(cancelLbl, &lv_font_montserrat_10, 0);
-    lv_label_set_text(cancelLbl, TR("Cancel"));
+    lv_label_set_text_fmt(cancelLbl, "%s  %s", LV_SYMBOL_CLOSE, TR("Cancel"));
     lv_obj_center(cancelLbl);
 
     lv_obj_t *sendBtn = lv_btn_create(row);
     lv_obj_set_flex_grow(sendBtn, 1);
     lv_obj_set_height(sendBtn, lv_pct(100));
     lv_obj_add_event_cb(sendBtn, onComposeSendPressed, LV_EVENT_CLICKED, nullptr);
+    composeStyleButton(sendBtn, /*primary=*/true);
     lv_obj_t *sendLbl = lv_label_create(sendBtn);
     lv_obj_set_style_text_font(sendLbl, &lv_font_montserrat_10, 0);
-    lv_label_set_text(sendLbl, TR("Send"));
+    lv_label_set_text_fmt(sendLbl, "%s  %s", TR("Send"), LV_SYMBOL_RIGHT);
     lv_obj_center(sendLbl);
 
     // Not with a physical keyboard attached (the T-Display P4's expansion): it
@@ -13917,10 +14027,7 @@ static void openComposePrompt(uint32_t replyPacketId,
 #endif
     lv_obj_clear_flag(s_composeModal, LV_OBJ_FLAG_SCROLLABLE);
     lv_obj_add_flag(s_composeModal, LV_OBJ_FLAG_CLICKABLE);
-    lv_obj_set_style_bg_color(s_composeModal, lv_color_hex(0x0E285B), 0);
-    lv_obj_set_style_bg_opa(s_composeModal, LV_OPA_COVER, 0);
-    lv_obj_set_style_border_width(s_composeModal, 1, 0);
-    lv_obj_set_style_border_color(s_composeModal, lv_color_hex(0x5C86C6), 0);
+    composeStyleModal(s_composeModal, modalW, modalH);
     lv_obj_set_style_pad_all(s_composeModal, 4, 0);
     lv_obj_set_style_pad_bottom(s_composeModal, composeModalBottomPad, 0);
     lv_obj_set_style_pad_row(s_composeModal, composeModalRowPad, 0);
@@ -13937,7 +14044,7 @@ static void openComposePrompt(uint32_t replyPacketId,
     lv_obj_t *title = lv_label_create(s_composeModal);
     lv_obj_set_width(title, lv_pct(100));
     lv_obj_set_style_text_font(title, &lv_font_montserrat_10, 0);
-    lv_obj_set_style_text_color(title, lv_color_hex(0xD9E8FF), 0);
+    composeStyleTitle(title);
     // Ellipsised, not wrapped. Channel names are user-set and can be long, and
     // the default wrap would take a second line out of an input box that is
     // measured to the pixel on these panels.
@@ -13952,11 +14059,7 @@ static void openComposePrompt(uint32_t replyPacketId,
         lv_obj_set_width(replyBox, lv_pct(100));
         lv_obj_set_height(replyBox, composeReplyRowH);
         lv_obj_clear_flag(replyBox, LV_OBJ_FLAG_SCROLLABLE);
-        lv_obj_set_style_bg_color(replyBox, lv_color_hex(0x123266), 0);
-        lv_obj_set_style_bg_opa(replyBox, LV_OPA_50, 0);
-        lv_obj_set_style_border_width(replyBox, 1, 0);
-        lv_obj_set_style_border_color(replyBox, lv_color_hex(0x335D9D), 0);
-        lv_obj_set_style_pad_left(replyBox, 4, 0);
+        composeStyleQuote(replyBox);
         lv_obj_set_style_pad_right(replyBox, 4, 0);
         lv_obj_set_style_pad_top(replyBox, 1, 0);
         lv_obj_set_style_pad_bottom(replyBox, 1, 0);
@@ -13965,7 +14068,7 @@ static void openComposePrompt(uint32_t replyPacketId,
         lv_obj_set_width(replyLbl, lv_pct(100));
         lv_obj_set_height(replyLbl, lv_font_get_line_height(composeBodyFont));
         lv_obj_set_style_text_font(replyLbl, composeBodyFont, 0);
-        lv_obj_set_style_text_color(replyLbl, lv_color_hex(0xA7C7FF), 0);
+        lv_obj_set_style_text_color(replyLbl, lvColorFrom565(s_ui.textDim), 0);
         lv_label_set_long_mode(replyLbl, LV_LABEL_LONG_DOT);
         setLabelTextEmojiSafe(replyLbl, preview[0] ? preview : "(message)");
     }
@@ -14052,11 +14155,6 @@ static void openComposePrompt(uint32_t replyPacketId,
     lv_obj_set_flex_grow(s_composeInput, 1);
 #endif
     lv_obj_set_style_text_font(s_composeInput, composeBodyFont, 0);
-    lv_obj_set_style_text_color(s_composeInput, lv_color_hex(0xE8F1FF), 0);
-    lv_obj_set_style_bg_color(s_composeInput, lv_color_hex(0x102B61), 0);
-    lv_obj_set_style_bg_opa(s_composeInput, LV_OPA_COVER, 0);
-    lv_obj_set_style_border_width(s_composeInput, 1, 0);
-    lv_obj_set_style_border_color(s_composeInput, lv_color_hex(0x4C76BA), 0);
     lv_obj_set_style_pad_top(s_composeInput, composeInputPadTop, 0);
     lv_obj_set_style_pad_bottom(s_composeInput, 1, 0);
     lv_obj_set_style_pad_left(s_composeInput, 3, 0);
@@ -14073,6 +14171,7 @@ static void openComposePrompt(uint32_t replyPacketId,
     lv_textarea_set_max_length(s_composeInput, MESH_TEXT_MAX_LEN);
     lv_textarea_set_placeholder_text(s_composeInput, TR("Type message..."));
     showTextareaCursor(s_composeInput);
+    composeStyleInput(s_composeInput);
     lv_obj_add_event_cb(s_composeInput, onComposeInputChanged, LV_EVENT_VALUE_CHANGED, nullptr);
     accentAttach(s_composeInput);
     spellAttach(s_composeInput);
@@ -14087,7 +14186,7 @@ static void openComposePrompt(uint32_t replyPacketId,
     if (s_composeEmojiBtn) {
         lv_obj_set_width(s_composeEmojiBtn, 30);
         lv_obj_set_height(s_composeEmojiBtn, lv_pct(100));
-        lv_obj_set_style_radius(s_composeEmojiBtn, 4, 0);
+        lv_obj_set_style_radius(s_composeEmojiBtn, 5, 0);
         lv_obj_set_style_pad_all(s_composeEmojiBtn, 0, 0);
         lv_obj_set_style_shadow_width(s_composeEmojiBtn, 0, 0);
         // Clickable as well as wheel-reachable. This board has no touch panel,
@@ -14105,10 +14204,10 @@ static void openComposePrompt(uint32_t replyPacketId,
         // button with something other than a finger.
         refreshComposeEmojiFocus();
 #else
-        lv_obj_set_style_bg_color(s_composeEmojiBtn, lv_color_hex(0x16386F), 0);
-        lv_obj_set_style_bg_opa(s_composeEmojiBtn, LV_OPA_70, 0);
+        lv_obj_set_style_bg_color(s_composeEmojiBtn, lvColorFrom565(s_ui.panelStrong), 0);
+        lv_obj_set_style_bg_opa(s_composeEmojiBtn, LV_OPA_COVER, 0);
         lv_obj_set_style_border_width(s_composeEmojiBtn, 1, 0);
-        lv_obj_set_style_border_color(s_composeEmojiBtn, lv_color_hex(0x4C76BA), 0);
+        lv_obj_set_style_border_color(s_composeEmojiBtn, lvColorFrom565(s_ui.dividerHi), 0);
 #endif
     }
 #endif
@@ -14123,7 +14222,7 @@ static void openComposePrompt(uint32_t replyPacketId,
 #else
     lv_obj_set_style_text_font(hint, composeBodyFont, 0);
 #endif
-    lv_obj_set_style_text_color(hint, lv_color_hex(0xA7C7FF), 0);
+    composeStyleMeta(hint);
     lv_obj_set_style_pad_top(hint, 0, 0);
 #if defined(DEVICE_TLORA_PAGER_TFT)
     lv_obj_set_style_pad_bottom(hint, 0, 0);
@@ -14162,7 +14261,7 @@ static void openComposePrompt(uint32_t replyPacketId,
 #else
     lv_obj_set_style_text_font(s_composeCharCount, composeBodyFont, 0);
 #endif
-    lv_obj_set_style_text_color(s_composeCharCount, lv_color_hex(0xA7C7FF), 0);
+    composeStyleMeta(s_composeCharCount);
 #if defined(DEVICE_CARDPUTER_LORA_HAT)
     // Flush with the legend's line rather than lifted off it: the legend is the
     // last item in the column, so its box already ends at the content bottom.
@@ -14216,6 +14315,17 @@ static void updateComposeCharCount() {
     for (const char *p = txt; p && *p; p++) {
         if (!utf8util::isContinuationByte((uint8_t)*p)) used++;
     }
+    // Dim while there is room, the theme's warning amber in the last tenth, and
+    // its red once the box is full and further keys do nothing -- the count is
+    // the only thing that says why typing stopped. (One colour on the paper
+    // build, whose palette has no amber or red.)
+    uint16_t countColor = s_ui.textDim;
+    if (used >= (uint32_t)MESH_TEXT_MAX_LEN) {
+        countColor = s_ui.battBad;
+    } else if (used * 10 >= (uint32_t)MESH_TEXT_MAX_LEN * 9) {
+        countColor = s_ui.battWarn;
+    }
+    lv_obj_set_style_text_color(s_composeCharCount, lvColorFrom565(countColor), 0);
 #if defined(DEVICE_CARDPUTER_LORA_HAT)
     // "200/200" rather than "200 of 200": the count shares its line with the
     // key legend, and on a 240 px panel the long form runs into it once the
