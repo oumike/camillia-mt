@@ -1,11 +1,6 @@
 ### New
-- The character counter in the message composer turns amber when you're near the 200-character limit and red when you reach it.
-- The composer title now starts with an icon: a pencil for a new channel message, a return arrow for a reply and an envelope for a direct message.
+- **Nodes → Map:** a new **Map** button above **All** on the Nodes screen opens a full-screen map showing every node that has a known position. The map first zooms to fit all of them, no closer than street level, and the title shows how many nodes are located. Pan by dragging, with the trackball, the arrow keys or I/J/K/L. Zoom with the +/− buttons, the Page keys, +/− or M/N. Recentre (the centre button, C/H or Space) fits every node in view again. Close with Esc/Enter or ✕. On keyboard boards, press Up once more from **All** to reach **Map**. Not available on Cardputer or Heltec V4.
+- **Node heat map (colour screens):** on the node map, each node shows as a soft coloured glow that runs from blue to red as nodes cluster. Busy areas stand out as hot spots, especially when zoomed out, and a small white dot marks each node's exact position.
+- **T-Deck Pro:** on the node map, each node shows as a black dot in a white ring.
 
-### Changed
-- The message composer has a new look on all boards. It's a rounded card in your active theme's colours, including custom themes, with an accent-coloured title, edge and cursor. When the card doesn't fill the screen, a soft accent glow surrounds it.
-- When you reply, the message you're answering now appears as a quote, with an accent bar down its left edge.
-- On touch-only boards (Heltec V4 with expansion, Wio Tracker L2, T-Display P4 and CrowPanel Advance 3.5), the Send button is filled in your accent colour and has an arrow. Cancel now has a ✕, and Cancel and the emoji button are plainer. All three buttons are rounded and darken when pressed.
-- On the T-Deck Pro, the composer is now a black-on-white card without the glow.
-
-Pull request: #114
+Pull request: #115
