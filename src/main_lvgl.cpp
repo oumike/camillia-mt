@@ -31917,6 +31917,12 @@ static void openLiveToolsModal() {
     constexpr bool toolsFill = true;
     const lv_font_t *toolsFillFont = &lv_font_montserrat_20;
     constexpr int toolsFillGap = 12;
+#elif defined(DEVICE_CROWPANEL_35)
+    // The same on the 3.5", which was drawing the 320x240 block: a strip of
+    // small buttons across the middle of 480x320, and a third of 320x480.
+    constexpr bool toolsFill = true;
+    const lv_font_t *toolsFillFont = &lv_font_montserrat_16;
+    constexpr int toolsFillGap = 8;
 #else
     constexpr bool toolsFill = false;
     const lv_font_t *toolsFillFont = kChanModalRowFont;
@@ -33300,13 +33306,28 @@ static bool homeDashSideBySide() {
 
 // Every face of the dashboard's band on screen at once, stacked, rather than
 // one at a time in a carousel: the CrowPanel 5"'s 800x480 has the room for all
-// of them in either orientation, so there is nothing to turn. The lock screen's
-// carousel is unaffected.
-#if defined(DEVICE_CROWPANEL_50)
-#define HOME_DASH_SHOW_ALL 1
+// of them in either orientation, so there is nothing to turn. The CrowPanel
+// 3.5" has it upright only: 320x480 fits the charts and both node lists, two
+// across, where 480x320 does not. The lock screen does the same, its messages
+// above the four widgets (buildLockCarousel()).
+//
+// homeDashShowAll() is whether it does, in the orientation the board booted
+// in. HOME_DASH_CAN_SHOW_ALL guards the lock screen's half, which resizes a
+// message budget that is a constant on the boards that never do.
+#if defined(DEVICE_CROWPANEL)
+#define HOME_DASH_CAN_SHOW_ALL 1
 #else
-#define HOME_DASH_SHOW_ALL 0
+#define HOME_DASH_CAN_SHOW_ALL 0
 #endif
+static inline bool homeDashShowAll() {
+#if defined(DEVICE_CROWPANEL_50)
+    return true;
+#elif defined(DEVICE_CROWPANEL_35)
+    return uiPortrait();
+#else
+    return false;
+#endif
+}
 
 // Records a page as it is built. The face list is built in order rather than
 // indexed by a fixed enum, because the two carousels do not carry the same set:
@@ -34039,10 +34060,7 @@ static void glanceCarouselGo(GlanceCarousel &c, int delta) {
 // serviceLockCarousel() and by nothing else.
 static void homeDashCarouselGo(int delta) {
     if (!homeDashboardVisible()) return;
-#if HOME_DASH_SHOW_ALL
-    (void)delta;
-    return;   // every face is already showing
-#endif
+    if (homeDashShowAll()) return;   // every face is already showing
     // The cards go with the page. A swipe gets here without passing through
     // homeDashCursorKey(), so the outline would otherwise ride off on a face
     // that is no longer in front.
@@ -34318,11 +34336,11 @@ static void refreshHomeDashboard(bool force) {
     // The Tools chart modals keep their per-packet updates. You open those to
     // watch the radio; this one opens itself.
     if (force || minuteRolled) refreshGlancePage(s_homeCarousel, (int)s_homeCarousel.at);
-#elif HOME_DASH_SHOW_ALL
-    // Every face is in front, so every face is kept current: the charts on
-    // their own sequences, the node lists on the same arrived-or-minute gate.
-    refreshGlanceCharts(s_homeCarousel, force);
-    {
+#else
+    if (homeDashShowAll()) {
+        // Every face is in front, so every face is kept current: the charts on
+        // their own sequences, the node lists on the same arrived-or-minute gate.
+        refreshGlanceCharts(s_homeCarousel, force);
         const bool arrived = (s_snrHist.seq != s_homeCarousel.nodeSeq);
         if (force || minuteRolled || arrived) {
             s_homeCarousel.nodeSeq = s_snrHist.seq;
@@ -34332,9 +34350,7 @@ static void refreshHomeDashboard(bool force) {
                 }
             }
         }
-    }
-#else
-    if (glanceFacing(s_homeCarousel) == GLANCE_PAGE_CHARTS) {
+    } else if (glanceFacing(s_homeCarousel) == GLANCE_PAGE_CHARTS) {
         refreshGlanceCharts(s_homeCarousel, force);
     } else {
         // Two reasons to refill, and nothing walks the node table without one:
@@ -34471,11 +34487,7 @@ static void openHomeDashboard() {
     // ever runs under a chevron, and the chevrons sit outside the host — they
     // stay put while the pages slide beneath them, and are never clipped or
     // carried off screen with one.
-#if HOME_DASH_SHOW_ALL
-    const int arrowGutter = 0;   // no arrows: nothing turns
-#else
-    const int arrowGutter = 11;
-#endif
+    const int arrowGutter = homeDashShowAll() ? 0 : 11;   // no arrows: nothing turns
     lv_obj_t *pageHost = lv_obj_create(s_homeDash);
     lv_obj_remove_style_all(pageHost);
     lv_obj_set_size(pageHost, widgetsW - (2 * arrowGutter), chartsH);
@@ -34494,8 +34506,7 @@ static void openHomeDashboard() {
     // turns. Labels rather than buttons: they mark the gesture instead of
     // offering a second way to perform it, and a tap target here would sit over
     // the pages and complicate what the swipe handler sees.
-#if !HOME_DASH_SHOW_ALL
-    {
+    if (!homeDashShowAll()) {
         const int arrowY = chartsTop
             + (chartsH - (int)lv_font_get_line_height(&lv_font_montserrat_12)) / 2;
         for (int side = 0; side < 2; side++) {
@@ -34516,31 +34527,31 @@ static void openHomeDashboard() {
                          side == 0 ? widgetsX + 1 : -1, arrowY);
         }
     }
-#endif
 
-#if HOME_DASH_SHOW_ALL
-    // The band shared between the faces rather than each having all of it: the
-    // charts, then the node lists -- one face when they fit side by side, two
-    // when they do not. Worked out before the node faces are built, because a
-    // list card sizes its row count from the height it is given.
-    constexpr int kShowAllGap = 4;
-    const int showAllFaces = homeDashSideBySide() ? 2 : 3;
-    const int faceH = (chartsH - kShowAllGap * (showAllFaces - 1)) / showAllFaces;
-    glanceBuildChartPage(s_homeCarousel, pageHost);
-    glanceBuildNodePages(s_homeCarousel, pageHost, faceH - kTdeckProBandInset);
-    for (int i = 0; i < (int)s_homeCarousel.pages; i++) {
-        lv_obj_t *page = s_homeCarousel.page[i];
-        if (!lvObjValid(page)) continue;
-        lv_obj_set_height(page, faceH);
-        lv_obj_set_y(page, i * (faceH + kShowAllGap));
-        lv_obj_clear_flag(page, LV_OBJ_FLAG_HIDDEN);
+    if (homeDashShowAll()) {
+        // The band shared between the faces rather than each having all of it:
+        // the charts, then the node lists -- one face when they fit side by
+        // side, two when they do not. Worked out before the node faces are
+        // built, because a list card sizes its row count from the height it is
+        // given.
+        constexpr int kShowAllGap = 4;
+        const int showAllFaces = homeDashSideBySide() ? 2 : 3;
+        const int faceH = (chartsH - kShowAllGap * (showAllFaces - 1)) / showAllFaces;
+        glanceBuildChartPage(s_homeCarousel, pageHost);
+        glanceBuildNodePages(s_homeCarousel, pageHost, faceH - kTdeckProBandInset);
+        for (int i = 0; i < (int)s_homeCarousel.pages; i++) {
+            lv_obj_t *page = s_homeCarousel.page[i];
+            if (!lvObjValid(page)) continue;
+            lv_obj_set_height(page, faceH);
+            lv_obj_set_y(page, i * (faceH + kShowAllGap));
+            lv_obj_clear_flag(page, LV_OBJ_FLAG_HIDDEN);
+        }
+    } else {
+        glanceBuildChartPage(s_homeCarousel, pageHost);
+        // A card gets the band less its page's own padding, and that height is
+        // what decides how many rows it fits.
+        glanceBuildNodePages(s_homeCarousel, pageHost, chartsH - kTdeckProBandInset);
     }
-#else
-    glanceBuildChartPage(s_homeCarousel, pageHost);
-    // A card gets the band less its page's own padding, and that height is what
-    // decides how many rows it fits.
-    glanceBuildNodePages(s_homeCarousel, pageHost, chartsH - kTdeckProBandInset);
-#endif
     // Either list opens the Nodes screen. Here rather than in the page builder,
     // which has three layouts to return from and serves the lock screen too.
     homeDashMakeCardTarget(s_homeCarousel.nodeCard[0], nullptr, HOME_CURSOR_NODES_RECENT);
@@ -34550,9 +34561,7 @@ static void openHomeDashboard() {
     // Wio boards rotate on a setting, and landscape has one fewer face than
     // portrait. Left alone, coming back in landscape on page 2 would show a
     // page this build never made.
-#if !HOME_DASH_SHOW_ALL
-    glanceShowPage(s_homeCarousel, s_homeCarousel.at);
-#endif
+    if (!homeDashShowAll()) glanceShowPage(s_homeCarousel, s_homeCarousel.at);
 
     s_homeGlanceMinuteKey = UINT32_MAX;   // force the first header paint
     refreshHomeDashboard(true);
@@ -34617,13 +34626,13 @@ static lv_obj_t *buildLockCarousel(lv_obj_t *overlay, int top, int height) {
     lv_obj_clear_flag(msgPage, LV_OBJ_FLAG_SCROLLABLE);
     glanceAddPage(s_lockCarousel, msgPage, GLANCE_PAGE_MESSAGES);
 
-#if HOME_DASH_SHOW_ALL
+#if HOME_DASH_CAN_SHOW_ALL
     // Everything at once, as on Home: the messages, then Home's widgets under
     // them, each face a share of the band -- and no timer turning it
     // (serviceLockCarousel()). The message budget is cut to the messages'
     // share, worst case all one-line rows with a gap after each, so the last
     // row cannot reach into the charts below.
-    {
+    if (homeDashShowAll()) {
         constexpr int kShowAllGap = 4;
         const int faces = 1 + (homeDashSideBySide() ? 2 : 3);
         const int faceH = (height - kShowAllGap * (faces - 1)) / faces;
@@ -34673,23 +34682,20 @@ static void resetLockCarousel() {
 // they read when the page came round.
 static void refreshLockCarouselPage() {
     if (!lvObjValid(s_lockCarousel.host)) return;
-#if HOME_DASH_SHOW_ALL
-    // Every face is showing (buildLockCarousel()), so every face is repainted.
-    for (int i = 0; i < (int)s_lockCarousel.pages; i++) {
-        refreshGlancePage(s_lockCarousel, i);
+    if (homeDashShowAll()) {
+        // Every face is showing (buildLockCarousel()), so every face is repainted.
+        for (int i = 0; i < (int)s_lockCarousel.pages; i++) {
+            refreshGlancePage(s_lockCarousel, i);
+        }
+    } else {
+        refreshGlancePage(s_lockCarousel, (int)s_lockCarousel.at);
     }
-#else
-    refreshGlancePage(s_lockCarousel, (int)s_lockCarousel.at);
-#endif
 }
 
 // The only thing that turns this carousel, driven from serviceLockScreen()
 // because that already runs every loop with the clock this wants.
 static void serviceLockCarousel(uint32_t nowMs) {
-#if HOME_DASH_SHOW_ALL
-    (void)nowMs;
-    return;   // every face is already showing
-#endif
+    if (homeDashShowAll()) return;   // every face is already showing
     if (!lvObjValid(s_lockCarousel.host) || s_lockCarousel.pages < 2) return;
     if ((uint32_t)(nowMs - s_lockCarouselTurnedMs) < kLockCarouselDwellMs) return;
     s_lockCarouselTurnedMs = nowMs;
