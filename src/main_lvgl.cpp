@@ -145,6 +145,8 @@ LV_FONT_DECLARE(lv_font_eink_bold_18);
 #define APP_VERSION "unknown"
 #endif
 
+#include "hal/crowpanel_50_fonts.h"   // last: renames fonts for the rest of this file
+
 // LVGL runs entirely on the Arduino loopTask (lv_timer_handler below), and the
 // default 8 KB loopTask stack is not enough to rasterize an emoji under LVGL 9.
 //
@@ -241,6 +243,12 @@ static constexpr uint16_t kDrawBufLines = 32;
 // Cardputer has no PSRAM and AP web config can leave very little internal DRAM.
 // A smaller draw buffer trades redraw speed for RAM headroom where it matters.
 static constexpr uint16_t kDrawBufLines = 24;
+#elif defined(DEVICE_CROWPANEL_50)
+// 800 px wide: 40 lines would be 64 KB, more than the largest internal block
+// left once WiFi is up, and the PSRAM fallback renders into the same memory the
+// RGB panel is scanned out of -- slow, and the contention shows as the panel
+// tearing. 20 lines (32 KB) stays internal.
+static constexpr uint16_t kDrawBufLines = 20;
 #else
 static constexpr uint16_t kDrawBufLines = 40;
 #endif
@@ -1079,6 +1087,15 @@ static lv_obj_t *s_dmMsgList = nullptr;
 static lv_obj_t *s_dmConvTitle = nullptr;
 static lv_obj_t *s_dmMsgTitle = nullptr;
 static lv_obj_t *s_dmHintLabel = nullptr;
+// Where the conversations are a drawer (dmListIsDrawer()): the scrim behind it,
+// and the screen header's title, which names the conversation being read.
+// s_dmConvPanel is the drawer itself. Null on the two-pane layout.
+static lv_obj_t *s_dmDrawerScrim = nullptr;
+static lv_obj_t *s_dmHeaderTitle = nullptr;
+static bool s_dmDrawerOpen = false;
+// False until the screen's first placement, which is instant: the screen opens
+// with the drawer already where it belongs rather than sliding into it.
+static bool s_dmDrawerAnimReady = false;
 static lv_obj_t *s_dmNodePickerModal = nullptr;
 static lv_obj_t *s_dmNodePickerList = nullptr;
 static lv_obj_t *s_dmNodePickerTitle = nullptr;
@@ -1237,7 +1254,14 @@ static SemaphoreHandle_t s_nodesMapFsMutex = nullptr;
 static lv_obj_t *s_nodesList = nullptr;
 static lv_obj_t *s_nodesTitleLabel = nullptr;
 static lv_obj_t *s_nodesHintLabel = nullptr;
+// The Search / Clear button above the node list, and its label.
 static lv_obj_t *s_nodesFilterBtn = nullptr;
+static lv_obj_t *s_nodesFilterBtnLabel = nullptr;
+// The All button above that: a search for "*", every node the list can show.
+static lv_obj_t *s_nodesAllBtn = nullptr;
+// Map, above All: every located node on one map (see openNodesMapModal()).
+// Only on the boards that have Locate's map engine; stays null elsewhere.
+static lv_obj_t *s_nodesMapBtn = nullptr;
 static lv_obj_t *s_nodesFilterDialog = nullptr;
 static lv_obj_t *s_nodesFilterInput = nullptr;
 static lv_obj_t *s_nodesFilterKeyboard = nullptr;
@@ -1288,13 +1312,30 @@ static int s_nodesSelected = -1;
 static constexpr int kNodesFilterMax = 24;
 static char s_nodesFilter[kNodesFilterMax + 1] = {};
 static int s_nodesFilterLen = 0;
-// Armed: the filter is applied to the list and the header shows its brackets.
+// A search is in force: the list shows every node (live, plus archived when
+// that half is shown) matching s_nodesFilter. Without one the list shows only
+// favorites. Set and cleared only through the Search dialog and the Clear
+// button (applyNodesFilterText()), never by typing on the list itself.
 static bool s_nodesFilterOpen = false;
-// Capturing: typed characters go into the filter text. Split from the flag above
-// so Enter can commit a filter — leaving the rows narrowed while handing the
-// keyboard back to the list, where the navigation keys move the cursor and A
-// opens Actions instead of typing an "a".
-static bool s_nodesFilterEditing = false;
+// Keyboard builds: the cursor is on one of the buttons above the list rather
+// than a row. Up from the first row puts it on Search, Up again on All, again
+// on Map where there is one, and Down walks back; Enter presses the button.
+// s_nodesTopBtn says which, and is only meaningful while
+// s_nodesSearchBtnFocused is set. Touch-only builds tap the buttons and never
+// set either.
+static constexpr int kNodesTopSearch = 0;
+static constexpr int kNodesTopAll = 1;
+static constexpr int kNodesTopMap = 2;
+static bool s_nodesSearchBtnFocused = false;
+static int s_nodesTopBtn = kNodesTopSearch;
+// Where the keyboard cursor can walk onto those buttons: every keyboard board,
+// and the T-Display P4, which builds touch-only but has a keyboard expansion
+// (#116: without this its arrows had nowhere to go from an empty list).
+#if !UI_TOUCH_ONLY_PROFILE || defined(DEVICE_TDISPLAY_P4)
+#  define NODES_KEYBOARD_TOP_BUTTONS 1
+#else
+#  define NODES_KEYBOARD_TOP_BUTTONS 0
+#endif
 // Locate is compiled out on the Cardputer, for the same reason Message Actions
 // is (see HAS_MESSAGE_ACTIONS below): no PSRAM, and decoding a PNG into a
 // full-panel image object is exactly the allocation that board has no room to
@@ -1337,18 +1378,14 @@ static constexpr int kNodesActionDelete = kNodesActionBaseCount + 1;
 // Delete, which grey out, this row is not built at all unless the peer is
 // confirmed: a disabled "Admin" on a stranger's node is an invitation to try,
 // and trying means unauthorized admin packets across the mesh and the broker.
-// "Use as chat server" appends after Delete for the same reason, and before
-// Admin, which has to stay last.
-static constexpr int kNodesActionChatServer = kNodesActionDelete + 1;
-static constexpr int kNodesActionAdmin = kNodesActionChatServer + 1;
+static constexpr int kNodesActionAdmin = kNodesActionDelete + 1;
 static constexpr int kNodesActionCount = kNodesActionAdmin + 1;
 // Set when the menu opens, from AdminPeerList. The row exists only while true,
 // which is why activeActionCount() rather than kNodesActionCount is what every
 // navigation and shortcut path counts against.
 static bool s_nodesActionAdminEnabled = false;
 #else
-static constexpr int kNodesActionChatServer = kNodesActionDelete + 1;
-static constexpr int kNodesActionCount = kNodesActionChatServer + 1;
+static constexpr int kNodesActionCount = kNodesActionDelete + 1;
 #endif
 static lv_obj_t *s_nodesActionModal = nullptr;
 static int s_nodesActionSelection = 0;
@@ -1375,8 +1412,6 @@ static constexpr char kNodesActionShortcuts[kNodesActionCount] = {
     // destructive action, which is why it opens a confirmation rather than
     // doing anything.
     'E',
-    // 'C' for (C)hat Server: free in both menus.
-    'C',
 #if HAS_ADMIN_TERMINAL
     'A',
 #endif
@@ -1399,8 +1434,6 @@ static bool s_nodesActionDeleteEnabled = false;
 // Share needs something to share: a node in the table with a real name, and
 // not this one (its own NodeInfo has its own send).
 static bool s_nodesActionShareEnabled = false;
-// Any other node can be made the chat server; this one cannot.
-static bool s_nodesActionChatServerEnabled = false;
 #if HAS_NODE_LOCATE
 // Locate needs a position to show. The row is built either way — a menu whose
 // contents move around depending on the node is harder to learn than one with a
@@ -1551,7 +1584,6 @@ static inline bool nodesActionRowDisabled(int idx) {
 #endif
     if (idx == kNodesActionDelete && !s_nodesActionDeleteEnabled) return true;
     if (idx == kNodesActionShare && !s_nodesActionShareEnabled) return true;
-    if (idx == kNodesActionChatServer && !s_nodesActionChatServerEnabled) return true;
     return false;
 }
 
@@ -1727,6 +1759,10 @@ static constexpr int kBottomNavHeight = 56;
 // Landscape keeps 42 -- or 30 with the keyboard expansion on (p4NavBarHeight()).
 // Nothing reads it before then.
 static int kBottomNavHeight = 42;
+#elif defined(DEVICE_CROWPANEL_50)
+// Twice the usual 28: an 800x480 panel has the height, and these are the
+// targets a finger aims at most.
+static constexpr int kBottomNavHeight = 56;
 #else
 static constexpr int kBottomNavHeight = 28;
 #endif
@@ -2042,6 +2078,15 @@ static constexpr int kMainScreenChannelBtnHeight = 48;
 static const lv_font_t *kMainScreenFont = &lv_font_montserrat_12;
 static constexpr int kMainScreenChannelBtnHeight = 24;
 #endif
+#elif defined(DEVICE_CROWPANEL_50)
+// The default below is sized for a 320x240 panel and read as tiny at 800x480:
+// list text (channel list, DM conversations, Nodes) and the channel buttons
+// twice as big. Named 18, drawn as 20 (hal/crowpanel_50_fonts.h).
+static constexpr bool kPagerWheelChatNav = false;
+static constexpr bool kUseScrollKeysForMainNav = false;
+static constexpr bool kModalCloseUsesEscape = false;
+static const lv_font_t *kMainScreenFont = &lv_font_montserrat_18;
+static constexpr int kMainScreenChannelBtnHeight = 44;
 #else
 static constexpr bool kPagerWheelChatNav = false;
 static constexpr bool kUseScrollKeysForMainNav = false;
@@ -2064,7 +2109,7 @@ static const lv_font_t *kChannelChatFont = kMainScreenFont;
 // one face, including 10 -> 8 px. Boards below use fixed, display-specific sizes.
 #if defined(DEVICE_CARDPUTER_LORA_HAT) || defined(DEVICE_TLORA_PAGER_TFT) \
     || defined(DEVICE_TDECK_PRO) || defined(DEVICE_TDISPLAY_P4) \
-    || defined(DEVICE_CROWPANEL_35)
+    || defined(DEVICE_CROWPANEL)
 static const lv_font_t *explicitChatFont() {
 #if UI_LARGE_PANEL_PROFILE
     switch (s_cfg.fontSize) {
@@ -2083,7 +2128,7 @@ static const lv_font_t *explicitChatFont() {
         case FONT_SIZE_MEDIUM:
         default:               return &lv_font_montserrat_16;
     }
-#elif defined(DEVICE_CROWPANEL_35)
+#elif defined(DEVICE_CROWPANEL)
     // Preserve Medium while making Large/Extra Large readable on the 3.5" panel.
     switch (s_cfg.fontSize) {
         case FONT_SIZE_SMALL:  return &lv_font_montserrat_8;
@@ -2115,7 +2160,7 @@ static const lv_font_t *explicitChatFont() {
 static const lv_font_t *scaledChatFontBase(const lv_font_t *base) {
 #if defined(DEVICE_CARDPUTER_LORA_HAT) || defined(DEVICE_TLORA_PAGER_TFT) \
     || defined(DEVICE_TDECK_PRO) || defined(DEVICE_TDISPLAY_P4) \
-    || defined(DEVICE_CROWPANEL_35)
+    || defined(DEVICE_CROWPANEL)
     (void)base;
     return explicitChatFont();
 #else
@@ -2285,7 +2330,8 @@ static inline void lvObjDeleteSafe(lv_obj_t *&obj) {
 // object of each fresh message as they build it, and one timer pulses them all.
 // text_opa is inherited, so setting it on the row reaches every label inside a
 // bubble or IRC row without each style knowing about it. Paper never blinks:
-// every pulse would be a panel refresh.
+// every pulse would be a panel refresh. How long it lasts, or whether it happens
+// at all, is the Message Blink setting (cfgChatBlinkSecs()).
 struct ChatBlinkSet {
     lv_obj_t *objs[48];
     int       count;
@@ -2305,6 +2351,16 @@ static void chatBlinkApply(ChatBlinkSet &set, lv_opa_t opa) {
 
 static void chatBlinkTick(lv_timer_t *) {
     if (s_chatBlink.count == 0 && s_dmBlink.count == 0) {
+        s_chatBlinkDim = false;
+        return;
+    }
+    // Switched Off (on the device or from the web page) with rows mid-blink:
+    // they go steady now rather than blinking on until their time is up.
+    if (cfgChatBlinkSecs(s_cfg) == 0) {
+        chatBlinkApply(s_chatBlink, LV_OPA_COVER);
+        chatBlinkApply(s_dmBlink, LV_OPA_COVER);
+        s_chatBlink.count = 0;
+        s_dmBlink.count = 0;
         s_chatBlinkDim = false;
         return;
     }
@@ -2334,6 +2390,7 @@ static void chatBlinkTrack(ChatBlinkSet &set, lv_obj_t *row, bool fresh) {
     (void)set; (void)row; (void)fresh;
 #else
     if (!fresh || !row || set.count >= (int)(sizeof(set.objs) / sizeof(set.objs[0]))) return;
+    if (cfgChatBlinkSecs(s_cfg) == 0) return;   // Message Blink: Off
     static lv_timer_t *timer = nullptr;
     if (!timer) timer = lv_timer_create(chatBlinkTick, kChatBlinkPeriodMs, nullptr);
     set.objs[set.count++] = row;
@@ -2800,13 +2857,17 @@ static void applyNodesFilterText(const char *text);
 static void openNodesFilterDialog();
 static void closeNodesFilterDialog();
 static void onNodesFilterButtonPressed(lv_event_t *e);
+static void nodesSearchButtonActivate();
+static void refreshNodesSearchButton();
 static void onNodesFilterKeyboardEvent(lv_event_t *e);
 static void onNodesFilterInputEvent(lv_event_t *e);
 static void nodesClampRenderWindow();
 static lv_obj_t *selectedNodesRowObj();
+static void refreshNodesHint();
 static void refreshNodesListRows();
 static void refreshNodesListSelection();
 static void refreshNodesDetails();
+static void refreshNodesPanelFocusStyles();
 static void onNodeSnapshotPressed(lv_event_t *e);
 #if UI_TOUCH_ONLY_PROFILE
 static void onNodeSnapshotClicked(lv_event_t *e);
@@ -2892,6 +2953,7 @@ static void nodesArchivedDetailInvalidate();
 static void refreshNodesMap(const NodeEntry *node);
 #if HAS_NODE_LOCATE
 static void openNodeLocateModal(uint32_t nodeId);
+static void openNodesMapModal();
 static void closeNodeLocateModal();
 static void nodeLocateOnDetailMapUpdated();
 static void serviceNodeLocateLiveMap(uint32_t nowMs);
@@ -3473,6 +3535,9 @@ enum CfgActionId {
     CFG_ACTION_CHAT_STYLE,
     CFG_ACTION_CHAT_NAMES,
     CFG_ACTION_CHAT_COLORS,
+    #if HAS_CHAT_BLINK
+    CFG_ACTION_CHAT_BLINK,
+    #endif
     CFG_ACTION_FONT_SIZE,
     CFG_ACTION_ORIENTATION,
     CFG_ACTION_LANGUAGE,       // UI language (issue #99)
@@ -5425,6 +5490,13 @@ static const char *cfgActionLabel(int actionId, char *buf, size_t bufLen) {
             snprintf(buf, bufLen, TR("Chat Colors: %s"),
                      s_cfg.chatColorsEnabled ? TR("On") : TR("Off"));
             break;
+        #if HAS_CHAT_BLINK
+        case CFG_ACTION_CHAT_BLINK: {
+            const uint8_t secs = cfgChatBlinkSecs(s_cfg);
+            if (secs == 0) snprintf(buf, bufLen, TR("Message Blink: %s"), TR("Off"));
+            else snprintf(buf, bufLen, TR("Message Blink: %u sec"), (unsigned)secs);
+        } break;
+        #endif
         case CFG_ACTION_FONT_SIZE:
             snprintf(buf, bufLen, TR("Font Size: %s"), fontSizeName(s_cfg.fontSize));
             break;
@@ -7559,6 +7631,10 @@ static inline void loadBootOrientation() {}
 static constexpr int kSideNavW = 68;
 #elif defined(DEVICE_TDISPLAY_P4)
 static constexpr int kSideNavW = 34;
+#elif defined(DEVICE_CROWPANEL_50)
+// Wider than the bottom bar is tall (56), unlike the other boards' column, so
+// its 24 px icons (navIconFont) have padding either side.
+static constexpr int kSideNavW = 72;
 #else
 // The bottom bar's height on these boards (kBottomNavHeight): the same 28 px
 // cell edge, turned on its side.
@@ -7605,6 +7681,24 @@ static inline bool channelListIsDropdown() {
 #else
     return UI_CHANNEL_LIST_DROPDOWN != 0;
 #endif
+}
+
+// The drawers' slide (the channel list's, and the DM screen's conversation
+// list). Instant on the Pro, for the reason the dashboard carousel is
+// (HAS_HOME_CAROUSEL_ANIM): every animated frame there is an e-paper refresh.
+#if defined(DEVICE_TDECK_PRO)
+#define HAS_CHANNEL_DRAWER_ANIM 0
+#else
+#define HAS_CHANNEL_DRAWER_ANIM 1
+#endif
+static constexpr uint32_t kChannelDrawerSlideMs = 180;
+
+// The DM screen's conversations slide in the same way wherever the channels do:
+// a drawer over the messages rather than a pane beside them. The Pager and the
+// large-panel P4 in landscape keep the two panes, as they keep the channel
+// column.
+static inline bool dmListIsDrawer() {
+    return channelListIsDropdown();
 }
 
 // ── Status icon ink ──────────────────────────────────────────────────────────
@@ -7899,6 +7993,16 @@ static const lv_font_t *kSleepOverlayTitleFont       = &lv_font_montserrat_18;
 static const lv_font_t *const kSleepOverlayNodeFont  = &lv_font_montserrat_14;
 static const lv_font_t *kSleepOverlayTimeFont        = &lv_font_montserrat_32;
 static const lv_font_t *kSleepOverlayWxFont          = &lv_font_montserrat_32;
+#elif defined(DEVICE_CROWPANEL_50)
+// Twice the usual faces, as its chat header is (the home dashboard and the lock
+// screen share this header), where the font set goes that high: title 18 -> 32,
+// node 14 -> 28 (named 24: hal/crowpanel_50_fonts.h puts every face but 32 and
+// 40 a step up), and the clock and temperature 32 -> 40, the largest there is.
+// The rows' positions follow from these (orientationApplyOverlayGeometry()).
+static const lv_font_t *const kSleepOverlayTitleFont = &lv_font_montserrat_32;
+static const lv_font_t *const kSleepOverlayNodeFont  = &lv_font_montserrat_24;
+static const lv_font_t *const kSleepOverlayTimeFont  = &lv_font_montserrat_40;
+static const lv_font_t *const kSleepOverlayWxFont    = &lv_font_montserrat_40;
 #else
 static const lv_font_t *const kSleepOverlayTitleFont = &lv_font_montserrat_18;
 static const lv_font_t *const kSleepOverlayNodeFont  = &lv_font_montserrat_14;
@@ -8017,7 +8121,11 @@ static constexpr int kTdeckProMsgTop        = 116;
 // (glanceBandTop()). Eight one-line messages run 134..296.
 static constexpr int kTdeckProMsgTop        = 134;
 #endif
+#if defined(DEVICE_CROWPANEL_50)
+static constexpr int kTdeckProMsgLineH      = 16;   // montserrat_12, drawn as 14 here
+#else
 static constexpr int kTdeckProMsgLineH      = 15;   // montserrat_12 line box
+#endif
 static constexpr int kTdeckProMsgMaxLines   = 2;    // per message
 #if HAS_RUNTIME_ORIENTATION
 static int kTdeckProMsgTotalLines           = 6;    // 320x240; 8 when portrait
@@ -8036,6 +8144,16 @@ static constexpr int kTdeckProMsgGapY       = 6;    // between messages, not lin
 // measured width is not something the gap should depend on.
 static constexpr int kTdeckProMsgGapPx     = 4;
 
+// The date and battery's face in the status band. Doubled on the CrowPanel 5",
+// with the rest of its header (named 24: see hal/crowpanel_50_fonts.h).
+static inline const lv_font_t *glanceBandFont() {
+#if defined(DEVICE_CROWPANEL_50)
+    return &lv_font_montserrat_24;
+#else
+    return &lv_font_montserrat_14;
+#endif
+}
+
 // The status band across the top: date pinned left, battery pinned right, both
 // at montserrat_14. The date used to be an 18 px centred line in the middle of
 // the stack, but a corner pinned opposite the battery reads as a status band
@@ -8052,6 +8170,23 @@ static int kTdeckProTimeTop                = 72;   // 32 px face, 35 px line box
 // is what the initialisers above already hold, so a board that never rotates
 // runs exactly the numbers it ran before this was a setting.
 static void orientationApplyOverlayGeometry() {
+#if defined(DEVICE_CROWPANEL_50)
+    // Its doubled faces (kSleepOverlay*Font, glanceBandFont()) in either
+    // orientation, each row placed under the line box of the one above -- read
+    // from the fonts rather than written down, so a face change moves them.
+    kTdeckProBandTop  = 8;
+    kTdeckProTitleTop = kTdeckProBandTop
+                      + (int)lv_font_get_line_height(glanceBandFont()) + 8;
+    kTdeckProNodeTop  = kTdeckProTitleTop
+                      + (int)lv_font_get_line_height(kSleepOverlayTitleFont) + 10;
+    kTdeckProTimeTop  = kTdeckProNodeTop
+                      + (int)lv_font_get_line_height(kSleepOverlayNodeFont) + 4;
+    kTdeckProMsgTop   = kTdeckProTimeTop
+                      + (int)lv_font_get_line_height(kSleepOverlayTimeFont) + 6;
+    // 480 px of height in landscape, 800 in portrait: room for more of them.
+    kTdeckProMsgTotalLines = uiPortrait() ? 24 : 12;
+    return;
+#endif
     if (!uiPortrait()) return;
     kTdeckProMsgTop        = 150;
     kTdeckProMsgTotalLines = 8;      // 240x320 has room for two more
@@ -9007,7 +9142,7 @@ static void buildGlanceHeader(lv_obj_t *parent, GlanceHeader &w,
     // percentage of the panel: a 92% box pinned to the left edge would reach
     // under the battery, and the two would collide the moment either grew.
     w.date = lv_label_create(parent);
-    lv_obj_set_style_text_font(w.date, &lv_font_montserrat_14, 0);
+    lv_obj_set_style_text_font(w.date, glanceBandFont(), 0);
     lv_obj_set_style_text_color(w.date, pal.ink, 0);
     lv_obj_set_style_text_align(w.date, LV_TEXT_ALIGN_LEFT, 0);
     // This band is the only row of the glance that reaches the top corners,
@@ -9030,7 +9165,7 @@ static void buildGlanceHeader(lv_obj_t *parent, GlanceHeader &w,
     // Right-aligned to the edge rather than centred, so "4.05V" and "9%" both
     // end in the same place instead of drifting with the reading.
     w.batt = lv_label_create(parent);
-    lv_obj_set_style_text_font(w.batt, &lv_font_montserrat_14, 0);
+    lv_obj_set_style_text_font(w.batt, glanceBandFont(), 0);
     lv_obj_set_style_text_color(w.batt, pal.ink, 0);
     lv_obj_set_style_text_align(w.batt, LV_TEXT_ALIGN_RIGHT, 0);
     lv_obj_align(w.batt, LV_ALIGN_TOP_RIGHT,
@@ -13373,38 +13508,15 @@ static void showTextareaCursor(lv_obj_t *ta) {
 }
 
 #if UI_TOUCH_ONLY_PROFILE
-static void configureOnScreenKeyboard(lv_obj_t *keyboard) {
-    if (!keyboard) return;
-    lv_obj_set_width(keyboard, lv_pct(100));
-#if UI_LARGE_PANEL_PROFILE
-    const int screenH = (int)lv_disp_get_ver_res(NULL);
-    const int keyboardH = min(360, max(240, screenH * 2 / 5));
-    lv_obj_set_flex_grow(keyboard, 0);
-    lv_obj_set_height(keyboard, keyboardH);
-    lv_obj_set_style_text_font(keyboard, &lv_font_montserrat_24, LV_PART_ITEMS);
-    lv_obj_set_style_pad_all(keyboard, 3, LV_PART_MAIN);
-    lv_obj_set_style_pad_column(keyboard, 3, LV_PART_MAIN);
-    lv_obj_set_style_pad_row(keyboard, 3, LV_PART_MAIN);
-    lv_obj_set_style_pad_all(keyboard, 4, LV_PART_ITEMS);
-#elif defined(DEVICE_TDISPLAY_P4)
-    // A fixed height pinned to the bottom, the way a phone keyboard sits and
-    // the way wadamesh's does -- not flex_grow. Growing into the rest of the
-    // modal is what the 240x320 boards want, where the rest is about half the
-    // screen; on this 596-tall portrait panel it was ~90% of it.
-    //
-    // 150 UI px is ~23 mm here (UI_PIXEL_SCALE, board.h): the physical size of
-    // wadamesh's 130 px keyboard on a T-Deck. Landscape is a 320x240-class
-    // shape, so it takes half the height, as wadamesh does there.
-    const int screenH = (int)lv_disp_get_ver_res(NULL);
-    lv_obj_set_flex_grow(keyboard, 0);
-    lv_obj_set_height(keyboard, uiPortrait() ? 150 : screenH / 2);
-
-    // What the keyboard gave up has to go somewhere. Where a sibling already
-    // grows (the admin transcript) it takes it and the keyboard, created last,
-    // is already at the bottom. Where nothing does -- the dialogs, whose rows
-    // are all fixed -- an invisible spacer above the keyboard takes it, rather
-    // than the keyboard floating mid-screen over blank space. A parent sized to
-    // its content (the composer) has no slack to take, so it gets none.
+#if defined(DEVICE_TDISPLAY_P4) || defined(DEVICE_CROWPANEL)
+// For a keyboard given a fixed height: what it gave up has to go somewhere.
+// Where a sibling already grows (the admin transcript) it takes it and the
+// keyboard, created last, is already at the bottom. Where nothing does -- the
+// dialogs, whose rows are all fixed -- an invisible spacer above the keyboard
+// takes it, rather than the keyboard floating mid-screen over blank space. A
+// parent sized to its content (the composer) has no slack to take, so it gets
+// none.
+static void keyboardYieldSlack(lv_obj_t *keyboard) {
     lv_obj_t *parent = lv_obj_get_parent(keyboard);
     if (parent && lv_obj_get_style_layout(parent, LV_PART_MAIN) == LV_LAYOUT_FLEX
         && lv_obj_get_style_height(parent, LV_PART_MAIN) != LV_SIZE_CONTENT) {
@@ -13428,8 +13540,75 @@ static void configureOnScreenKeyboard(lv_obj_t *keyboard) {
             lv_obj_move_to_index(spacer, lv_obj_get_index(keyboard));
         }
     }
+}
+#endif
+
+// The composer docks on a fixed-height keyboard -- only as tall as what it
+// holds, on the bottom edge, the conversation readable above it -- wherever
+// the keyboard is fixed rather than grown (configureOnScreenKeyboard): the P4
+// always, the CrowPanel 3.5 upright.
+static inline bool composeDockedOnKeyboard() {
+#if defined(DEVICE_TDISPLAY_P4)
+    return true;
+#elif defined(DEVICE_CROWPANEL_35)
+    return uiPortrait();
+#else
+    return false;
+#endif
+}
+
+static void configureOnScreenKeyboard(lv_obj_t *keyboard) {
+    if (!keyboard) return;
+    lv_obj_set_width(keyboard, lv_pct(100));
+#if UI_LARGE_PANEL_PROFILE
+    const int screenH = (int)lv_disp_get_ver_res(NULL);
+    const int keyboardH = min(360, max(240, screenH * 2 / 5));
+    lv_obj_set_flex_grow(keyboard, 0);
+    lv_obj_set_height(keyboard, keyboardH);
+    lv_obj_set_style_text_font(keyboard, &lv_font_montserrat_24, LV_PART_ITEMS);
+    lv_obj_set_style_pad_all(keyboard, 3, LV_PART_MAIN);
+    lv_obj_set_style_pad_column(keyboard, 3, LV_PART_MAIN);
+    lv_obj_set_style_pad_row(keyboard, 3, LV_PART_MAIN);
+    lv_obj_set_style_pad_all(keyboard, 4, LV_PART_ITEMS);
+#elif defined(DEVICE_TDISPLAY_P4) || defined(DEVICE_CROWPANEL_50)
+    // A fixed height pinned to the bottom, the way a phone keyboard sits and
+    // the way wadamesh's does -- not flex_grow. Growing into the rest of the
+    // modal is what the 240x320 boards want, where the rest is about half the
+    // screen; on this 596-tall portrait panel it was ~90% of it.
+    //
+    // 150 UI px is ~23 mm here (UI_PIXEL_SCALE, board.h): the physical size of
+    // wadamesh's 130 px keyboard on a T-Deck. Landscape is a 320x240-class
+    // shape, so it takes half the height, as wadamesh does there.
+    const int screenH = (int)lv_disp_get_ver_res(NULL);
+    lv_obj_set_flex_grow(keyboard, 0);
+#if defined(DEVICE_CROWPANEL_50)
+    // The same problem on the 5" upright (480x800), where growing took ~95% of
+    // the screen: 40% of the height there, half of it in landscape -- each
+    // about the keyboard on a phone held that way. Key labels at 20 px (named
+    // 18: hal/crowpanel_50_fonts.h) for keys this size.
+    lv_obj_set_height(keyboard, uiPortrait() ? (screenH * 2) / 5 : screenH / 2);
+    lv_obj_set_style_text_font(keyboard, &lv_font_montserrat_18, LV_PART_ITEMS);
+#else
+    lv_obj_set_height(keyboard, uiPortrait() ? 150 : screenH / 2);
+#endif
+    keyboardYieldSlack(keyboard);
 #elif UI_EDGE_TO_EDGE_TEXT_ENTRY
+#if defined(DEVICE_CROWPANEL_35)
+    // Upright (320x480) this is the P4's portrait keyboard: a fixed height on
+    // the bottom edge instead of growing into the modal, which took nearly the
+    // whole screen. 150 px is ~24 mm on this panel, the same physical height
+    // as the P4's 150 UI px. Landscape is a 320-tall panel, where growing into
+    // what is left is still the right amount.
+    if (uiPortrait()) {
+        lv_obj_set_flex_grow(keyboard, 0);
+        lv_obj_set_height(keyboard, 150);
+        keyboardYieldSlack(keyboard);
+    } else {
+        lv_obj_set_flex_grow(keyboard, 1);
+    }
+#else
     lv_obj_set_flex_grow(keyboard, 1);
+#endif
     // Text entry owns the screen (Wio Tracker L2, CrowPanel). Remove keyboard chrome
     // and keep only a one-pixel key gap so the narrow QWERTY rows spend their
     // width on tap targets rather than nested modal/theme padding.
@@ -13457,19 +13636,133 @@ static void configureOnScreenKeyboard(lv_obj_t *keyboard) {
 // DMs are left alone. openComposePromptForDm() flips the target after this has
 // already run once, and calls it again; there the peer is named by the screen
 // the composer opened over, and a channel name would be an outright lie.
+//
+// The icon in front says the same thing at a glance: a pencil for a new
+// channel message, the return arrow for a reply, an envelope for a DM. It sits
+// outside TR() so translations keep keying on the bare words.
 static void composeSetTitle(bool isReply) {
     if (!lvObjValid(s_composeTitle)) return;
     const char *kind = isReply ? TR("Reply") : TR("New Message");
+    const char *icon = isReply ? LV_SYMBOL_NEW_LINE : LV_SYMBOL_EDIT;
+    char text[80];
     if (s_composeTarget == COMPOSE_TARGET_DM) {
-        lv_label_set_text(s_composeTitle, kind);
+        snprintf(text, sizeof(text), "%s  %s", isReply ? icon : LV_SYMBOL_ENVELOPE, kind);
+        lv_label_set_text(s_composeTitle, text);
         return;
     }
     const char *chan = channelName(s_composeChannelIdx);
     if (!chan || !chan[0]) chan = TR("Channel");
-    char text[64];
-    snprintf(text, sizeof(text), "%s: %s", kind, chan);
+    snprintf(text, sizeof(text), "%s  %s: %s", icon, kind, chan);
     lv_label_set_text(s_composeTitle, text);
 }
+
+// ── Composer look ────────────────────────────────────────────────────────────
+// Every colour below is read from s_ui, the palette the active theme derives,
+// rather than from the dark-navy hex values the hex remap table translates. So
+// the composer is drawn in the theme's own roles -- panel, raised surface,
+// accent, text -- and a custom theme gets the same treatment as a preset.
+//
+// None of this moves anything: radii, colours and a glow only. The sizes above
+// and below are measured to the pixel on several panels, and a restyle that
+// changed a single row height would undo that work.
+//
+// The T-Deck Pro has no themes; its s_ui is the paper palette, black on white,
+// so the same calls come out as a clean black-and-white card. The glow, which
+// is a translucent shadow, has nothing to draw on 1 bpp and is left off there.
+
+// The card itself. A rounded panel with an accent-tinted edge and, where the
+// card does not fill the panel, a soft accent glow around it -- the only place
+// the composer reaches outside its own box, and what lifts it off the screen
+// it opened over.
+static void composeStyleModal(lv_obj_t *modal, int modalW, int modalH) {
+    if (!modal) return;
+    const bool fullW = modalW >= (int)lv_disp_get_hor_res(NULL);
+    const bool fullH = modalH >= (int)lv_disp_get_ver_res(NULL);
+    lv_obj_set_style_bg_color(modal, lvColorFrom565(s_ui.panelBg), 0);
+    lv_obj_set_style_bg_opa(modal, LV_OPA_COVER, 0);
+    lv_obj_set_style_border_width(modal, 1, 0);
+    lv_obj_set_style_border_color(modal, lvColorFrom565(s_ui.dividerHi), 0);
+    // Square when it runs edge to edge: rounding a corner against the panel's
+    // own edge just shows the screen underneath in four slivers.
+    lv_obj_set_style_radius(modal, fullW ? 0 : 6, 0);
+#if HAS_UI_THEMES
+    if (!fullW && !fullH) {
+        lv_obj_set_style_shadow_color(modal, lvColorFrom565(s_ui.accent), 0);
+        lv_obj_set_style_shadow_width(modal, 16, 0);
+        lv_obj_set_style_shadow_spread(modal, 0, 0);
+        lv_obj_set_style_shadow_opa(modal, LV_OPA_40, 0);
+    } else {
+        lv_obj_set_style_shadow_width(modal, 0, 0);
+    }
+#else
+    lv_obj_set_style_shadow_width(modal, 0, 0);
+#endif
+}
+
+static void composeStyleTitle(lv_obj_t *title) {
+    if (!title) return;
+    lv_obj_set_style_text_color(title, lvColorFrom565(s_ui.accent), 0);
+}
+
+// The message box: the theme's input surface, rounded to match the card, an
+// edge that turns accent while it has focus, an accent caret, and a placeholder
+// in the dim text colour rather than LVGL's default grey.
+static void composeStyleInput(lv_obj_t *ta) {
+    if (!ta) return;
+    lv_obj_set_style_text_color(ta, lvColorFrom565(s_ui.textMain), 0);
+    lv_obj_set_style_bg_color(ta, lvColorFrom565(s_ui.inputBg), 0);
+    lv_obj_set_style_bg_opa(ta, LV_OPA_COVER, 0);
+    lv_obj_set_style_radius(ta, 5, 0);
+    lv_obj_set_style_border_width(ta, 1, 0);
+    lv_obj_set_style_border_color(ta, lvColorFrom565(s_ui.dividerHi), 0);
+    lv_obj_set_style_border_color(ta, lvColorFrom565(s_ui.accent), LV_STATE_FOCUSED);
+    lv_obj_set_style_border_color(ta, lvColorFrom565(s_ui.accent), LV_STATE_FOCUS_KEY);
+    lv_obj_set_style_outline_width(ta, 0, LV_STATE_FOCUSED);
+    lv_obj_set_style_outline_width(ta, 0, LV_STATE_FOCUS_KEY);
+    lv_obj_set_style_text_color(ta, lvColorFrom565(s_ui.textDim), LV_PART_TEXTAREA_PLACEHOLDER);
+    // showTextareaCursor() has already set the caret up; only its colour moves.
+    lv_obj_set_style_border_color(ta, lvColorFrom565(s_ui.cursor), LV_PART_CURSOR);
+}
+
+// The quoted message a reply answers, drawn as a quote: a raised strip with an
+// accent bar down its left edge, the way the chat draws a reply. Border and
+// padding are horizontal only, so the strip keeps the height it was given.
+static void composeStyleQuote(lv_obj_t *obj) {
+    if (!obj) return;
+    lv_obj_set_style_bg_color(obj, lvColorFrom565(s_ui.panelAlt), 0);
+    lv_obj_set_style_bg_opa(obj, LV_OPA_COVER, 0);
+    lv_obj_set_style_radius(obj, 3, 0);
+    lv_obj_set_style_border_side(obj, LV_BORDER_SIDE_LEFT, 0);
+    lv_obj_set_style_border_width(obj, 3, 0);
+    lv_obj_set_style_border_color(obj, lvColorFrom565(s_ui.accent), 0);
+    lv_obj_set_style_pad_left(obj, 6, 0);
+    lv_obj_set_style_text_color(obj, lvColorFrom565(s_ui.textDim), 0);
+}
+
+// Footer text: the key legend and the character count.
+static void composeStyleMeta(lv_obj_t *lbl) {
+    if (!lbl) return;
+    lv_obj_set_style_text_color(lbl, lvColorFrom565(s_ui.textDim), 0);
+}
+
+#if UI_TOUCH_ONLY_PROFILE
+// Touch buttons. Send is the one filled in the accent; Cancel and the emoji
+// opener are quiet raised surfaces, so the eye lands on the thing you came to
+// press. Pressed darkens toward the card rather than LVGL's stock recolour.
+static void composeStyleButton(lv_obj_t *btn, bool primary) {
+    if (!btn) return;
+    const uint16_t face = primary ? s_ui.accent : s_ui.panelStrong;
+    lv_obj_set_style_bg_color(btn, lvColorFrom565(face), 0);
+    lv_obj_set_style_bg_opa(btn, LV_OPA_COVER, 0);
+    lv_obj_set_style_bg_color(btn, lvColorFrom565(blend565(face, s_ui.panelBg, 90)),
+                              LV_STATE_PRESSED);
+    lv_obj_set_style_radius(btn, 6, 0);
+    lv_obj_set_style_border_width(btn, primary ? 0 : 1, 0);
+    lv_obj_set_style_border_color(btn, lvColorFrom565(s_ui.dividerHi), 0);
+    lv_obj_set_style_shadow_width(btn, 0, 0);
+    lv_obj_set_style_text_color(btn, lvColorFrom565(primary ? s_ui.textOnAccent : s_ui.textMain), 0);
+}
+#endif
 
 #if defined(DEVICE_TLORA_PAGER_TFT)
 // Paints the emoji button for the current focus, and puts the caret back where
@@ -13593,25 +13886,22 @@ static void openComposePrompt(uint32_t replyPacketId,
     if (modalH < 120) modalH = lv_disp_get_ver_res(NULL);
 
     s_composeModal = lv_obj_create(s_rootScreen);
-#if defined(DEVICE_TDISPLAY_P4)
-    // Only as tall as what it holds, sitting on the bottom edge: the keyboard
-    // here is a fixed height (configureOnScreenKeyboard), so a full-screen
-    // modal left a band of nothing between it and the buttons. Content-sized,
-    // the buttons land on the keyboard, the input and title stack above them,
-    // and the conversation stays readable over the top.
-    (void)modalH;
-    lv_obj_set_size(s_composeModal, modalW, LV_SIZE_CONTENT);
-    lv_obj_align(s_composeModal, LV_ALIGN_BOTTOM_MID, 0, -4);
-#else
-    lv_obj_set_size(s_composeModal, modalW, modalH);
-    lv_obj_align(s_composeModal, LV_ALIGN_CENTER, 0, 0);
-#endif
+    const bool composeDocked = composeDockedOnKeyboard();
+    if (composeDocked) {
+        // Only as tall as what it holds, sitting on the bottom edge: the
+        // keyboard here is a fixed height (configureOnScreenKeyboard), so a
+        // full-screen modal left a band of nothing between it and the buttons.
+        // Content-sized, the buttons land on the keyboard, the input and title
+        // stack above them, and the conversation stays readable over the top.
+        lv_obj_set_size(s_composeModal, modalW, LV_SIZE_CONTENT);
+        lv_obj_align(s_composeModal, LV_ALIGN_BOTTOM_MID, 0, -4);
+    } else {
+        lv_obj_set_size(s_composeModal, modalW, modalH);
+        lv_obj_align(s_composeModal, LV_ALIGN_CENTER, 0, 0);
+    }
     lv_obj_clear_flag(s_composeModal, LV_OBJ_FLAG_SCROLLABLE);
     lv_obj_add_flag(s_composeModal, LV_OBJ_FLAG_CLICKABLE);
-    lv_obj_set_style_bg_color(s_composeModal, lv_color_hex(0x0E285B), 0);
-    lv_obj_set_style_bg_opa(s_composeModal, LV_OPA_COVER, 0);
-    lv_obj_set_style_border_width(s_composeModal, 1, 0);
-    lv_obj_set_style_border_color(s_composeModal, lv_color_hex(0x5C86C6), 0);
+    composeStyleModal(s_composeModal, modalW, modalH);
     lv_obj_set_style_pad_all(s_composeModal, 4, 0);
 #if UI_EDGE_TO_EDGE_TEXT_ENTRY
     lv_obj_set_style_pad_left(s_composeModal, 2, 0);
@@ -13625,7 +13915,7 @@ static void openComposePrompt(uint32_t replyPacketId,
     lv_obj_t *title = lv_label_create(s_composeModal);
     lv_obj_set_width(title, lv_pct(100));
     lv_obj_set_style_text_font(title, &lv_font_montserrat_10, 0);
-    lv_obj_set_style_text_color(title, lv_color_hex(0xD9E8FF), 0);
+    composeStyleTitle(title);
     // Ellipsised, not wrapped. Channel names are user-set and can be long, and
     // the default wrap would take a second line out of an input box that is
     // measured to the pixel on these panels.
@@ -13640,7 +13930,7 @@ static void openComposePrompt(uint32_t replyPacketId,
         lv_obj_set_width(replyLbl, lv_pct(100));
         lv_obj_set_height(replyLbl, lv_font_get_line_height(&lv_font_montserrat_10));
         lv_obj_set_style_text_font(replyLbl, emojiFont(&lv_font_montserrat_10), 0);
-        lv_obj_set_style_text_color(replyLbl, lv_color_hex(0xA7C7FF), 0);
+        composeStyleQuote(replyLbl);
         lv_label_set_long_mode(replyLbl, LV_LABEL_LONG_DOT);
         setLabelTextEmojiSafe(replyLbl, preview[0] ? preview : "(message)");
     }
@@ -13653,20 +13943,15 @@ static void openComposePrompt(uint32_t replyPacketId,
     }
     lv_obj_set_width(s_composeInput, lv_pct(100));
     lv_obj_set_style_text_font(s_composeInput, emojiFont(&lv_font_montserrat_14), 0);
-    lv_obj_set_style_text_color(s_composeInput, lv_color_hex(0xE8F1FF), 0);
-    lv_obj_set_style_bg_color(s_composeInput, lv_color_hex(0x102B61), 0);
-    lv_obj_set_style_bg_opa(s_composeInput, LV_OPA_COVER, 0);
-    lv_obj_set_style_border_width(s_composeInput, 1, 0);
-    lv_obj_set_style_border_color(s_composeInput, lv_color_hex(0x4C76BA), 0);
-#if defined(DEVICE_TDISPLAY_P4)
-    // Wrapping, several lines tall, so a message reads as you write it rather
-    // than scrolling sideways out of a single line. Four in portrait, where
-    // the panel has the room; two in landscape, where the half-height keyboard
-    // leaves about that much. Measured from the face, with explicit padding
-    // rather than the theme's, so the box is exactly that many lines.
-    {
-        // With the keyboard expansion on there is no on-screen keyboard below
-        // (see the end of this function), and its room goes to the message.
+    if (composeDocked) {
+        // Wrapping, several lines tall, so a message reads as you write it
+        // rather than scrolling sideways out of a single line. Four in
+        // portrait, where the panel has the room; two in landscape (the P4
+        // only), where the half-height keyboard leaves about that much.
+        // Measured from the face, with explicit padding rather than the
+        // theme's, so the box is exactly that many lines. With the keyboard
+        // expansion on there is no on-screen keyboard below (see the end of
+        // this function), and its room goes to the message.
         const lv_coord_t composeLines = keyboardAttached() ? (uiPortrait() ? 8 : 4)
                                                            : (uiPortrait() ? 4 : 2);
         const lv_coord_t composePad = 4;
@@ -13675,28 +13960,28 @@ static void openComposePrompt(uint32_t replyPacketId,
                           lv_font_get_line_height(emojiFont(&lv_font_montserrat_14))
                               * composeLines
                           + 2 * composePad + 2);   // + 1 px border each side
+        lv_textarea_set_one_line(s_composeInput, false);
+        // A wrapping box would take the keyboard's Enter as a line break. In
+        // the one-line box every other touch board uses, the textarea drops
+        // that character, and a mesh message is one line either way -- so drop
+        // it here too and keep Enter doing what it does there.
+        lv_obj_add_event_cb(s_composeInput,
+                            [](lv_event_t *e) {
+                                const char *ins = (const char *)lv_event_get_param(e);
+                                if (ins && strcmp(ins, "\n") == 0) {
+                                    lv_textarea_set_insert_replace(
+                                        lv_event_get_target_obj(e), "");
+                                }
+                            },
+                            LV_EVENT_INSERT, nullptr);
+    } else {
+        lv_obj_set_height(s_composeInput, 44);
+        lv_textarea_set_one_line(s_composeInput, true);
     }
-    lv_textarea_set_one_line(s_composeInput, false);
-    // A wrapping box would take the keyboard's Enter as a line break. In the
-    // one-line box every other touch board uses, the textarea drops that
-    // character, and a mesh message is one line either way -- so drop it here
-    // too and keep Enter doing what it does there.
-    lv_obj_add_event_cb(s_composeInput,
-                        [](lv_event_t *e) {
-                            const char *ins = (const char *)lv_event_get_param(e);
-                            if (ins && strcmp(ins, "\n") == 0) {
-                                lv_textarea_set_insert_replace(
-                                    lv_event_get_target_obj(e), "");
-                            }
-                        },
-                        LV_EVENT_INSERT, nullptr);
-#else
-    lv_obj_set_height(s_composeInput, 44);
-    lv_textarea_set_one_line(s_composeInput, true);
-#endif
     lv_textarea_set_max_length(s_composeInput, MESH_TEXT_MAX_LEN);
     lv_textarea_set_placeholder_text(s_composeInput, TR("Type message..."));
     showTextareaCursor(s_composeInput);
+    composeStyleInput(s_composeInput);
     lv_obj_add_event_cb(s_composeInput, onComposeInputChanged, LV_EVENT_VALUE_CHANGED, nullptr);
     accentAttach(s_composeInput);
     spellAttach(s_composeInput);
@@ -13704,7 +13989,7 @@ static void openComposePrompt(uint32_t replyPacketId,
     s_composeCharCount = lv_label_create(s_composeModal);
     lv_obj_set_width(s_composeCharCount, lv_pct(100));
     lv_obj_set_style_text_font(s_composeCharCount, &lv_font_montserrat_10, 0);
-    lv_obj_set_style_text_color(s_composeCharCount, lv_color_hex(0xA7C7FF), 0);
+    composeStyleMeta(s_composeCharCount);
     lv_obj_set_style_text_align(s_composeCharCount, LV_TEXT_ALIGN_RIGHT, 0);
 
     lv_obj_t *row = lv_obj_create(s_composeModal);
@@ -13723,6 +14008,7 @@ static void openComposePrompt(uint32_t replyPacketId,
     // Cancel/Send keep the room.
     lv_obj_t *emojiBtn = lv_btn_create(row);
     lv_obj_set_size(emojiBtn, 34, lv_pct(100));
+    composeStyleButton(emojiBtn, /*primary=*/false);
     lv_obj_add_event_cb(emojiBtn, [](lv_event_t *) { openEmojiPicker(false); },
                         LV_EVENT_CLICKED, nullptr);
     lv_obj_t *emojiLbl = lv_label_create(emojiBtn);
@@ -13734,18 +14020,20 @@ static void openComposePrompt(uint32_t replyPacketId,
     lv_obj_set_flex_grow(cancelBtn, 1);
     lv_obj_set_height(cancelBtn, lv_pct(100));
     lv_obj_add_event_cb(cancelBtn, onComposeCancelPressed, LV_EVENT_CLICKED, nullptr);
+    composeStyleButton(cancelBtn, /*primary=*/false);
     lv_obj_t *cancelLbl = lv_label_create(cancelBtn);
     lv_obj_set_style_text_font(cancelLbl, &lv_font_montserrat_10, 0);
-    lv_label_set_text(cancelLbl, TR("Cancel"));
+    lv_label_set_text_fmt(cancelLbl, "%s  %s", LV_SYMBOL_CLOSE, TR("Cancel"));
     lv_obj_center(cancelLbl);
 
     lv_obj_t *sendBtn = lv_btn_create(row);
     lv_obj_set_flex_grow(sendBtn, 1);
     lv_obj_set_height(sendBtn, lv_pct(100));
     lv_obj_add_event_cb(sendBtn, onComposeSendPressed, LV_EVENT_CLICKED, nullptr);
+    composeStyleButton(sendBtn, /*primary=*/true);
     lv_obj_t *sendLbl = lv_label_create(sendBtn);
     lv_obj_set_style_text_font(sendLbl, &lv_font_montserrat_10, 0);
-    lv_label_set_text(sendLbl, TR("Send"));
+    lv_label_set_text_fmt(sendLbl, "%s  %s", TR("Send"), LV_SYMBOL_RIGHT);
     lv_obj_center(sendLbl);
 
     // Not with a physical keyboard attached (the T-Display P4's expansion): it
@@ -13809,10 +14097,7 @@ static void openComposePrompt(uint32_t replyPacketId,
 #endif
     lv_obj_clear_flag(s_composeModal, LV_OBJ_FLAG_SCROLLABLE);
     lv_obj_add_flag(s_composeModal, LV_OBJ_FLAG_CLICKABLE);
-    lv_obj_set_style_bg_color(s_composeModal, lv_color_hex(0x0E285B), 0);
-    lv_obj_set_style_bg_opa(s_composeModal, LV_OPA_COVER, 0);
-    lv_obj_set_style_border_width(s_composeModal, 1, 0);
-    lv_obj_set_style_border_color(s_composeModal, lv_color_hex(0x5C86C6), 0);
+    composeStyleModal(s_composeModal, modalW, modalH);
     lv_obj_set_style_pad_all(s_composeModal, 4, 0);
     lv_obj_set_style_pad_bottom(s_composeModal, composeModalBottomPad, 0);
     lv_obj_set_style_pad_row(s_composeModal, composeModalRowPad, 0);
@@ -13829,7 +14114,7 @@ static void openComposePrompt(uint32_t replyPacketId,
     lv_obj_t *title = lv_label_create(s_composeModal);
     lv_obj_set_width(title, lv_pct(100));
     lv_obj_set_style_text_font(title, &lv_font_montserrat_10, 0);
-    lv_obj_set_style_text_color(title, lv_color_hex(0xD9E8FF), 0);
+    composeStyleTitle(title);
     // Ellipsised, not wrapped. Channel names are user-set and can be long, and
     // the default wrap would take a second line out of an input box that is
     // measured to the pixel on these panels.
@@ -13844,11 +14129,7 @@ static void openComposePrompt(uint32_t replyPacketId,
         lv_obj_set_width(replyBox, lv_pct(100));
         lv_obj_set_height(replyBox, composeReplyRowH);
         lv_obj_clear_flag(replyBox, LV_OBJ_FLAG_SCROLLABLE);
-        lv_obj_set_style_bg_color(replyBox, lv_color_hex(0x123266), 0);
-        lv_obj_set_style_bg_opa(replyBox, LV_OPA_50, 0);
-        lv_obj_set_style_border_width(replyBox, 1, 0);
-        lv_obj_set_style_border_color(replyBox, lv_color_hex(0x335D9D), 0);
-        lv_obj_set_style_pad_left(replyBox, 4, 0);
+        composeStyleQuote(replyBox);
         lv_obj_set_style_pad_right(replyBox, 4, 0);
         lv_obj_set_style_pad_top(replyBox, 1, 0);
         lv_obj_set_style_pad_bottom(replyBox, 1, 0);
@@ -13857,7 +14138,7 @@ static void openComposePrompt(uint32_t replyPacketId,
         lv_obj_set_width(replyLbl, lv_pct(100));
         lv_obj_set_height(replyLbl, lv_font_get_line_height(composeBodyFont));
         lv_obj_set_style_text_font(replyLbl, composeBodyFont, 0);
-        lv_obj_set_style_text_color(replyLbl, lv_color_hex(0xA7C7FF), 0);
+        lv_obj_set_style_text_color(replyLbl, lvColorFrom565(s_ui.textDim), 0);
         lv_label_set_long_mode(replyLbl, LV_LABEL_LONG_DOT);
         setLabelTextEmojiSafe(replyLbl, preview[0] ? preview : "(message)");
     }
@@ -13944,11 +14225,6 @@ static void openComposePrompt(uint32_t replyPacketId,
     lv_obj_set_flex_grow(s_composeInput, 1);
 #endif
     lv_obj_set_style_text_font(s_composeInput, composeBodyFont, 0);
-    lv_obj_set_style_text_color(s_composeInput, lv_color_hex(0xE8F1FF), 0);
-    lv_obj_set_style_bg_color(s_composeInput, lv_color_hex(0x102B61), 0);
-    lv_obj_set_style_bg_opa(s_composeInput, LV_OPA_COVER, 0);
-    lv_obj_set_style_border_width(s_composeInput, 1, 0);
-    lv_obj_set_style_border_color(s_composeInput, lv_color_hex(0x4C76BA), 0);
     lv_obj_set_style_pad_top(s_composeInput, composeInputPadTop, 0);
     lv_obj_set_style_pad_bottom(s_composeInput, 1, 0);
     lv_obj_set_style_pad_left(s_composeInput, 3, 0);
@@ -13965,6 +14241,7 @@ static void openComposePrompt(uint32_t replyPacketId,
     lv_textarea_set_max_length(s_composeInput, MESH_TEXT_MAX_LEN);
     lv_textarea_set_placeholder_text(s_composeInput, TR("Type message..."));
     showTextareaCursor(s_composeInput);
+    composeStyleInput(s_composeInput);
     lv_obj_add_event_cb(s_composeInput, onComposeInputChanged, LV_EVENT_VALUE_CHANGED, nullptr);
     accentAttach(s_composeInput);
     spellAttach(s_composeInput);
@@ -13979,7 +14256,7 @@ static void openComposePrompt(uint32_t replyPacketId,
     if (s_composeEmojiBtn) {
         lv_obj_set_width(s_composeEmojiBtn, 30);
         lv_obj_set_height(s_composeEmojiBtn, lv_pct(100));
-        lv_obj_set_style_radius(s_composeEmojiBtn, 4, 0);
+        lv_obj_set_style_radius(s_composeEmojiBtn, 5, 0);
         lv_obj_set_style_pad_all(s_composeEmojiBtn, 0, 0);
         lv_obj_set_style_shadow_width(s_composeEmojiBtn, 0, 0);
         // Clickable as well as wheel-reachable. This board has no touch panel,
@@ -13997,10 +14274,10 @@ static void openComposePrompt(uint32_t replyPacketId,
         // button with something other than a finger.
         refreshComposeEmojiFocus();
 #else
-        lv_obj_set_style_bg_color(s_composeEmojiBtn, lv_color_hex(0x16386F), 0);
-        lv_obj_set_style_bg_opa(s_composeEmojiBtn, LV_OPA_70, 0);
+        lv_obj_set_style_bg_color(s_composeEmojiBtn, lvColorFrom565(s_ui.panelStrong), 0);
+        lv_obj_set_style_bg_opa(s_composeEmojiBtn, LV_OPA_COVER, 0);
         lv_obj_set_style_border_width(s_composeEmojiBtn, 1, 0);
-        lv_obj_set_style_border_color(s_composeEmojiBtn, lv_color_hex(0x4C76BA), 0);
+        lv_obj_set_style_border_color(s_composeEmojiBtn, lvColorFrom565(s_ui.dividerHi), 0);
 #endif
     }
 #endif
@@ -14015,7 +14292,7 @@ static void openComposePrompt(uint32_t replyPacketId,
 #else
     lv_obj_set_style_text_font(hint, composeBodyFont, 0);
 #endif
-    lv_obj_set_style_text_color(hint, lv_color_hex(0xA7C7FF), 0);
+    composeStyleMeta(hint);
     lv_obj_set_style_pad_top(hint, 0, 0);
 #if defined(DEVICE_TLORA_PAGER_TFT)
     lv_obj_set_style_pad_bottom(hint, 0, 0);
@@ -14054,7 +14331,7 @@ static void openComposePrompt(uint32_t replyPacketId,
 #else
     lv_obj_set_style_text_font(s_composeCharCount, composeBodyFont, 0);
 #endif
-    lv_obj_set_style_text_color(s_composeCharCount, lv_color_hex(0xA7C7FF), 0);
+    composeStyleMeta(s_composeCharCount);
 #if defined(DEVICE_CARDPUTER_LORA_HAT)
     // Flush with the legend's line rather than lifted off it: the legend is the
     // last item in the column, so its box already ends at the content bottom.
@@ -14108,6 +14385,17 @@ static void updateComposeCharCount() {
     for (const char *p = txt; p && *p; p++) {
         if (!utf8util::isContinuationByte((uint8_t)*p)) used++;
     }
+    // Dim while there is room, the theme's warning amber in the last tenth, and
+    // its red once the box is full and further keys do nothing -- the count is
+    // the only thing that says why typing stopped. (One colour on the paper
+    // build, whose palette has no amber or red.)
+    uint16_t countColor = s_ui.textDim;
+    if (used >= (uint32_t)MESH_TEXT_MAX_LEN) {
+        countColor = s_ui.battBad;
+    } else if (used * 10 >= (uint32_t)MESH_TEXT_MAX_LEN * 9) {
+        countColor = s_ui.battWarn;
+    }
+    lv_obj_set_style_text_color(s_composeCharCount, lvColorFrom565(countColor), 0);
 #if defined(DEVICE_CARDPUTER_LORA_HAT)
     // "200/200" rather than "200 of 200": the count shares its line with the
     // key legend, and on a 240 px panel the long form runs into it once the
@@ -14265,6 +14553,10 @@ static void initCfgActions() {
     s_cfgActions[s_cfgActionCount++] = CFG_ACTION_CHAT_COLORS;
     s_cfgActions[s_cfgActionCount++] = CFG_ACTION_OWNER_COLOR;
     s_cfgActions[s_cfgActionCount++] = CFG_ACTION_RESET_CHAT_COLORS;
+#endif
+#if HAS_CHAT_BLINK
+    // With the other rows about how chat looks: it is how a new message looks.
+    s_cfgActions[s_cfgActionCount++] = CFG_ACTION_CHAT_BLINK;
 #endif
     // Font Size scales the chat and DM text in every style, so every build gets
     // it — the Cardputer arguably most of all.
@@ -14820,7 +15112,7 @@ static void refreshCfgModal() {
     const lv_font_t *cfgRowFont = &lv_font_montserrat_14;
     const int cfgPadTop = 6;
     const int cfgPadBottom = 6;
-#elif defined(DEVICE_TDISPLAY_P4) || defined(DEVICE_CROWPANEL_35)
+#elif defined(DEVICE_TDISPLAY_P4) || defined(DEVICE_CROWPANEL)
     // Roomier touch panels: readable text and taller tap targets.
     const lv_font_t *cfgRowFont = &lv_font_montserrat_16;
     const int cfgPadTop = 14;
@@ -14859,7 +15151,7 @@ static void refreshCfgModal() {
                         LV_EVENT_CLICKED,
                         (void *)(intptr_t)i);
         }
-#if defined(DEVICE_CROWPANEL_35)
+#if defined(DEVICE_CROWPANEL)
         lv_obj_set_style_min_height(row, 47, 0);
         lv_label_set_long_mode(row, LV_LABEL_LONG_WRAP);
 #else
@@ -16511,6 +16803,48 @@ static void openCfgSliderModal(const CfgSliderPicker *spec, int startIdx) {
     if (hasCheck) refreshCfgSliderFocus();
 #endif
 }
+
+#if HAS_CHAT_BLINK
+// ── Message blink ────────────────────────────────────────────────────────────
+// Stop 0 is Off, stop n is n * kChatBlinkStepS seconds, up to kChatBlinkMaxS.
+
+static const char *cfgChatBlinkLabelFor(int idx) {
+    static char buf[24];
+    if (idx <= 0) return TR("Off");
+    snprintf(buf, sizeof(buf), TR("%u sec"), (unsigned)(idx * kChatBlinkStepS));
+    return buf;
+}
+
+static void cfgChatBlinkApply(int idx) {
+    s_cfg.chatBlinkSecs = cfgCoerceChatBlink((long)idx * kChatBlinkStepS);
+    persistConfigToPrefs();
+    const uint8_t secs = cfgChatBlinkSecs(s_cfg);
+    if (secs == 0) {
+        snprintf(s_cfgStatus, sizeof(s_cfgStatus), "%s", TR("New messages do not blink"));
+    } else {
+        snprintf(s_cfgStatus, sizeof(s_cfgStatus), TR("New messages blink for %u sec"),
+                 (unsigned)secs);
+    }
+    // Off stops anything blinking at the next tick (chatBlinkTick()); turning it
+    // on needs the view rebuilt so its new rows register.
+    s_lastRenderedChannel = -1;
+    s_lastRenderedCount = -1;
+    refreshChatView(true);
+}
+
+static void openCfgChatBlinkModal() {
+    const int startIdx = cfgChatBlinkSecs(s_cfg) / kChatBlinkStepS;
+    static const CfgSliderPicker kSpec = {
+        TR_NOOP("Message Blink"),
+        kChatBlinkMaxS / kChatBlinkStepS + 1,
+        cfgChatBlinkLabelFor,
+        cfgChatBlinkApply,
+        TR_NOOP("off"),
+        TR_NOOP("60 sec"),
+    };
+    openCfgSliderModal(&kSpec, startIdx);
+}
+#endif  // HAS_CHAT_BLINK
 
 // ── Location precision ───────────────────────────────────────────────────────
 
@@ -23888,6 +24222,11 @@ static void populateHeltecBottomNav(lv_obj_t *bar, int activeTarget) {
     // otherwise.
     const lv_font_t *const navIconFont = uiPortrait() ? &lv_font_montserrat_20
                                                       : &lv_font_montserrat_18;
+#elif defined(DEVICE_CROWPANEL_50)
+    // With the doubled bar (kBottomNavHeight). 24 rather than 28: it is the
+    // largest size the CrowPanels give an emoji face (emoji_font.cpp), and
+    // Chat, Nodes and Tools draw from it.
+    const lv_font_t *const navIconFont = &lv_font_montserrat_24;
 #else
     const lv_font_t *const navIconFont = &lv_font_montserrat_14;
 #endif
@@ -24147,6 +24486,8 @@ static void buildNavStatusCluster(lv_obj_t *bar, lv_obj_t **boxOut, lv_obj_t **g
 #if defined(DEVICE_TDISPLAY_P4)
     // Scaled with the P4's taller bar and larger icons (kBottomNavHeight).
     const lv_font_t *const statusFont = &lv_font_montserrat_14;
+#elif defined(DEVICE_CROWPANEL_50)
+    const lv_font_t *const statusFont = &lv_font_montserrat_20;   // the doubled bar
 #else
     const lv_font_t *const statusFont = &lv_font_montserrat_10;
 #endif
@@ -24997,6 +25338,10 @@ static void closeDmModal() {
     s_dmConvTitle = nullptr;
     s_dmMsgTitle = nullptr;
     s_dmHintLabel = nullptr;
+    s_dmDrawerScrim = nullptr;
+    s_dmHeaderTitle = nullptr;
+    s_dmDrawerOpen = false;
+    s_dmDrawerAnimReady = false;
     s_dmConvCount = 0;
     s_dmSelection = -1;
     s_dmRenderedConvCount = -1;
@@ -25054,6 +25399,11 @@ static void closeNodesModal() {
     s_nodesTitleLabel = nullptr;
     s_nodesHintLabel = nullptr;
     s_nodesFilterBtn = nullptr;
+    s_nodesFilterBtnLabel = nullptr;
+    s_nodesAllBtn = nullptr;
+    s_nodesMapBtn = nullptr;
+    s_nodesSearchBtnFocused = false;
+    s_nodesTopBtn = kNodesTopSearch;
     s_nodesFilterDialog = nullptr;
     s_nodesFilterInput = nullptr;
     s_nodesFilterKeyboard = nullptr;
@@ -25077,7 +25427,6 @@ static void closeNodesModal() {
     s_nodesFilteredCount = 0;
     s_nodesSelected = -1;
     s_nodesFilterOpen = false;
-    s_nodesFilterEditing = false;
     s_nodesFilterLen = 0;
     s_nodesFilter[0] = '\0';
     s_nodesRenderStart = 0;
@@ -25179,15 +25528,15 @@ static bool nodesArchiveVisible() {
     return nodeArchiveSlotExists() && nodeArchiveAvailable() && s_cfg.nodeArchiveShow;
 }
 
+// Keeps any search in force: this is also called to rebuild the list while the
+// screen is up (a favorite toggled, a node restored or deleted), and those
+// should not throw away what the user searched for. openNodesModal() starts
+// each visit with no search.
 static void snapshotNodesForModal() {
     s_nodesSnapshotCount = 0;
     s_nodesArchivedCount = 0;
     s_nodesFilteredCount = 0;
     s_nodesSelected = -1;
-    s_nodesFilterOpen = false;
-    s_nodesFilterEditing = false;
-    s_nodesFilterLen = 0;
-    s_nodesFilter[0] = '\0';
 
     int total = Nodes.count();
     if (total < 0) total = 0;
@@ -25255,6 +25604,79 @@ static lv_obj_t *selectedNodesRowObj() {
     return nullptr;
 }
 
+static inline char nodesAsciiLower(char c) {
+    return (c >= 'A' && c <= 'Z') ? (char)(c - 'A' + 'a') : c;
+}
+
+// Case-insensitive glob over the whole of text: '*' is any run (even none) and
+// '?' is any one character -- a whole UTF-8 sequence, so it stands for an emoji
+// as readily as a letter. Backtracks only to the last '*', which is enough.
+static bool nodesGlobMatchNoCase(const char *text, const char *pat) {
+    if (!text) text = "";
+    const char *starPat = nullptr;
+    const char *starText = nullptr;
+    while (*text) {
+        if (*pat == '*') {
+            starPat = pat++;
+            starText = text;
+        } else if (*pat == '?') {
+            pat++;
+            text++;
+            while ((*(const uint8_t *)text & 0xC0) == 0x80) text++;
+        } else if (*pat && nodesAsciiLower(*pat) == nodesAsciiLower(*text)) {
+            pat++;
+            text++;
+        } else if (starPat) {
+            pat = starPat + 1;
+            text = ++starText;
+        } else {
+            return false;
+        }
+    }
+    while (*pat == '*') pat++;
+    return !*pat;
+}
+
+// A query with no wildcard keeps matching anywhere in the text, as it always
+// has. One with a wildcard is a pattern for the whole text, so "mi*" means
+// starts with "mi" and "*" means everything.
+static bool nodesFilterMatches(const char *text, const char *query) {
+    if (strpbrk(query, "*?")) return nodesGlobMatchNoCase(text, query);
+    return dmNodePickerContainsNoCase(text, query);
+}
+
+static bool nodesFilterIsAll() {
+    return s_nodesFilterOpen && strcmp(s_nodesFilter, "*") == 0;
+}
+
+#if NODES_KEYBOARD_TOP_BUTTONS
+// Whether the keyboard cursor is drawn at all: always where there are keys,
+// and on the P4 only while its keyboard is attached, so a P4 used by touch
+// never shows a cursor it cannot move.
+static bool nodesKeyboardCursorShown() {
+#if UI_TOUCH_ONLY_PROFILE
+    return keyboardAttached();
+#else
+    return true;
+#endif
+}
+#endif
+
+// An empty list has no row to hold the cursor, which left it nowhere and the
+// arrows doing nothing (#116). Put it on the button that gets you a list:
+// All for an empty Favorites, Clear search for a search with no matches.
+// Enter presses it (nodesFocusedButtonActivate()). Left alone when it is
+// already on a button, which is where the user put it.
+static void nodesFocusCursorForEmptyList() {
+#if NODES_KEYBOARD_TOP_BUTTONS
+    if (s_nodesSearchBtnFocused || !nodesKeyboardCursorShown()) return;
+    s_nodesSearchBtnFocused = true;
+    s_nodesTopBtn = s_nodesFilterOpen ? kNodesTopSearch : kNodesTopAll;
+    refreshNodesSearchButton();
+    refreshNodesHint();
+#endif
+}
+
 static void nodesApplyFilter() {
     s_nodesFilteredCount = 0;
 
@@ -25268,16 +25690,21 @@ static void nodesApplyFilter() {
         // unsearchable by the name the user actually knows.
         const NodeEntry *n = (i < s_nodesSnapshotCount) ? Nodes.find(nodeId) : nullptr;
         const ArchivedNode *a = nodesArchivedAt(i);
-        bool match = true;
+        bool match;
 
         if (s_nodesFilterOpen && s_nodesFilterLen > 0) {
             char nodeIdText[16];
             snprintf(nodeIdText, sizeof(nodeIdText), "!%08lX", (unsigned long)nodeId);
-            match = dmNodePickerContainsNoCase(nodeIdText, s_nodesFilter)
-                 || (n && dmNodePickerContainsNoCase(n->longName, s_nodesFilter))
-                 || (n && dmNodePickerContainsNoCase(n->shortName, s_nodesFilter))
-                 || (a && dmNodePickerContainsNoCase(a->longName, s_nodesFilter))
-                 || (a && dmNodePickerContainsNoCase(a->shortName, s_nodesFilter));
+            match = nodesFilterMatches(nodeIdText, s_nodesFilter)
+                 || (n && nodesFilterMatches(n->longName, s_nodesFilter))
+                 || (n && nodesFilterMatches(n->shortName, s_nodesFilter))
+                 || (a && nodesFilterMatches(a->longName, s_nodesFilter))
+                 || (a && nodesFilterMatches(a->shortName, s_nodesFilter));
+        } else {
+            // No search: favorites only. Archived rows never qualify: the
+            // favorite flag lives on the table entry, and favorites are never
+            // evicted from it.
+            match = (n && n->favorite);
         }
 
         if (match) {
@@ -25288,6 +25715,7 @@ static void nodesApplyFilter() {
     if (s_nodesFilteredCount <= 0) {
         s_nodesSelected = -1;
         s_nodesRenderStart = 0;
+        nodesFocusCursorForEmptyList();
         return;
     }
 
@@ -25302,8 +25730,11 @@ static void nodesApplyFilter() {
 
 static void applyNodesFilterText(const char *text) {
     if (!text) text = "";
-
+    // Surrounding blanks are not part of a name anyone searches for, and a
+    // query of nothing but blanks is no query: it clears the search.
+    while (*text == ' ') text++;
     size_t len = strlen(text);
+    while (len > 0 && text[len - 1] == ' ') len--;
     if (len > kNodesFilterMax) len = kNodesFilterMax;
 
     if (len > 0) {
@@ -25316,17 +25747,24 @@ static void applyNodesFilterText(const char *text) {
         s_nodesFilterLen = 0;
         s_nodesFilter[0] = '\0';
     }
-    // The dialog returns finished text, so the filter arrives committed.
-    s_nodesFilterEditing = false;
+
+    // A different set of rows: start at its top, with the keys on the list.
+    s_nodesSearchBtnFocused = false;
+    s_nodesTopBtn = kNodesTopSearch;
+    s_nodesSelected = 0;
+    s_nodesRenderStart = 0;
+    if (s_nodesInfoFocused) {
+        s_nodesInfoFocused = false;
+        refreshNodesPanelFocusStyles();
+    }
 
     nodesApplyFilter();
     refreshNodesListRows();
     refreshNodesListSelection();
     refreshNodesDetails();
+    refreshNodesSearchButton();
 
-    if (lv_obj_t *selectedRow = selectedNodesRowObj()) {
-        lv_obj_scroll_to_view(selectedRow, LV_ANIM_OFF);
-    }
+    if (lvObjValid(s_nodesList)) lv_obj_scroll_to_y(s_nodesList, 0, LV_ANIM_OFF);
 }
 
 static void closeNodesFilterDialog() {
@@ -25354,43 +25792,125 @@ static void onNodesFilterInputEvent(lv_event_t *e) {
     closeNodesFilterDialog();
 }
 
+static void onNodesFilterCancelPressed(lv_event_t *e) {
+    LV_UNUSED(e);
+    closeNodesFilterDialog();
+}
+
+static void onNodesFilterSearchPressed(lv_event_t *e) {
+    LV_UNUSED(e);
+    const char *text = (s_nodesFilterInput) ? lv_textarea_get_text(s_nodesFilterInput) : "";
+    applyNodesFilterText(text);
+    closeNodesFilterDialog();
+}
+
+static lv_obj_t *nodesFilterDialogBtn(lv_obj_t *row, const char *text, lv_event_cb_t cb,
+                                      bool primary) {
+    lv_obj_t *btn = lv_btn_create(row);
+    lv_obj_set_flex_grow(btn, 1);
+    lv_obj_set_height(btn, UI_TOUCH_ONLY_PROFILE ? max(28, kStackBtnH) : 22);
+    lv_obj_set_style_radius(btn, 4, 0);
+    lv_obj_set_style_shadow_width(btn, 0, 0);
+    lv_obj_set_style_pad_ver(btn, 1, 0);
+    lv_obj_set_style_bg_color(btn, lv_color_hex(primary ? 0x2A4E8F : 0x16386F), 0);
+    lv_obj_set_style_bg_opa(btn, primary ? LV_OPA_COVER : LV_OPA_70, 0);
+    lv_obj_set_style_border_width(btn, 1, 0);
+    lv_obj_set_style_border_color(btn, lv_color_hex(primary ? 0x90B4FF : 0x335D9D), 0);
+    lv_obj_add_event_cb(btn, cb, LV_EVENT_CLICKED, nullptr);
+
+    lv_obj_t *lbl = lv_label_create(btn);
+    lv_obj_set_style_text_font(lbl, UI_TOUCH_ONLY_PROFILE ? STACK_BTN_FONT
+                                                          : &lv_font_montserrat_12, 0);
+    lv_obj_set_style_text_color(lbl, lv_color_hex(0xE8F1FF), 0);
+    lv_label_set_text(lbl, text);
+    lv_obj_center(lbl);
+    return btn;
+}
+
+// The Search dialog: a text field, Cancel and Search. On every board now, not
+// only the touch ones. With an on-screen keyboard it takes the whole panel,
+// for the keyboard's sake; with a physical one (every keyboard board, and the
+// T-Display P4 with its expansion attached) it is a card over the list, and
+// pumpKeyboardInput() types into it — Enter is Search and the close key is
+// Cancel, which the hint line names for boards whose buttons cannot be tapped.
 static void openNodesFilterDialog() {
-#if UI_TOUCH_ONLY_PROFILE
     if (!s_nodesModal || s_nodesFilterDialog) return;
 
-    int dialogW = lv_disp_get_hor_res(NULL);
-    int dialogH = lv_disp_get_ver_res(NULL);
-    if (dialogW < 180) dialogW = lv_obj_get_width(s_nodesModal);
-    if (dialogH < 120) dialogH = lv_obj_get_height(s_nodesModal);
+    // Only the touch-only builds can be without a physical keyboard (every
+    // other board has one built in), and only they carry the on-screen one.
+#if UI_TOUCH_ONLY_PROFILE
+    const bool onScreenKeyboard = !keyboardAttached();
+#else
+    const bool onScreenKeyboard = false;
+#endif
+    const int dispW = lv_disp_get_hor_res(NULL);
+    const int dispH = lv_disp_get_ver_res(NULL);
 
+    // The whole panel either way, so nothing on the screen underneath takes a
+    // tap while the dialog is up. With a physical keyboard the panel is a dim
+    // backdrop and the dialog proper is a card centred on it.
     s_nodesFilterDialog = lv_obj_create(s_rootScreen);
-    lv_obj_set_size(s_nodesFilterDialog, dialogW, dialogH);
+    if (!s_nodesFilterDialog) {
+        logLvglMemDiag("nodes search aborted (low LVGL mem)");
+        return;
+    }
+    {
+        int dialogW = dispW;
+        int dialogH = dispH;
+        if (dialogW < 180) dialogW = lv_obj_get_width(s_nodesModal);
+        if (dialogH < 120) dialogH = lv_obj_get_height(s_nodesModal);
+        lv_obj_set_size(s_nodesFilterDialog, dialogW, dialogH);
+    }
     lv_obj_align(s_nodesFilterDialog, LV_ALIGN_TOP_LEFT, 0, 0);
     lv_obj_clear_flag(s_nodesFilterDialog, LV_OBJ_FLAG_SCROLLABLE);
     lv_obj_add_flag(s_nodesFilterDialog, LV_OBJ_FLAG_CLICKABLE);
     lv_obj_add_flag(s_nodesFilterDialog, LV_OBJ_FLAG_FLOATING);
-    lv_obj_set_style_bg_color(s_nodesFilterDialog, lv_color_hex(0x0E285B), 0);
-    lv_obj_set_style_bg_opa(s_nodesFilterDialog, LV_OPA_COVER, 0);
-    lv_obj_set_style_border_width(s_nodesFilterDialog, 1, 0);
-    lv_obj_set_style_border_color(s_nodesFilterDialog, lv_color_hex(0x5C86C6), 0);
-    lv_obj_set_style_pad_all(s_nodesFilterDialog, 4, 0);
-#if UI_EDGE_TO_EDGE_TEXT_ENTRY
-    lv_obj_set_style_pad_left(s_nodesFilterDialog, 2, 0);
-    lv_obj_set_style_pad_right(s_nodesFilterDialog, 2, 0);
-#endif
-    lv_obj_set_style_pad_row(s_nodesFilterDialog, 3, 0);
-    lv_obj_set_flex_flow(s_nodesFilterDialog, LV_FLEX_FLOW_COLUMN);
-    lv_obj_set_flex_align(s_nodesFilterDialog, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_START);
+    lv_obj_set_style_radius(s_nodesFilterDialog, 0, 0);
 
-    lv_obj_t *title = lv_label_create(s_nodesFilterDialog);
+    lv_obj_t *box = s_nodesFilterDialog;
+    if (onScreenKeyboard) {
+        lv_obj_set_style_border_width(box, 1, 0);
+    } else {
+        lv_obj_set_style_bg_color(s_nodesFilterDialog, lv_color_hex(0x000000), 0);
+        lv_obj_set_style_bg_opa(s_nodesFilterDialog, LV_OPA_50, 0);
+        lv_obj_set_style_border_width(s_nodesFilterDialog, 0, 0);
+        lv_obj_set_style_pad_all(s_nodesFilterDialog, 0, 0);
+
+        box = lv_obj_create(s_nodesFilterDialog);
+        if (!box) {
+            logLvglMemDiag("nodes search aborted (low LVGL mem)");
+            closeNodesFilterDialog();
+            return;
+        }
+        lv_obj_set_size(box, min(dispW - 16, 300), LV_SIZE_CONTENT);
+        lv_obj_center(box);
+        lv_obj_clear_flag(box, LV_OBJ_FLAG_SCROLLABLE);
+        lv_obj_set_style_radius(box, 6, 0);
+        lv_obj_set_style_border_width(box, 2, 0);
+    }
+    lv_obj_set_style_bg_color(box, lv_color_hex(0x0E285B), 0);
+    lv_obj_set_style_bg_opa(box, LV_OPA_COVER, 0);
+    lv_obj_set_style_border_color(box, lv_color_hex(0x5C86C6), 0);
+    lv_obj_set_style_pad_all(box, 4, 0);
+#if UI_EDGE_TO_EDGE_TEXT_ENTRY
+    if (onScreenKeyboard) {
+        lv_obj_set_style_pad_left(box, 2, 0);
+        lv_obj_set_style_pad_right(box, 2, 0);
+    }
+#endif
+    lv_obj_set_style_pad_row(box, 4, 0);
+    lv_obj_set_flex_flow(box, LV_FLEX_FLOW_COLUMN);
+    lv_obj_set_flex_align(box, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_START);
+
+    lv_obj_t *title = lv_label_create(box);
     lv_obj_set_width(title, lv_pct(100));
     lv_obj_set_style_text_font(title, &lv_font_montserrat_12, 0);
     lv_obj_set_style_text_color(title, lv_color_hex(0xD9E8FF), 0);
-    lv_label_set_text(title, TR("Filter Nodes"));
+    lv_label_set_text(title, TR("Search Nodes"));
 
-    s_nodesFilterInput = lv_textarea_create(s_nodesFilterDialog);
+    s_nodesFilterInput = lv_textarea_create(box);
     if (!s_nodesFilterInput) {
-        logLvglMemDiag("nodes filter aborted (low LVGL mem)");
+        logLvglMemDiag("nodes search aborted (low LVGL mem)");
         closeNodesFilterDialog();
         return;
     }
@@ -25406,33 +25926,214 @@ static void openNodesFilterDialog() {
     lv_obj_set_style_pad_right(s_nodesFilterInput, 3, 0);
     lv_textarea_set_one_line(s_nodesFilterInput, true);
     lv_textarea_set_max_length(s_nodesFilterInput, kNodesFilterMax);
-    lv_textarea_set_placeholder_text(s_nodesFilterInput, TR("Type to filter nodes"));
-    if (s_nodesFilterOpen && s_nodesFilterLen > 0) {
-        lv_textarea_set_text(s_nodesFilterInput, s_nodesFilter);
-    } else {
-        lv_textarea_set_text(s_nodesFilterInput, "");
-    }
-    lv_textarea_set_cursor_pos(s_nodesFilterInput, LV_TEXTAREA_CURSOR_LAST);
+    lv_textarea_set_placeholder_text(s_nodesFilterInput, TR("Name or !id, * and ? ok"));
+    lv_textarea_set_text(s_nodesFilterInput, "");
+    lv_obj_add_state(s_nodesFilterInput, LV_STATE_FOCUSED);
     lv_obj_add_event_cb(s_nodesFilterInput, onNodesFilterInputEvent, LV_EVENT_READY, nullptr);
 
-    // Not with a physical keyboard attached (the T-Display P4's expansion):
-    // keys typed on it reach this field through pumpKeyboardInput(), and an
-    // on-screen one would only take half the panel. Checked as this opens.
-    if (!keyboardAttached()) {
-        s_nodesFilterKeyboard = lv_keyboard_create(s_nodesFilterDialog);
+    lv_obj_t *btnRow = lv_obj_create(box);
+    lv_obj_remove_style_all(btnRow);
+    lv_obj_set_width(btnRow, lv_pct(100));
+    lv_obj_set_height(btnRow, LV_SIZE_CONTENT);
+    lv_obj_clear_flag(btnRow, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_set_style_pad_column(btnRow, 6, 0);
+    lv_obj_set_flex_flow(btnRow, LV_FLEX_FLOW_ROW);
+    lv_obj_set_flex_align(btnRow, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+    nodesFilterDialogBtn(btnRow, TR("Cancel"), onNodesFilterCancelPressed, false);
+    nodesFilterDialogBtn(btnRow, TR("Search"), onNodesFilterSearchPressed, true);
+
+    if (onScreenKeyboard) {
+#if UI_TOUCH_ONLY_PROFILE
+        s_nodesFilterKeyboard = lv_keyboard_create(box);
         configureOnScreenKeyboard(s_nodesFilterKeyboard);
         lv_keyboard_set_mode(s_nodesFilterKeyboard, LV_KEYBOARD_MODE_TEXT_LOWER);
         lv_keyboard_set_textarea(s_nodesFilterKeyboard, s_nodesFilterInput);
         lv_obj_add_event_cb(s_nodesFilterKeyboard, onNodesFilterKeyboardEvent, LV_EVENT_READY, nullptr);
         lv_obj_add_event_cb(s_nodesFilterKeyboard, onNodesFilterKeyboardEvent, LV_EVENT_CANCEL, nullptr);
+#endif
+    } else {
+        lv_obj_t *hint = lv_label_create(box);
+        lv_obj_set_width(hint, lv_pct(100));
+        lv_obj_set_style_text_font(hint, &lv_font_montserrat_10, 0);
+        lv_obj_set_style_text_color(hint, lv_color_hex(0xA7C7FF), 0);
+        lv_label_set_text_fmt(hint, TR("Enter=Search  %s=Cancel"), modalCloseKeyLabel());
     }
     lv_obj_move_foreground(s_nodesFilterDialog);
+}
+
+// The button above the list: Search while the list shows favorites, Clear
+// while it shows search results. Space does the same on keyboard boards.
+static void nodesSearchButtonActivate() {
+    if (!s_nodesModal) return;
+    if (s_nodesFilterOpen) {
+        applyNodesFilterText("");
+    } else {
+        openNodesFilterDialog();
+    }
+}
+
+// The All button: every node, by way of the "*" pattern.
+static void nodesAllButtonActivate() {
+    if (!s_nodesModal) return;
+    applyNodesFilterText("*");
+}
+
+// The Map button: every node with a position, on one map.
+static void nodesMapButtonActivate() {
+#if HAS_NODE_LOCATE
+    if (!s_nodesModal) return;
+    openNodesMapModal();
 #endif
 }
 
+// The topmost button the keyboard cursor can reach above the list.
+static int nodesTopBtnLast() {
+#if HAS_NODE_LOCATE
+    return kNodesTopMap;
+#else
+    return kNodesTopAll;
+#endif
+}
+
+// Enter on the keyboard cursor's button, whichever one it is on.
+static void nodesFocusedButtonActivate() {
+    switch (s_nodesTopBtn) {
+        case kNodesTopMap: nodesMapButtonActivate();    break;
+        case kNodesTopAll: nodesAllButtonActivate();    break;
+        default:           nodesSearchButtonActivate(); break;
+    }
+}
+
+static void styleNodesTopButton(lv_obj_t *btn, bool focused) {
+    if (!lvObjValid(btn)) return;
+#if defined(DEVICE_TDECK_PRO)
+    lv_obj_set_style_border_width(btn, focused ? 3 : 1, 0);
+#else
+    lv_obj_set_style_bg_color(btn, lv_color_hex(focused ? 0x2A4E8F : 0x16386F), 0);
+    lv_obj_set_style_border_width(btn, focused ? 2 : 1, 0);
+    lv_obj_set_style_border_color(btn, lv_color_hex(focused ? 0x90B4FF : 0x5C86C6), 0);
+#endif
+}
+
+// Label for what the button does now, and the cursor drawn the way a selected
+// row draws it, so moving Up from the first row reads as one list.
+static void refreshNodesSearchButton() {
+    if (lvObjValid(s_nodesFilterBtnLabel)) {
+        lv_label_set_text(s_nodesFilterBtnLabel,
+                          s_nodesFilterOpen ? TR("Clear search") : TR("Search"));
+    }
+    styleNodesTopButton(s_nodesMapBtn, s_nodesSearchBtnFocused && s_nodesTopBtn == kNodesTopMap);
+    styleNodesTopButton(s_nodesAllBtn, s_nodesSearchBtnFocused && s_nodesTopBtn == kNodesTopAll);
+    styleNodesTopButton(s_nodesFilterBtn,
+                        s_nodesSearchBtnFocused && s_nodesTopBtn == kNodesTopSearch);
+}
+
+#if NODES_KEYBOARD_TOP_BUTTONS
+// Moves the keyboard cursor between the buttons above the list and the rows.
+// btn picks which button (kNodesTop*) when focused is set.
+static void nodesSetSearchBtnFocus(bool focused, int btn = kNodesTopSearch) {
+    if (!focused) btn = kNodesTopSearch;
+    if (focused == s_nodesSearchBtnFocused && btn == s_nodesTopBtn) return;
+    s_nodesSearchBtnFocused = focused;
+    s_nodesTopBtn = btn;
+    refreshNodesSearchButton();
+    refreshNodesListSelection();
+    refreshNodesHint();
+    if (focused && lvObjValid(s_nodesList)) {
+        lv_obj_scroll_to_y(s_nodesList, 0, LV_ANIM_OFF);
+    } else if (lv_obj_t *selectedRow = selectedNodesRowObj()) {
+        lv_obj_scroll_to_view(selectedRow, LV_ANIM_OFF);
+    }
+}
+#endif
+
 static void onNodesFilterButtonPressed(lv_event_t *e) {
     LV_UNUSED(e);
-    openNodesFilterDialog();
+    nodesSearchButtonActivate();
+}
+
+static void onNodesAllButtonPressed(lv_event_t *e) {
+    LV_UNUSED(e);
+    nodesAllButtonActivate();
+}
+
+#if HAS_NODE_LOCATE
+static void onNodesMapButtonPressed(lv_event_t *e) {
+    LV_UNUSED(e);
+    nodesMapButtonActivate();
+}
+#endif
+
+// One of the buttons above the list, full width; returns its label.
+static lv_obj_t *buildNodesTopButton(lv_obj_t *listPanel, lv_obj_t **btnOut, int btnH,
+                                     const lv_font_t *btnFont, lv_event_cb_t cb) {
+    lv_obj_t *btn = lv_btn_create(listPanel);
+    *btnOut = btn;
+    if (!btn) return nullptr;
+    lv_obj_set_width(btn, lv_pct(96));
+    lv_obj_set_height(btn, btnH);
+    lv_obj_set_style_radius(btn, 4, 0);
+    lv_obj_set_style_pad_hor(btn, 3, 0);
+    lv_obj_set_style_pad_ver(btn, 1, 0);
+    lv_obj_set_style_shadow_width(btn, 0, 0);
+    lv_obj_set_style_border_width(btn, 1, 0);
+#if defined(DEVICE_TDECK_PRO)
+    const lv_color_t textColor = lv_color_make(0, 0, 0);
+    lv_obj_set_style_bg_opa(btn, LV_OPA_TRANSP, 0);
+    lv_obj_set_style_border_color(btn, lv_color_make(0, 0, 0), 0);
+#else
+    const lv_color_t textColor = lv_color_hex(0xE8F1FF);
+    lv_obj_set_style_bg_color(btn, lv_color_hex(0x16386F), 0);
+    lv_obj_set_style_bg_opa(btn, LV_OPA_COVER, 0);
+    lv_obj_set_style_border_color(btn, lv_color_hex(0x5C86C6), 0);
+#endif
+    lv_obj_add_event_cb(btn, cb, LV_EVENT_CLICKED, nullptr);
+
+    lv_obj_t *lbl = lv_label_create(btn);
+    lv_obj_set_style_text_font(lbl, btnFont, 0);
+    lv_obj_set_style_text_color(lbl, textColor, 0);
+    lv_label_set_long_mode(lbl, LV_LABEL_LONG_CLIP);
+    lv_obj_center(lbl);
+    return lbl;
+}
+
+// Builds the Map, All and Search / Clear buttons at the top of the list pane and
+// turns the pane into a column, so the list under them takes the remaining
+// height.
+static void buildNodesSearchButton(lv_obj_t *listPanel) {
+    lv_obj_set_flex_flow(listPanel, LV_FLEX_FLOW_COLUMN);
+    lv_obj_set_flex_align(listPanel, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_START,
+                          LV_FLEX_ALIGN_START);
+    lv_obj_set_style_pad_row(listPanel, 3, 0);
+
+#if defined(DEVICE_CROWPANEL_50)
+    const int btnH = 40;
+    const lv_font_t *btnFont = &lv_font_montserrat_16;
+#elif UI_TOUCH_ONLY_PROFILE
+    // A finger target: the stacked layout's button height where it has one.
+    const int btnH = toolStackLayout() ? kStackBtnH : 28;
+    const lv_font_t *btnFont = toolStackLayout() ? STACK_BTN_FONT : &lv_font_montserrat_12;
+#elif defined(DEVICE_TLORA_PAGER_TFT) || defined(DEVICE_TDECK_PRO)
+    const int btnH = 22;
+    const lv_font_t *btnFont = &lv_font_montserrat_12;
+#else
+    const int btnH = 20;
+    const lv_font_t *btnFont = &lv_font_montserrat_10;
+#endif
+
+#if HAS_NODE_LOCATE
+    if (lv_obj_t *mapLbl = buildNodesTopButton(listPanel, &s_nodesMapBtn, btnH, btnFont,
+                                               onNodesMapButtonPressed)) {
+        lv_label_set_text(mapLbl, TR("Map"));
+    }
+#endif
+    if (lv_obj_t *allLbl = buildNodesTopButton(listPanel, &s_nodesAllBtn, btnH, btnFont,
+                                               onNodesAllButtonPressed)) {
+        lv_label_set_text(allLbl, TR("All"));
+    }
+    s_nodesFilterBtnLabel = buildNodesTopButton(listPanel, &s_nodesFilterBtn, btnH, btnFont,
+                                                onNodesFilterButtonPressed);
+    refreshNodesSearchButton();
 }
 
 static bool nodesSnapshotContains(uint32_t nodeId) {
@@ -26691,6 +27392,36 @@ static NodeLocateTileJob s_nodeLocateTileCompleted;
 static size_t s_nodeLocateTileCompletedBytes = 0;
 static uint8_t *s_nodeLocateTilePng = nullptr;
 
+// ── Node map (Nodes -> Map) ──
+// The same modal with every located node on it instead of one pin. On colour
+// panels the nodes are a heat map; on the 1 bpp T-Deck Pro, which has no
+// colours to ramp through, each node is a black dot in a white ring.
+//
+// The overlay is painted into the tile canvas itself, once per pixel, whenever
+// that pixel is written: after a clear, after a pan (only the strip the shift
+// exposed), and after each tile lands (only that tile). The canvas is
+// memmove'd on pan, so heat already painted travels with the map under it and
+// never needs repainting. What makes that work is s_nodeMapHeat: a per-pixel
+// intensity for the current view, rebuilt whenever the view moves. Rebuilding
+// costs one small kernel stamp per node, far less than a tile decode.
+static bool s_nodeLocateAllNodes = false;
+struct NodeMapPoint {
+    float lat;
+    float lon;
+};
+static NodeMapPoint s_nodeMapPoints[MAX_NODES];
+static int s_nodeMapPointCount = 0;
+// Viewport positions of the points for the view s_nodeMapHeat was built for.
+static int16_t s_nodeMapScreenX[MAX_NODES];
+static int16_t s_nodeMapScreenY[MAX_NODES];
+static uint8_t *s_nodeMapHeat = nullptr;   // s_locateMapW x s_locateMapH
+static int s_nodeMapHeatZoom = -1;
+static double s_nodeMapHeatCenterX = 0.0;
+static double s_nodeMapHeatCenterY = 0.0;
+
+static void nodeMapRebuildOverlay();
+static void nodeMapPaintRect(int x0, int y0, int x1, int y1);
+
 static void closeNodeLocateModal() {
     lv_draw_buf_t *canvasBuf = s_nodeLocateCanvasBuf;
     s_nodeLocateGeneration++;
@@ -26722,6 +27453,13 @@ static void closeNodeLocateModal() {
     s_nodeLocateHasPixels = false;
     s_locateNodeLat = 0.0f;
     s_locateNodeLon = 0.0f;
+    s_nodeLocateAllNodes = false;
+    s_nodeMapPointCount = 0;
+    if (s_nodeMapHeat) {
+        heap_caps_free(s_nodeMapHeat);
+        s_nodeMapHeat = nullptr;
+    }
+    s_nodeMapHeatZoom = -1;
 }
 
 static double nodeLocateWorldSize(int zoom) {
@@ -26832,6 +27570,12 @@ static void nodeLocateClearLiveCanvas() {
     if (!s_nodeLocateCanvas || !lvObjValid(s_nodeLocateCanvas)) return;
     lv_canvas_fill_bg(s_nodeLocateCanvas, nodeLocateCanvasBgColor(), LV_OPA_COVER);
     s_nodeLocateHasPixels = false;
+    if (s_nodeLocateAllNodes) {
+        nodeMapRebuildOverlay();
+        nodeMapPaintRect(0, 0, s_locateMapW, s_locateMapH);
+        lv_draw_buf_flush_cache(s_nodeLocateCanvasBuf, nullptr);
+        lv_obj_invalidate(s_nodeLocateCanvas);
+    }
 }
 
 static void nodeLocateShiftLiveCanvas(int dx, int dy) {
@@ -26873,6 +27617,22 @@ static void nodeLocateShiftLiveCanvas(int dx, int dy) {
         } else if (dest != src) {
             memmove(dest, src, (size_t)s_locateMapW * sizeof(uint16_t));
         }
+    }
+
+    if (s_nodeLocateAllNodes) {
+        // Only the newly exposed strips: everything else carried its overlay
+        // along with it. The side strips stop short of the top/bottom one, so
+        // a diagonal pan does not paint its corner twice.
+        nodeMapRebuildOverlay();
+        int keptY0 = 0;
+        int keptY1 = s_locateMapH;
+        if (dy > 0) { nodeMapPaintRect(0, 0, s_locateMapW, dy); keptY0 = dy; }
+        if (dy < 0) {
+            nodeMapPaintRect(0, s_locateMapH + dy, s_locateMapW, s_locateMapH);
+            keptY1 = s_locateMapH + dy;
+        }
+        if (dx > 0) nodeMapPaintRect(0, keptY0, dx, keptY1);
+        if (dx < 0) nodeMapPaintRect(s_locateMapW + dx, keptY0, s_locateMapW, keptY1);
     }
 
     lv_draw_buf_flush_cache(s_nodeLocateCanvasBuf, nullptr);
@@ -27292,6 +28052,10 @@ static bool nodeLocateComposeTile(const NodeLocateTileJob &job, size_t pngBytes)
 #if defined(DEVICE_TDECK_PRO)
     nodeLocateDitherTile(job);
 #endif
+    if (s_nodeLocateAllNodes) {
+        nodeMapPaintRect(job.drawX, job.drawY,
+                         job.drawX + kNodeLocateTilePx, job.drawY + kNodeLocateTilePx);
+    }
     lv_image_cache_drop(&source);
     lv_draw_buf_flush_cache(s_nodeLocateCanvasBuf, nullptr);
 
@@ -27348,9 +28112,16 @@ static void serviceNodeLocateLiveMap(uint32_t nowMs) {
     }
 }
 
-// Puts the node back under the middle of the map box at the current zoom.
+static void nodeMapFitAll();
+
+// Puts the node back under the middle of the map box at the current zoom. On
+// the node map, frames every node again instead.
 static void nodeLocateCenterOnNode() {
     if (s_locateMapW <= 0 || s_locateMapH <= 0) return;
+    if (s_nodeLocateAllNodes) {
+        nodeMapFitAll();
+        return;
+    }
     nodeLocateLatLonToWorld(s_locateNodeLat, s_locateNodeLon, s_nodeLocateZoom,
                             s_nodeLocateCenterWorldX, s_nodeLocateCenterWorldY);
     nodeLocateNormalizeCenter();
@@ -27430,22 +28201,34 @@ static void onNodeLocateBackdropPressed(lv_event_t *e) {
     closeNodeLocateModal();
 }
 
-static void openNodeLocateModal(uint32_t nodeId) {
-    if (!s_rootScreen || nodeId == 0) return;
-    if (s_nodeLocateModal || s_nodeLocateBackdrop) return;
-
-    const NodeEntry *node = Nodes.find(nodeId);
-    if (!node || !node->hasPosition || (node->latI == 0 && node->lonI == 0)) return;
-
-    const float lat = (float)node->latI / 10000000.0f;
-    const float lon = (float)node->lonI / 10000000.0f;
-
-    s_nodeLocateNodeId = nodeId;
+// Builds the modal around titleText: map box, canvas, chips, controls, and the
+// pin when there is one node to show. Sets s_locateMapW/H; the caller picks the
+// view and requests tiles. Returns false when nothing was built.
+static bool nodeLocateBuildModal(const char *titleText, bool allNodes) {
+    if (!s_rootScreen) return false;
+    if (s_nodeLocateModal || s_nodeLocateBackdrop) return false;
+    s_nodeLocateAllNodes = allNodes;
 
     const int scrW = lv_disp_get_hor_res(NULL);
     const int scrH = lv_disp_get_ver_res(NULL);
+#if defined(DEVICE_TDISPLAY_P4)
+    // Edge to edge (#116). The 300 px card below was sized for 320-wide
+    // panels; on the P4 (284 or 616 UI px across) it left a band of backdrop
+    // either side, and in landscape used less than half the screen. The title
+    // rides on the map as a chip and the touch X is the way back, so the
+    // canvas gets the whole display. Locate and the node map both.
+    const bool fullScreen = true;
+#else
+    const bool fullScreen = false;
+#endif
     int modalW = scrW - 24;
     if (modalW > 300) modalW = 300;
+    if (fullScreen) modalW = scrW;
+#if UI_TOUCH_ONLY_PROFILE
+    const int closeXSize = kHeltecCloseXSize;   // the X that is the way back
+#else
+    const int closeXSize = 0;
+#endif
     // Full viewport height. The map box is the modal's only flex-grow child, so
     // every row reclaimed here lands in the canvas rather than in padding.
     //
@@ -27488,7 +28271,7 @@ static void openNodeLocateModal(uint32_t nodeId) {
     lv_obj_clear_flag(s_nodeLocateBackdrop, LV_OBJ_FLAG_SCROLLABLE);
     lv_obj_add_flag(s_nodeLocateBackdrop, LV_OBJ_FLAG_CLICKABLE);
     lv_obj_set_style_bg_color(s_nodeLocateBackdrop, lv_color_hex(0x000000), 0);
-    lv_obj_set_style_bg_opa(s_nodeLocateBackdrop, LV_OPA_50, 0);
+    lv_obj_set_style_bg_opa(s_nodeLocateBackdrop, fullScreen ? LV_OPA_COVER : LV_OPA_50, 0);
     lv_obj_set_style_border_width(s_nodeLocateBackdrop, 0, 0);
     lv_obj_set_style_pad_all(s_nodeLocateBackdrop, 0, 0);
     lv_obj_add_event_cb(s_nodeLocateBackdrop, onNodeLocateBackdropPressed, LV_EVENT_CLICKED, nullptr);
@@ -27500,26 +28283,28 @@ static void openNodeLocateModal(uint32_t nodeId) {
     lv_obj_add_flag(s_nodeLocateModal, LV_OBJ_FLAG_CLICKABLE);
     lv_obj_set_style_bg_color(s_nodeLocateModal, modalBg, 0);
     lv_obj_set_style_bg_opa(s_nodeLocateModal, LV_OPA_COVER, 0);
-    lv_obj_set_style_border_width(s_nodeLocateModal, 1, 0);
+    lv_obj_set_style_border_width(s_nodeLocateModal, fullScreen ? 0 : 1, 0);
     lv_obj_set_style_border_color(s_nodeLocateModal, modalBorder, 0);
-    lv_obj_set_style_pad_all(s_nodeLocateModal, 6, 0);
-    lv_obj_set_style_pad_row(s_nodeLocateModal, 3, 0);
+    lv_obj_set_style_pad_all(s_nodeLocateModal, fullScreen ? 0 : 6, 0);
+    lv_obj_set_style_pad_row(s_nodeLocateModal, fullScreen ? 0 : 3, 0);
+    if (fullScreen) lv_obj_set_style_radius(s_nodeLocateModal, 0, 0);
     lv_obj_set_flex_flow(s_nodeLocateModal, LV_FLEX_FLOW_COLUMN);
     lv_obj_set_flex_align(s_nodeLocateModal, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_CENTER,
                           LV_FLEX_ALIGN_CENTER);
     lv_obj_move_foreground(s_nodeLocateBackdrop);
 
-    char who[40];
-    nodesActionTitleLabel(nodeId, who, sizeof(who));
-    lv_obj_t *title = lv_label_create(s_nodeLocateModal);
-    lv_obj_set_width(title, lv_pct(100));
-    lv_obj_set_style_text_font(title, &lv_font_montserrat_12, 0);
-    lv_obj_set_style_text_color(title, titleColor, 0);
-    lv_obj_set_style_text_align(title, LV_TEXT_ALIGN_CENTER, 0);
-    lv_label_set_long_mode(title, LV_LABEL_LONG_DOT);
-    char titleBuf[56];
-    snprintf(titleBuf, sizeof(titleBuf), TR("Locate: %s"), who);
-    setLabelTextEmojiSafe(title, titleBuf);
+    // Full screen, the title is a chip on the map instead (below, once the
+    // map has its size).
+    lv_obj_t *title = nullptr;
+    if (!fullScreen) {
+        title = lv_label_create(s_nodeLocateModal);
+        lv_obj_set_width(title, lv_pct(100));
+        lv_obj_set_style_text_font(title, &lv_font_montserrat_12, 0);
+        lv_obj_set_style_text_color(title, titleColor, 0);
+        lv_obj_set_style_text_align(title, LV_TEXT_ALIGN_CENTER, 0);
+        lv_label_set_long_mode(title, LV_LABEL_LONG_DOT);
+        setLabelTextEmojiSafe(title, titleText);
+    }
 
     // The map area. Its own container so the renderer can position the image and
     // the pin in coordinates that belong to nobody else.
@@ -27529,10 +28314,10 @@ static void openNodeLocateModal(uint32_t nodeId) {
     lv_obj_clear_flag(mapBox, LV_OBJ_FLAG_SCROLLABLE);
     lv_obj_set_style_bg_color(mapBox, nodeLocateCanvasBgColor(), 0);
     lv_obj_set_style_bg_opa(mapBox, LV_OPA_COVER, 0);
-    lv_obj_set_style_border_width(mapBox, 1, 0);
+    lv_obj_set_style_border_width(mapBox, fullScreen ? 0 : 1, 0);
     lv_obj_set_style_border_color(mapBox, modalBorder, 0);
     lv_obj_set_style_pad_all(mapBox, 0, 0);
-    lv_obj_set_style_radius(mapBox, 3, 0);
+    lv_obj_set_style_radius(mapBox, fullScreen ? 0 : 3, 0);
     s_nodeLocateMapBox = mapBox;
 #if HAS_TOUCH
     // The drag surface. The layers above it — tile layer, image, pin — are
@@ -27550,8 +28335,12 @@ static void openNodeLocateModal(uint32_t nodeId) {
 #if UI_TOUCH_ONLY_PROFILE
     // Node names run long, and the title is LV_LABEL_LONG_DOT across the full
     // width, so it has to be told to stop short of the X.
-    reserveHeltecCloseXRow(title);
-    appendHeltecCloseX(s_nodeLocateModal, onNodeLocateClosePressed);
+    if (title) reserveHeltecCloseXRow(title);
+    {
+        lv_obj_t *closeX = appendHeltecCloseX(s_nodeLocateModal, onNodeLocateClosePressed);
+        // On the map itself, full screen: in from the corner like the chips.
+        if (closeX && fullScreen) lv_obj_align(closeX, LV_ALIGN_TOP_RIGHT, -4, 4);
+    }
 #endif
 
     // Build one RGB565 viewport. Live PNG tiles are decoded into this canvas
@@ -27600,43 +28389,63 @@ static void openNodeLocateModal(uint32_t nodeId) {
     lv_label_set_text(attribution, TR("(c) OpenStreetMap"));
     lv_obj_align(attribution, LV_ALIGN_BOTTOM_LEFT, 2, -2);
 
-    // A map pin rather than a dot: a round head over a short stem, tip down.
-    // Built from two plain objects because there is no pin glyph to lean on —
-    // this build already falls back LV_SYMBOL_GPS to LV_SYMBOL_DRIVE — and a
-    // canvas would cost a buffer for something this simple.
-    //
-    // Red with a white outline on both parts. The outline is what keeps it
-    // readable over dark map features; red alone disappears into a highway.
-    s_nodeLocateMarker = lv_obj_create(s_nodeLocateTileLayer);
-    lv_obj_remove_style_all(s_nodeLocateMarker);
-    lv_obj_clear_flag(s_nodeLocateMarker, LV_OBJ_FLAG_SCROLLABLE);
-    lv_obj_set_size(s_nodeLocateMarker, kLocatePinW, kLocatePinH);
-    lv_obj_clear_flag(s_nodeLocateMarker, LV_OBJ_FLAG_CLICKABLE);
+    if (fullScreen) {
+        // The title as a chip, top left, stopping short of the X and the
+        // zoom column on the right.
+        lv_obj_t *chip = lv_label_create(s_nodeLocateTileLayer);
+        lv_obj_set_style_text_font(chip, &lv_font_montserrat_12, 0);
+        lv_obj_set_style_text_color(chip, titleColor, 0);
+        lv_obj_set_style_bg_color(chip, chipBg, 0);
+        lv_obj_set_style_bg_opa(chip, chipOpa, 0);
+        lv_obj_set_style_pad_all(chip, 3, 0);
+        lv_obj_set_style_radius(chip, 3, 0);
+        lv_label_set_long_mode(chip, LV_LABEL_LONG_DOT);
+        lv_obj_set_width(chip, LV_SIZE_CONTENT);
+        lv_obj_set_style_max_width(chip, mapW - closeXSize - 20, 0);
+        setLabelTextEmojiSafe(chip, titleText);
+        lv_obj_align(chip, LV_ALIGN_TOP_LEFT, 4, 4);
+    }
 
-    lv_obj_t *pinHead = lv_obj_create(s_nodeLocateMarker);
-    lv_obj_remove_style_all(pinHead);
-    lv_obj_clear_flag(pinHead, LV_OBJ_FLAG_SCROLLABLE);
-    lv_obj_set_size(pinHead, kLocatePinW, kLocatePinW);
-    lv_obj_set_pos(pinHead, 0, 0);
-    lv_obj_set_style_radius(pinHead, LV_RADIUS_CIRCLE, 0);
-    lv_obj_set_style_bg_color(pinHead, lv_color_hex(0xE04A4A), 0);
-    lv_obj_set_style_bg_opa(pinHead, LV_OPA_COVER, 0);
-    lv_obj_set_style_border_width(pinHead, 2, 0);
-    lv_obj_set_style_border_color(pinHead, lv_color_hex(0xFFFFFF), 0);
+    // The node map draws its nodes into the canvas instead (nodeMapPaintRect()).
+    if (!allNodes) {
+        // A map pin rather than a dot: a round head over a short stem, tip down.
+        // Built from two plain objects because there is no pin glyph to lean on —
+        // this build already falls back LV_SYMBOL_GPS to LV_SYMBOL_DRIVE — and a
+        // canvas would cost a buffer for something this simple.
+        //
+        // Red with a white outline on both parts. The outline is what keeps it
+        // readable over dark map features; red alone disappears into a highway.
+        s_nodeLocateMarker = lv_obj_create(s_nodeLocateTileLayer);
+        lv_obj_remove_style_all(s_nodeLocateMarker);
+        lv_obj_clear_flag(s_nodeLocateMarker, LV_OBJ_FLAG_SCROLLABLE);
+        lv_obj_set_size(s_nodeLocateMarker, kLocatePinW, kLocatePinH);
+        lv_obj_clear_flag(s_nodeLocateMarker, LV_OBJ_FLAG_CLICKABLE);
 
-    lv_obj_t *pinStem = lv_obj_create(s_nodeLocateMarker);
-    lv_obj_remove_style_all(pinStem);
-    lv_obj_clear_flag(pinStem, LV_OBJ_FLAG_SCROLLABLE);
-    lv_obj_set_size(pinStem, 5, kLocatePinH - kLocatePinW + 2);
-    // Overlapping the head by two rows hides the seam between them.
-    lv_obj_set_pos(pinStem, (kLocatePinW - 5) / 2, kLocatePinW - 2);
-    lv_obj_set_style_radius(pinStem, 1, 0);
-    lv_obj_set_style_bg_color(pinStem, lv_color_hex(0xE04A4A), 0);
-    lv_obj_set_style_bg_opa(pinStem, LV_OPA_COVER, 0);
-    lv_obj_set_style_border_width(pinStem, 1, 0);
-    lv_obj_set_style_border_color(pinStem, lv_color_hex(0xFFFFFF), 0);
+        lv_obj_t *pinHead = lv_obj_create(s_nodeLocateMarker);
+        lv_obj_remove_style_all(pinHead);
+        lv_obj_clear_flag(pinHead, LV_OBJ_FLAG_SCROLLABLE);
+        lv_obj_set_size(pinHead, kLocatePinW, kLocatePinW);
+        lv_obj_set_pos(pinHead, 0, 0);
+        lv_obj_set_style_radius(pinHead, LV_RADIUS_CIRCLE, 0);
+        lv_obj_set_style_bg_color(pinHead, lv_color_hex(0xE04A4A), 0);
+        lv_obj_set_style_bg_opa(pinHead, LV_OPA_COVER, 0);
+        lv_obj_set_style_border_width(pinHead, 2, 0);
+        lv_obj_set_style_border_color(pinHead, lv_color_hex(0xFFFFFF), 0);
 
-    lv_obj_add_flag(s_nodeLocateMarker, LV_OBJ_FLAG_HIDDEN);
+        lv_obj_t *pinStem = lv_obj_create(s_nodeLocateMarker);
+        lv_obj_remove_style_all(pinStem);
+        lv_obj_clear_flag(pinStem, LV_OBJ_FLAG_SCROLLABLE);
+        lv_obj_set_size(pinStem, 5, kLocatePinH - kLocatePinW + 2);
+        // Overlapping the head by two rows hides the seam between them.
+        lv_obj_set_pos(pinStem, (kLocatePinW - 5) / 2, kLocatePinW - 2);
+        lv_obj_set_style_radius(pinStem, 1, 0);
+        lv_obj_set_style_bg_color(pinStem, lv_color_hex(0xE04A4A), 0);
+        lv_obj_set_style_bg_opa(pinStem, LV_OPA_COVER, 0);
+        lv_obj_set_style_border_width(pinStem, 1, 0);
+        lv_obj_set_style_border_color(pinStem, lv_color_hex(0xFFFFFF), 0);
+
+        lv_obj_add_flag(s_nodeLocateMarker, LV_OBJ_FLAG_HIDDEN);
+    }
 
 #if HAS_TOUCH
     // Compact zoom / center controls overlaid on the map. Smaller buttons leave
@@ -27716,15 +28525,35 @@ static void openNodeLocateModal(uint32_t nodeId) {
         Local::btn(ctlCol, LV_SYMBOL_MINUS, onNodeLocateZoomOutPressed);
         Local::btn(ctlCol, LV_SYMBOL_GPS, onNodeLocateCenterPressed);
 
-        lv_obj_align(ctlCol, LV_ALIGN_TOP_RIGHT, -4, 4);
+        // Full screen the close X has the corner, so the column starts under it.
+        lv_obj_align(ctlCol, LV_ALIGN_TOP_RIGHT, -4,
+                     fullScreen ? 4 + closeXSize + 4 : 4);
         lv_obj_move_foreground(ctlCol);
     }
 #endif
 
-    // Zoom 13 is the default. The selected node is the canonical view center,
-    // so its pin starts exactly at the center of the map viewport.
     s_locateMapW = mapW;
     s_locateMapH = mapH;
+    return true;
+}
+
+static void openNodeLocateModal(uint32_t nodeId) {
+    if (nodeId == 0) return;
+    const NodeEntry *node = Nodes.find(nodeId);
+    if (!node || !node->hasPosition || (node->latI == 0 && node->lonI == 0)) return;
+
+    const float lat = (float)node->latI / 10000000.0f;
+    const float lon = (float)node->lonI / 10000000.0f;
+
+    char who[40];
+    nodesActionTitleLabel(nodeId, who, sizeof(who));
+    char titleBuf[56];
+    snprintf(titleBuf, sizeof(titleBuf), TR("Locate: %s"), who);
+    if (!nodeLocateBuildModal(titleBuf, false)) return;
+    s_nodeLocateNodeId = nodeId;
+
+    // Zoom 13 is the default. The selected node is the canonical view center,
+    // so its pin starts exactly at the center of the map viewport.
     s_locateNodeLat = lat;
     s_locateNodeLon = lon;
     s_nodeLocateZoom = kNodeLocateZoomDefault;
@@ -27736,6 +28565,287 @@ static void openNodeLocateModal(uint32_t nodeId) {
     else nodeLocateUpdateLiveMarker();
 
     // Bottom status text removed so the map can take the reclaimed space.
+}
+// ── Node map overlay ──
+// Heat kernel radius in pixels. Fixed on screen rather than in metres, so a
+// node reads as the same size blob at every zoom and clusters merge as the
+// map zooms out -- which is what makes it a density map.
+static constexpr int kNodeMapHeatR = 18;
+// One node's peak intensity. Lone nodes land mid-ramp (teal-green); two
+// overlapping go yellow-orange and three or more saturate to red.
+static constexpr int kNodeMapHeatPeak = 110;
+#if !defined(DEVICE_TDECK_PRO)
+static uint8_t s_nodeMapKernel[(2 * kNodeMapHeatR + 1) * (2 * kNodeMapHeatR + 1)];
+static bool s_nodeMapKernelReady = false;
+
+static void nodeMapBuildKernel() {
+    if (s_nodeMapKernelReady) return;
+    const int side = 2 * kNodeMapHeatR + 1;
+    const float r2 = (float)(kNodeMapHeatR * kNodeMapHeatR);
+    for (int y = -kNodeMapHeatR; y <= kNodeMapHeatR; y++) {
+        for (int x = -kNodeMapHeatR; x <= kNodeMapHeatR; x++) {
+            float f = 1.0f - (float)(x * x + y * y) / r2;
+            // Quartic falloff: a soft edge without a Gaussian's long tail.
+            f = (f > 0.0f) ? f * f : 0.0f;
+            s_nodeMapKernel[(y + kNodeMapHeatR) * side + (x + kNodeMapHeatR)] =
+                (uint8_t)lroundf(f * (float)kNodeMapHeatPeak);
+        }
+    }
+    s_nodeMapKernelReady = true;
+}
+#endif
+
+// Positions the points and rebuilds the intensity buffer for the current view.
+// A no-op when the view has not moved since the last build.
+static void nodeMapRebuildOverlay() {
+    if (!s_nodeLocateAllNodes || s_locateMapW <= 0 || s_locateMapH <= 0) return;
+    if (s_nodeLocateZoom == s_nodeMapHeatZoom
+        && s_nodeLocateCenterWorldX == s_nodeMapHeatCenterX
+        && s_nodeLocateCenterWorldY == s_nodeMapHeatCenterY) {
+        return;
+    }
+    s_nodeMapHeatZoom = s_nodeLocateZoom;
+    s_nodeMapHeatCenterX = s_nodeLocateCenterWorldX;
+    s_nodeMapHeatCenterY = s_nodeLocateCenterWorldY;
+
+    const double worldSize = nodeLocateWorldSize(s_nodeLocateZoom);
+    for (int i = 0; i < s_nodeMapPointCount; i++) {
+        double wx = 0.0;
+        double wy = 0.0;
+        nodeLocateLatLonToWorld(s_nodeMapPoints[i].lat, s_nodeMapPoints[i].lon,
+                                s_nodeLocateZoom, wx, wy);
+        double dx = wx - s_nodeLocateCenterWorldX;
+        if (dx > worldSize * 0.5) dx -= worldSize;
+        if (dx < -worldSize * 0.5) dx += worldSize;
+        const double sx = (double)s_locateMapW * 0.5 + dx;
+        const double sy = (double)s_locateMapH * 0.5 + (wy - s_nodeLocateCenterWorldY);
+        // Kept while any of its blob could reach the viewport.
+        if (sx < -kNodeMapHeatR || sx > s_locateMapW + kNodeMapHeatR
+            || sy < -kNodeMapHeatR || sy > s_locateMapH + kNodeMapHeatR) {
+            s_nodeMapScreenX[i] = INT16_MIN;
+            s_nodeMapScreenY[i] = INT16_MIN;
+        } else {
+            s_nodeMapScreenX[i] = (int16_t)lround(sx);
+            s_nodeMapScreenY[i] = (int16_t)lround(sy);
+        }
+    }
+
+#if !defined(DEVICE_TDECK_PRO)
+    const size_t heatBytes = (size_t)s_locateMapW * (size_t)s_locateMapH;
+    if (!s_nodeMapHeat) {
+        s_nodeMapHeat = (uint8_t *)heap_caps_malloc(heatBytes,
+                                                    MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+        if (!s_nodeMapHeat) {
+            s_nodeMapHeat = (uint8_t *)heap_caps_malloc(heatBytes, MALLOC_CAP_8BIT);
+        }
+        // Without it the map still shows every node as a dot, just no heat.
+        if (!s_nodeMapHeat) Serial.println("[map] node heat buffer unavailable");
+    }
+    if (!s_nodeMapHeat) return;
+    memset(s_nodeMapHeat, 0, heatBytes);
+    nodeMapBuildKernel();
+    const int side = 2 * kNodeMapHeatR + 1;
+    for (int i = 0; i < s_nodeMapPointCount; i++) {
+        if (s_nodeMapScreenX[i] == INT16_MIN) continue;
+        const int cx = s_nodeMapScreenX[i];
+        const int cy = s_nodeMapScreenY[i];
+        const int y0 = max(0, cy - kNodeMapHeatR);
+        const int y1 = min(s_locateMapH - 1, cy + kNodeMapHeatR);
+        const int x0 = max(0, cx - kNodeMapHeatR);
+        const int x1 = min(s_locateMapW - 1, cx + kNodeMapHeatR);
+        for (int y = y0; y <= y1; y++) {
+            uint8_t *row = s_nodeMapHeat + (size_t)y * s_locateMapW;
+            const uint8_t *k = s_nodeMapKernel
+                               + (y - cy + kNodeMapHeatR) * side + (kNodeMapHeatR - cx);
+            for (int x = x0; x <= x1; x++) {
+                const int v = row[x] + k[x];
+                row[x] = (uint8_t)(v > 255 ? 255 : v);
+            }
+        }
+    }
+#endif
+}
+
+#if !defined(DEVICE_TDECK_PRO)
+// Intensity to colour: blue, cyan, green, yellow, red at 0, 64, 128, 192, 255.
+static void nodeMapHeatColor(uint8_t v, uint8_t &r, uint8_t &g, uint8_t &b) {
+    static constexpr uint8_t kStops[5][3] = {
+        { 48,  96, 255},
+        {  0, 224, 255},
+        { 64, 236,  72},
+        {255, 224,   0},
+        {255,  48,  32},
+    };
+    const int seg = (v >= 255) ? 3 : v / 64;
+    const int t = (v >= 255) ? 64 : v - seg * 64;   // 0..64 within the segment
+    r = (uint8_t)(kStops[seg][0] + (kStops[seg + 1][0] - kStops[seg][0]) * t / 64);
+    g = (uint8_t)(kStops[seg][1] + (kStops[seg + 1][1] - kStops[seg][1]) * t / 64);
+    b = (uint8_t)(kStops[seg][2] + (kStops[seg + 1][2] - kStops[seg][2]) * t / 64);
+}
+#endif
+
+// Paints the overlay over canvas pixels [x0,x1) x [y0,y1) that have just been
+// written. Each pixel must be painted exactly once after it is written, or the
+// heat would build up on it.
+static void nodeMapPaintRect(int x0, int y0, int x1, int y1) {
+    if (!s_nodeLocateAllNodes || !s_nodeLocateCanvasBuf) return;
+    if (x0 < 0) x0 = 0;
+    if (y0 < 0) y0 = 0;
+    if (x1 > s_locateMapW) x1 = s_locateMapW;
+    if (y1 > s_locateMapH) y1 = s_locateMapH;
+    if (x0 >= x1 || y0 >= y1) return;
+    const uint32_t stride = s_nodeLocateCanvasBuf->header.stride;
+
+#if !defined(DEVICE_TDECK_PRO)
+    if (s_nodeMapHeat) {
+        for (int y = y0; y < y1; y++) {
+            uint16_t *px = (uint16_t *)(s_nodeLocateCanvasBuf->data + y * stride);
+            const uint8_t *heat = s_nodeMapHeat + (size_t)y * s_locateMapW;
+            for (int x = x0; x < x1; x++) {
+                const uint8_t v = heat[x];
+                if (!v) continue;
+                // Fades in from nothing at the blob's edge and stops short of
+                // opaque, so the streets under a hot spot still show.
+                const int a = (v * 3 > 190) ? 190 : v * 3;
+                uint8_t hr, hg, hb;
+                nodeMapHeatColor(v, hr, hg, hb);
+                const uint16_t p = px[x];
+                const int r = ((p >> 11) & 0x1F) << 3;
+                const int g = ((p >> 5) & 0x3F) << 2;
+                const int b = (p & 0x1F) << 3;
+                const int nr = r + (hr - r) * a / 255;
+                const int ng = g + (hg - g) * a / 255;
+                const int nb = b + (hb - b) * a / 255;
+                px[x] = (uint16_t)(((nr >> 3) << 11) | ((ng >> 2) << 5) | (nb >> 3));
+            }
+        }
+    }
+#endif
+
+    // A crisp dot on each node, so single nodes are pinpointed rather than
+    // only implied by their blob. Outlines first, then cores, so one node's
+    // outline never cuts into a neighbour's core.
+#if defined(DEVICE_TDECK_PRO)
+    // Black core in a white ring: the ring is what separates it from the
+    // dithered map, which is black and white too.
+    static constexpr int kRingR2 = 25;
+    static constexpr int kCoreR2 = 10;
+    static constexpr uint16_t kRingPx = 0xFFFF;
+    static constexpr uint16_t kCorePx = 0x0000;
+#else
+    static constexpr int kRingR2 = 8;
+    static constexpr int kCoreR2 = 3;
+    static constexpr uint16_t kRingPx = 0x10C5;   // near-black navy
+    static constexpr uint16_t kCorePx = 0xFFFF;
+#endif
+    for (int pass = 0; pass < 2; pass++) {
+        const int r2 = pass ? kCoreR2 : kRingR2;
+        const uint16_t color = pass ? kCorePx : kRingPx;
+        const int r = (int)ceilf(sqrtf((float)r2));
+        for (int i = 0; i < s_nodeMapPointCount; i++) {
+            if (s_nodeMapScreenX[i] == INT16_MIN) continue;
+            const int cx = s_nodeMapScreenX[i];
+            const int cy = s_nodeMapScreenY[i];
+            const int dy0 = max(y0, cy - r);
+            const int dy1 = min(y1 - 1, cy + r);
+            const int dx0 = max(x0, cx - r);
+            const int dx1 = min(x1 - 1, cx + r);
+            for (int y = dy0; y <= dy1; y++) {
+                uint16_t *px = (uint16_t *)(s_nodeLocateCanvasBuf->data + y * stride);
+                for (int x = dx0; x <= dx1; x++) {
+                    const int ddx = x - cx;
+                    const int ddy = y - cy;
+                    if (ddx * ddx + ddy * ddy <= r2) px[x] = color;
+                }
+            }
+        }
+    }
+}
+
+// Frames every node: the closest zoom at which their bounding box fits inside
+// the viewport with a margin, centred on it. Does not try to handle a set of
+// nodes straddling the antimeridian, which frames as the long way round.
+static void nodeMapFitAll() {
+    if (s_locateMapW <= 0 || s_locateMapH <= 0) return;
+    // Close enough to see streets, without opening a lone node at building level.
+    static constexpr int kFitZoomMax = 15;
+    static constexpr int kFitMargin = 28;
+
+    if (s_nodeMapPointCount == 0) {
+        // Nothing to frame. Our own position if we have one, else the world.
+        if (s_cfg.latI != 0 || s_cfg.lonI != 0) {
+            s_nodeLocateZoom = kNodeLocateZoomDefault;
+            nodeLocateLatLonToWorld((double)s_cfg.latI / 1e7, (double)s_cfg.lonI / 1e7,
+                                    s_nodeLocateZoom, s_nodeLocateCenterWorldX,
+                                    s_nodeLocateCenterWorldY);
+        } else {
+            s_nodeLocateZoom = kNodeLocateZoomMin;
+            nodeLocateLatLonToWorld(0.0, 0.0, s_nodeLocateZoom,
+                                    s_nodeLocateCenterWorldX, s_nodeLocateCenterWorldY);
+        }
+        nodeLocateNormalizeCenter();
+        nodeLocateRequestLiveTiles(0, true);
+        return;
+    }
+
+    double minX = 0.0, maxX = 0.0, minY = 0.0, maxY = 0.0;
+    for (int i = 0; i < s_nodeMapPointCount; i++) {
+        double wx = 0.0;
+        double wy = 0.0;
+        nodeLocateLatLonToWorld(s_nodeMapPoints[i].lat, s_nodeMapPoints[i].lon, 0, wx, wy);
+        if (i == 0 || wx < minX) minX = wx;
+        if (i == 0 || wx > maxX) maxX = wx;
+        if (i == 0 || wy < minY) minY = wy;
+        if (i == 0 || wy > maxY) maxY = wy;
+    }
+
+    const double fitW = (double)max(1, s_locateMapW - 2 * kFitMargin);
+    const double fitH = (double)max(1, s_locateMapH - 2 * kFitMargin);
+    int zoom = kNodeLocateZoomMin;
+    for (int z = kFitZoomMax; z > kNodeLocateZoomMin; z--) {
+        const double scale = ldexp(1.0, z);
+        if ((maxX - minX) * scale <= fitW && (maxY - minY) * scale <= fitH) {
+            zoom = z;
+            break;
+        }
+    }
+    s_nodeLocateZoom = zoom;
+    const double scale = ldexp(1.0, zoom);
+    s_nodeLocateCenterWorldX = (minX + maxX) * 0.5 * scale;
+    s_nodeLocateCenterWorldY = (minY + maxY) * 0.5 * scale;
+    nodeLocateNormalizeCenter();
+    nodeLocateRequestLiveTiles(0, true);
+}
+
+// Nodes -> Map. Every node in the table with a position, at once.
+static void openNodesMapModal() {
+    // Checked before the points are touched: they belong to an open map.
+    if (!s_rootScreen || s_nodeLocateModal || s_nodeLocateBackdrop) return;
+    s_nodeMapPointCount = 0;
+    const int total = min(Nodes.count(), (int)MAX_NODES);
+    for (int i = 0; i < total; i++) {
+        const NodeEntry *n = Nodes.at(i);
+        if (!n || n->nodeId == 0 || !n->hasPosition) continue;
+        if (n->latI == 0 && n->lonI == 0) continue;
+        s_nodeMapPoints[s_nodeMapPointCount].lat = (float)n->latI / 10000000.0f;
+        s_nodeMapPoints[s_nodeMapPointCount].lon = (float)n->lonI / 10000000.0f;
+        s_nodeMapPointCount++;
+    }
+    const int located = s_nodeMapPointCount;
+
+    char titleBuf[48];
+    snprintf(titleBuf, sizeof(titleBuf), TR("Node map: %d located"), located);
+    if (!nodeLocateBuildModal(titleBuf, true)) {
+        s_nodeMapPointCount = 0;
+        return;
+    }
+    s_nodeMapHeatZoom = -1;
+    s_nodeLocateHasPixels = false;
+    if (s_nodeLocateCanvasBuf) {
+        nodeMapFitAll();
+    } else {
+        nodeLocateUpdateLiveMarker();
+    }
 }
 #endif  // HAS_NODE_LOCATE
 
@@ -28168,9 +29278,9 @@ static bool clearNodeDbOnSd() {
 static void refreshNodesHint() {
     if (!s_nodesHintLabel) return;
 #if UI_TOUCH_ONLY_PROFILE
-    // One line for every state, because none of the three states below can be
-    // reached without a keyboard: there is no Space to open the filter and no
-    // Enter to focus the info panel. Naming the way out matters more here than
+    // One line for every state, because the keyboard states below cannot be
+    // reached without a keyboard: search is the button above the list, and
+    // there is no Enter to focus the info panel. Naming the way out matters more here than
     // on the keyboard builds — it is the nav button, not a key, and this screen
     // is closed by tapping the Nodes button that is already lit underneath it.
     lv_label_set_text(s_nodesHintLabel, TR("Tap a node for actions   Nodes below = Back"));
@@ -28185,22 +29295,27 @@ static void refreshNodesHint() {
         // the list's legend up over a panel it no longer drives.
         lv_label_set_text_fmt(s_nodesHintLabel, TR("%s=Scroll  A=Actions  %s=List"),
                               navKeys, modalCloseKeyLabel());
-    } else if (s_nodesFilterEditing) {
+    } else if (s_nodesSearchBtnFocused && s_nodesTopBtn == kNodesTopMap) {
+        lv_label_set_text_fmt(s_nodesHintLabel, TR("Enter=Map  %s=Back"),
+                              modalCloseKeyLabel());
+    } else if (s_nodesSearchBtnFocused && s_nodesTopBtn == kNodesTopAll) {
+        lv_label_set_text_fmt(s_nodesHintLabel, TR("Enter=Show all  %s=Back"),
+                              modalCloseKeyLabel());
+    } else if (s_nodesSearchBtnFocused) {
         lv_label_set_text_fmt(s_nodesHintLabel,
-                              TR("Type=Filter  Enter=Done  Bksp=Edit/Exit  %s=Back"),
+                              s_nodesFilterOpen ? TR("Enter=Clear search  %s=Back")
+                                                : TR("Enter=Search  %s=Back"),
                               modalCloseKeyLabel());
     } else if (s_nodesFilterOpen) {
-        // Committed: the list is still filtered, but the shortcuts are live
-        // again. Naming Bksp is what tells the reader the filter is still
-        // editable rather than stuck — "Edit/Exit" for the same reason the
-        // editing state says it, since on most boards Backspace is also the
-        // close key and only reaches Back once the filter is unwound.
+        // Showing search results. Space presses the button, which reads Clear
+        // now; Bksp does too, ahead of Back, since on most boards Backspace is
+        // also the close key and should unwind the search before the screen.
         lv_label_set_text_fmt(s_nodesHintLabel,
-                              TR("Enter=Info  A=Actions  Bksp=Edit/Exit  %s=Back"),
+                              TR("Enter=Info  A=Actions  Space=Clear  %s=Back"),
                               modalCloseKeyLabel());
     } else {
         lv_label_set_text_fmt(s_nodesHintLabel,
-                              TR("Enter=Info  A=Actions  Space=Filter  %s=Back"),
+                              TR("Enter=Info  A=Actions  Space=Search  %s=Back"),
                               modalCloseKeyLabel());
     }
 #endif   // !UI_TOUCH_ONLY_PROFILE
@@ -28234,30 +29349,30 @@ static void refreshNodesListRows() {
     const lv_font_t *nodesListFont = emojiFont(nodesBig ? &lv_font_montserrat_12
                                                         : &lv_font_montserrat_10);
     const int nodesListRowH = nodesBig ? 26 : 22;
+#elif defined(DEVICE_CROWPANEL_50)
+    // The 800x480 panel's list text (kMainScreenFont): named 18, drawn as 20.
+    const lv_font_t *nodesListFont = emojiFont(&lv_font_montserrat_18);
+    const int nodesListRowH = 40;
 #else
     const lv_font_t *nodesListFont = emojiFont(&lv_font_montserrat_10);
     const int nodesListRowH = 22;
 #endif
 
     if (s_nodesTitleLabel) {
-        // One total: live plus archived, which is the number of nodes this
-        // device knows about. With the archived half hidden it is the live count
-        // and the title is exactly what it always was.
-        const int nodeCount = nodesRowCountTotal();
-        // The one qualifier kept. The index caps how far back the archive scan
-        // reaches, so when it filled before the start of the file this is a
-        // floor rather than a total — and the real figure would need exactly the
-        // full read the cap exists to avoid. Nothing archived, nothing to
-        // qualify.
-        const char *more = (s_nodesArchivedCount > 0 && nodeArchiveIndexTruncated()) ? "+" : "";
+        // Favorites, or the matches for a search, counted as the list holds them.
         char titleText[80];
-        if (s_nodesFilterOpen) {
-            // Brackets appear as soon as the filter is armed (even empty) so the
-            // user has a visual cue that filtering is on; text fills in as typed.
+        if (nodesFilterIsAll()) {
+            const char *more = (s_nodesArchivedCount > 0 && nodeArchiveIndexTruncated()) ? "+" : "";
+            snprintf(titleText, sizeof(titleText), TR("All nodes (%d%s)"),
+                     s_nodesFilteredCount, more);
+        } else if (s_nodesFilterOpen) {
+            // Floor marker as before: a truncated archive scan means there may
+            // be more matches than the index reached.
+            const char *more = (s_nodesArchivedCount > 0 && nodeArchiveIndexTruncated()) ? "+" : "";
             snprintf(titleText, sizeof(titleText), TR("Nodes [%s] (%d%s)"),
-                     s_nodesFilter, nodeCount, more);
+                     s_nodesFilter, s_nodesFilteredCount, more);
         } else {
-            snprintf(titleText, sizeof(titleText), TR("Nodes (%d%s)"), nodeCount, more);
+            snprintf(titleText, sizeof(titleText), TR("Favorites (%d)"), s_nodesFilteredCount);
         }
         screenHeaderSetTitle(s_nodesTitleLabel, titleText);
     }
@@ -28274,12 +29389,14 @@ static void refreshNodesListRows() {
         lv_obj_set_width(empty, lv_pct(100));
         lv_obj_set_style_text_font(empty, nodesListFont, 0);
         lv_obj_set_style_text_color(empty, lv_color_hex(0xD9E8FF), 0);
-        if (s_nodesFilterOpen && s_nodesFilterLen > 0) {
+        if (nodesFilterIsAll()) {
+            lv_label_set_text(empty, TR("No nodes yet."));
+        } else if (s_nodesFilterOpen && s_nodesFilterLen > 0) {
             char noMatch[64];
             snprintf(noMatch, sizeof(noMatch), TR("No matches for: %s"), s_nodesFilter);
             lv_label_set_text(empty, noMatch);
         } else {
-            lv_label_set_text(empty, TR("No nodes seen"));
+            lv_label_set_text(empty, TR("No favorites yet. All or Search finds nodes."));
         }
         return;
     }
@@ -28397,7 +29514,8 @@ static void refreshNodesListSelection() {
     for (int i = 0; i < s_nodesListRowCount; i++) {
         lv_obj_t *row = s_nodesListRows[i];
         if (!row) continue;
-        bool selected = (s_nodesRenderedFilteredIdx[i] == s_nodesSelected);
+        bool selected = !s_nodesSearchBtnFocused
+                        && (s_nodesRenderedFilteredIdx[i] == s_nodesSelected);
         // Archived rows are dimmed: they are a record of nodes that have left
         // the table, and should not read as part of the live mesh at a glance.
         // Resolved back through the filtered index the row was built from.
@@ -28769,6 +29887,12 @@ static void onNodeSnapshotPressed(lv_event_t *e) {
         closeNodesActionMenu();
     }
     s_nodesSelected = idx;
+    if (s_nodesSearchBtnFocused) {
+        s_nodesSearchBtnFocused = false;
+        s_nodesTopBtn = kNodesTopSearch;
+        refreshNodesSearchButton();
+        refreshNodesHint();
+    }
     nodesClampRenderWindow();
     refreshNodesListSelection();
     refreshNodesDetails();
@@ -29527,19 +30651,6 @@ static void executeNodesActionSelection() {
     }
 #endif
 
-    if (s_nodesActionSelection == kNodesActionChatServer) {
-        // Pins this node as the chat server: set manually, never replaced.
-        const uint32_t nodeId = s_nodesActionNodeId;
-        if (!s_nodesActionChatServerEnabled || nodeId == 0) return;
-        closeNodesActionMenu();
-        chatServerSetManual(nodeId);
-        char who[16], line[64];
-        liveNodeLabel(nodeId, who, sizeof(who), false);
-        snprintf(line, sizeof(line), TR("Chat server set to %s"), who);
-        csLive(line, TFT_GREEN);
-        return;
-    }
-
     if (s_nodesActionSelection == kNodesActionShare) {
         if (!s_nodesActionShareEnabled) return;
         const uint32_t shareId = s_nodesActionNodeId;
@@ -29601,7 +30712,9 @@ static void executeNodesActionSelection() {
             for (int i = 0; i < s_dmConvCount; i++) {
                 if (s_dmConvNodeIds[i] == nodeId) {
                     s_dmSelection = i + 1;  // +1 because row 0 is "New DM"
-                    s_dmMsgPanelFocused = false;
+                    // Into the conversation itself where the list is a drawer;
+                    // on the two panes, the list keeps the keys as before.
+                    s_dmMsgPanelFocused = dmListIsDrawer();
                     refreshDmModal(true);
                     break;
                 }
@@ -29804,7 +30917,6 @@ static void openNodesActionMenuFor(uint32_t nodeId, bool msgMode, uint32_t packe
     s_nodesActionDeleteEnabled = (actionNode != nullptr);
     s_nodesActionShareEnabled = actionNode && actionNode->hasName
                                 && nodeId != s_myNodeId;
-    s_nodesActionChatServerEnabled = (nodeId != s_myNodeId);
 #if HAS_NODE_LOCATE
     // A node the table has never had a position for has nothing to point at, so
     // Locate is greyed rather than opening an empty map. (0, 0) is a real place
@@ -29843,7 +30955,6 @@ static void openNodesActionMenuFor(uint32_t nodeId, bool msgMode, uint32_t packe
     #endif
         TR_NOOP("Share"),
         TR_NOOP("Delete"),
-        TR_NOOP("Chat Server"),
     #if HAS_ADMIN_TERMINAL
         TR_NOOP("Admin"),
     #endif
@@ -29864,7 +30975,6 @@ static void openNodesActionMenuFor(uint32_t nodeId, bool msgMode, uint32_t packe
 #endif
         TR_NOOP("S(h)are"),
         TR_NOOP("Del(e)te"),
-        TR_NOOP("(C)hat Server"),
 #if HAS_ADMIN_TERMINAL
         TR_NOOP("(A)dmin"),
 #endif
@@ -30846,6 +31956,19 @@ static void openLiveToolsModal() {
     const lv_font_t *toolsFillFont =
         UI_LARGE_PANEL_PROFILE ? &lv_font_montserrat_28 : &lv_font_montserrat_16;
     const int toolsFillGap = UI_LARGE_PANEL_PROFILE ? 20 : 10;
+#elif defined(DEVICE_CROWPANEL_50)
+    // As P4 landscape: the grid takes the whole screen under the header rather
+    // than the 300 px block sized for a 320x240 panel, in either orientation.
+    // Named 20, drawn as 24 (hal/crowpanel_50_fonts.h).
+    constexpr bool toolsFill = true;
+    const lv_font_t *toolsFillFont = &lv_font_montserrat_20;
+    constexpr int toolsFillGap = 12;
+#elif defined(DEVICE_CROWPANEL_35)
+    // The same on the 3.5", which was drawing the 320x240 block: a strip of
+    // small buttons across the middle of 480x320, and a third of 320x480.
+    constexpr bool toolsFill = true;
+    const lv_font_t *toolsFillFont = &lv_font_montserrat_16;
+    constexpr int toolsFillGap = 8;
 #else
     constexpr bool toolsFill = false;
     const lv_font_t *toolsFillFont = kChanModalRowFont;
@@ -31014,9 +32137,17 @@ static void openLiveToolsModal() {
         const int fillH = (int)lv_obj_get_content_height(body) - 2 * toolsFillGap;
         int rowH = (fillH - (kLiveToolRowsPerCol - 1) * toolsRowGap) / kLiveToolRowsPerCol;
         if (rowH < toolsRowH) rowH = toolsRowH;
+        const int gridW = (fillW > toolsContentW) ? fillW : toolsContentW;
         if (fillW > toolsContentW) lv_obj_set_width(grid, fillW);
+        // Cells in pixels, not kChanModalCellPct: two 49% cells and this gap
+        // only fit side by side where 2% of the grid covers the gap -- 600 px
+        // at a 12 px gap. Narrower (the CrowPanel 5" upright, 448 px) each cell
+        // wrapped onto a row of its own, and the grid became one column.
+        const int cellW = (gridW - toolsFillGap * (kChanModalCols - 1)) / kChanModalCols;
         for (int i = 0; i < LIVE_TOOL_COUNT; i++) {
-            if (s_liveToolsRows[i]) lv_obj_set_height(s_liveToolsRows[i], rowH);
+            if (!s_liveToolsRows[i]) continue;
+            lv_obj_set_height(s_liveToolsRows[i], rowH);
+            if (!toolsStacked) lv_obj_set_width(s_liveToolsRows[i], cellW);
         }
     }
 
@@ -32219,6 +33350,31 @@ static bool homeDashSideBySide() {
     return lv_disp_get_hor_res(NULL) >= 300;
 }
 
+// Every face of the dashboard's band on screen at once, stacked, rather than
+// one at a time in a carousel: the CrowPanel 5"'s 800x480 has the room for all
+// of them in either orientation, so there is nothing to turn. The CrowPanel
+// 3.5" has it upright only: 320x480 fits the charts and both node lists, two
+// across, where 480x320 does not. The lock screen does the same, its messages
+// above the four widgets (buildLockCarousel()).
+//
+// homeDashShowAll() is whether it does, in the orientation the board booted
+// in. HOME_DASH_CAN_SHOW_ALL guards the lock screen's half, which resizes a
+// message budget that is a constant on the boards that never do.
+#if defined(DEVICE_CROWPANEL)
+#define HOME_DASH_CAN_SHOW_ALL 1
+#else
+#define HOME_DASH_CAN_SHOW_ALL 0
+#endif
+static inline bool homeDashShowAll() {
+#if defined(DEVICE_CROWPANEL_50)
+    return true;
+#elif defined(DEVICE_CROWPANEL_35)
+    return uiPortrait();
+#else
+    return false;
+#endif
+}
+
 // Records a page as it is built. The face list is built in order rather than
 // indexed by a fixed enum, because the two carousels do not carry the same set:
 // the lock screen has a messages page the dashboard does not, and a wide panel
@@ -32950,6 +34106,7 @@ static void glanceCarouselGo(GlanceCarousel &c, int delta) {
 // serviceLockCarousel() and by nothing else.
 static void homeDashCarouselGo(int delta) {
     if (!homeDashboardVisible()) return;
+    if (homeDashShowAll()) return;   // every face is already showing
     // The cards go with the page. A swipe gets here without passing through
     // homeDashCursorKey(), so the outline would otherwise ride off on a face
     // that is no longer in front.
@@ -33226,7 +34383,20 @@ static void refreshHomeDashboard(bool force) {
     // watch the radio; this one opens itself.
     if (force || minuteRolled) refreshGlancePage(s_homeCarousel, (int)s_homeCarousel.at);
 #else
-    if (glanceFacing(s_homeCarousel) == GLANCE_PAGE_CHARTS) {
+    if (homeDashShowAll()) {
+        // Every face is in front, so every face is kept current: the charts on
+        // their own sequences, the node lists on the same arrived-or-minute gate.
+        refreshGlanceCharts(s_homeCarousel, force);
+        const bool arrived = (s_snrHist.seq != s_homeCarousel.nodeSeq);
+        if (force || minuteRolled || arrived) {
+            s_homeCarousel.nodeSeq = s_snrHist.seq;
+            for (int i = 0; i < (int)s_homeCarousel.pages; i++) {
+                if (s_homeCarousel.kind[i] != GLANCE_PAGE_CHARTS) {
+                    refreshGlancePage(s_homeCarousel, i);
+                }
+            }
+        }
+    } else if (glanceFacing(s_homeCarousel) == GLANCE_PAGE_CHARTS) {
         refreshGlanceCharts(s_homeCarousel, force);
     } else {
         // Two reasons to refill, and nothing walks the node table without one:
@@ -33363,7 +34533,7 @@ static void openHomeDashboard() {
     // ever runs under a chevron, and the chevrons sit outside the host — they
     // stay put while the pages slide beneath them, and are never clipped or
     // carried off screen with one.
-    const int arrowGutter = 11;
+    const int arrowGutter = homeDashShowAll() ? 0 : 11;   // no arrows: nothing turns
     lv_obj_t *pageHost = lv_obj_create(s_homeDash);
     lv_obj_remove_style_all(pageHost);
     lv_obj_set_size(pageHost, widgetsW - (2 * arrowGutter), chartsH);
@@ -33382,7 +34552,7 @@ static void openHomeDashboard() {
     // turns. Labels rather than buttons: they mark the gesture instead of
     // offering a second way to perform it, and a tap target here would sit over
     // the pages and complicate what the swipe handler sees.
-    {
+    if (!homeDashShowAll()) {
         const int arrowY = chartsTop
             + (chartsH - (int)lv_font_get_line_height(&lv_font_montserrat_12)) / 2;
         for (int side = 0; side < 2; side++) {
@@ -33404,10 +34574,30 @@ static void openHomeDashboard() {
         }
     }
 
-    glanceBuildChartPage(s_homeCarousel, pageHost);
-    // A card gets the band less its page's own padding, and that height is what
-    // decides how many rows it fits.
-    glanceBuildNodePages(s_homeCarousel, pageHost, chartsH - kTdeckProBandInset);
+    if (homeDashShowAll()) {
+        // The band shared between the faces rather than each having all of it:
+        // the charts, then the node lists -- one face when they fit side by
+        // side, two when they do not. Worked out before the node faces are
+        // built, because a list card sizes its row count from the height it is
+        // given.
+        constexpr int kShowAllGap = 4;
+        const int showAllFaces = homeDashSideBySide() ? 2 : 3;
+        const int faceH = (chartsH - kShowAllGap * (showAllFaces - 1)) / showAllFaces;
+        glanceBuildChartPage(s_homeCarousel, pageHost);
+        glanceBuildNodePages(s_homeCarousel, pageHost, faceH - kTdeckProBandInset);
+        for (int i = 0; i < (int)s_homeCarousel.pages; i++) {
+            lv_obj_t *page = s_homeCarousel.page[i];
+            if (!lvObjValid(page)) continue;
+            lv_obj_set_height(page, faceH);
+            lv_obj_set_y(page, i * (faceH + kShowAllGap));
+            lv_obj_clear_flag(page, LV_OBJ_FLAG_HIDDEN);
+        }
+    } else {
+        glanceBuildChartPage(s_homeCarousel, pageHost);
+        // A card gets the band less its page's own padding, and that height is
+        // what decides how many rows it fits.
+        glanceBuildNodePages(s_homeCarousel, pageHost, chartsH - kTdeckProBandInset);
+    }
     // Either list opens the Nodes screen. Here rather than in the page builder,
     // which has three layouts to return from and serves the lock screen too.
     homeDashMakeCardTarget(s_homeCarousel.nodeCard[0], nullptr, HOME_CURSOR_NODES_RECENT);
@@ -33417,7 +34607,7 @@ static void openHomeDashboard() {
     // Wio boards rotate on a setting, and landscape has one fewer face than
     // portrait. Left alone, coming back in landscape on page 2 would show a
     // page this build never made.
-    glanceShowPage(s_homeCarousel, s_homeCarousel.at);
+    if (!homeDashShowAll()) glanceShowPage(s_homeCarousel, s_homeCarousel.at);
 
     s_homeGlanceMinuteKey = UINT32_MAX;   // force the first header paint
     refreshHomeDashboard(true);
@@ -33482,6 +34672,31 @@ static lv_obj_t *buildLockCarousel(lv_obj_t *overlay, int top, int height) {
     lv_obj_clear_flag(msgPage, LV_OBJ_FLAG_SCROLLABLE);
     glanceAddPage(s_lockCarousel, msgPage, GLANCE_PAGE_MESSAGES);
 
+#if HOME_DASH_CAN_SHOW_ALL
+    // Everything at once, as on Home: the messages, then Home's widgets under
+    // them, each face a share of the band -- and no timer turning it
+    // (serviceLockCarousel()). The message budget is cut to the messages'
+    // share, worst case all one-line rows with a gap after each, so the last
+    // row cannot reach into the charts below.
+    if (homeDashShowAll()) {
+        constexpr int kShowAllGap = 4;
+        const int faces = 1 + (homeDashSideBySide() ? 2 : 3);
+        const int faceH = (height - kShowAllGap * (faces - 1)) / faces;
+        glanceBuildChartPage(s_lockCarousel, host);
+        glanceBuildNodePages(s_lockCarousel, host, faceH - kTdeckProBandInset);
+        for (int i = 0; i < (int)s_lockCarousel.pages; i++) {
+            lv_obj_t *page = s_lockCarousel.page[i];
+            if (!lvObjValid(page)) continue;
+            lv_obj_set_height(page, faceH);
+            lv_obj_set_y(page, i * (faceH + kShowAllGap));
+            lv_obj_clear_flag(page, LV_OBJ_FLAG_HIDDEN);
+        }
+        kTdeckProMsgTotalLines = max(1, (faceH + kTdeckProMsgGapY)
+                                        / (kTdeckProMsgLineH + kTdeckProMsgGapY));
+        return msgPage;
+    }
+#endif
+
     glanceBuildChartPage(s_lockCarousel, host);
     glanceBuildNodePages(s_lockCarousel, host, height - kTdeckProBandInset);
 
@@ -33513,12 +34728,20 @@ static void resetLockCarousel() {
 // they read when the page came round.
 static void refreshLockCarouselPage() {
     if (!lvObjValid(s_lockCarousel.host)) return;
-    refreshGlancePage(s_lockCarousel, (int)s_lockCarousel.at);
+    if (homeDashShowAll()) {
+        // Every face is showing (buildLockCarousel()), so every face is repainted.
+        for (int i = 0; i < (int)s_lockCarousel.pages; i++) {
+            refreshGlancePage(s_lockCarousel, i);
+        }
+    } else {
+        refreshGlancePage(s_lockCarousel, (int)s_lockCarousel.at);
+    }
 }
 
 // The only thing that turns this carousel, driven from serviceLockScreen()
 // because that already runs every loop with the clock this wants.
 static void serviceLockCarousel(uint32_t nowMs) {
+    if (homeDashShowAll()) return;   // every face is already showing
     if (!lvObjValid(s_lockCarousel.host) || s_lockCarousel.pages < 2) return;
     if ((uint32_t)(nowMs - s_lockCarouselTurnedMs) < kLockCarouselDwellMs) return;
     s_lockCarouselTurnedMs = nowMs;
@@ -37629,7 +38852,230 @@ static bool dmTakeDeferredRefresh() {
 }
 #endif
 
+// ── DM conversation drawer ───────────────────────────────────────────────────
+// The channel drawer's twin (channelDrawerSlide()), on the DM screen. It is not
+// a separate state: it is the conversation list having the keys. Open while
+// s_dmMsgPanelFocused is false -- the list's keys, the list in view -- and shut
+// while the messages have them, so every path that already moved focus between
+// the two panes (Enter, Backspace, the wheel click, a tap on a row, a delete)
+// opens and closes it without knowing it exists.
+static bool dmDrawerBuilt() {
+    return lvObjValid(s_dmModal) && lvObjValid(s_dmConvPanel) && lvObjValid(s_dmDrawerScrim)
+        && lvObjValid(s_dmMsgPanel);
+}
+
+#if HAS_CHANNEL_DRAWER_ANIM
+static void dmDrawerSlideXCb(void *obj, int32_t x) {
+    lv_obj_set_x((lv_obj_t *)obj, x);
+}
+
+static void dmDrawerSlideDone(lv_anim_t *a) {
+    lv_obj_t *drawer = (lv_obj_t *)a->var;
+    if (!s_dmDrawerOpen && lvObjValid(drawer)) {
+        lv_obj_add_flag(drawer, LV_OBJ_FLAG_HIDDEN);
+    }
+}
+#endif
+
+static void dmDrawerSlide(bool open) {
+    if (!dmDrawerBuilt()) return;
+
+    // Placed every time, even when it is not moving: the nav column's padding
+    // goes on the screen after the drawer is made (appendHeltecBottomNav()),
+    // and the Cardputer's hint line comes and goes under the pane with the
+    // delete prompt. Coordinates are the screen's content area, which starts
+    // its padding in from the display edge; the drawer sits flush against that
+    // edge, or against the nav column when it is on the left, over the message
+    // pane's full height.
+    lv_obj_update_layout(s_dmModal);
+    const int32_t padL = lv_obj_get_style_pad_left(s_dmModal, LV_PART_MAIN)
+                       + lv_obj_get_style_border_width(s_dmModal, LV_PART_MAIN);
+    const int32_t padT = lv_obj_get_style_pad_top(s_dmModal, LV_PART_MAIN)
+                       + lv_obj_get_style_border_width(s_dmModal, LV_PART_MAIN);
+    lv_obj_t *content = lv_obj_get_parent(s_dmMsgPanel);
+    const int32_t paneY = lv_obj_get_y(content);
+    const int32_t paneH = lv_obj_get_height(content);
+#if defined(DEVICE_TDECK_PRO)
+    // From the top of the screen, over the header, as the channel drawer is
+    // there: on 1-bit paper with no dim, a sheet the pane's height only looks
+    // like the pane got narrower.
+    lv_obj_set_y(s_dmConvPanel, -padT);
+    lv_obj_set_height(s_dmConvPanel, paneY + paneH + padT);
+#else
+    lv_obj_set_y(s_dmConvPanel, paneY);
+    lv_obj_set_height(s_dmConvPanel, paneH);
+#endif
+    const int32_t shownX = navSideInsetLeft() - padL;
+    const int32_t hiddenX = -padL - lv_obj_get_width(s_dmConvPanel) - 2;
+
+    lv_obj_set_pos(s_dmDrawerScrim, -padL, -padT);
+    // No scrim with nothing behind the drawer to go back to: tapping it could
+    // not shut the list (dmDrawerSetOpen()), and up it would cover the nav bar
+    // that is the touch boards' only way off this screen. Set on every pass,
+    // so the first conversation arriving with the list up brings it in.
+    if (open && s_dmConvCount > 0) lv_obj_clear_flag(s_dmDrawerScrim, LV_OBJ_FLAG_HIDDEN);
+    else                           lv_obj_add_flag(s_dmDrawerScrim, LV_OBJ_FLAG_HIDDEN);
+    if (open == s_dmDrawerOpen
+        && open != lv_obj_has_flag(s_dmConvPanel, LV_OBJ_FLAG_HIDDEN)) {
+        return;   // already where it was asked to be
+    }
+    s_dmDrawerOpen = open;
+
+    if (open) {
+        lv_obj_move_foreground(s_dmDrawerScrim);
+        if (lv_obj_has_flag(s_dmConvPanel, LV_OBJ_FLAG_HIDDEN)) {
+            lv_obj_set_x(s_dmConvPanel, hiddenX);
+            lv_obj_clear_flag(s_dmConvPanel, LV_OBJ_FLAG_HIDDEN);
+        }
+        lv_obj_move_foreground(s_dmConvPanel);
+        // The selection may be anywhere in a long list.
+        if (s_dmSelection > 0 && s_dmSelection <= s_dmConvCount
+            && lvObjValid(s_dmConvRows[s_dmSelection - 1])) {
+            lv_obj_scroll_to_view(s_dmConvRows[s_dmSelection - 1], LV_ANIM_OFF);
+        }
+    } else {
+        lv_obj_add_flag(s_dmDrawerScrim, LV_OBJ_FLAG_HIDDEN);
+    }
+
+#if HAS_CHANNEL_DRAWER_ANIM
+    lv_anim_delete(s_dmConvPanel, dmDrawerSlideXCb);
+    if (s_dmDrawerAnimReady) {
+        lv_anim_t a;
+        lv_anim_init(&a);
+        lv_anim_set_var(&a, s_dmConvPanel);
+        lv_anim_set_exec_cb(&a, dmDrawerSlideXCb);
+        lv_anim_set_values(&a, lv_obj_get_x(s_dmConvPanel), open ? shownX : hiddenX);
+        lv_anim_set_duration(&a, kChannelDrawerSlideMs);
+        lv_anim_set_path_cb(&a, lv_anim_path_ease_out);
+        lv_anim_set_completed_cb(&a, dmDrawerSlideDone);
+        lv_anim_start(&a);
+        return;
+    }
+#endif
+    lv_obj_set_x(s_dmConvPanel, open ? shownX : hiddenX);
+    if (!open) lv_obj_add_flag(s_dmConvPanel, LV_OBJ_FLAG_HIDDEN);
+}
+
+// Brings the drawer to where the focus says it belongs.
+static void dmDrawerSync() {
+    if (!dmDrawerBuilt()) return;
+    dmDrawerSlide(!(s_dmMsgPanelFocused && s_dmSelection > 0));
+}
+
+// Asked for by name: the toggle key, a tap on the header or the scrim, a swipe.
+// Shutting it needs a conversation to show behind it. From the New DM row that
+// is the top one; with no conversations at all there is nothing to show, and
+// the list stays.
+static void dmDrawerSetOpen(bool open) {
+    if (!dmDrawerBuilt()) return;
+    if (open) {
+        s_dmMsgPanelFocused = false;
+        refreshDmPanelFocusStyles();
+        return;
+    }
+    if (s_dmSelection <= 0) {
+        if (s_dmConvCount <= 0) return;
+        s_dmSelection = 1;
+        s_dmMsgPanelFocused = true;
+        refreshDmModal(true);
+        return;
+    }
+    s_dmMsgPanelFocused = true;
+    refreshDmPanelFocusStyles();
+}
+
+static void onDmDrawerScrimPressed(lv_event_t *e) {
+    LV_UNUSED(e);
+    dmDrawerSetOpen(false);
+}
+
+#if HAS_TOUCH
+static void onDmHeaderTitlePressed(lv_event_t *e) {
+    LV_UNUSED(e);
+    // Only ever opens in practice: while the drawer is up the scrim covers the
+    // header, and the tap closes it from there.
+    dmDrawerSetOpen(!s_dmDrawerOpen);
+}
+#endif
+
+#if HAS_TOUCH && UI_CHANNEL_LIST_DROPDOWN
+// The edge swipe's half for this screen (channelDrawerIndevCb()): the DM screen
+// has to be the one in front, with nothing of its own over it.
+static bool dmDrawerCanOpenFromEdge() {
+    if (!dmDrawerBuilt() || s_dmDrawerOpen) return false;
+    if (s_composeModal || s_dmNodePickerModal || s_dmDelModal) return false;
+    lv_obj_t *parent = lv_obj_get_parent(s_dmModal);
+    if (!parent) return false;
+    const int32_t from = lv_obj_get_index(s_dmModal);
+    if (from < 0) return false;
+    const int32_t dispW = lv_disp_get_hor_res(NULL);
+    const int32_t dispH = lv_disp_get_ver_res(NULL);
+    const uint32_t n = lv_obj_get_child_count(parent);
+    for (uint32_t i = (uint32_t)from + 1; i < n; i++) {
+        lv_obj_t *o = lv_obj_get_child(parent, (int32_t)i);
+        if (!o || lv_obj_has_flag(o, LV_OBJ_FLAG_HIDDEN)) continue;
+        if (lv_obj_get_width(o) >= dispW * 3 / 4 && lv_obj_get_height(o) >= dispH / 2) {
+            return false;
+        }
+    }
+    return true;
+}
+#endif
+
+// The header names the conversation being read, as the chat's names its
+// channel; the screen's own name when there is none.
+static void dmRefreshHeaderTitle(const DmConv *selected) {
+    if (!lvObjValid(s_dmHeaderTitle) || !dmDrawerBuilt()) return;
+    if (!selected) {
+        screenHeaderSetTitle(s_dmHeaderTitle, TR("Direct Messages"));
+        return;
+    }
+    char name[64];
+    chatSenderLabel(selected->nodeId, name, sizeof(name));
+    if (!name[0] && liveShortNameUsable(selected->shortName)) {
+        snprintf(name, sizeof(name), "%s", selected->shortName);
+    }
+    if (!name[0]) snprintf(name, sizeof(name), "!%08lX", (unsigned long)selected->nodeId);
+    screenHeaderSetTitle(s_dmHeaderTitle, name);
+}
+
+// The key legend under the messages. One place for it: the screen sets it on
+// open, and refreshDmModal() puts it back after the delete flow has borrowed
+// the line.
+static const char *dmHintText() {
+    static char buf[128];
+    const bool drawer = dmListIsDrawer();
+#if defined(DEVICE_CARDPUTER_LORA_HAT)
+    LV_UNUSED(drawer);
+    buf[0] = '\0';   // no static legend here (openDmModal())
+#elif defined(DEVICE_TDECK)
+    snprintf(buf, sizeof(buf), "%s",
+             drawer ? TR("J/K = Select   Enter = Open   C = List   Space = Compose   D = Delete")
+                    : TR("J/K = Select   Space = Compose   Enter = Focus   D = Delete"));
+#elif defined(DEVICE_TLORA_PAGER_TFT)
+    LV_UNUSED(drawer);
+    snprintf(buf, sizeof(buf), "%s",
+             TR("Up/Down = Select   Space = Compose   Enter = Focus   D = Delete"));
+#elif UI_TOUCH_ONLY_PROFILE
+    snprintf(buf, sizeof(buf), "%s",
+             drawer ? TR("Tap name = List   Long-press 3s = Delete   DM below = Back")
+                    : TR("Tap = Open   Long-press 3s = Delete   DM below = Back"));
+#elif defined(DEVICE_M9)
+    snprintf(buf, sizeof(buf),
+             drawer ? TR("Up/Down = Select   Enter = Open   DM = List   Space = Compose   %s = Delete   %s = Back")
+                    : TR("Up/Down = Select   Space = Compose   Enter = Focus   %s = Delete   %s = Back"),
+             dmDeleteTriggerLabel(), modalCloseKeyLabel());
+#else
+    snprintf(buf, sizeof(buf),
+             drawer ? TR("Up/Down = Select   Enter = Open   C = List   Space = Compose   %s = Delete   %s = Back")
+                    : TR("Up/Down = Select   Space = Compose   Enter = Focus   %s = Delete   %s = Back"),
+             dmDeleteTriggerLabel(), modalCloseKeyLabel());
+#endif
+    return buf;
+}
+
 static void refreshDmPanelFocusStyles() {
+    dmDrawerSync();
     if (!s_dmConvTitle || !s_dmMsgTitle) return;
 
     // The panes have no frame now -- one rule divides them -- so the pane with
@@ -37656,6 +39102,10 @@ static void refreshDmPanelFocusStyles() {
 static void onDmConversationPressed(lv_event_t *e) {
     int idx = (int)(intptr_t)lv_event_get_user_data(e);
     if (idx < 0 || idx > s_dmConvCount) return;
+    // The end of a hold-to-delete: in the drawer rows answer on CLICKED, which
+    // LVGL still sends on that release, and it would shut the drawer behind the
+    // prompt the hold just raised.
+    if (s_dmDelModal) return;
     s_dmSelection = idx;
     s_dmMsgPanelFocused = (idx > 0);
 #if UI_TOUCH_ONLY_PROFILE
@@ -37918,6 +39368,9 @@ static void activateDmNodePickerSelection() {
     for (int i = 0; i < s_dmConvCount; i++) {
         if (s_dmConvNodeIds[i] == selectedNodeId) {
             s_dmSelection = i + 1;  // +1 because row 0 is "New DM"
+            // Into the new conversation where the list is a drawer, as from
+            // Nodes (executeNodesActionSelection()).
+            if (dmListIsDrawer()) s_dmMsgPanelFocused = true;
             break;
         }
     }
@@ -38224,6 +39677,8 @@ static void refreshDmModal(bool force) {
         s_dmMsgPanel = nullptr;
         s_dmMsgList = nullptr;
         s_dmHintLabel = nullptr;
+        s_dmDrawerScrim = nullptr;
+        s_dmHeaderTitle = nullptr;
         return;
     }
 
@@ -38251,7 +39706,6 @@ static void refreshDmModal(bool force) {
         }
     }
 
-    memset(s_dmConvRows, 0, sizeof(s_dmConvRows));
     memset(s_dmConvNodeIds, 0, sizeof(s_dmConvNodeIds));
     s_dmConvCount = 0;
 
@@ -38308,6 +39762,9 @@ static void refreshDmModal(bool force) {
         return;
     }
 
+    // Cleared with the rows, not before the early-out above: the drawer reads
+    // them between rebuilds to scroll the selection into view (dmDrawerSlide()).
+    memset(s_dmConvRows, 0, sizeof(s_dmConvRows));
     lv_obj_clean(s_dmConvList);
     chatBlinkForget(s_dmBlink, openDmPeerNodeId());
     lv_obj_clean(s_dmMsgList);
@@ -38316,6 +39773,8 @@ static void refreshDmModal(bool force) {
     const lv_font_t *dmMsgFont = scaledChatFont(kMainScreenFont);
 #if defined(DEVICE_TLORA_PAGER_TFT)
     int dmListRowH = 24;
+#elif defined(DEVICE_CROWPANEL_50)
+    int dmListRowH = 40;   // its larger list font (kMainScreenFont)
 #else
     int dmListRowH = 22;
 #endif
@@ -38420,7 +39879,12 @@ static void refreshDmModal(bool force) {
             lv_obj_set_style_bg_opa(row, selectedRow ? LV_OPA_70 : LV_OPA_40, 0);
 #endif
             lv_obj_set_style_shadow_width(row, 0, 0);
-            lv_obj_add_event_cb(row, onDmConversationPressed, LV_EVENT_PRESSED, (void *)(intptr_t)rowIdx);
+            // In the drawer a tap on a row also shuts it, so it waits for the
+            // tap to finish: on PRESSED, dragging the list to scroll it would
+            // pick whichever row the finger landed on and slam the drawer.
+            lv_obj_add_event_cb(row, onDmConversationPressed,
+                                dmListIsDrawer() ? LV_EVENT_CLICKED : LV_EVENT_PRESSED,
+                                (void *)(intptr_t)rowIdx);
             lv_obj_add_event_cb(row, onDmConversationPressState, LV_EVENT_PRESSED, (void *)(intptr_t)rowIdx);
             lv_obj_add_event_cb(row, onDmConversationPressState, LV_EVENT_PRESSING, (void *)(intptr_t)rowIdx);
             lv_obj_add_event_cb(row, onDmConversationPressState, LV_EVENT_RELEASED, (void *)(intptr_t)rowIdx);
@@ -38655,24 +40119,7 @@ static void refreshDmModal(bool force) {
         if (s_dmDeleteFlashMsg[0]) {
             lv_label_set_text(s_dmHintLabel, s_dmDeleteFlashMsg);
         } else {
-#if defined(DEVICE_CARDPUTER_LORA_HAT)
-            lv_label_set_text(s_dmHintLabel, "");   // no static legend here
-#elif defined(DEVICE_TDECK)
-            lv_label_set_text(s_dmHintLabel,
-                                  TR("J/K = Select   Space = Compose   Enter = Focus   D = Delete"));
-#elif defined(DEVICE_TLORA_PAGER_TFT)
-            lv_label_set_text(s_dmHintLabel,
-                                  TR("Up/Down = Select   Space = Compose   Enter = Focus   D = Delete"));
-#elif UI_TOUCH_ONLY_PROFILE
-            lv_label_set_text_fmt(s_dmHintLabel,
-                                  TR("Tap = Open   Long-press 3s = Delete"
-                                  "   DM below = Back"));
-#else
-            lv_label_set_text_fmt(s_dmHintLabel,
-                                  TR("Up/Down = Select   Space = Compose   Enter = Focus   %s = Delete   %s = Back"),
-                                  dmDeleteTriggerLabel(),
-                                  modalCloseKeyLabel());
-#endif
+            lv_label_set_text(s_dmHintLabel, dmHintText());
         }
 #if defined(DEVICE_CARDPUTER_LORA_HAT)
         // The line exists only while the delete flow is talking. Hiding rather
@@ -38684,6 +40131,7 @@ static void refreshDmModal(bool force) {
 #endif
     }
 
+    dmRefreshHeaderTitle(selected);
     refreshDmPanelFocusStyles();
 }
 
@@ -38697,6 +40145,10 @@ static void openDmModal() {
         s_dmConvTitle = nullptr;
         s_dmMsgTitle = nullptr;
         s_dmHintLabel = nullptr;
+        s_dmDrawerScrim = nullptr;
+        s_dmHeaderTitle = nullptr;
+        s_dmDrawerOpen = false;
+        s_dmDrawerAnimReady = false;
     }
     if (!s_rootScreen || s_dmModal) return;
     if (s_composeModal) closeComposePrompt();
@@ -38718,19 +40170,28 @@ static void openDmModal() {
     // Less the nav column where the bar is one (Left/Right): the panes are
     // sized absolutely, and appendHeltecBottomNav() reserves it as padding.
     int contentW = modalW - 8 - (navIsSideColumn() ? kSideNavW : 0);
+    // Where the conversations are a drawer, the messages have the whole width
+    // and the list slides in over them from the left (dmDrawerSlide()).
+    const bool dmDrawer = dmListIsDrawer();
     // Conversations over messages, both full width, instead of side by side:
     // the P4 held upright is 284 px wide -- too narrow to split -- and has the
     // height to stack into, the same way its Nodes screen does. The Heltec V4
     // and the Wio Tracker upright (240 px) take the same layout.
 #if defined(DEVICE_TDISPLAY_P4) || defined(DEVICE_HELTEC_V4_EXPANSION) \
     || defined(DEVICE_WIO_TRACKER_L2)
-    const bool dmStacked = uiPortrait();
+    const bool dmStacked = !dmDrawer && uiPortrait();
 #else
     const bool dmStacked = false;
 #endif
-    int leftW = dmStacked ? contentW : max(96, (contentW * 38) / 100);
+    // The drawer is as wide as the channel drawer (buildUi()).
+#if defined(DEVICE_CROWPANEL_50)
+    const int drawerW = min(max(contentW / 2, 120), 420);
+#else
+    const int drawerW = min(max(contentW / 2, 120), 260);
+#endif
+    int leftW = dmDrawer ? drawerW : (dmStacked ? contentW : max(96, (contentW * 38) / 100));
     // Side by side: a 3 px gap either side of the 1 px rule between the panes.
-    int rightW = dmStacked ? contentW : (contentW - leftW - 7);
+    int rightW = (dmDrawer || dmStacked) ? contentW : (contentW - leftW - 7);
 
     s_dmModal = lv_obj_create(s_rootScreen);
     lv_obj_set_size(s_dmModal, modalW, modalH);
@@ -38746,7 +40207,19 @@ static void openDmModal() {
     lv_obj_set_flex_flow(s_dmModal, LV_FLEX_FLOW_COLUMN);
     lv_obj_set_flex_align(s_dmModal, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_START);
 
-    buildScreenHeader(s_dmModal, TR("Direct Messages"));
+    lv_obj_t *dmTitle = buildScreenHeader(s_dmModal, TR("Direct Messages"));
+    if (dmDrawer) {
+        // Retitled with the conversation being read (dmRefreshHeaderTitle()).
+        s_dmHeaderTitle = dmTitle;
+#if HAS_TOUCH
+        // A tap on the name opens the drawer, as on the chat's channel name.
+        if (dmTitle) {
+            lv_obj_add_flag(dmTitle, LV_OBJ_FLAG_CLICKABLE);
+            lv_obj_set_ext_click_area(dmTitle, 6);
+            lv_obj_add_event_cb(dmTitle, onDmHeaderTitlePressed, LV_EVENT_CLICKED, nullptr);
+        }
+#endif
+    }
 
     lv_obj_t *content = lv_obj_create(s_dmModal);
     lv_obj_set_width(content, lv_pct(100));
@@ -38767,29 +40240,84 @@ static void openDmModal() {
     }
     lv_obj_set_flex_align(content, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_START);
 
-    lv_obj_t *leftPanel = lv_obj_create(content);
+    lv_obj_t *leftPanel = nullptr;
+    if (dmDrawer) {
+        // Behind the drawer and over everything else on the screen, the header
+        // and nav bar included: a tap anywhere off the list shuts it. Built
+        // first so the drawer, raised after it on every open, sits on top. No
+        // dim on the Pro, where a partial opacity dithers. As the channel
+        // drawer's (buildUi()).
+        s_dmDrawerScrim = lv_obj_create(s_dmModal);
+        lv_obj_remove_style_all(s_dmDrawerScrim);
+        lv_obj_add_flag(s_dmDrawerScrim, LV_OBJ_FLAG_IGNORE_LAYOUT);
+        lv_obj_set_size(s_dmDrawerScrim, modalW, modalH);
+        lv_obj_set_style_bg_color(s_dmDrawerScrim, lv_color_black(), 0);
+#if defined(DEVICE_TDECK_PRO)
+        lv_obj_set_style_bg_opa(s_dmDrawerScrim, LV_OPA_TRANSP, 0);
+#else
+        lv_obj_set_style_bg_opa(s_dmDrawerScrim, LV_OPA_40, 0);
+#endif
+        lv_obj_add_flag(s_dmDrawerScrim,
+                        (lv_obj_flag_t)(LV_OBJ_FLAG_CLICKABLE | LV_OBJ_FLAG_HIDDEN));
+        lv_obj_clear_flag(s_dmDrawerScrim, LV_OBJ_FLAG_SCROLLABLE);
+        lv_obj_add_event_cb(s_dmDrawerScrim, onDmDrawerScrimPressed, LV_EVENT_CLICKED, nullptr);
+
+        // The drawer: out of the screen's flex column, hidden until it opens,
+        // and placed by dmDrawerSlide() each time it moves. Styled as the
+        // channel drawer is.
+        leftPanel = lv_obj_create(s_dmModal);
+        lv_obj_add_flag(leftPanel,
+                        (lv_obj_flag_t)(LV_OBJ_FLAG_IGNORE_LAYOUT | LV_OBJ_FLAG_HIDDEN));
+        lv_obj_set_size(leftPanel, leftW, lv_pct(100));
+#if defined(DEVICE_TDECK_PRO)
+        lv_obj_set_style_bg_color(leftPanel, lv_color_make(255, 255, 255), 0);
+        lv_obj_set_style_bg_opa(leftPanel, LV_OPA_COVER, 0);
+        lv_obj_set_style_border_width(leftPanel, 2, 0);
+        lv_obj_set_style_border_color(leftPanel, lv_color_make(0, 0, 0), 0);
+        lv_obj_set_style_border_side(leftPanel,
+            (lv_border_side_t)(LV_BORDER_SIDE_RIGHT | LV_BORDER_SIDE_BOTTOM), 0);
+#else
+        lv_obj_set_style_bg_color(leftPanel, lv_color_hex(0x0F2A5C), 0);
+        lv_obj_set_style_bg_opa(leftPanel, LV_OPA_COVER, 0);
+        lv_obj_set_style_border_width(leftPanel, 1, 0);
+        lv_obj_set_style_border_color(leftPanel, lv_color_hex(0x335D9D), 0);
+        lv_obj_set_style_border_side(leftPanel, LV_BORDER_SIDE_RIGHT, 0);
+#endif
+        lv_obj_set_style_radius(leftPanel, 0, 0);
+        lv_obj_set_style_pad_all(leftPanel, 4, 0);
+    } else {
+        leftPanel = lv_obj_create(content);
+        lv_obj_set_width(leftPanel, leftW);
+        // Stacked: the conversation list takes the top 40%, the messages the rest.
+        lv_obj_set_height(leftPanel, dmStacked ? lv_pct(40) : lv_pct(100));
+        // No box round either pane: a single rule between them does the dividing.
+        lv_obj_set_style_bg_opa(leftPanel, LV_OPA_TRANSP, 0);
+        lv_obj_set_style_border_width(leftPanel, 0, 0);
+        lv_obj_set_style_pad_all(leftPanel, 2, 0);
+    }
     s_dmConvPanel = leftPanel;
-    lv_obj_set_width(leftPanel, leftW);
-    // Stacked: the conversation list takes the top 40%, the messages the rest.
-    lv_obj_set_height(leftPanel, dmStacked ? lv_pct(40) : lv_pct(100));
     lv_obj_clear_flag(leftPanel, LV_OBJ_FLAG_SCROLLABLE);
-    // No box round either pane: a single rule between them does the dividing.
-    lv_obj_set_style_bg_opa(leftPanel, LV_OPA_TRANSP, 0);
-    lv_obj_set_style_border_width(leftPanel, 0, 0);
-    lv_obj_set_style_pad_all(leftPanel, 2, 0);
     lv_obj_set_style_pad_row(leftPanel, 2, 0);
     lv_obj_set_flex_flow(leftPanel, LV_FLEX_FLOW_COLUMN);
     lv_obj_set_flex_align(leftPanel, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_START);
 
-    lv_obj_t *leftTitle = lv_label_create(leftPanel);
-    lv_obj_set_width(leftTitle, lv_pct(100));
-    lv_obj_set_style_text_font(leftTitle, &lv_font_montserrat_10, 0);
-    lv_obj_set_style_text_color(
-        leftTitle,
-        (s_cfg.uiMode == UI_MODE_LIGHT) ? lv_color_hex(0x1B243D) : lv_color_hex(0xD9E8FF),
-        0);
-    lv_label_set_text(leftTitle, TR("Conversations"));
-    s_dmConvTitle = leftTitle;
+    // The drawer needs no title: being open says the list has the keys. The
+    // panes' titles are what say which one has them (refreshDmPanelFocusStyles()).
+    if (!dmDrawer) {
+        lv_obj_t *leftTitle = lv_label_create(leftPanel);
+        lv_obj_set_width(leftTitle, lv_pct(100));
+#if defined(DEVICE_CROWPANEL_50)
+        lv_obj_set_style_text_font(leftTitle, &lv_font_montserrat_14, 0);   // drawn as 16
+#else
+        lv_obj_set_style_text_font(leftTitle, &lv_font_montserrat_10, 0);
+#endif
+        lv_obj_set_style_text_color(
+            leftTitle,
+            (s_cfg.uiMode == UI_MODE_LIGHT) ? lv_color_hex(0x1B243D) : lv_color_hex(0xD9E8FF),
+            0);
+        lv_label_set_text(leftTitle, TR("Conversations"));
+        s_dmConvTitle = leftTitle;
+    }
 
     s_dmConvList = lv_obj_create(leftPanel);
     lv_obj_set_width(s_dmConvList, lv_pct(100));
@@ -38809,7 +40337,7 @@ static void openDmModal() {
     lv_obj_set_flex_flow(s_dmConvList, LV_FLEX_FLOW_COLUMN);
     lv_obj_set_flex_align(s_dmConvList, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_START);
 
-    buildPaneRule(content, dmStacked);
+    if (!dmDrawer) buildPaneRule(content, dmStacked);
 
     lv_obj_t *rightPanel = lv_obj_create(content);
     s_dmMsgPanel = rightPanel;
@@ -38827,15 +40355,22 @@ static void openDmModal() {
     lv_obj_set_flex_flow(rightPanel, LV_FLEX_FLOW_COLUMN);
     lv_obj_set_flex_align(rightPanel, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_START);
 
-    lv_obj_t *rightTitle = lv_label_create(rightPanel);
-    lv_obj_set_width(rightTitle, lv_pct(100));
-    lv_obj_set_style_text_font(rightTitle, &lv_font_montserrat_10, 0);
-    lv_obj_set_style_text_color(
-        rightTitle,
-        (s_cfg.uiMode == UI_MODE_LIGHT) ? lv_color_hex(0x1B243D) : lv_color_hex(0xD9E8FF),
-        0);
-    lv_label_set_text(rightTitle, TR("Messages"));
-    s_dmMsgTitle = rightTitle;
+    // The header names the conversation where the list is a drawer.
+    if (!dmDrawer) {
+        lv_obj_t *rightTitle = lv_label_create(rightPanel);
+        lv_obj_set_width(rightTitle, lv_pct(100));
+#if defined(DEVICE_CROWPANEL_50)
+        lv_obj_set_style_text_font(rightTitle, &lv_font_montserrat_14, 0);   // drawn as 16
+#else
+        lv_obj_set_style_text_font(rightTitle, &lv_font_montserrat_10, 0);
+#endif
+        lv_obj_set_style_text_color(
+            rightTitle,
+            (s_cfg.uiMode == UI_MODE_LIGHT) ? lv_color_hex(0x1B243D) : lv_color_hex(0xD9E8FF),
+            0);
+        lv_label_set_text(rightTitle, TR("Messages"));
+        s_dmMsgTitle = rightTitle;
+    }
 
     s_dmMsgList = lv_obj_create(rightPanel);
     lv_obj_set_width(s_dmMsgList, lv_pct(100));
@@ -38864,7 +40399,11 @@ static void openDmModal() {
     // new message leaves it alone.
     lv_obj_t *dmNewMsgBtn = lv_btn_create(rightPanel);
     lv_obj_set_width(dmNewMsgBtn, lv_pct(100));
+#if defined(DEVICE_CROWPANEL_50)
+    lv_obj_set_height(dmNewMsgBtn, 44);   // as the chat's, doubled
+#else
     lv_obj_set_height(dmNewMsgBtn, 24);
+#endif
     lv_obj_set_style_radius(dmNewMsgBtn, 4, 0);
     lv_obj_set_style_pad_all(dmNewMsgBtn, 0, 0);
     lv_obj_set_style_shadow_width(dmNewMsgBtn, 0, 0);
@@ -38875,7 +40414,11 @@ static void openDmModal() {
     lv_obj_add_event_cb(dmNewMsgBtn, onDmNewMessagePressed, LV_EVENT_CLICKED, nullptr);
 
     lv_obj_t *dmNewMsgLbl = lv_label_create(dmNewMsgBtn);
+#if defined(DEVICE_CROWPANEL_50)
+    lv_obj_set_style_text_font(dmNewMsgLbl, &lv_font_montserrat_18, 0);   // drawn as 20
+#else
     lv_obj_set_style_text_font(dmNewMsgLbl, &lv_font_montserrat_10, 0);
+#endif
     lv_obj_set_style_text_color(dmNewMsgLbl, lv_color_hex(0xE8F1FF), 0);
     lv_label_set_text(dmNewMsgLbl, TR("New Message"));
     lv_obj_center(dmNewMsgLbl);
@@ -38889,29 +40432,14 @@ static void openDmModal() {
         hint,
         (s_cfg.uiMode == UI_MODE_LIGHT) ? lv_color_hex(0x334E75) : lv_color_hex(0xA7C7FF),
         0);
+    lv_label_set_text(hint, dmHintText());
 #if defined(DEVICE_CARDPUTER_LORA_HAT)
     // No static key legend on this build: a 240x135 panel cannot spare a
     // permanent line for it. The label itself stays, because the delete flow
     // has nowhere else to prompt — refreshDmModal() unhides it for "Confirm
     // delete" and the result, then hides it again. A hidden object is skipped
     // by the flex layout, so it costs no height while there is nothing to say.
-    lv_label_set_text(hint, "");
     lv_obj_add_flag(hint, LV_OBJ_FLAG_HIDDEN);
-#elif defined(DEVICE_TDECK)
-    lv_label_set_text(hint,
-                          TR("J/K = Select   Space = Compose   Enter = Focus   D = Delete"));
-#elif defined(DEVICE_TLORA_PAGER_TFT)
-    lv_label_set_text(hint,
-                          TR("Up/Down = Select   Space = Compose   Enter = Focus   D = Delete"));
-#elif UI_TOUCH_ONLY_PROFILE
-    lv_label_set_text_fmt(hint,
-                          TR("Tap = Open   Long-press 3s = Delete"
-                          "   DM below = Back"));
-#else
-    lv_label_set_text_fmt(hint,
-                          TR("Up/Down = Select   Space = Compose   Enter = Focus   %s = Delete   %s = Back"),
-                          dmDeleteTriggerLabel(),
-                          modalCloseKeyLabel());
 #endif
 
     s_dmRenderedConvCount = -1;
@@ -38919,11 +40447,21 @@ static void openDmModal() {
     s_dmRenderedMsgCount = -1;
     s_dmRenderedUnreadTotal = -1;
     s_dmMsgPanelFocused = false;
-    refreshDmModal(true);
+    // With a drawer, the screen opens on the most recent conversation, the list
+    // shut; only with none to show does it open on the list. (Row 0 is New DM.)
+    s_dmDrawerOpen = false;
+    s_dmDrawerAnimReady = false;
+    if (dmDrawer && DMs.count() > 0) {
+        s_dmSelection = 1;
+        s_dmMsgPanelFocused = true;
+    }
 
 #if UI_TOUCH_NAV_BAR
     appendHeltecBottomNav(s_dmModal, HELTEC_NAV_DM);
 #endif
+    // After the nav bar, whose padding the drawer is placed against.
+    refreshDmModal(true);
+    s_dmDrawerAnimReady = true;
 }
 
 static void openNodesModal() {
@@ -38973,6 +40511,13 @@ static void openNodesModal() {
         }
     }
 
+    // Each visit opens on the favorites, with no search carried over, and
+    // the cursor on the first row rather than the Search button.
+    s_nodesFilterOpen = false;
+    s_nodesSearchBtnFocused = false;
+    s_nodesTopBtn = kNodesTopSearch;
+    s_nodesFilterLen = 0;
+    s_nodesFilter[0] = '\0';
     snapshotNodesForModal();
 
     int modalW = lv_disp_get_hor_res(NULL);
@@ -39016,6 +40561,10 @@ static void openNodesModal() {
     // up rather than the P4's two, for a panel a third of its height.
     const lv_font_t *nodesDetailFont =
         emojiFont(nodesStacked ? &lv_font_montserrat_12 : &lv_font_montserrat_10);
+#elif defined(DEVICE_CROWPANEL_50)
+    // A size under the list's, as everywhere: the table has two columns to
+    // fit. Named 16, drawn as 18.
+    const lv_font_t *nodesDetailFont = emojiFont(&lv_font_montserrat_16);
 #else
     const lv_font_t *nodesDetailFont = emojiFont(&lv_font_montserrat_10);
 #endif
@@ -39066,14 +40615,9 @@ static void openNodesModal() {
     lv_obj_set_flex_flow(s_nodesModal, LV_FLEX_FLOW_COLUMN);
     lv_obj_set_flex_align(s_nodesModal, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_START);
 
-    // Retitled with the count (and the filter, while one is armed) by
-    // refreshNodesModal(), through screenHeaderSetTitle().
+    // Retitled with the count (and the search, while one is in force) by
+    // refreshNodesListRows(), through screenHeaderSetTitle().
     s_nodesTitleLabel = buildScreenHeader(s_nodesModal, "");
-
-#if UI_TOUCH_ONLY_PROFILE
-    s_nodesFilterBtn = secondaryHeaderBtn(buildSecondaryHeader(s_nodesModal),
-                                          TR("Filter"), onNodesFilterButtonPressed);
-#endif
 
     lv_obj_t *content = lv_obj_create(s_nodesModal);
     lv_obj_set_width(content, lv_pct(100));
@@ -39119,8 +40663,11 @@ static void openNodesModal() {
     lv_obj_set_style_pad_top(listPanel, 2, 0);
     lv_obj_set_style_pad_bottom(listPanel, 2, 0);
 
+    buildNodesSearchButton(listPanel);
+
     s_nodesList = lv_obj_create(listPanel);
-    lv_obj_set_size(s_nodesList, lv_pct(100), lv_pct(100));
+    lv_obj_set_width(s_nodesList, lv_pct(100));
+    lv_obj_set_flex_grow(s_nodesList, 1);
     lv_obj_add_flag(s_nodesList, LV_OBJ_FLAG_SCROLLABLE);
     setupVScroll(s_nodesList);
     lv_obj_set_scrollbar_mode(s_nodesList, LV_SCROLLBAR_MODE_AUTO);
@@ -39301,8 +40848,11 @@ static void openNodesModal() {
     lv_obj_set_style_pad_top(listPanel, 2, 0);
     lv_obj_set_style_pad_bottom(listPanel, 2, 0);
 
+    buildNodesSearchButton(listPanel);
+
     s_nodesList = lv_obj_create(listPanel);
-    lv_obj_set_size(s_nodesList, lv_pct(100), lv_pct(100));
+    lv_obj_set_width(s_nodesList, lv_pct(100));
+    lv_obj_set_flex_grow(s_nodesList, 1);
     lv_obj_add_flag(s_nodesList, LV_OBJ_FLAG_SCROLLABLE);
     setupVScroll(s_nodesList);
     lv_obj_set_scrollbar_mode(s_nodesList, LV_SCROLLBAR_MODE_AUTO);
@@ -40798,6 +42348,15 @@ static void performCfgAction(int actionId) {
             s_lastRenderedCount = -1;
             refreshChatView(true);
             break;
+
+#if HAS_CHAT_BLINK
+        // A slider, like the light timeouts: Off at one end, a minute at the other.
+        case CFG_ACTION_CHAT_BLINK:
+            if (s_cfgDebugLog) Serial.println("[lvgl-cfg] exec CHAT_BLINK");
+            showActionPopup = false;   // the picker is the feedback
+            openCfgChatBlinkModal();
+            break;
+#endif
 
         case CFG_ACTION_FONT_SIZE:
             if (s_cfgDebugLog) Serial.println("[lvgl-cfg] exec FONT_SIZE");
@@ -43143,10 +44702,13 @@ static void openNavDirectMessagesShortcut() {
     if (!prepareGlobalNavigation()) return;
     if (s_dmModal && lvObjAlive(s_dmModal)) {
         // Already there: drop back to the conversation list rather than
-        // reopening, which would discard the list state for no reason.
+        // reopening, which would discard the list state for no reason. Where
+        // the list is a drawer, a second press slides it in, and a third out
+        // again -- the M9's Messages button does the same with the channels.
         closeDmNodePicker();
         lv_obj_move_foreground(s_dmModal);
         refreshDmModal(true);
+        if (dmDrawerBuilt()) dmDrawerSetOpen(!s_dmDrawerOpen);
         return;
     }
     openDmModal();
@@ -45572,6 +47134,18 @@ static void pumpKeyboardInput() {
                 continue;
             }
 
+            // The drawer's key, the one that opens the channel list on the chat
+            // screen (legendChannelListTextRaw()): H on the Cardputer, C on the
+            // other keyboards.
+#if defined(DEVICE_CARDPUTER_LORA_HAT)
+            if ((k == 'h' || k == 'H') && dmDrawerBuilt()) {
+#else
+            if ((k == 'c' || k == 'C') && dmDrawerBuilt()) {
+#endif
+                dmDrawerSetOpen(!s_dmDrawerOpen);
+                continue;
+            }
+
             if (k == KEY_ROLLER && s_dmSelection > 0) {
                 s_dmMsgPanelFocused = !s_dmMsgPanelFocused;
                 refreshDmPanelFocusStyles();
@@ -45780,10 +47354,10 @@ static void pumpKeyboardInput() {
             continue;
         }
 
-        // The touch build's filter dialog, typed into from a physical keyboard
-        // (the T-Display P4's expansion). Every key is the dialog's while it is
-        // up, as with the other text fields -- the Nodes screen under it has an
-        // inline filter of its own that letters would otherwise reach.
+        // The Nodes Search dialog, typed into from a physical keyboard. Every
+        // key is the dialog's while it is up, as with the other text fields --
+        // the Nodes screen under it has Space and A shortcuts that letters
+        // would otherwise reach.
         if (s_nodesFilterDialog) {
             if (k == KEY_ENTER) {
                 applyNodesFilterText(s_nodesFilterInput
@@ -45817,59 +47391,26 @@ static void pumpKeyboardInput() {
                 continue;
             }
 
-            if ((k == KEY_BACKSPACE || k == KEY_BACKSPACE_HOLD) && s_nodesFilterOpen) {
-                // Reopens a committed filter rather than discarding it: a typo
-                // stays one keystroke from being fixed, and the unwind chain
-                // (edit down to empty, disarm, then Back) is the one this screen
-                // already had.
-                s_nodesFilterEditing = true;
-                if (s_nodesFilterLen > 0) {
-                    s_nodesFilter[--s_nodesFilterLen] = '\0';
-                } else {
-                    s_nodesFilterOpen = false;
-                    s_nodesFilterEditing = false;
-                }
-                nodesApplyFilter();
-                refreshNodesListRows();
-                refreshNodesListSelection();
-                refreshNodesDetails();
+            // Backspace leaves search results for the favorites before it
+            // reaches Back, which on most boards is the same key. From the
+            // details it steps out to the list first, as Back does there.
+            if ((k == KEY_BACKSPACE || k == KEY_BACKSPACE_HOLD) && s_nodesFilterOpen
+                && !s_nodesInfoFocused) {
+                applyNodesFilterText("");
                 continue;
             }
 
-            // The filter is entered explicitly with the spacebar; the space
-            // itself is never added to the filter text. Letters no longer
-            // start the filter on their own — they only append once it's open.
-            // Space is also the way back into a filter Enter has committed.
+            // Space presses the Search / Clear button above the list: it opens
+            // the Search dialog, or clears the search in force.
             if (k == ' ') {
-                if (!s_nodesFilterOpen || !s_nodesFilterEditing) {
-                    s_nodesFilterOpen = true;
-                    s_nodesFilterEditing = true;
-                    nodesApplyFilter();
-                    refreshNodesListRows();
-                    refreshNodesListSelection();
-                    refreshNodesDetails();
-                }
-                continue;
-            }
-
-            if (k > 0x20 && k < 0x7F && s_nodesFilterEditing) {
-                if (s_nodesFilterLen < kNodesFilterMax) {
-                    s_nodesFilter[s_nodesFilterLen++] = k;
-                    s_nodesFilter[s_nodesFilterLen] = '\0';
-                }
-                nodesApplyFilter();
-                refreshNodesListRows();
-                refreshNodesListSelection();
-                refreshNodesDetails();
+                nodesSearchButtonActivate();
                 continue;
             }
 
             // Actions moved off Enter and onto A when Enter became "focus the
-            // details". Guarded on the filter only while it is being typed into:
-            // once Enter commits it, the rows stay narrowed but A is a shortcut
-            // again rather than a character.
-            if (!s_nodesFilterEditing && (k == 'a' || k == 'A')) {
-                openNodesActionMenu();
+            // details". Not from the Search button: no node is under the cursor.
+            if (k == 'a' || k == 'A') {
+                if (!s_nodesSearchBtnFocused) openNodesActionMenu();
                 continue;
             }
 
@@ -45886,13 +47427,11 @@ static void pumpKeyboardInput() {
                 continue;
             }
             if (k == KEY_ENTER || k == KEY_ROLLER) {
-                // While the filter is being typed into, a confirm gesture means
-                // "done typing" and nothing else: the rows keep the filter and
-                // the keyboard goes back to the list. A second Enter then
-                // focuses the details as usual.
-                if (s_nodesFilterEditing) {
-                    s_nodesFilterEditing = false;
-                    refreshNodesHint();
+                // On a button above the list, Enter presses it. Clear, All
+                // (and a finished search) put the cursor back on the first
+                // row; Cancel leaves it on the button.
+                if (s_nodesSearchBtnFocused) {
+                    nodesFocusedButtonActivate();
                     continue;
                 }
                 // Enter hands the keys to the details; the Pager's wheel click
@@ -45921,13 +47460,33 @@ static void pumpKeyboardInput() {
             }
 
             if (k == KEY_SCROLL_UP || k == KEY_SCROLL_DN) {
-                int nextSelected = s_nodesSelected;
-                if (invertScrollNav) {
-                    // Pager wheel orientation: UP should move to the next row.
-                    nextSelected += (k == KEY_SCROLL_UP) ? 1 : -1;
-                } else {
-                    nextSelected += (k == KEY_SCROLL_UP) ? -1 : 1;
+                // Pager wheel orientation: UP should move to the next row.
+                const int step = invertScrollNav ? ((k == KEY_SCROLL_UP) ? 1 : -1)
+                                                 : ((k == KEY_SCROLL_UP) ? -1 : 1);
+#if NODES_KEYBOARD_TOP_BUTTONS
+                // The Map, All and Search / Clear buttons sit above the first
+                // row: Up from there (or from an empty list) moves onto Search,
+                // Up again onto All, then Map, and Down walks back.
+                if (s_nodesSearchBtnFocused) {
+                    if (step < 0 && s_nodesTopBtn < nodesTopBtnLast()) {
+                        nodesSetSearchBtnFocus(true, s_nodesTopBtn + 1);
+                    } else if (step > 0 && s_nodesTopBtn > kNodesTopSearch) {
+                        nodesSetSearchBtnFocus(true, s_nodesTopBtn - 1);
+                    } else if (step > 0 && s_nodesFilteredCount > 0) {
+                        s_nodesSelected = 0;
+                        nodesClampRenderWindow();
+                        refreshNodesListRows();
+                        refreshNodesDetails();
+                        nodesSetSearchBtnFocus(false);
+                    }
+                    continue;
                 }
+                if (step < 0 && s_nodesSelected <= 0) {
+                    nodesSetSearchBtnFocus(true);
+                    continue;
+                }
+#endif
+                int nextSelected = s_nodesSelected + step;
 
                 if (nextSelected < 0) nextSelected = 0;
                 if (nextSelected >= s_nodesFilteredCount) nextSelected = s_nodesFilteredCount - 1;
@@ -48386,6 +49945,14 @@ static void drawBootSplash() {
     }
 
     const int cardMargin = 10;
+    // A card sized to what it holds, centred on a background with faint
+    // camellias in its corners, rather than one filling the panel: the boards
+    // whose screens are far bigger than the card's contents.
+#if defined(DEVICE_TDISPLAY_P4) || defined(DEVICE_CROWPANEL_50)
+#define SPLASH_FLOATING_CARD 1
+#else
+#define SPLASH_FLOATING_CARD 0
+#endif
 #if defined(DEVICE_TDISPLAY_P4)
     // The portrait card's width in both orientations, centred. Landscape used
     // to run the card end to end across 616 px with the same narrow stack of
@@ -48394,10 +49961,15 @@ static void drawBootSplash() {
     const int cardW = min(screenW - cardMargin * 2,
                           DEVICE_LCD_PORTRAIT_W / UI_PIXEL_SCALE - cardMargin * 2);
     const int cardX = (screenW - cardW) / 2;
+#elif defined(DEVICE_CROWPANEL_50)
+    // Room round the title and footer, which are drawn at the sizes of the
+    // 320 px boards, without stretching them across an 800 px panel.
+    const int cardW = min(screenW - cardMargin * 2, 360);
+    const int cardX = (screenW - cardW) / 2;
 #else
     const int cardX = cardMargin;
 #endif
-#if defined(DEVICE_TDISPLAY_P4)
+#if SPLASH_FLOATING_CARD
     // Sized to what it holds rather than to the canvas, and centred in it: on
     // the 596-tall canvas any fixed card left dead space above and below the
     // flower. Title block, a gap, the flower, a gap, the footer -- each measured
@@ -48434,7 +50006,7 @@ static void drawBootSplash() {
     const int cardY = 10;
     const int cardH = screenH - 20;
 #endif
-#if !defined(DEVICE_TDISPLAY_P4)
+#if !SPLASH_FLOATING_CARD
     const int cardW = screenW - cardMargin * 2;
 #endif
 
@@ -48564,7 +50136,7 @@ static void drawBootSplash() {
         splashDev().fillCircle(cx + leafInnerX, cy + leafInnerYRight, leafInnerR, fade(LEAF_LIGHT, cy + leafInnerYRight));
     };
 
-#if defined(DEVICE_TDISPLAY_P4)
+#if SPLASH_FLOATING_CARD
     // Four large, faint camellias behind the card, one centred on each corner
     // of the screen, so each shows as a partial bloom framing the card. Drawn
     // before the card, which covers whatever of them reaches it. Scaled to the
@@ -48801,6 +50373,7 @@ static void drawBootSplash() {
         bootSplashTick();
         delay(20);
     }
+#undef SPLASH_FLOATING_CARD
 }
 
 // ── Channel-button paint cache ───────────────────────────────────────────────
@@ -49351,15 +50924,8 @@ static void refreshChannelSelectorLabel() {
 
 #if UI_CHANNEL_LIST_DROPDOWN
 // ── Channel drawer ───────────────────────────────────────────────────────────
-// The slide itself. Instant on the Pro, for the reason the dashboard carousel
-// is (HAS_HOME_CAROUSEL_ANIM): every animated frame there is an e-paper refresh.
-#if defined(DEVICE_TDECK_PRO)
-#define HAS_CHANNEL_DRAWER_ANIM 0
-#else
-#define HAS_CHANNEL_DRAWER_ANIM 1
-#endif
-static constexpr uint32_t kChannelDrawerSlideMs = 180;
-
+// The slide itself (HAS_CHANNEL_DRAWER_ANIM, kChannelDrawerSlideMs: defined
+// beside channelListIsDropdown(), for the DM screen's drawer too).
 #if HAS_CHANNEL_DRAWER_ANIM
 static void channelDrawerSlideXCb(void *obj, int32_t x) {
     lv_obj_set_x((lv_obj_t *)obj, x);
@@ -49488,6 +51054,17 @@ static void channelDrawerIndevCb(lv_event_t *e) {
     const lv_dir_t dir = lv_indev_get_gesture_dir(indev);
     const bool fromEdge = s_channelDrawerEdgePress;
     s_channelDrawerEdgePress = false;
+    // The DM screen's drawer first: while that screen is up, the chat (and so
+    // the channel drawer) is underneath it and channelDrawerCanOpenFromEdge()
+    // says no anyway.
+    if (dir == LV_DIR_RIGHT && fromEdge && dmDrawerCanOpenFromEdge()) {
+        dmDrawerSetOpen(true);
+        return;
+    }
+    if (dir == LV_DIR_LEFT && s_dmDrawerOpen && dmDrawerBuilt()) {
+        dmDrawerSetOpen(false);
+        return;
+    }
     if (dir == LV_DIR_RIGHT && fromEdge && !isChannelDropdownVisible()
         && channelDrawerCanOpenFromEdge()) {
         setChannelDropdownVisible(true);
@@ -50082,6 +51659,11 @@ static void layoutScreenHeader(ScreenHeader &h) {
     // or two down where it does not ("Configuration" in the P4's upright 24 px
     // would otherwise run under it) -- only then is it cut short.
     static const lv_font_t *const kSmaller[] = {
+#if defined(DEVICE_CROWPANEL_50)
+        // Steps down from its doubled 32 px header. Only here: naming a font
+        // links it, and no other board's header starts above 24.
+        &lv_font_montserrat_28, &lv_font_montserrat_24, &lv_font_montserrat_20,
+#endif
         &lv_font_montserrat_18, &lv_font_montserrat_16,
         &lv_font_montserrat_14, &lv_font_montserrat_12,
     };
@@ -50256,7 +51838,7 @@ static lv_obj_t *secondaryHeaderBtn(lv_obj_t *row, const char *text, lv_event_cb
     lv_obj_add_event_cb(btn, cb, LV_EVENT_CLICKED, nullptr);
 
     lv_obj_t *lbl = lv_label_create(btn);
-#if defined(DEVICE_CROWPANEL_35)
+#if defined(DEVICE_CROWPANEL)
     lv_obj_set_style_text_font(lbl, big ? STACK_BTN_FONT : &lv_font_montserrat_12, 0);
 #else
     lv_obj_set_style_text_font(lbl, big ? STACK_BTN_FONT : &lv_font_montserrat_10, 0);
@@ -53084,8 +54666,17 @@ static bool s_mqttDownlinkUiDirty = false;
 // received-style packet and run it through the normal RX pipeline so it displays
 // and (for router roles) rebroadcasts onto LoRa — gated by the channel's
 // downlink flag. Called from mqttBridgeLoop() on the main loop.
-static void mqttDownlinkInject(const MeshHdr &hdr, const uint8_t *cipher,
-                               size_t cipherLen, const char *chanName) {
+//
+// plaintext: the envelope's packet carried `decoded` Data rather than
+// ciphertext, as stock nodes publish with MQTT encryption off. Such a packet is
+// encrypted here with the named channel's key and stamped with its hash, so from
+// there on it is the encrypted form and takes the same path — decrypt, dedup
+// against the RF and encrypted-MQTT copies, and a relay that has on-air bytes
+// to send. Upstream does the same, re-encrypting on its way back to LoRa.
+static void mqttDownlinkInject(const MeshHdr &hdrIn, const uint8_t *cipherIn,
+                               size_t cipherLen, bool plaintext, const char *chanName) {
+    MeshHdr hdr = hdrIn;
+    const uint8_t *cipher = cipherIn;
     // Nothing from the broker enters the RX pipeline while a preset scan has the
     // radio parked on another preset. The bridge keeps its session — dropping a
     // downlink costs one packet, where dropping the session costs a reconnect —
@@ -53114,6 +54705,12 @@ static void mqttDownlinkInject(const MeshHdr &hdr, const uint8_t *cipher,
     // meant to reject them.
     const bool isPkiEnvelope = chanName && !strcmp(chanName, "PKI");
     if (isPkiEnvelope) {
+        // A PKI packet is only ever ciphertext; there is no key to check a
+        // "decoded" one against, so it would be an unauthenticated DM.
+        if (plaintext) {
+            Serial.println("[mqtt] downlink drop: decoded packet on PKI topic");
+            return;
+        }
         if (s_myNodeId == 0 || hdr.to != s_myNodeId) {
             Serial.println("[mqtt] downlink drop: PKI packet not addressed to us");
             return;
@@ -53153,8 +54750,38 @@ static void mqttDownlinkInject(const MeshHdr &hdr, const uint8_t *cipher,
                       CHANNEL_KEYS[idx].name);
         return;
     }
-    Serial.printf("[mqtt] downlink inject: channel='%s' from=%08lx\n",
-                  CHANNEL_KEYS[idx].name, (unsigned long)hdr.from);
+
+    uint8_t sealed[sizeof(((MeshPacket *)nullptr)->rawCipher)];
+    if (plaintext) {
+        uint32_t port = 0, reqId = 0; bool wantResp = false;
+        const uint8_t *pay = nullptr; size_t payLen = 0;
+        if (cipherLen == 0 || cipherLen > sizeof(sealed) ||
+            !decodeData(cipher, cipherLen, port, pay, payLen, reqId, wantResp)) {
+            Serial.printf("[mqtt] downlink drop: malformed decoded packet on '%s'\n",
+                          CHANNEL_KEYS[idx].name);
+            return;
+        }
+        // Upstream's rule: anyone on the broker can write a decoded packet, and
+        // nothing in it proves who sent it, so it never reaches admin handling.
+        if (port == ADMIN_APP) {
+            Serial.printf("[mqtt] downlink drop: decoded ADMIN packet from=%08lx\n",
+                          (unsigned long)hdr.from);
+            return;
+        }
+        if (!encryptPayload(hdr.id, hdr.from, CHANNEL_KEYS[idx].key,
+                            CHANNEL_KEYS[idx].keyLen, cipher, sealed, cipherLen)) {
+            Serial.println("[mqtt] downlink drop: could not encrypt decoded packet");
+            return;
+        }
+        cipher = sealed;
+        // A decoded packet's channel field is the sender's channel index, not
+        // the on-air hash decryptPacket() and the relay need.
+        hdr.channel = CHANNEL_KEYS[idx].hash;
+    }
+
+    Serial.printf("[mqtt] downlink inject: channel='%s' from=%08lx%s\n",
+                  CHANNEL_KEYS[idx].name, (unsigned long)hdr.from,
+                  plaintext ? " (decoded)" : "");
 
     // Reconstruct the decoded packet the same way MeshRadio::pollRx() does, then
     // hand it to the shared RX handler (decrypt/display + rebroadcast).
@@ -55431,6 +57058,11 @@ static void buildUi() {
     // name and clock (see selectorTextFont / clockTextFont below). The chat
     // list is what gives it up -- it is sized from what is left over.
     const int chatHeaderH = uiPortrait() ? 38 : 25;
+#elif defined(DEVICE_CROWPANEL_50)
+    // Twice the usual, fonts with it (below): the 5" has the room, and the
+    // header is read at arm's length. Every screen's header copies this one
+    // (s_chatHdrGeom), so they all grow together.
+    const int chatHeaderH = 50;
 #else
     const int chatHeaderH = 25;
 #endif
@@ -55625,7 +57257,15 @@ static void buildUi() {
 #if UI_TOUCH_ONLY_PROFILE
     const lv_font_t *headerIconFont = (chatHeaderH >= 25) ? &lv_font_montserrat_14 : &lv_font_montserrat_12;
 #endif
+#if defined(DEVICE_CROWPANEL_50)
+    // The doubled header (chatHeaderH): each face twice its usual size.
+    headerTextFont = &lv_font_montserrat_24;
+    clockTextFont = &lv_font_montserrat_32;
+    headerIconFont = &lv_font_montserrat_28;
+    const int headerPadX = 12;
+#else
     const int headerPadX = (chatHeaderH >= 25) ? 6 : 4;
+#endif
 #if UI_CHANNEL_LIST_DROPDOWN
     s_channelStrip = nullptr;
     s_channelList = nullptr;
@@ -55779,10 +57419,16 @@ static void buildUi() {
     lv_obj_set_size(s_chatHeaderBattBar,
 #if defined(DEVICE_CARDPUTER_LORA_HAT)
                     6,
+#elif defined(DEVICE_CROWPANEL_50)
+                    16,
 #else
                     (chatHeaderH >= 25) ? 8 : 7,
 #endif
+#if defined(DEVICE_CROWPANEL_50)
+                    16);
+#else
                     (chatHeaderH >= 25) ? 8 : 7);
+#endif
     lv_obj_align(s_chatHeaderBattBar, LV_ALIGN_RIGHT_MID, -headerPadX, 0);
     lv_obj_set_style_radius(s_chatHeaderBattBar, LV_RADIUS_CIRCLE, 0);
     lv_obj_set_style_bg_opa(s_chatHeaderBattBar, LV_OPA_COVER, 0);
@@ -55909,6 +57555,9 @@ static void buildUi() {
     channelNavFont = &lv_font_montserrat_14;
 #elif defined(DEVICE_TDECK) || defined(DEVICE_TDECK_PRO) || defined(DEVICE_M9)
     channelNavFont = &lv_font_montserrat_14; // nearest built-in to requested size 13
+#elif defined(DEVICE_CROWPANEL_50)
+    // Its list text as it is (kMainScreenFont, drawn as 20), not the 14 the
+    // other touch boards take: the 800x480 panel has the room.
 #elif UI_TOUCH_ONLY_PROFILE
     if (!useCompactVerticalHeltecSelector()) channelNavFont = &lv_font_montserrat_14; // keep vertical Heltec unchanged
 #endif
@@ -55929,7 +57578,12 @@ static void buildUi() {
         // button has settled.
         const int dropdownW = selectorBtnW;
 #else
+#if defined(DEVICE_CROWPANEL_50)
+        // Wider for its larger names (channelNavFont above).
+        const int dropdownW = min(max(chatW / 2, 120), 420);
+#else
         const int dropdownW = min(max(chatW / 2, 120), 260);
+#endif
 #endif
 
         // Behind the drawer and over everything else: a tap anywhere outside
@@ -56032,6 +57686,11 @@ static void buildUi() {
     // rows leave behind.
 #if UI_LARGE_PANEL_PROFILE
     const int chatBtnRowH = 56;
+    const lv_font_t *chatActionFont = &lv_font_montserrat_18;
+#elif defined(DEVICE_CROWPANEL_50)
+    // Twice the height and the text (named 18: drawn as 20, see
+    // hal/crowpanel_50_fonts.h), with the nav bar and header.
+    const int chatBtnRowH = 44;
     const lv_font_t *chatActionFont = &lv_font_montserrat_18;
 #else
     const int chatBtnRowH = 22;
@@ -58118,12 +59777,17 @@ static bool chatPanelInFront() {
     return true;
 }
 
-// How long a conversation's new messages blink once it is in front of the user.
-// A message arriving meanwhile starts the count again.
-static constexpr uint32_t kFreshSeenMs = 15000;
+// How long a conversation's new messages blink once it is in front of the user:
+// the Message Blink setting. A message arriving meanwhile starts the count
+// again. With the blink Off the marks still clear after the default 15 s, since
+// that is also when the channel list stops flagging the conversation.
+static uint32_t freshSeenMs() {
+    const uint32_t secs = cfgChatBlinkSecs(s_cfg);
+    return (secs ? secs : 15u) * 1000u;
+}
 
 // Tracks how long one conversation has been in front since its last new
-// message, and reports once when that reaches kFreshSeenMs.
+// message, and reports once when that reaches freshSeenMs().
 struct FreshSeenTimer {
     uint32_t sinceMs;
     uint32_t seq;
@@ -58135,14 +59799,14 @@ struct FreshSeenTimer {
             done = false;
             return false;
         }
-        if (done || (uint32_t)(now - sinceMs) < kFreshSeenMs) return false;
+        if (done || (uint32_t)(now - sinceMs) < freshSeenMs()) return false;
         done = true;
         return true;
     }
 };
 
 // New messages stay marked (and blinking) until the user has had their
-// conversation in front of them for kFreshSeenMs, or has left it sooner:
+// conversation in front of them for freshSeenMs(), or has left it sooner:
 // another channel, another screen, or the display going to sleep. Watching what
 // is in front each pass catches every way of leaving without hooking each one.
 static void serviceFreshMarks() {

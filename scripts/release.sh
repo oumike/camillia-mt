@@ -37,6 +37,7 @@ RELEASE_ENVS=(
     m9
     wio-tracker-l2
     crowpanel-35
+    crowpanel-50
     p4-amoled-sx1262
     p4-amoled-lr2021
 )

@@ -707,6 +707,31 @@ uint16_t cfgCoerceKbLightTimeout(long secs) {
     return (bestDelta < 0) ? 0 : best;
 }
 
+uint8_t cfgCoerceChatBlink(long secs) {
+    if (secs <= 0) return kChatBlinkOff;
+    long snapped = ((secs + kChatBlinkStepS / 2) / kChatBlinkStepS) * kChatBlinkStepS;
+    if (snapped < kChatBlinkStepS) snapped = kChatBlinkStepS;
+    if (snapped > kChatBlinkMaxS) snapped = kChatBlinkMaxS;
+    return (uint8_t)snapped;
+}
+
+uint8_t cfgChatBlinkSecs(const RhinoConfig &c) {
+    if (c.chatBlinkSecs == kChatBlinkOff) return 0;
+    if (c.chatBlinkSecs == 0 || c.chatBlinkSecs > kChatBlinkMaxS
+        || c.chatBlinkSecs % kChatBlinkStepS != 0) {
+        const uint8_t def = cfgCoerceChatBlink(MY_CHAT_BLINK_S);
+        return (def == kChatBlinkOff) ? 0 : def;
+    }
+    return c.chatBlinkSecs;
+}
+
+const char *chatBlinkName(uint8_t secs) {
+    static char buf[12];
+    if (secs == 0) return TR_NOOP("Off");
+    snprintf(buf, sizeof(buf), "%u sec", (unsigned)secs);
+    return buf;
+}
+
 uint8_t positionPrecisionCoerce(uint8_t bits) {
     for (int i = 0; i < kPositionPrecisionCount; i++) {
         if (kPositionPrecisions[i].bits == bits) return bits;
@@ -1234,6 +1259,7 @@ void cfgInitDefaults(RhinoConfig &cfg) {
     cfg.kbBlinkDmFlashes   = cfgCoerceKbFlashes(MY_KB_BLINK_DM_FLASHES);
     cfg.notifyLightTimeoutS = cfgCoerceNotifyLightTimeout(MY_NOTIFY_LIGHT_TIMEOUT_S);
     cfg.kbLightTimeoutS     = cfgCoerceKbLightTimeout(MY_KB_LIGHT_TIMEOUT_S);
+    cfg.chatBlinkSecs       = cfgCoerceChatBlink(MY_CHAT_BLINK_S);
     cfg.meshBeaconListen  = (bool)MY_MESH_BEACON_LISTEN;
     cfg.debugAcks          = MY_DBG_ACKS;
     cfg.debugMessages      = MY_DBG_MESSAGES;
@@ -1686,6 +1712,9 @@ void cfgToYaml(const RhinoConfig &cfg, String &out) {
     // Carried by every build so a backup moves between boards.
     snprintf(tmp, sizeof(tmp), "    keyboardLightTimeoutSecs: %u   # 0 = never (%s)\n",
              (unsigned)cfg.kbLightTimeoutS, kbLightTimeoutName(cfg.kbLightTimeoutS));
+    out += tmp;
+    snprintf(tmp, sizeof(tmp), "    chatBlinkSecs: %u   # 0 = off\n",
+             (unsigned)cfgChatBlinkSecs(cfg));
     out += tmp;
     snprintf(tmp, sizeof(tmp), "    invertScroll: %s\n", cfg.invertScroll ? "true" : "false"); out += tmp;
     snprintf(tmp, sizeof(tmp), "    navBar: %s\n", cfg.navBarEnabled ? "true" : "false"); out += tmp;
@@ -2351,6 +2380,8 @@ bool cfgImportFromBuf(const char *buf, size_t len, RhinoConfig &cfg) {
                     cfg.notifyLightTimeoutS = cfgCoerceNotifyLightTimeout(atol(val));
                 else if (!strcmp(key, "keyboardLightTimeoutSecs"))
                     cfg.kbLightTimeoutS = cfgCoerceKbLightTimeout(atol(val));
+                else if (!strcmp(key, "chatBlinkSecs"))
+                    cfg.chatBlinkSecs = cfgCoerceChatBlink(atol(val));
                 else if (!strcmp(key, "invertScroll"))    cfg.invertScroll = parseBoolValue(val);
                 else if (!strcmp(key, "navBar"))         cfg.navBarEnabled = parseBoolValue(val);
                 else if (!strcmp(key, "navAlign"))     cfg.navAlign = navAlignParse(val);

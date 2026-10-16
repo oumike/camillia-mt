@@ -1,4 +1,4 @@
-// Vendored from camillia-chat-server 9754229; edit there, not here.
+// Vendored from camillia-chat-server d6bd9e2; edit there, not here.
 #include "cs_proto.h"
 #include "sha256_portable.h"
 #include <string.h>
@@ -86,10 +86,29 @@ bool peekType(const uint8_t *buf, size_t len, Type &out) {
 
 size_t itemWireSize(const Item &it) { return ITEM_OVERHEAD + it.textLen; }
 
-size_t encodeDiscover(uint8_t *buf, size_t cap) {
+size_t encodeDiscover(uint8_t *buf, size_t cap, const uint32_t *ids, uint8_t n) {
+    if (n > MAX_DISCOVER_CHANNELS) return 0;
     Writer w{buf, cap};
     w.u8(VERSION); w.u8(DISCOVER);
+    if (n) {
+        w.u8(n);
+        for (uint8_t i = 0; i < n; i++) w.u32(ids[i]);
+    }
     return w.done();
+}
+
+bool decodeDiscover(const uint8_t *buf, size_t len, uint32_t *ids, uint8_t &n, bool &hasList) {
+    Reader r{buf, len};
+    n = 0;
+    hasList = false;
+    if (!readHeader(r, DISCOVER)) return false;
+    if (r.n == len) return true;
+    n = r.u8();
+    if (!r.ok || n > MAX_DISCOVER_CHANNELS) { n = 0; return false; }
+    for (uint8_t i = 0; i < n; i++) ids[i] = r.u32();
+    if (!r.ok || r.n != len) { n = 0; return false; }
+    hasList = true;
+    return true;
 }
 
 size_t encodeAnnounce(const Announce &a, uint8_t *buf, size_t cap) {

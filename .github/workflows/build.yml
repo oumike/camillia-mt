@@ -102,6 +102,7 @@ jobs:
           pio run -e m9 --disable-auto-clean
           pio run -e wio-tracker-l2 --disable-auto-clean
           pio run -e crowpanel-35 --disable-auto-clean
+          pio run -e crowpanel-50 --disable-auto-clean
           PLATFORMIO_CORE_DIR="$HOME/.platformio-p4" pio run -e p4-amoled-sx1262 --disable-auto-clean
           PLATFORMIO_CORE_DIR="$HOME/.platformio-p4" pio run -e p4-amoled-lr2021 --disable-auto-clean
 

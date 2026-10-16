@@ -339,8 +339,8 @@ These apply to all keyboard builds, including `tdeck`, `tdeck-pro`,
   step through messages and Enter opens [Message Actions](#message-actions).
   Left goes back to the list, where Up and Down switch channels again. Portrait,
   whose list is a drawer, is unchanged
-- **The Nodes filter takes typing.** Enter applies the filter, and Backspace on
-  an empty field closes the dialog
+- **The Nodes Search dialog takes typing.** Enter searches, and Backspace on
+  an empty field cancels the dialog
 - **Caps Lock lights the expansion's indicator LEDs** while it is on
 - **F7 turns the keyboard light on and off.** The choice is kept across reboots,
   and the light also goes out and comes back with the screen
@@ -937,7 +937,7 @@ reset actions. Announcing to the mesh has moved to Live → Tools → Announce.
 - Keyboard builds: I opens/focuses the info panel within Config
 - Import, both Clear Nodes rows, and Factory Reset require a second Enter
   confirmation
-- **Space filters the rows**, the same way it does on the Nodes screen. Press
+- **Space filters the rows**. Press
   Space to arm the filter, then type to narrow the list; the header shows
   `[what you typed]` and how many rows match. Backspace edits the filter and
   disarms it once empty, Up/Down and Enter work normally on whatever is left,
@@ -1217,7 +1217,7 @@ does.
 from the last returns to the first — with nearly thirty themes in the list, the
 bottom of it is otherwise a long way from the top.
 
-**Space filters the rows**, the same way it does on the CFG and Nodes screens.
+**Space filters the rows**, the same way it does on the CFG screen.
 Press Space to arm the filter, then type to narrow the list to themes whose names
 contain what you typed, case-insensitively — `dark` for every dark variant, `sun`
 for `Sunset Ridge`. The line under the title shows `[what you typed]` and how many
@@ -2279,6 +2279,20 @@ Unlike Chat Style, this applies **without a reboot**: bubble views re-render
 immediately, and new classic-chat lines use the chosen style going forward. The
 Web Config **Chat Names** dropdown offers the same two choices.
 
+### Message blink
+
+A newly received message blinks in the chat and DM views until its conversation
+has been on screen for a while, or until you leave it. Config's **Message
+Blink** action opens a slider that sets how long: **Off**, or 5 to 60 seconds in
+5-second steps. The default is 15 seconds, which is what every build did before
+this setting existed. Off means new messages never blink; the channel list still
+stops flagging a conversation after 15 seconds on screen.
+
+It applies immediately, with no reboot. Switching it off stops anything already
+blinking. On the web page, **Message Blink** opens the same slider in a modal,
+with Save and Cancel. The T-Deck Pro has no such row, because its e-paper never
+blinks.
+
 ### Brightness
 
 The **Brightness** action opens a slider covering 10%–100% in 10% steps. The
@@ -2779,9 +2793,29 @@ it. With the master **WiFi** row off nothing can start, so the picker says
 
 ## Nodes screen
 
-Nodes shows discovered nodes and detail fields, including map position details.
+Nodes shows your favorite nodes, and any node you search for, with detail
+fields including map position details.
 
 - Open from the main screen (N on keyboard builds, Nodes bottom-nav button on Heltec)
+- **The list shows only favorites** until you search. The title reads
+  `Favorites (n)`. Favorite a node from its actions menu (A, or tap it) while it
+  is in search results and it joins the favorites
+- **Search** is the button at the top of the list (Space on keyboard builds). It
+  opens a dialog with a text field, **Cancel** and **Search**. Type part of a long
+  name, a short name or a node id (`!1a2b`) and press Search (or Enter); the list
+  then shows every matching node, favorite or not, and the title reads
+  `Nodes [what you typed] (matches)`. Archived nodes are included only while
+  **Show Archived Nodes** is on. Searching for nothing just closes the dialog
+- **While search results are shown the button reads Clear search.** Tap it, or
+  press Space or Backspace, to return to the favorites. Every visit to the screen
+  starts on the favorites
+- **All**, the button above Search, lists every node at once (live, plus
+  archived while **Show Archived Nodes** is on). The title reads
+  `All nodes (n)`; Clear search returns to the favorites
+- **Wildcards:** `*` matches any run of characters and `?` any one character.
+  A query with a wildcard must match the whole name or id, so `mi*` finds names
+  starting with "mi", `*base` names ending in "base", and `!1a2b*` ids starting
+  with `1a2b`. Without a wildcard a query matches anywhere in the name, as before
 - **The node list is on the left, the selected node's details on the right.** The
   list gets a real share of the width — about 45% — because its rows carry the
   node's **long name**, ellipsized when it does not fit. A node with no long name
@@ -2794,9 +2828,7 @@ Nodes shows discovered nodes and detail fields, including map position details.
   focused panel is the one with the bright border. The close key steps back out
   to the list; from the list it closes the screen
 - **A opens the actions menu** for the selected node, from either panel. (It used
-  to be Enter, which now focuses the details.) While you are typing a filter,
-  letters are filter text; press Enter to commit the filter and A works again on
-  the narrowed list
+  to be Enter, which now focuses the details.)
 - **Locate** in that menu shows where the node is — see [Locate](#locate)
 - On the T-Lora Pager the wheel click toggles between the two panels, the same
   way it swaps panels on Config and DM
@@ -2805,8 +2837,8 @@ Nodes shows discovered nodes and detail fields, including map position details.
 **Cardputer keeps the original layout**: a narrow column of short names on the
 right with the details taking the left. Four sections of aligned fields need
 width for two columns and height for roughly seventeen rows, and 240x135 has
-neither. Everything else on this screen — the filter, the selection, Enter for
-details focus, A for actions — works there the same way.
+neither. Everything else on this screen — the selection, Enter for
+details focus, A for actions, Space for Search — works there the same way.
 
 It also lists **at most 50 nodes** rather than 250, because it is the one board
 with no PSRAM to keep the table in. The list is otherwise identical; it just
@@ -2885,23 +2917,26 @@ limitations. The pre-download controls still present in Web Config are legacy;
 the live Locate viewport does not consume those files while the cache design is
 being revisited.
 
-### Filtering nodes
+### Searching nodes
 
-- Space starts the filter. Filter brackets `[ ]` appear in the header as a visual
-  cue that filtering is on, even before you type anything
-- Once the filter is armed, type to narrow the list; the text shows inside the
-  brackets (`NODES [text] (count)`)
-- Typing a letter on its own no longer starts the filter — only Space does
-- Backspace edits the filter text; backspacing past the last character closes the
-  filter and clears the brackets
-- **Enter commits the filter.** The rows stay narrowed and the brackets stay in
-  the header, but the keyboard goes back to the list: Up/Down move the cursor
-  over the matching nodes and A opens the actions menu for the selected one
-  instead of typing an `a`. A second Enter focuses the details panel, the same
-  as it does with no filter
-- With a committed filter, Backspace goes back to editing the text (it does not
-  discard it), and Space does the same — so you can narrow, act, and re-narrow
-  without leaving the screen. The hint line names whichever keys are live
+- The list shows favorites only. **Search** (the button above the list, or Space
+  on keyboard builds) opens a dialog with a text field, Cancel and Search
+- Matching is case-insensitive on the long name, short name and node id
+  (`!1a2b3c4d`). Archived nodes are searched only while Show Archived Nodes is on
+- `*` (any run) and `?` (any one character) are wildcards; a query containing
+  one must match the whole field (`mi*`, `*base`, `!1a2b*`). `*` alone is what
+  the **All** button searches for
+- **All**, above Search, shows every node; the header reads `All nodes (n)`
+- Search (or Enter) shows the matches; Cancel (or the close key) leaves the list
+  as it was. The header reads `Nodes [text] (matches)`
+- Up/Down, Enter and A work on the results as they do on the favorites
+- On keyboard builds the screen opens with the cursor on the first node. Up from
+  the first node (or from an empty list) moves the cursor onto the Search /
+  Clear search button, Up again onto All, Down walks back, and Enter presses
+  the button
+- The button reads **Clear search** while results are shown. It, Space, or
+  Backspace from the list returns to the favorites. The hint line names whichever
+  keys are live
 
 ![Node details screen](screenshots/RiCa_screen_20260730_194331.png)
 
@@ -2910,9 +2945,20 @@ being revisited.
 Direct messaging:
 
 - Open from the main screen (D on keyboard builds, DM bottom-nav button on Heltec)
+- Wherever the chat's channel list is a drawer (every board but the T-Lora
+  Pager and the large-panel P4 in landscape), the conversations are one too: the
+  screen opens on the most recent conversation, full width, with its peer named
+  in the header, and the list slides in from the left over the messages. It
+  opens the way the channel list does — **C** (**H** on the Cardputer), the DM
+  button again on the M9, or on touch a tap on the name in the header or a swipe
+  in from the left edge. Picking a conversation (Enter, or a tap) slides it away
+  again; a tap outside it, or C/H again, closes it. With no conversations yet it
+  opens on the list, at New DM
+- The Pager and the large-panel P4 in landscape keep the two panels side by side
 - Pressing Enter on New DM opens node picker
 - Enter on a conversation focuses the message panel (it stops there — Enter never
-  opens compose)
+  opens compose). On the drawer boards that is the list sliding away; Backspace
+  (T-Deck, T-Deck Pro) brings it back
 - Space opens compose for the focused DM (Space replaced Enter for new messages)
 - DM messages honor the Bubbles chat style: your messages are right-aligned in
   the accent/ack color, the other node's are left-aligned in their node color
@@ -2925,7 +2971,8 @@ Delete behavior:
   conversation?** dialog naming the peer and warning that the message history
   goes with it. Y or Enter confirms, N or the modal close key cancels, and the
   dialog swallows every other key while it is up. D does nothing on the New DM
-  row, or while the message panel has focus
+  row, or while the message panel has focus (on the drawer boards: while the
+  list is closed)
 - Heltec touch build: long-press a conversation row for 3 seconds to raise the
   same dialog; tap (Y)es or (N)o, or tap outside it to cancel
 - Deleting removes the conversation and its stored history, and cannot be

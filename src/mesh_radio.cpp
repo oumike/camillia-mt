@@ -358,6 +358,9 @@ bool MeshRadio::init(uint8_t txPower, bool rxBoostedGain) {
 #elif defined(DEVICE_CROWPANEL_35)
             Serial.printf("[radio] target=crowpanel-35 (expected pins: CS%d DIO1=%d RST%d BUSY%d; IO45 LOW selects LoRa, and the SX1262 module must be seated in J8/J9)\n",
                           LORA_CS, LORA_DIO1, LORA_RST, LORA_BUSY);
+#elif defined(DEVICE_CROWPANEL_50)
+            Serial.printf("[radio] target=crowpanel-50 (expected pins: CS%d DIO1=%d RST%d BUSY%d; the function DIP switch must select the wireless module, and the SX1262 module must be seated in J8/J9)\n",
+                          LORA_CS, LORA_DIO1, LORA_RST, LORA_BUSY);
 #elif defined(DEVICE_TDISPLAY_P4)
             Serial.printf("[radio] target=p4-amoled-%s (shared pins: CS%d IRQ=XL9535 RST=XL9535 BUSY%d)\n",
                           MESH_RADIO_IS_LR2021 ? "lr2021" : "sx1262",

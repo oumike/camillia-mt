@@ -32,13 +32,19 @@ EmojiSlot s_slots[] = {
     { &lv_font_montserrat_14, 16, {}, nullptr, false },
     { &lv_font_montserrat_16, 18, {}, nullptr, false },
     { &lv_font_montserrat_18, 20, {}, nullptr, false },
-#if defined(DEVICE_TDISPLAY_P4)
-    // The P4's Extra Large chat size, which no other board draws at.
+#if defined(DEVICE_TDISPLAY_P4) || defined(DEVICE_CROWPANEL_50)
+    // The P4's Extra Large chat size, which no other board draws at -- and on
+    // the CrowPanel 5", whose UI is drawn a step up (hal/crowpanel_50_fonts.h),
+    // what its 18 px text becomes.
     { &lv_font_montserrat_20, 22, {}, nullptr, false },
 #endif
-#if defined(DEVICE_CROWPANEL_35)
-    // The CrowPanel 3.5's Extra Large chat size.
+#if defined(DEVICE_CROWPANEL)
+    // The CrowPanels' Extra Large chat size.
     { &lv_font_montserrat_24, 26, {}, nullptr, false },
+#endif
+#if defined(DEVICE_CROWPANEL_50)
+    // Its 24 px text a step up: Extra Large chat and the nav bar's icons.
+    { &lv_font_montserrat_28, 30, {}, nullptr, false },
 #endif
 };
 constexpr int kSlotCount = (int)(sizeof(s_slots) / sizeof(s_slots[0]));

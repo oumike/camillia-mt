@@ -138,20 +138,25 @@ void onMessage(char *topic, uint8_t *payload, unsigned int len) {
     MeshHdr hdr;
     uint8_t cipher[240];
     size_t  cipherLen = 0;
+    bool    plaintext = false;
     char    chan[16];
     bool decoded = decodeServiceEnvelope(payload, len, hdr, cipher, sizeof(cipher),
-                                         cipherLen, chan, sizeof(chan));
+                                         cipherLen, plaintext, chan, sizeof(chan));
     // Serial.printf("[mqtt] downlink rx topic=%s len=%u decoded=%d chan=%s from=%08lx\n",
     //               topic ? topic : "(null)", len, decoded ? 1 : 0,
     //               decoded ? chan : "?", decoded ? (unsigned long)hdr.from : 0UL);
-    if (!decoded) return;
+    if (!decoded) {
+        Serial.printf("[mqtt] downlink drop: no ciphertext and no decoded payload, "
+                      "or oversized (topic=%s len=%u)\n", topic ? topic : "(null)", len);
+        return;
+    }
     // Before the inject, so the gateway is known by the time anything asks.
     const uint32_t gw = topicGatewayNode(topic);
     if (gw != 0) {
         s_gatewaySeen[s_gatewaySeenNext] = { hdr.from, hdr.id, gw };
         s_gatewaySeenNext = (s_gatewaySeenNext + 1) % kGatewaySeenCount;
     }
-    s_inject(hdr, cipher, cipherLen, chan);
+    s_inject(hdr, cipher, cipherLen, plaintext, chan);
 }
 
 void applyTransport() {
