@@ -1327,6 +1327,14 @@ static constexpr int kNodesTopAll = 1;
 static constexpr int kNodesTopMap = 2;
 static bool s_nodesSearchBtnFocused = false;
 static int s_nodesTopBtn = kNodesTopSearch;
+// Where the keyboard cursor can walk onto those buttons: every keyboard board,
+// and the T-Display P4, which builds touch-only but has a keyboard expansion
+// (#116: without this its arrows had nowhere to go from an empty list).
+#if !UI_TOUCH_ONLY_PROFILE || defined(DEVICE_TDISPLAY_P4)
+#  define NODES_KEYBOARD_TOP_BUTTONS 1
+#else
+#  define NODES_KEYBOARD_TOP_BUTTONS 0
+#endif
 // Locate is compiled out on the Cardputer, for the same reason Message Actions
 // is (see HAS_MESSAGE_ACTIONS below): no PSRAM, and decoding a PNG into a
 // full-panel image object is exactly the allocation that board has no room to
@@ -13480,6 +13488,55 @@ static void showTextareaCursor(lv_obj_t *ta) {
 }
 
 #if UI_TOUCH_ONLY_PROFILE
+#if defined(DEVICE_TDISPLAY_P4) || defined(DEVICE_CROWPANEL)
+// For a keyboard given a fixed height: what it gave up has to go somewhere.
+// Where a sibling already grows (the admin transcript) it takes it and the
+// keyboard, created last, is already at the bottom. Where nothing does -- the
+// dialogs, whose rows are all fixed -- an invisible spacer above the keyboard
+// takes it, rather than the keyboard floating mid-screen over blank space. A
+// parent sized to its content (the composer) has no slack to take, so it gets
+// none.
+static void keyboardYieldSlack(lv_obj_t *keyboard) {
+    lv_obj_t *parent = lv_obj_get_parent(keyboard);
+    if (parent && lv_obj_get_style_layout(parent, LV_PART_MAIN) == LV_LAYOUT_FLEX
+        && lv_obj_get_style_height(parent, LV_PART_MAIN) != LV_SIZE_CONTENT) {
+        bool siblingGrows = false;
+        const uint32_t n = lv_obj_get_child_count(parent);
+        for (uint32_t i = 0; i < n; i++) {
+            lv_obj_t *child = lv_obj_get_child(parent, (int32_t)i);
+            if (child != keyboard
+                && lv_obj_get_style_flex_grow(child, LV_PART_MAIN) > 0) {
+                siblingGrows = true;
+                break;
+            }
+        }
+        if (!siblingGrows) {
+            lv_obj_t *spacer = lv_obj_create(parent);
+            lv_obj_remove_style_all(spacer);
+            lv_obj_clear_flag(spacer, (lv_obj_flag_t)(LV_OBJ_FLAG_CLICKABLE
+                                                      | LV_OBJ_FLAG_SCROLLABLE));
+            lv_obj_set_size(spacer, 1, 0);
+            lv_obj_set_flex_grow(spacer, 1);
+            lv_obj_move_to_index(spacer, lv_obj_get_index(keyboard));
+        }
+    }
+}
+#endif
+
+// The composer docks on a fixed-height keyboard -- only as tall as what it
+// holds, on the bottom edge, the conversation readable above it -- wherever
+// the keyboard is fixed rather than grown (configureOnScreenKeyboard): the P4
+// always, the CrowPanel 3.5 upright.
+static inline bool composeDockedOnKeyboard() {
+#if defined(DEVICE_TDISPLAY_P4)
+    return true;
+#elif defined(DEVICE_CROWPANEL_35)
+    return uiPortrait();
+#else
+    return false;
+#endif
+}
+
 static void configureOnScreenKeyboard(lv_obj_t *keyboard) {
     if (!keyboard) return;
     lv_obj_set_width(keyboard, lv_pct(100));
@@ -13514,38 +13571,24 @@ static void configureOnScreenKeyboard(lv_obj_t *keyboard) {
 #else
     lv_obj_set_height(keyboard, uiPortrait() ? 150 : screenH / 2);
 #endif
-
-    // What the keyboard gave up has to go somewhere. Where a sibling already
-    // grows (the admin transcript) it takes it and the keyboard, created last,
-    // is already at the bottom. Where nothing does -- the dialogs, whose rows
-    // are all fixed -- an invisible spacer above the keyboard takes it, rather
-    // than the keyboard floating mid-screen over blank space. A parent sized to
-    // its content (the composer) has no slack to take, so it gets none.
-    lv_obj_t *parent = lv_obj_get_parent(keyboard);
-    if (parent && lv_obj_get_style_layout(parent, LV_PART_MAIN) == LV_LAYOUT_FLEX
-        && lv_obj_get_style_height(parent, LV_PART_MAIN) != LV_SIZE_CONTENT) {
-        bool siblingGrows = false;
-        const uint32_t n = lv_obj_get_child_count(parent);
-        for (uint32_t i = 0; i < n; i++) {
-            lv_obj_t *child = lv_obj_get_child(parent, (int32_t)i);
-            if (child != keyboard
-                && lv_obj_get_style_flex_grow(child, LV_PART_MAIN) > 0) {
-                siblingGrows = true;
-                break;
-            }
-        }
-        if (!siblingGrows) {
-            lv_obj_t *spacer = lv_obj_create(parent);
-            lv_obj_remove_style_all(spacer);
-            lv_obj_clear_flag(spacer, (lv_obj_flag_t)(LV_OBJ_FLAG_CLICKABLE
-                                                      | LV_OBJ_FLAG_SCROLLABLE));
-            lv_obj_set_size(spacer, 1, 0);
-            lv_obj_set_flex_grow(spacer, 1);
-            lv_obj_move_to_index(spacer, lv_obj_get_index(keyboard));
-        }
-    }
+    keyboardYieldSlack(keyboard);
 #elif UI_EDGE_TO_EDGE_TEXT_ENTRY
+#if defined(DEVICE_CROWPANEL_35)
+    // Upright (320x480) this is the P4's portrait keyboard: a fixed height on
+    // the bottom edge instead of growing into the modal, which took nearly the
+    // whole screen. 150 px is ~24 mm on this panel, the same physical height
+    // as the P4's 150 UI px. Landscape is a 320-tall panel, where growing into
+    // what is left is still the right amount.
+    if (uiPortrait()) {
+        lv_obj_set_flex_grow(keyboard, 0);
+        lv_obj_set_height(keyboard, 150);
+        keyboardYieldSlack(keyboard);
+    } else {
+        lv_obj_set_flex_grow(keyboard, 1);
+    }
+#else
     lv_obj_set_flex_grow(keyboard, 1);
+#endif
     // Text entry owns the screen (Wio Tracker L2, CrowPanel). Remove keyboard chrome
     // and keep only a one-pixel key gap so the narrow QWERTY rows spend their
     // width on tap targets rather than nested modal/theme padding.
@@ -13823,19 +13866,19 @@ static void openComposePrompt(uint32_t replyPacketId,
     if (modalH < 120) modalH = lv_disp_get_ver_res(NULL);
 
     s_composeModal = lv_obj_create(s_rootScreen);
-#if defined(DEVICE_TDISPLAY_P4)
-    // Only as tall as what it holds, sitting on the bottom edge: the keyboard
-    // here is a fixed height (configureOnScreenKeyboard), so a full-screen
-    // modal left a band of nothing between it and the buttons. Content-sized,
-    // the buttons land on the keyboard, the input and title stack above them,
-    // and the conversation stays readable over the top.
-    (void)modalH;
-    lv_obj_set_size(s_composeModal, modalW, LV_SIZE_CONTENT);
-    lv_obj_align(s_composeModal, LV_ALIGN_BOTTOM_MID, 0, -4);
-#else
-    lv_obj_set_size(s_composeModal, modalW, modalH);
-    lv_obj_align(s_composeModal, LV_ALIGN_CENTER, 0, 0);
-#endif
+    const bool composeDocked = composeDockedOnKeyboard();
+    if (composeDocked) {
+        // Only as tall as what it holds, sitting on the bottom edge: the
+        // keyboard here is a fixed height (configureOnScreenKeyboard), so a
+        // full-screen modal left a band of nothing between it and the buttons.
+        // Content-sized, the buttons land on the keyboard, the input and title
+        // stack above them, and the conversation stays readable over the top.
+        lv_obj_set_size(s_composeModal, modalW, LV_SIZE_CONTENT);
+        lv_obj_align(s_composeModal, LV_ALIGN_BOTTOM_MID, 0, -4);
+    } else {
+        lv_obj_set_size(s_composeModal, modalW, modalH);
+        lv_obj_align(s_composeModal, LV_ALIGN_CENTER, 0, 0);
+    }
     lv_obj_clear_flag(s_composeModal, LV_OBJ_FLAG_SCROLLABLE);
     lv_obj_add_flag(s_composeModal, LV_OBJ_FLAG_CLICKABLE);
     composeStyleModal(s_composeModal, modalW, modalH);
@@ -13880,15 +13923,15 @@ static void openComposePrompt(uint32_t replyPacketId,
     }
     lv_obj_set_width(s_composeInput, lv_pct(100));
     lv_obj_set_style_text_font(s_composeInput, emojiFont(&lv_font_montserrat_14), 0);
-#if defined(DEVICE_TDISPLAY_P4)
-    // Wrapping, several lines tall, so a message reads as you write it rather
-    // than scrolling sideways out of a single line. Four in portrait, where
-    // the panel has the room; two in landscape, where the half-height keyboard
-    // leaves about that much. Measured from the face, with explicit padding
-    // rather than the theme's, so the box is exactly that many lines.
-    {
-        // With the keyboard expansion on there is no on-screen keyboard below
-        // (see the end of this function), and its room goes to the message.
+    if (composeDocked) {
+        // Wrapping, several lines tall, so a message reads as you write it
+        // rather than scrolling sideways out of a single line. Four in
+        // portrait, where the panel has the room; two in landscape (the P4
+        // only), where the half-height keyboard leaves about that much.
+        // Measured from the face, with explicit padding rather than the
+        // theme's, so the box is exactly that many lines. With the keyboard
+        // expansion on there is no on-screen keyboard below (see the end of
+        // this function), and its room goes to the message.
         const lv_coord_t composeLines = keyboardAttached() ? (uiPortrait() ? 8 : 4)
                                                            : (uiPortrait() ? 4 : 2);
         const lv_coord_t composePad = 4;
@@ -13897,25 +13940,24 @@ static void openComposePrompt(uint32_t replyPacketId,
                           lv_font_get_line_height(emojiFont(&lv_font_montserrat_14))
                               * composeLines
                           + 2 * composePad + 2);   // + 1 px border each side
+        lv_textarea_set_one_line(s_composeInput, false);
+        // A wrapping box would take the keyboard's Enter as a line break. In
+        // the one-line box every other touch board uses, the textarea drops
+        // that character, and a mesh message is one line either way -- so drop
+        // it here too and keep Enter doing what it does there.
+        lv_obj_add_event_cb(s_composeInput,
+                            [](lv_event_t *e) {
+                                const char *ins = (const char *)lv_event_get_param(e);
+                                if (ins && strcmp(ins, "\n") == 0) {
+                                    lv_textarea_set_insert_replace(
+                                        lv_event_get_target_obj(e), "");
+                                }
+                            },
+                            LV_EVENT_INSERT, nullptr);
+    } else {
+        lv_obj_set_height(s_composeInput, 44);
+        lv_textarea_set_one_line(s_composeInput, true);
     }
-    lv_textarea_set_one_line(s_composeInput, false);
-    // A wrapping box would take the keyboard's Enter as a line break. In the
-    // one-line box every other touch board uses, the textarea drops that
-    // character, and a mesh message is one line either way -- so drop it here
-    // too and keep Enter doing what it does there.
-    lv_obj_add_event_cb(s_composeInput,
-                        [](lv_event_t *e) {
-                            const char *ins = (const char *)lv_event_get_param(e);
-                            if (ins && strcmp(ins, "\n") == 0) {
-                                lv_textarea_set_insert_replace(
-                                    lv_event_get_target_obj(e), "");
-                            }
-                        },
-                        LV_EVENT_INSERT, nullptr);
-#else
-    lv_obj_set_height(s_composeInput, 44);
-    lv_textarea_set_one_line(s_composeInput, true);
-#endif
     lv_textarea_set_max_length(s_composeInput, MESH_TEXT_MAX_LEN);
     lv_textarea_set_placeholder_text(s_composeInput, TR("Type message..."));
     showTextareaCursor(s_composeInput);
@@ -25563,6 +25605,34 @@ static bool nodesFilterIsAll() {
     return s_nodesFilterOpen && strcmp(s_nodesFilter, "*") == 0;
 }
 
+#if NODES_KEYBOARD_TOP_BUTTONS
+// Whether the keyboard cursor is drawn at all: always where there are keys,
+// and on the P4 only while its keyboard is attached, so a P4 used by touch
+// never shows a cursor it cannot move.
+static bool nodesKeyboardCursorShown() {
+#if UI_TOUCH_ONLY_PROFILE
+    return keyboardAttached();
+#else
+    return true;
+#endif
+}
+#endif
+
+// An empty list has no row to hold the cursor, which left it nowhere and the
+// arrows doing nothing (#116). Put it on the button that gets you a list:
+// All for an empty Favorites, Clear search for a search with no matches.
+// Enter presses it (nodesFocusedButtonActivate()). Left alone when it is
+// already on a button, which is where the user put it.
+static void nodesFocusCursorForEmptyList() {
+#if NODES_KEYBOARD_TOP_BUTTONS
+    if (s_nodesSearchBtnFocused || !nodesKeyboardCursorShown()) return;
+    s_nodesSearchBtnFocused = true;
+    s_nodesTopBtn = s_nodesFilterOpen ? kNodesTopSearch : kNodesTopAll;
+    refreshNodesSearchButton();
+    refreshNodesHint();
+#endif
+}
+
 static void nodesApplyFilter() {
     s_nodesFilteredCount = 0;
 
@@ -25601,6 +25671,7 @@ static void nodesApplyFilter() {
     if (s_nodesFilteredCount <= 0) {
         s_nodesSelected = -1;
         s_nodesRenderStart = 0;
+        nodesFocusCursorForEmptyList();
         return;
     }
 
@@ -25913,7 +25984,7 @@ static void refreshNodesSearchButton() {
                         s_nodesSearchBtnFocused && s_nodesTopBtn == kNodesTopSearch);
 }
 
-#if !UI_TOUCH_ONLY_PROFILE
+#if NODES_KEYBOARD_TOP_BUTTONS
 // Moves the keyboard cursor between the buttons above the list and the rows.
 // btn picks which button (kNodesTop*) when focused is set.
 static void nodesSetSearchBtnFocus(bool focused, int btn = kNodesTopSearch) {
@@ -28096,8 +28167,24 @@ static bool nodeLocateBuildModal(const char *titleText, bool allNodes) {
 
     const int scrW = lv_disp_get_hor_res(NULL);
     const int scrH = lv_disp_get_ver_res(NULL);
+#if defined(DEVICE_TDISPLAY_P4)
+    // Edge to edge (#116). The 300 px card below was sized for 320-wide
+    // panels; on the P4 (284 or 616 UI px across) it left a band of backdrop
+    // either side, and in landscape used less than half the screen. The title
+    // rides on the map as a chip and the touch X is the way back, so the
+    // canvas gets the whole display. Locate and the node map both.
+    const bool fullScreen = true;
+#else
+    const bool fullScreen = false;
+#endif
     int modalW = scrW - 24;
     if (modalW > 300) modalW = 300;
+    if (fullScreen) modalW = scrW;
+#if UI_TOUCH_ONLY_PROFILE
+    const int closeXSize = kHeltecCloseXSize;   // the X that is the way back
+#else
+    const int closeXSize = 0;
+#endif
     // Full viewport height. The map box is the modal's only flex-grow child, so
     // every row reclaimed here lands in the canvas rather than in padding.
     //
@@ -28140,7 +28227,7 @@ static bool nodeLocateBuildModal(const char *titleText, bool allNodes) {
     lv_obj_clear_flag(s_nodeLocateBackdrop, LV_OBJ_FLAG_SCROLLABLE);
     lv_obj_add_flag(s_nodeLocateBackdrop, LV_OBJ_FLAG_CLICKABLE);
     lv_obj_set_style_bg_color(s_nodeLocateBackdrop, lv_color_hex(0x000000), 0);
-    lv_obj_set_style_bg_opa(s_nodeLocateBackdrop, LV_OPA_50, 0);
+    lv_obj_set_style_bg_opa(s_nodeLocateBackdrop, fullScreen ? LV_OPA_COVER : LV_OPA_50, 0);
     lv_obj_set_style_border_width(s_nodeLocateBackdrop, 0, 0);
     lv_obj_set_style_pad_all(s_nodeLocateBackdrop, 0, 0);
     lv_obj_add_event_cb(s_nodeLocateBackdrop, onNodeLocateBackdropPressed, LV_EVENT_CLICKED, nullptr);
@@ -28152,22 +28239,28 @@ static bool nodeLocateBuildModal(const char *titleText, bool allNodes) {
     lv_obj_add_flag(s_nodeLocateModal, LV_OBJ_FLAG_CLICKABLE);
     lv_obj_set_style_bg_color(s_nodeLocateModal, modalBg, 0);
     lv_obj_set_style_bg_opa(s_nodeLocateModal, LV_OPA_COVER, 0);
-    lv_obj_set_style_border_width(s_nodeLocateModal, 1, 0);
+    lv_obj_set_style_border_width(s_nodeLocateModal, fullScreen ? 0 : 1, 0);
     lv_obj_set_style_border_color(s_nodeLocateModal, modalBorder, 0);
-    lv_obj_set_style_pad_all(s_nodeLocateModal, 6, 0);
-    lv_obj_set_style_pad_row(s_nodeLocateModal, 3, 0);
+    lv_obj_set_style_pad_all(s_nodeLocateModal, fullScreen ? 0 : 6, 0);
+    lv_obj_set_style_pad_row(s_nodeLocateModal, fullScreen ? 0 : 3, 0);
+    if (fullScreen) lv_obj_set_style_radius(s_nodeLocateModal, 0, 0);
     lv_obj_set_flex_flow(s_nodeLocateModal, LV_FLEX_FLOW_COLUMN);
     lv_obj_set_flex_align(s_nodeLocateModal, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_CENTER,
                           LV_FLEX_ALIGN_CENTER);
     lv_obj_move_foreground(s_nodeLocateBackdrop);
 
-    lv_obj_t *title = lv_label_create(s_nodeLocateModal);
-    lv_obj_set_width(title, lv_pct(100));
-    lv_obj_set_style_text_font(title, &lv_font_montserrat_12, 0);
-    lv_obj_set_style_text_color(title, titleColor, 0);
-    lv_obj_set_style_text_align(title, LV_TEXT_ALIGN_CENTER, 0);
-    lv_label_set_long_mode(title, LV_LABEL_LONG_DOT);
-    setLabelTextEmojiSafe(title, titleText);
+    // Full screen, the title is a chip on the map instead (below, once the
+    // map has its size).
+    lv_obj_t *title = nullptr;
+    if (!fullScreen) {
+        title = lv_label_create(s_nodeLocateModal);
+        lv_obj_set_width(title, lv_pct(100));
+        lv_obj_set_style_text_font(title, &lv_font_montserrat_12, 0);
+        lv_obj_set_style_text_color(title, titleColor, 0);
+        lv_obj_set_style_text_align(title, LV_TEXT_ALIGN_CENTER, 0);
+        lv_label_set_long_mode(title, LV_LABEL_LONG_DOT);
+        setLabelTextEmojiSafe(title, titleText);
+    }
 
     // The map area. Its own container so the renderer can position the image and
     // the pin in coordinates that belong to nobody else.
@@ -28177,10 +28270,10 @@ static bool nodeLocateBuildModal(const char *titleText, bool allNodes) {
     lv_obj_clear_flag(mapBox, LV_OBJ_FLAG_SCROLLABLE);
     lv_obj_set_style_bg_color(mapBox, nodeLocateCanvasBgColor(), 0);
     lv_obj_set_style_bg_opa(mapBox, LV_OPA_COVER, 0);
-    lv_obj_set_style_border_width(mapBox, 1, 0);
+    lv_obj_set_style_border_width(mapBox, fullScreen ? 0 : 1, 0);
     lv_obj_set_style_border_color(mapBox, modalBorder, 0);
     lv_obj_set_style_pad_all(mapBox, 0, 0);
-    lv_obj_set_style_radius(mapBox, 3, 0);
+    lv_obj_set_style_radius(mapBox, fullScreen ? 0 : 3, 0);
     s_nodeLocateMapBox = mapBox;
 #if HAS_TOUCH
     // The drag surface. The layers above it — tile layer, image, pin — are
@@ -28198,8 +28291,12 @@ static bool nodeLocateBuildModal(const char *titleText, bool allNodes) {
 #if UI_TOUCH_ONLY_PROFILE
     // Node names run long, and the title is LV_LABEL_LONG_DOT across the full
     // width, so it has to be told to stop short of the X.
-    reserveHeltecCloseXRow(title);
-    appendHeltecCloseX(s_nodeLocateModal, onNodeLocateClosePressed);
+    if (title) reserveHeltecCloseXRow(title);
+    {
+        lv_obj_t *closeX = appendHeltecCloseX(s_nodeLocateModal, onNodeLocateClosePressed);
+        // On the map itself, full screen: in from the corner like the chips.
+        if (closeX && fullScreen) lv_obj_align(closeX, LV_ALIGN_TOP_RIGHT, -4, 4);
+    }
 #endif
 
     // Build one RGB565 viewport. Live PNG tiles are decoded into this canvas
@@ -28247,6 +28344,23 @@ static bool nodeLocateBuildModal(const char *titleText, bool allNodes) {
     lv_obj_set_style_pad_right(attribution, 2, 0);
     lv_label_set_text(attribution, TR("(c) OpenStreetMap"));
     lv_obj_align(attribution, LV_ALIGN_BOTTOM_LEFT, 2, -2);
+
+    if (fullScreen) {
+        // The title as a chip, top left, stopping short of the X and the
+        // zoom column on the right.
+        lv_obj_t *chip = lv_label_create(s_nodeLocateTileLayer);
+        lv_obj_set_style_text_font(chip, &lv_font_montserrat_12, 0);
+        lv_obj_set_style_text_color(chip, titleColor, 0);
+        lv_obj_set_style_bg_color(chip, chipBg, 0);
+        lv_obj_set_style_bg_opa(chip, chipOpa, 0);
+        lv_obj_set_style_pad_all(chip, 3, 0);
+        lv_obj_set_style_radius(chip, 3, 0);
+        lv_label_set_long_mode(chip, LV_LABEL_LONG_DOT);
+        lv_obj_set_width(chip, LV_SIZE_CONTENT);
+        lv_obj_set_style_max_width(chip, mapW - closeXSize - 20, 0);
+        setLabelTextEmojiSafe(chip, titleText);
+        lv_obj_align(chip, LV_ALIGN_TOP_LEFT, 4, 4);
+    }
 
     // The node map draws its nodes into the canvas instead (nodeMapPaintRect()).
     if (!allNodes) {
@@ -28367,7 +28481,9 @@ static bool nodeLocateBuildModal(const char *titleText, bool allNodes) {
         Local::btn(ctlCol, LV_SYMBOL_MINUS, onNodeLocateZoomOutPressed);
         Local::btn(ctlCol, LV_SYMBOL_GPS, onNodeLocateCenterPressed);
 
-        lv_obj_align(ctlCol, LV_ALIGN_TOP_RIGHT, -4, 4);
+        // Full screen the close X has the corner, so the column starts under it.
+        lv_obj_align(ctlCol, LV_ALIGN_TOP_RIGHT, -4,
+                     fullScreen ? 4 + closeXSize + 4 : 4);
         lv_obj_move_foreground(ctlCol);
     }
 #endif
@@ -31801,6 +31917,12 @@ static void openLiveToolsModal() {
     constexpr bool toolsFill = true;
     const lv_font_t *toolsFillFont = &lv_font_montserrat_20;
     constexpr int toolsFillGap = 12;
+#elif defined(DEVICE_CROWPANEL_35)
+    // The same on the 3.5", which was drawing the 320x240 block: a strip of
+    // small buttons across the middle of 480x320, and a third of 320x480.
+    constexpr bool toolsFill = true;
+    const lv_font_t *toolsFillFont = &lv_font_montserrat_16;
+    constexpr int toolsFillGap = 8;
 #else
     constexpr bool toolsFill = false;
     const lv_font_t *toolsFillFont = kChanModalRowFont;
@@ -33184,13 +33306,28 @@ static bool homeDashSideBySide() {
 
 // Every face of the dashboard's band on screen at once, stacked, rather than
 // one at a time in a carousel: the CrowPanel 5"'s 800x480 has the room for all
-// of them in either orientation, so there is nothing to turn. The lock screen's
-// carousel is unaffected.
-#if defined(DEVICE_CROWPANEL_50)
-#define HOME_DASH_SHOW_ALL 1
+// of them in either orientation, so there is nothing to turn. The CrowPanel
+// 3.5" has it upright only: 320x480 fits the charts and both node lists, two
+// across, where 480x320 does not. The lock screen does the same, its messages
+// above the four widgets (buildLockCarousel()).
+//
+// homeDashShowAll() is whether it does, in the orientation the board booted
+// in. HOME_DASH_CAN_SHOW_ALL guards the lock screen's half, which resizes a
+// message budget that is a constant on the boards that never do.
+#if defined(DEVICE_CROWPANEL)
+#define HOME_DASH_CAN_SHOW_ALL 1
 #else
-#define HOME_DASH_SHOW_ALL 0
+#define HOME_DASH_CAN_SHOW_ALL 0
 #endif
+static inline bool homeDashShowAll() {
+#if defined(DEVICE_CROWPANEL_50)
+    return true;
+#elif defined(DEVICE_CROWPANEL_35)
+    return uiPortrait();
+#else
+    return false;
+#endif
+}
 
 // Records a page as it is built. The face list is built in order rather than
 // indexed by a fixed enum, because the two carousels do not carry the same set:
@@ -33923,10 +34060,7 @@ static void glanceCarouselGo(GlanceCarousel &c, int delta) {
 // serviceLockCarousel() and by nothing else.
 static void homeDashCarouselGo(int delta) {
     if (!homeDashboardVisible()) return;
-#if HOME_DASH_SHOW_ALL
-    (void)delta;
-    return;   // every face is already showing
-#endif
+    if (homeDashShowAll()) return;   // every face is already showing
     // The cards go with the page. A swipe gets here without passing through
     // homeDashCursorKey(), so the outline would otherwise ride off on a face
     // that is no longer in front.
@@ -34202,11 +34336,11 @@ static void refreshHomeDashboard(bool force) {
     // The Tools chart modals keep their per-packet updates. You open those to
     // watch the radio; this one opens itself.
     if (force || minuteRolled) refreshGlancePage(s_homeCarousel, (int)s_homeCarousel.at);
-#elif HOME_DASH_SHOW_ALL
-    // Every face is in front, so every face is kept current: the charts on
-    // their own sequences, the node lists on the same arrived-or-minute gate.
-    refreshGlanceCharts(s_homeCarousel, force);
-    {
+#else
+    if (homeDashShowAll()) {
+        // Every face is in front, so every face is kept current: the charts on
+        // their own sequences, the node lists on the same arrived-or-minute gate.
+        refreshGlanceCharts(s_homeCarousel, force);
         const bool arrived = (s_snrHist.seq != s_homeCarousel.nodeSeq);
         if (force || minuteRolled || arrived) {
             s_homeCarousel.nodeSeq = s_snrHist.seq;
@@ -34216,9 +34350,7 @@ static void refreshHomeDashboard(bool force) {
                 }
             }
         }
-    }
-#else
-    if (glanceFacing(s_homeCarousel) == GLANCE_PAGE_CHARTS) {
+    } else if (glanceFacing(s_homeCarousel) == GLANCE_PAGE_CHARTS) {
         refreshGlanceCharts(s_homeCarousel, force);
     } else {
         // Two reasons to refill, and nothing walks the node table without one:
@@ -34355,11 +34487,7 @@ static void openHomeDashboard() {
     // ever runs under a chevron, and the chevrons sit outside the host — they
     // stay put while the pages slide beneath them, and are never clipped or
     // carried off screen with one.
-#if HOME_DASH_SHOW_ALL
-    const int arrowGutter = 0;   // no arrows: nothing turns
-#else
-    const int arrowGutter = 11;
-#endif
+    const int arrowGutter = homeDashShowAll() ? 0 : 11;   // no arrows: nothing turns
     lv_obj_t *pageHost = lv_obj_create(s_homeDash);
     lv_obj_remove_style_all(pageHost);
     lv_obj_set_size(pageHost, widgetsW - (2 * arrowGutter), chartsH);
@@ -34378,8 +34506,7 @@ static void openHomeDashboard() {
     // turns. Labels rather than buttons: they mark the gesture instead of
     // offering a second way to perform it, and a tap target here would sit over
     // the pages and complicate what the swipe handler sees.
-#if !HOME_DASH_SHOW_ALL
-    {
+    if (!homeDashShowAll()) {
         const int arrowY = chartsTop
             + (chartsH - (int)lv_font_get_line_height(&lv_font_montserrat_12)) / 2;
         for (int side = 0; side < 2; side++) {
@@ -34400,31 +34527,31 @@ static void openHomeDashboard() {
                          side == 0 ? widgetsX + 1 : -1, arrowY);
         }
     }
-#endif
 
-#if HOME_DASH_SHOW_ALL
-    // The band shared between the faces rather than each having all of it: the
-    // charts, then the node lists -- one face when they fit side by side, two
-    // when they do not. Worked out before the node faces are built, because a
-    // list card sizes its row count from the height it is given.
-    constexpr int kShowAllGap = 4;
-    const int showAllFaces = homeDashSideBySide() ? 2 : 3;
-    const int faceH = (chartsH - kShowAllGap * (showAllFaces - 1)) / showAllFaces;
-    glanceBuildChartPage(s_homeCarousel, pageHost);
-    glanceBuildNodePages(s_homeCarousel, pageHost, faceH - kTdeckProBandInset);
-    for (int i = 0; i < (int)s_homeCarousel.pages; i++) {
-        lv_obj_t *page = s_homeCarousel.page[i];
-        if (!lvObjValid(page)) continue;
-        lv_obj_set_height(page, faceH);
-        lv_obj_set_y(page, i * (faceH + kShowAllGap));
-        lv_obj_clear_flag(page, LV_OBJ_FLAG_HIDDEN);
+    if (homeDashShowAll()) {
+        // The band shared between the faces rather than each having all of it:
+        // the charts, then the node lists -- one face when they fit side by
+        // side, two when they do not. Worked out before the node faces are
+        // built, because a list card sizes its row count from the height it is
+        // given.
+        constexpr int kShowAllGap = 4;
+        const int showAllFaces = homeDashSideBySide() ? 2 : 3;
+        const int faceH = (chartsH - kShowAllGap * (showAllFaces - 1)) / showAllFaces;
+        glanceBuildChartPage(s_homeCarousel, pageHost);
+        glanceBuildNodePages(s_homeCarousel, pageHost, faceH - kTdeckProBandInset);
+        for (int i = 0; i < (int)s_homeCarousel.pages; i++) {
+            lv_obj_t *page = s_homeCarousel.page[i];
+            if (!lvObjValid(page)) continue;
+            lv_obj_set_height(page, faceH);
+            lv_obj_set_y(page, i * (faceH + kShowAllGap));
+            lv_obj_clear_flag(page, LV_OBJ_FLAG_HIDDEN);
+        }
+    } else {
+        glanceBuildChartPage(s_homeCarousel, pageHost);
+        // A card gets the band less its page's own padding, and that height is
+        // what decides how many rows it fits.
+        glanceBuildNodePages(s_homeCarousel, pageHost, chartsH - kTdeckProBandInset);
     }
-#else
-    glanceBuildChartPage(s_homeCarousel, pageHost);
-    // A card gets the band less its page's own padding, and that height is what
-    // decides how many rows it fits.
-    glanceBuildNodePages(s_homeCarousel, pageHost, chartsH - kTdeckProBandInset);
-#endif
     // Either list opens the Nodes screen. Here rather than in the page builder,
     // which has three layouts to return from and serves the lock screen too.
     homeDashMakeCardTarget(s_homeCarousel.nodeCard[0], nullptr, HOME_CURSOR_NODES_RECENT);
@@ -34434,9 +34561,7 @@ static void openHomeDashboard() {
     // Wio boards rotate on a setting, and landscape has one fewer face than
     // portrait. Left alone, coming back in landscape on page 2 would show a
     // page this build never made.
-#if !HOME_DASH_SHOW_ALL
-    glanceShowPage(s_homeCarousel, s_homeCarousel.at);
-#endif
+    if (!homeDashShowAll()) glanceShowPage(s_homeCarousel, s_homeCarousel.at);
 
     s_homeGlanceMinuteKey = UINT32_MAX;   // force the first header paint
     refreshHomeDashboard(true);
@@ -34501,13 +34626,13 @@ static lv_obj_t *buildLockCarousel(lv_obj_t *overlay, int top, int height) {
     lv_obj_clear_flag(msgPage, LV_OBJ_FLAG_SCROLLABLE);
     glanceAddPage(s_lockCarousel, msgPage, GLANCE_PAGE_MESSAGES);
 
-#if HOME_DASH_SHOW_ALL
+#if HOME_DASH_CAN_SHOW_ALL
     // Everything at once, as on Home: the messages, then Home's widgets under
     // them, each face a share of the band -- and no timer turning it
     // (serviceLockCarousel()). The message budget is cut to the messages'
     // share, worst case all one-line rows with a gap after each, so the last
     // row cannot reach into the charts below.
-    {
+    if (homeDashShowAll()) {
         constexpr int kShowAllGap = 4;
         const int faces = 1 + (homeDashSideBySide() ? 2 : 3);
         const int faceH = (height - kShowAllGap * (faces - 1)) / faces;
@@ -34557,23 +34682,20 @@ static void resetLockCarousel() {
 // they read when the page came round.
 static void refreshLockCarouselPage() {
     if (!lvObjValid(s_lockCarousel.host)) return;
-#if HOME_DASH_SHOW_ALL
-    // Every face is showing (buildLockCarousel()), so every face is repainted.
-    for (int i = 0; i < (int)s_lockCarousel.pages; i++) {
-        refreshGlancePage(s_lockCarousel, i);
+    if (homeDashShowAll()) {
+        // Every face is showing (buildLockCarousel()), so every face is repainted.
+        for (int i = 0; i < (int)s_lockCarousel.pages; i++) {
+            refreshGlancePage(s_lockCarousel, i);
+        }
+    } else {
+        refreshGlancePage(s_lockCarousel, (int)s_lockCarousel.at);
     }
-#else
-    refreshGlancePage(s_lockCarousel, (int)s_lockCarousel.at);
-#endif
 }
 
 // The only thing that turns this carousel, driven from serviceLockScreen()
 // because that already runs every loop with the clock this wants.
 static void serviceLockCarousel(uint32_t nowMs) {
-#if HOME_DASH_SHOW_ALL
-    (void)nowMs;
-    return;   // every face is already showing
-#endif
+    if (homeDashShowAll()) return;   // every face is already showing
     if (!lvObjValid(s_lockCarousel.host) || s_lockCarousel.pages < 2) return;
     if ((uint32_t)(nowMs - s_lockCarouselTurnedMs) < kLockCarouselDwellMs) return;
     s_lockCarouselTurnedMs = nowMs;
@@ -47287,7 +47409,7 @@ static void pumpKeyboardInput() {
                 // Pager wheel orientation: UP should move to the next row.
                 const int step = invertScrollNav ? ((k == KEY_SCROLL_UP) ? 1 : -1)
                                                  : ((k == KEY_SCROLL_UP) ? -1 : 1);
-#if !UI_TOUCH_ONLY_PROFILE
+#if NODES_KEYBOARD_TOP_BUTTONS
                 // The Map, All and Search / Clear buttons sit above the first
                 // row: Up from there (or from an empty list) moves onto Search,
                 // Up again onto All, then Map, and Down walks back.
