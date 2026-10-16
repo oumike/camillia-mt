@@ -13480,6 +13480,55 @@ static void showTextareaCursor(lv_obj_t *ta) {
 }
 
 #if UI_TOUCH_ONLY_PROFILE
+#if defined(DEVICE_TDISPLAY_P4) || defined(DEVICE_CROWPANEL)
+// For a keyboard given a fixed height: what it gave up has to go somewhere.
+// Where a sibling already grows (the admin transcript) it takes it and the
+// keyboard, created last, is already at the bottom. Where nothing does -- the
+// dialogs, whose rows are all fixed -- an invisible spacer above the keyboard
+// takes it, rather than the keyboard floating mid-screen over blank space. A
+// parent sized to its content (the composer) has no slack to take, so it gets
+// none.
+static void keyboardYieldSlack(lv_obj_t *keyboard) {
+    lv_obj_t *parent = lv_obj_get_parent(keyboard);
+    if (parent && lv_obj_get_style_layout(parent, LV_PART_MAIN) == LV_LAYOUT_FLEX
+        && lv_obj_get_style_height(parent, LV_PART_MAIN) != LV_SIZE_CONTENT) {
+        bool siblingGrows = false;
+        const uint32_t n = lv_obj_get_child_count(parent);
+        for (uint32_t i = 0; i < n; i++) {
+            lv_obj_t *child = lv_obj_get_child(parent, (int32_t)i);
+            if (child != keyboard
+                && lv_obj_get_style_flex_grow(child, LV_PART_MAIN) > 0) {
+                siblingGrows = true;
+                break;
+            }
+        }
+        if (!siblingGrows) {
+            lv_obj_t *spacer = lv_obj_create(parent);
+            lv_obj_remove_style_all(spacer);
+            lv_obj_clear_flag(spacer, (lv_obj_flag_t)(LV_OBJ_FLAG_CLICKABLE
+                                                      | LV_OBJ_FLAG_SCROLLABLE));
+            lv_obj_set_size(spacer, 1, 0);
+            lv_obj_set_flex_grow(spacer, 1);
+            lv_obj_move_to_index(spacer, lv_obj_get_index(keyboard));
+        }
+    }
+}
+#endif
+
+// The composer docks on a fixed-height keyboard -- only as tall as what it
+// holds, on the bottom edge, the conversation readable above it -- wherever
+// the keyboard is fixed rather than grown (configureOnScreenKeyboard): the P4
+// always, the CrowPanel 3.5 upright.
+static inline bool composeDockedOnKeyboard() {
+#if defined(DEVICE_TDISPLAY_P4)
+    return true;
+#elif defined(DEVICE_CROWPANEL_35)
+    return uiPortrait();
+#else
+    return false;
+#endif
+}
+
 static void configureOnScreenKeyboard(lv_obj_t *keyboard) {
     if (!keyboard) return;
     lv_obj_set_width(keyboard, lv_pct(100));
@@ -13514,38 +13563,24 @@ static void configureOnScreenKeyboard(lv_obj_t *keyboard) {
 #else
     lv_obj_set_height(keyboard, uiPortrait() ? 150 : screenH / 2);
 #endif
-
-    // What the keyboard gave up has to go somewhere. Where a sibling already
-    // grows (the admin transcript) it takes it and the keyboard, created last,
-    // is already at the bottom. Where nothing does -- the dialogs, whose rows
-    // are all fixed -- an invisible spacer above the keyboard takes it, rather
-    // than the keyboard floating mid-screen over blank space. A parent sized to
-    // its content (the composer) has no slack to take, so it gets none.
-    lv_obj_t *parent = lv_obj_get_parent(keyboard);
-    if (parent && lv_obj_get_style_layout(parent, LV_PART_MAIN) == LV_LAYOUT_FLEX
-        && lv_obj_get_style_height(parent, LV_PART_MAIN) != LV_SIZE_CONTENT) {
-        bool siblingGrows = false;
-        const uint32_t n = lv_obj_get_child_count(parent);
-        for (uint32_t i = 0; i < n; i++) {
-            lv_obj_t *child = lv_obj_get_child(parent, (int32_t)i);
-            if (child != keyboard
-                && lv_obj_get_style_flex_grow(child, LV_PART_MAIN) > 0) {
-                siblingGrows = true;
-                break;
-            }
-        }
-        if (!siblingGrows) {
-            lv_obj_t *spacer = lv_obj_create(parent);
-            lv_obj_remove_style_all(spacer);
-            lv_obj_clear_flag(spacer, (lv_obj_flag_t)(LV_OBJ_FLAG_CLICKABLE
-                                                      | LV_OBJ_FLAG_SCROLLABLE));
-            lv_obj_set_size(spacer, 1, 0);
-            lv_obj_set_flex_grow(spacer, 1);
-            lv_obj_move_to_index(spacer, lv_obj_get_index(keyboard));
-        }
-    }
+    keyboardYieldSlack(keyboard);
 #elif UI_EDGE_TO_EDGE_TEXT_ENTRY
+#if defined(DEVICE_CROWPANEL_35)
+    // Upright (320x480) this is the P4's portrait keyboard: a fixed height on
+    // the bottom edge instead of growing into the modal, which took nearly the
+    // whole screen. 150 px is ~24 mm on this panel, the same physical height
+    // as the P4's 150 UI px. Landscape is a 320-tall panel, where growing into
+    // what is left is still the right amount.
+    if (uiPortrait()) {
+        lv_obj_set_flex_grow(keyboard, 0);
+        lv_obj_set_height(keyboard, 150);
+        keyboardYieldSlack(keyboard);
+    } else {
+        lv_obj_set_flex_grow(keyboard, 1);
+    }
+#else
     lv_obj_set_flex_grow(keyboard, 1);
+#endif
     // Text entry owns the screen (Wio Tracker L2, CrowPanel). Remove keyboard chrome
     // and keep only a one-pixel key gap so the narrow QWERTY rows spend their
     // width on tap targets rather than nested modal/theme padding.
@@ -13823,19 +13858,19 @@ static void openComposePrompt(uint32_t replyPacketId,
     if (modalH < 120) modalH = lv_disp_get_ver_res(NULL);
 
     s_composeModal = lv_obj_create(s_rootScreen);
-#if defined(DEVICE_TDISPLAY_P4)
-    // Only as tall as what it holds, sitting on the bottom edge: the keyboard
-    // here is a fixed height (configureOnScreenKeyboard), so a full-screen
-    // modal left a band of nothing between it and the buttons. Content-sized,
-    // the buttons land on the keyboard, the input and title stack above them,
-    // and the conversation stays readable over the top.
-    (void)modalH;
-    lv_obj_set_size(s_composeModal, modalW, LV_SIZE_CONTENT);
-    lv_obj_align(s_composeModal, LV_ALIGN_BOTTOM_MID, 0, -4);
-#else
-    lv_obj_set_size(s_composeModal, modalW, modalH);
-    lv_obj_align(s_composeModal, LV_ALIGN_CENTER, 0, 0);
-#endif
+    const bool composeDocked = composeDockedOnKeyboard();
+    if (composeDocked) {
+        // Only as tall as what it holds, sitting on the bottom edge: the
+        // keyboard here is a fixed height (configureOnScreenKeyboard), so a
+        // full-screen modal left a band of nothing between it and the buttons.
+        // Content-sized, the buttons land on the keyboard, the input and title
+        // stack above them, and the conversation stays readable over the top.
+        lv_obj_set_size(s_composeModal, modalW, LV_SIZE_CONTENT);
+        lv_obj_align(s_composeModal, LV_ALIGN_BOTTOM_MID, 0, -4);
+    } else {
+        lv_obj_set_size(s_composeModal, modalW, modalH);
+        lv_obj_align(s_composeModal, LV_ALIGN_CENTER, 0, 0);
+    }
     lv_obj_clear_flag(s_composeModal, LV_OBJ_FLAG_SCROLLABLE);
     lv_obj_add_flag(s_composeModal, LV_OBJ_FLAG_CLICKABLE);
     composeStyleModal(s_composeModal, modalW, modalH);
@@ -13880,15 +13915,15 @@ static void openComposePrompt(uint32_t replyPacketId,
     }
     lv_obj_set_width(s_composeInput, lv_pct(100));
     lv_obj_set_style_text_font(s_composeInput, emojiFont(&lv_font_montserrat_14), 0);
-#if defined(DEVICE_TDISPLAY_P4)
-    // Wrapping, several lines tall, so a message reads as you write it rather
-    // than scrolling sideways out of a single line. Four in portrait, where
-    // the panel has the room; two in landscape, where the half-height keyboard
-    // leaves about that much. Measured from the face, with explicit padding
-    // rather than the theme's, so the box is exactly that many lines.
-    {
-        // With the keyboard expansion on there is no on-screen keyboard below
-        // (see the end of this function), and its room goes to the message.
+    if (composeDocked) {
+        // Wrapping, several lines tall, so a message reads as you write it
+        // rather than scrolling sideways out of a single line. Four in
+        // portrait, where the panel has the room; two in landscape (the P4
+        // only), where the half-height keyboard leaves about that much.
+        // Measured from the face, with explicit padding rather than the
+        // theme's, so the box is exactly that many lines. With the keyboard
+        // expansion on there is no on-screen keyboard below (see the end of
+        // this function), and its room goes to the message.
         const lv_coord_t composeLines = keyboardAttached() ? (uiPortrait() ? 8 : 4)
                                                            : (uiPortrait() ? 4 : 2);
         const lv_coord_t composePad = 4;
@@ -13897,25 +13932,24 @@ static void openComposePrompt(uint32_t replyPacketId,
                           lv_font_get_line_height(emojiFont(&lv_font_montserrat_14))
                               * composeLines
                           + 2 * composePad + 2);   // + 1 px border each side
+        lv_textarea_set_one_line(s_composeInput, false);
+        // A wrapping box would take the keyboard's Enter as a line break. In
+        // the one-line box every other touch board uses, the textarea drops
+        // that character, and a mesh message is one line either way -- so drop
+        // it here too and keep Enter doing what it does there.
+        lv_obj_add_event_cb(s_composeInput,
+                            [](lv_event_t *e) {
+                                const char *ins = (const char *)lv_event_get_param(e);
+                                if (ins && strcmp(ins, "\n") == 0) {
+                                    lv_textarea_set_insert_replace(
+                                        lv_event_get_target_obj(e), "");
+                                }
+                            },
+                            LV_EVENT_INSERT, nullptr);
+    } else {
+        lv_obj_set_height(s_composeInput, 44);
+        lv_textarea_set_one_line(s_composeInput, true);
     }
-    lv_textarea_set_one_line(s_composeInput, false);
-    // A wrapping box would take the keyboard's Enter as a line break. In the
-    // one-line box every other touch board uses, the textarea drops that
-    // character, and a mesh message is one line either way -- so drop it here
-    // too and keep Enter doing what it does there.
-    lv_obj_add_event_cb(s_composeInput,
-                        [](lv_event_t *e) {
-                            const char *ins = (const char *)lv_event_get_param(e);
-                            if (ins && strcmp(ins, "\n") == 0) {
-                                lv_textarea_set_insert_replace(
-                                    lv_event_get_target_obj(e), "");
-                            }
-                        },
-                        LV_EVENT_INSERT, nullptr);
-#else
-    lv_obj_set_height(s_composeInput, 44);
-    lv_textarea_set_one_line(s_composeInput, true);
-#endif
     lv_textarea_set_max_length(s_composeInput, MESH_TEXT_MAX_LEN);
     lv_textarea_set_placeholder_text(s_composeInput, TR("Type message..."));
     showTextareaCursor(s_composeInput);
