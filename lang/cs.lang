@@ -138,6 +138,7 @@ BT Keyboard: %s	BT klávesnice: %s
 BT Keyboard: Off	BT klávesnice: Vyp.
 Back	Zpět
 Back = Cancel	Zpět = Zrušit
+Balanced	Vyvážený
 Bass	Basy
 Battery Calibration	Kalibrace baterie
 Battery Calibration: %s	Kalibrace baterie: %s
@@ -219,6 +220,7 @@ Clock Format: %s	Formát času: %s
 Clock set from web config	Hodiny nastaveny z webové konfigurace
 Clock set: %04d-%02d-%02d %02d:%02d	Hodiny nastaveny: %04d-%02d-%02d %02d:%02d
 Close	Zavřít
+Compatible	Kompatibilní
 Configuration	Nastavení
 Configuration exported to /camillia/config.yaml.\n\nThe card is formatted and holds nothing else. Chat history, the node database and any map tiles were on the old filesystem and are gone.	Konfigurace exportována do /camillia/config.yaml.\n\nKarta je naformátovaná a nic jiného neobsahuje. Historie chatu, databáze uzlů a dlaždice map byly ve starém souborovém systému a jsou pryč.
 Configured WiFi is empty	Nastavená WiFi je prázdná
@@ -468,6 +470,7 @@ N=Choose WiFi   Enter=Finish   Bksp=Back	N=Vybrat WiFi   Enter=Dokončit   Bksp=
 NO LINE OF SIGHT	BEZ PŘÍMÉ VIDITELNOSTI
 NODEINFO + telemetry queued.	NODEINFO + telemetrie ve frontě.
 No GPS fix	Bez fixu GPS
+Only signed packets accepted (no 2.7 nodes)	Jen podepsané pakety (bez uzlů 2.7)
 Send NODEINFO and telemetry to the mesh now?	Odeslat nyní NODEINFO a telemetrii do sítě?
 NODES	UZLY
 NODES (%d%s)	UZLY (%d%s)
@@ -684,6 +687,7 @@ Short: %s	Krátké: %s
 Show Archived Nodes: %s	Zobrazit archivované uzly: %s
 Show Archived Nodes: %s%s	Zobrazit archivované uzly: %s%s
 Signal: SNR %.1f dB, RSSI %.0f dBm	Signál: SNR %.1f dB, RSSI %.0f dBm
+Signed Packets: %s	Podepsané pakety: %s
 Silver	Stříbrná
 Sky	Nebeská
 Small	Malé
@@ -699,6 +703,7 @@ State map unavailable	Mapa regionu není k dispozici
 Stay on	Stále zapnuto
 Storage: %s %s	Úložiště: %s %s
 Storage: %s (not mounted)	Úložiště: %s (nepřipojeno)
+Strict	Přísný
 Sun	ne
 Sweep	Průzkum
 Sweep already running	Průzkum už běží
@@ -766,6 +771,8 @@ Uni(g)nore	Přestat i(g)norovat
 Unignore	Přestat ignorovat
 Units: %s	Jednotky: %s
 Unknown	Neznámý
+Unsigned broadcasts from signers dropped	Nepodepsané vysílání od podepisujících zahozeno
+Unsigned packets accepted	Nepodepsané pakety přijímány
 Until read	Do přečtení
 Up to date (%s)	Aktuální (%s)
 Up/Down	Nahoru/Dolů

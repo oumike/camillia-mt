@@ -133,6 +133,7 @@ BT Keyboard: %s	BT-toetsenbord: %s
 BT Keyboard: Off	BT-toetsenbord: Uit
 Back	Terug
 Back = Cancel	Terug = Annuleren
+Balanced	Gebalanceerd
 Bass	Bas
 Battery Calibration	Accukalibratie
 Battery Calibration: %s	Accukalibratie: %s
@@ -214,6 +215,7 @@ Clock Format: %s	Klokformaat: %s
 Clock set from web config	Klok ingesteld via webconfiguratie
 Clock set: %04d-%02d-%02d %02d:%02d	Klok ingesteld: %04d-%02d-%02d %02d:%02d
 Close	Sluiten
+Compatible	Compatibel
 Configuration	Configuratie
 Configuration exported to /camillia/config.yaml.\n\nThe card is formatted and holds nothing else. Chat history, the node database and any map tiles were on the old filesystem and are gone.	Configuratie geëxporteerd naar /camillia/config.yaml.\n\nDe kaart is geformatteerd en bevat verder niets. Chatgeschiedenis, nodedatabase en kaarttegels stonden op het oude bestandssysteem en zijn weg.
 Configured WiFi is empty	Ingestelde wifi is leeg
@@ -455,6 +457,7 @@ N=Choose WiFi   Enter=Finish   Bksp=Back	N=Kies wifi   Enter=Voltooien   Bksp=Te
 NO LINE OF SIGHT	GEEN ZICHTLIJN
 NODEINFO + telemetry queued.	NODEINFO + telemetrie in de wachtrij.
 No GPS fix	Geen GPS-fix
+Only signed packets accepted (no 2.7 nodes)	Alleen ondertekende pakketten (geen 2.7-nodes)
 Send NODEINFO and telemetry to the mesh now?	NODEINFO en telemetrie nu naar de mesh sturen?
 Name	Naam
 Name: %s\nShort: %s\nID: !%08X\nLast heard: %s\nSNR: %.1f dB\nHops: %u\nChannel: %d\n\nPosition:\n%s\n\nTelemetry:\n%s	Naam: %s\nKort: %s\nID: !%08X\nLaatst gehoord: %s\nSNR: %.1f dB\nHops: %u\nKanaal: %d\n\nPositie:\n%s\n\nTelemetrie:\n%s
@@ -666,6 +669,7 @@ Short: %s	Kort: %s
 Show Archived Nodes: %s	Gearchiveerde nodes tonen: %s
 Show Archived Nodes: %s%s	Gearchiveerde nodes tonen: %s%s
 Signal: SNR %.1f dB, RSSI %.0f dBm	Signaal: SNR %.1f dB, RSSI %.0f dBm
+Signed Packets: %s	Ondertekende pakketten: %s
 Silver	Zilver
 Sky	Hemelsblauw
 Small	Klein
@@ -681,6 +685,7 @@ State map unavailable	Regiokaart niet beschikbaar
 Stay on	Blijft aan
 Storage: %s %s	Opslag: %s %s
 Storage: %s (not mounted)	Opslag: %s (niet gekoppeld)
+Strict	Strikt
 Sun	zo
 Sweep already running	Sweep loopt al
 Sweep cancelled	Sweep geannuleerd
@@ -747,6 +752,8 @@ Uni(g)nore	Niet ne(g)eren
 Unignore	Niet negeren
 Units: %s	Eenheden: %s
 Unknown	Onbekend
+Unsigned broadcasts from signers dropped	Niet-ondertekende broadcasts van ondertekenaars genegeerd
+Unsigned packets accepted	Niet-ondertekende pakketten geaccepteerd
 Until read	Tot gelezen
 Up to date (%s)	Actueel (%s)
 Up/Down	Omhoog/Omlaag

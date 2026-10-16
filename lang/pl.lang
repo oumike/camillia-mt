@@ -137,6 +137,7 @@ BT Keyboard: %s	Klawiatura BT: %s
 BT Keyboard: Off	Klawiatura BT: Wył.
 Back	Wstecz
 Back = Cancel	Wstecz = Anuluj
+Balanced	Zrównoważony
 Bass	Bas
 Battery Calibration	Kalibracja baterii
 Battery Calibration: %s	Kalibracja baterii: %s
@@ -218,6 +219,7 @@ Clock Format: %s	Format zegara: %s
 Clock set from web config	Zegar ustawiony z konfiguracji web
 Clock set: %04d-%02d-%02d %02d:%02d	Zegar ustawiony: %04d-%02d-%02d %02d:%02d
 Close	Zamknij
+Compatible	Zgodny
 Configuration	Konfiguracja
 Configuration exported to /camillia/config.yaml.\n\nThe card is formatted and holds nothing else. Chat history, the node database and any map tiles were on the old filesystem and are gone.	Konfiguracja wyeksportowana do /camillia/config.yaml.\n\nKarta jest sformatowana i nie zawiera nic więcej. Historia czatu, baza węzłów i kafelki map były w starym systemie plików i zniknęły.
 Configured WiFi is empty	Skonfigurowane WiFi jest puste
@@ -467,6 +469,7 @@ N=Choose WiFi   Enter=Finish   Bksp=Back	N=Wybierz WiFi   Enter=Zakończ   Bksp=
 NO LINE OF SIGHT	BRAK LINII WZROKU
 NODEINFO + telemetry queued.	NODEINFO + telemetria w kolejce.
 No GPS fix	Brak pozycji GPS
+Only signed packets accepted (no 2.7 nodes)	Tylko podpisane pakiety (bez węzłów 2.7)
 Send NODEINFO and telemetry to the mesh now?	Wysłać teraz NODEINFO i telemetrię do sieci?
 NODES	WĘZŁY
 NODES (%d%s)	WĘZŁY (%d%s)
@@ -684,6 +687,7 @@ Short: %s	Krótka: %s
 Show Archived Nodes: %s	Pokaż zarchiwizowane węzły: %s
 Show Archived Nodes: %s%s	Pokaż zarchiwizowane węzły: %s%s
 Signal: SNR %.1f dB, RSSI %.0f dBm	Sygnał: SNR %.1f dB, RSSI %.0f dBm
+Signed Packets: %s	Podpisane pakiety: %s
 Silver	Srebrny
 Sky	Błękitny
 Small	Mały
@@ -699,6 +703,7 @@ State map unavailable	Mapa regionu niedostępna
 Stay on	Zawsze włączony
 Storage: %s %s	Pamięć: %s %s
 Storage: %s (not mounted)	Pamięć: %s (niezamontowana)
+Strict	Ścisły
 Sun	nd
 Sweep	Przeszukiwanie
 Sweep already running	Przeszukiwanie już trwa
@@ -767,6 +772,8 @@ Uni(g)nore	Przestań i(g)norować
 Unignore	Przestań ignorować
 Units: %s	Jednostki: %s
 Unknown	Nieznany
+Unsigned broadcasts from signers dropped	Niepodpisane rozgłoszenia od podpisujących odrzucane
+Unsigned packets accepted	Niepodpisane pakiety akceptowane
 Until read	Do odczytu
 Up to date (%s)	Aktualne (%s)
 Up/Down	Góra/Dół

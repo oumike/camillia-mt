@@ -136,6 +136,7 @@ BT Keyboard: %s	BT-tastatur: %s
 BT Keyboard: Off	BT-tastatur: Fra
 Back	Tilbage
 Back = Cancel	Tilbage = Annullér
+Balanced	Balanceret
 Bass	Bas
 Battery Calibration	Batterikalibrering
 Battery Calibration: %s	Batterikalibrering: %s
@@ -216,6 +217,7 @@ Clock Format: %s	Urformat: %s
 Clock set from web config	Uret indstillet fra webkonfigurationen
 Clock set: %04d-%02d-%02d %02d:%02d	Uret indstillet: %04d-%02d-%02d %02d:%02d
 Close	Luk
+Compatible	Kompatibel
 Configuration	Konfiguration
 Configuration exported to /camillia/config.yaml.\n\nThe card is formatted and holds nothing else. Chat history, the node database and any map tiles were on the old filesystem and are gone.	Konfigurationen eksporteret til /camillia/config.yaml.\n\nKortet er formateret og indeholder intet andet. Chathistorik, nodedatabase og kortfliser lå på det gamle filsystem og er væk.
 Configured WiFi is empty	Konfigureret WiFi er tomt
@@ -457,6 +459,7 @@ N=Choose WiFi   Enter=Finish   Bksp=Back	N=Vælg WiFi   Enter=Afslut   Bksp=Tilb
 NO LINE OF SIGHT	INGEN FRI SIGT
 NODEINFO + telemetry queued.	NODEINFO + telemetri sat i kø.
 No GPS fix	Ingen GPS-fix
+Only signed packets accepted (no 2.7 nodes)	Kun signerede pakker (ingen 2.7-noder)
 Send NODEINFO and telemetry to the mesh now?	Send NODEINFO og telemetri til nettet nu?
 NODES	NODER
 NODES (%d%s)	NODER (%d%s)
@@ -670,6 +673,7 @@ Short name cannot be empty	Kort navn må ikke være tomt
 Short: %s	Kort: %s
 Show Archived Nodes: %s	Vis arkiverede noder: %s
 Show Archived Nodes: %s%s	Vis arkiverede noder: %s%s
+Signed Packets: %s	Signerede pakker: %s
 Silver	Sølv
 Sky	Himmelblå
 Small	Lille
@@ -685,6 +689,7 @@ State map unavailable	Regionskort ikke tilgængeligt
 Stay on	Altid tændt
 Storage: %s %s	Lager: %s %s
 Storage: %s (not mounted)	Lager: %s (ikke monteret)
+Strict	Streng
 Sun	søn
 Sweep	Afsøgning
 Sweep already running	Afsøgning kører allerede
@@ -753,6 +758,8 @@ Uni(g)nore	Stop med at i(g)norere
 Unignore	Stop med at ignorere
 Units: %s	Enheder: %s
 Unknown	Ukendt
+Unsigned broadcasts from signers dropped	Usignerede udsendelser fra signerende kasseres
+Unsigned packets accepted	Usignerede pakker modtages
 Until read	Indtil læst
 Up to date (%s)	Opdateret (%s)
 Up/Down	Op/Ned

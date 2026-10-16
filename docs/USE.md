@@ -2538,11 +2538,31 @@ means we have their key but no signed packet yet, which is the ordinary case
 today: almost nothing on the mesh signs. **no key** means we have not learned
 their public key at all, so there is nothing to check against.
 
-Nothing is rejected for being unsigned, and nothing is rejected for failing.
-Meshtastic's own default accepts unsigned traffic, and dropping packets on a
-failed check would punish the whole mesh for a feature barely in use. A failed
-check is logged rather than acted on — it means either the key we hold is stale
-or something is claiming to be that node.
+What Camillia does with a packet once it has checked it is the **Signed
+Packets** setting (Settings on the device, or Web Config under the node ID
+option). It has Meshtastic 2.8.1's three signature policies and behaves exactly
+as a 2.8.1 node on the same one would:
+
+- **Compatible**, the default here as in 2.8.1, accepts unsigned packets, so it
+  hears every 2.7 node.
+- **Balanced** also drops an unsigned broadcast from a node that has signed
+  before, when that broadcast would have fitted in a frame with a signature. A
+  node that signs always signs such a broadcast, so an unsigned one claiming to
+  be from it is a downgrade.
+- **Strict** accepts only packets with a verified signature, or that arrived as
+  an encrypted direct message. It ignores every 2.7 node, and every 2.8.1 node
+  whose key you do not have yet, apart from that node's own signed node info.
+
+Under all three, a packet is dropped if its signature fails to verify, if the
+signature is malformed, or if it is a signed node info from a node we have no
+key for whose key does not hash to its node ID. A failed signature means either
+the key we hold is stale or something is claiming to be that node. A dropped
+packet goes no further: it is not shown, relayed, uplinked to MQTT, or counted
+as hearing the node. Each drop is logged on the serial console with the reason.
+
+Camillia remembers which nodes have passed a signature check (the **Signed:
+yes** row), across reboots, as Balanced needs it to. Replacing a node's key
+clears it.
 
 Camillia also signs its own packets, by the same rule as Meshtastic 2.8.1: every
 broadcast it sends — channel messages, position, node info, telemetry, neighbor
@@ -2568,8 +2588,7 @@ drops an unsigned broadcast from it that would have fit with a signature — so 
 Camillia build from before this change should not share a node ID with one
 after it, and switching **Node ID from public key** off again gives the node a
 new ID rather than an unsigned old one. A 2.8.1
-node also drops any packet whose signature fails outright, where Camillia only
-logs it.
+node also drops any packet whose signature fails outright, as Camillia does.
 
 ### Delivery proofs
 

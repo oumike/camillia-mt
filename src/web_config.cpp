@@ -3837,6 +3837,24 @@ static void sendConfigPage(const char *msg = "", bool lite = false) {
                 "out, and direct messages people already have with you stay "
                 "attached to the old address. Your own chat history is carried "
                 "across. Reboot to apply.</p>";
+
+        // Values are Meshtastic 2.8.1's PacketSignaturePolicy, in its order.
+        html += "<label>Signed packets<select name='sig_policy'>";
+        for (int i = 0; i < SIG_POLICY_COUNT; i++) {
+            snprintf(tmp, sizeof(tmp), "%d", i);
+            html += "<option value='"; html += tmp; html += "'";
+            if (sigPolicyCoerce(gCfg->packetSigPolicy) == i) html += " selected";
+            html += ">"; html += sigPolicyName((uint8_t)i); html += "</option>";
+        }
+        html += "</select></label>";
+        html += "<p class='gps-hint'>Which received packets to accept, by their "
+                "signature, as Meshtastic 2.8.1 decides it. <b>Compatible</b> "
+                "(the default) accepts unsigned packets, so it hears every 2.7 "
+                "node. <b>Balanced</b> also drops an unsigned broadcast from a "
+                "node that has signed before. <b>Strict</b> accepts only signed "
+                "or PKI-encrypted packets, and ignores every 2.7 node and every "
+                "node not yet heard signing. A signature that fails to verify is "
+                "dropped under all three.</p>";
     }
     sectionEnd(html, lite);
     sendChunk(html);
@@ -7756,6 +7774,11 @@ static void handlePostSave() {
     if (server.hasArg("nodeid_present")) {
         gCfg->nodeIdFromPubKey = (server.arg("nodeid_pubkey") == "1");
     }
+    // Also only on the full page; a select always submits, so its own name is
+    // the marker.
+    if (server.hasArg("sig_policy")) {
+        gCfg->packetSigPolicy = sigPolicyCoerce(server.arg("sig_policy").toInt());
+    }
 
     // Web config auth (username is fixed to admin)
     // Unchecked checkboxes are not submitted, so absence means "disabled".
@@ -8390,16 +8413,19 @@ static void handlePostSave() {
     cfgMasked.kbLightTimeoutS = cfgBefore.kbLightTimeoutS;
     // Read live by the chat blink every pass.
     cfgMasked.chatBlinkSecs = cfgBefore.chatBlinkSecs;
+    // Read on every received packet.
+    cfgMasked.packetSigPolicy = cfgBefore.packetSigPolicy;
     const bool fontChanged  = (gCfg->fontSize != cfgBefore.fontSize);
     const bool spellChanged = (gCfg->spellCheckEnabled != cfgBefore.spellCheckEnabled);
     const bool wardriveChanged = (gCfg->wardriveLogEnabled != cfgBefore.wardriveLogEnabled);
     const bool navAlignChanged = (gCfg->navAlign != cfgBefore.navAlign);
     const bool kbLightTimeoutChanged = (gCfg->kbLightTimeoutS != cfgBefore.kbLightTimeoutS);
     const bool chatBlinkChanged = (gCfg->chatBlinkSecs != cfgBefore.chatBlinkSecs);
+    const bool sigPolicyChanged = (gCfg->packetSigPolicy != cfgBefore.packetSigPolicy);
     const bool liveOnly = (memcmp(&cfgMasked, &cfgBefore, sizeof(RhinoConfig)) == 0)
                           && (fontChanged || spellChanged || wardriveChanged
                               || navAlignChanged || kbLightTimeoutChanged
-                              || chatBlinkChanged);
+                              || chatBlinkChanged || sigPolicyChanged);
 
     if (liveOnly) {
         redirectHomeWithFlash(fontChanged ? "Saved. Font size applied." : "Saved.");

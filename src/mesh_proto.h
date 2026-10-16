@@ -101,7 +101,13 @@ struct DataEnvelope {
     uint32_t bitfield;        // Data.bitfield (field 9)
     bool     hasBitfield;     // field 9 present; signed separately from its value
     bool     hasSignature;    // Data.xeddsa_signature (field 10) was a full 64 bytes
+    // Field 10 was present but neither empty nor 64 bytes. 2.8.1 drops such a
+    // packet under every signature policy (see sig_policy.h).
+    bool     badSignature;
     uint8_t  signature[64];
+    // Length of the encoded Data. The Balanced policy asks whether an unsigned
+    // packet would still have fitted with a signature added.
+    uint16_t dataLen;
 };
 
 struct MeshPacket {

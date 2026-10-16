@@ -114,7 +114,8 @@ struct NodeBlob {
     uint8_t pubKey[32];
     uint8_t chanIdx;
     // bit 0 = hasPosition, 1 = hasName, 2 = hasPubKey, 3 = hasTelemetry,
-    // bit 4 = favorite, 5 = hasDeviceTelemetry, 6 = hasEnvironmentTelemetry
+    // bit 4 = favorite, 5 = hasDeviceTelemetry, 6 = hasEnvironmentTelemetry,
+    // bit 7 = xeddsaVerified
     uint8_t flags;
 };
 
@@ -185,6 +186,7 @@ void NodeDB::init() {
         e->favorite     = (b.flags & 16) != 0;
         e->hasDeviceTelemetry = (b.flags & 32) != 0;
         e->hasEnvironmentTelemetry = (b.flags & 64) != 0;
+        e->xeddsaVerified = e->hasPubKey && (b.flags & 128) != 0;
         // Backward compatibility for older blobs that only exposed a single telemetry bit.
         if (e->hasTelemetry && !e->hasDeviceTelemetry && !e->hasEnvironmentTelemetry) {
             e->hasDeviceTelemetry = true;
@@ -237,7 +239,8 @@ void NodeDB::_save(uint32_t nodeId) {
             | (e->hasPubKey    ? 4 : 0) | (e->hasTelemetry ? 8 : 0)
             | (e->favorite     ? 16 : 0)
             | (e->hasDeviceTelemetry ? 32 : 0)
-            | (e->hasEnvironmentTelemetry ? 64 : 0);
+            | (e->hasEnvironmentTelemetry ? 64 : 0)
+            | (e->xeddsaVerified ? 128 : 0);
 
     char key[12]; nodeKey(key, nodeId);
     Preferences p;
@@ -1287,6 +1290,10 @@ void NodeDB::updateUser(uint32_t nodeId, const UserInfo &u) {
         changed = true;
     }
     if (u.hasPubKey && memcmp(e->pubKey, u.pubKey, 32) != 0) {
+        // A signature proved the old key, not this one. Only a replaced key
+        // clears it: a first key arriving in a verified signed NodeInfo was
+        // marked a moment ago, on this same packet.
+        if (e->hasPubKey) e->xeddsaVerified = false;
         memcpy(e->pubKey, u.pubKey, 32);
         e->hasPubKey = true;
         e->pkiNoChannel = false;
@@ -1362,6 +1369,14 @@ bool NodeDB::persist(uint32_t nodeId) {
     _save(nodeId);
     e->lastPersistMs = millis();
     return true;
+}
+
+void NodeDB::markSigner(uint32_t nodeId) {
+    NodeEntry *e = find(nodeId);
+    if (!e || !e->nodeId || e->xeddsaVerified) return;
+    e->xeddsaVerified = true;
+    _save(nodeId);
+    e->lastPersistMs = millis();
 }
 
 bool NodeDB::setFavorite(uint32_t nodeId, bool favorite) {

@@ -214,7 +214,10 @@ bool decodeData(const uint8_t *buf, size_t len,
     if (sourceNode) *sourceNode = 0;
     if (hasDestNode) *hasDestNode = false;
     if (hasSourceNode) *hasSourceNode = false;
-    if (env) memset(env, 0, sizeof(*env));
+    if (env) {
+        memset(env, 0, sizeof(*env));
+        env->dataLen = (uint16_t)len;
+    }
     size_t i = 0;
     while (i < len) {
         uint64_t tag; i = pbReadVarint(buf, len, i, tag); if (!i) break;
@@ -241,6 +244,8 @@ bool decodeData(const uint8_t *buf, size_t len,
             else if (field == 10 && env && sz == XEDDSA_SIGNATURE_BYTES && i + sz <= len) {
                 memcpy(env->signature, buf + i, XEDDSA_SIGNATURE_BYTES);
                 env->hasSignature = true;
+            } else if (field == 10 && env && sz != 0) {
+                env->badSignature = true;
             }
             i += sz;
         } else if (wtype == 5) {

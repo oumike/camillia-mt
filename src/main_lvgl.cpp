@@ -2885,23 +2885,29 @@ static void openDestructiveConfirm(DestructiveConfirmAction action, uint32_t nod
 // Message Actions: the same modal with the tapback/Reply rows, acting on a chat
 // message. Falls back to the node menu when there is no packet id.
 static void openMessageActionMenu(uint32_t packetId, uint32_t senderNodeId);
-// Check a Data.xeddsa_signature against the sender's stored public key and
-// record the outcome on the node. Called once per packet from processMeshPacket(),
-// after any PKI decrypt, so RF, MQTT and PKI traffic are all checked the same way.
+// Apply the packet signature policy (s_cfg.packetSigPolicy, src/sig_policy.h)
+// to a decrypted packet: check its Data.xeddsa_signature against the sender's
+// stored public key, then decide whether to accept it the way a 2.8.1 node on
+// the same policy would. Called once per packet from processMeshPacket(), after
+// any PKI decrypt and before anything else touches it — node list, relay, MQTT
+// uplink — so RF, MQTT and PKI traffic are all judged the same way, and a
+// dropped packet goes no further, as upstream drops it in its routing gate.
 //
-// Verification is advisory here: an unsigned or unverifiable packet is handled
-// exactly as before. Meshtastic's own default receive policy is COMPATIBLE,
-// which accepts unsigned traffic, so
-// treating a failed check as a reason to drop would punish the majority of the
-// mesh for a feature almost nobody is using. What it buys today is the ability
-// to say a node has proved it holds the key we have for it.
-static void notePacketSignature(const MeshPacket &pkt) {
-    if (!pkt.decrypted || !pkt.env.hasSignature) return;
+// A packet we could not decrypt has no Data to check and is not judged here;
+// it is relayed opaquely, as upstream does.
+static SigPolicyResult checkPacketSignature(const MeshPacket &pkt) {
+    if (!pkt.decrypted) return {true, false};
+
+    SigPolicyInput in = {};
+    in.policy       = s_cfg.packetSigPolicy;
+    in.bootstrap    = SIG_BOOTSTRAP_NA;
+    in.pkiEncrypted = (pkt.chanIdx == -2);
+    in.broadcast    = (pkt.hdr.to == 0xFFFFFFFF);
+    in.dataLen      = pkt.env.dataLen;
+
     NodeEntry *n = Nodes.find(pkt.hdr.from);
-    if (!n || !n->hasPubKey) return;
-    // Already proved; the crypto is cheap but not free, and the answer cannot
-    // change while the entry holds the same key.
-    if (n->xeddsaVerified) return;
+    const bool haveKey = n && n->hasPubKey;
+    in.knownSigner = haveKey && n->xeddsaVerified;
 
     XeddsaSignedFields f = {};
     f.from         = pkt.hdr.from;
@@ -2914,16 +2920,48 @@ static void notePacketSignature(const MeshPacket &pkt) {
     f.bitfield     = pkt.env.bitfield;
     f.hasBitfield  = pkt.env.hasBitfield;
     f.wantResponse = pkt.wantResponse;
-    if (xeddsaVerify(n->pubKey, f, pkt.payload, pkt.payloadLen, pkt.env.signature)) {
-        n->xeddsaVerified = true;
-        Serial.printf("[xeddsa] verified signature from !%08lx port=%lu\n",
-                      (unsigned long)pkt.hdr.from, (unsigned long)pkt.portnum);
+
+    if (pkt.env.badSignature) {
+        in.check = SIG_CHECK_MALFORMED;
+    } else if (!pkt.env.hasSignature) {
+        in.check = SIG_CHECK_UNSIGNED;
+    } else if (haveKey) {
+        // Checked on every signed packet, not just until the node first proves
+        // itself: a failure drops the packet, so every one has to be judged.
+        in.check = xeddsaVerify(n->pubKey, f, pkt.payload, pkt.payloadLen, pkt.env.signature)
+                       ? SIG_CHECK_VERIFIED : SIG_CHECK_FAILED;
     } else {
-        // Worth a line: a signature that does not verify means either the key
-        // we hold is not theirs any more, or something is impersonating them.
-        Serial.printf("[xeddsa] signature FAILED from !%08lx port=%lu\n",
-                      (unsigned long)pkt.hdr.from, (unsigned long)pkt.portnum);
+        in.check = SIG_CHECK_NO_KEY;
+        // First contact. A signed NodeInfo carries the key to check it with,
+        // and 2.8.1 trusts that key only if it hashes to the sender's ID.
+        if (pkt.portnum == NODEINFO_APP) {
+            UserInfo u = {};
+            const bool ok = decodeUser(pkt.payload, pkt.payloadLen, u) && u.hasPubKey
+                && meshCrc32(u.pubKey, 32) == pkt.hdr.from
+                && xeddsaVerify(u.pubKey, f, pkt.payload, pkt.payloadLen, pkt.env.signature);
+            in.bootstrap = ok ? SIG_BOOTSTRAP_VERIFIED : SIG_BOOTSTRAP_INVALID;
+        }
     }
+
+    const SigPolicyResult r = sigPolicyDecide(in);
+    if (in.check == SIG_CHECK_VERIFIED || in.bootstrap == SIG_BOOTSTRAP_VERIFIED) {
+        if (!in.knownSigner) {
+            Serial.printf("[xeddsa] verified signature from !%08lx port=%lu\n",
+                          (unsigned long)pkt.hdr.from, (unsigned long)pkt.portnum);
+        }
+    } else if (!r.accept) {
+        // Worth a line each time: a failed signature means either the key we
+        // hold is not theirs any more, or something is impersonating them.
+        static const char *const kWhy[] = {
+            "unsigned", "malformed signature", "", "signature FAILED", "unverifiable signature",
+        };
+        const char *why = (in.bootstrap == SIG_BOOTSTRAP_INVALID)
+                              ? "invalid first-contact NodeInfo" : kWhy[in.check];
+        Serial.printf("[xeddsa] drop %s from !%08lx port=%lu (policy %s)\n", why,
+                      (unsigned long)pkt.hdr.from, (unsigned long)pkt.portnum,
+                      sigPolicyName(s_cfg.packetSigPolicy));
+    }
+    return r;
 }
 
 static void closeNodesActionMenu();
@@ -3527,6 +3565,7 @@ enum CfgActionId {
 #endif
     CFG_ACTION_SHARE_LOCATION,
     CFG_ACTION_POSITION_PRECISION,
+    CFG_ACTION_SIG_POLICY,     // which signed/unsigned packets to accept
     CFG_ACTION_EXPORT,
     CFG_ACTION_IMPORT,
     CFG_ACTION_THEME,
@@ -5412,6 +5451,15 @@ static const char *cfgActionLabel(int actionId, char *buf, size_t bufLen) {
             snprintf(buf, bufLen, TR("Location Precision: %s"),
                      TR(positionPrecisionLabel(s_cfg.positionPrecision)));
             break;
+        case CFG_ACTION_SIG_POLICY: {
+            // sigPolicyName()'s spellings, marked here for translation; that
+            // header stays free of the UI.
+            static const char *const kNames[SIG_POLICY_COUNT] = {
+                TR_NOOP("Compatible"), TR_NOOP("Balanced"), TR_NOOP("Strict"),
+            };
+            snprintf(buf, bufLen, TR("Signed Packets: %s"),
+                     TR(kNames[sigPolicyCoerce(s_cfg.packetSigPolicy)]));
+        } break;
         case CFG_ACTION_NODE_NAME:
             snprintf(buf, bufLen, TR("Node Name: %s (%s)"),
                      s_cfg.nodeLong[0]  ? s_cfg.nodeLong  : TR("unset"),
@@ -11212,6 +11260,8 @@ static void applyLoadedConfigInvariants() {
     // particular must not survive: applyPositionPrecision() treats it as "do
     // not coarsen", which is the opposite of what a stray 0 looks like.
     s_cfg.positionPrecision = positionPrecisionCoerce(s_cfg.positionPrecision);
+    // A stray byte must not become Strict and silence the mesh.
+    s_cfg.packetSigPolicy = sigPolicyCoerce(s_cfg.packetSigPolicy);
     // An off-list value would show on the row as "Never" while behaving as
     // something else entirely, and the row could not cycle back to it.
     s_cfg.notifyLightTimeoutS = cfgCoerceNotifyLightTimeout((long)s_cfg.notifyLightTimeoutS);
@@ -14549,6 +14599,8 @@ static void initCfgActions() {
     s_cfgActions[s_cfgActionCount++] = CFG_ACTION_POSITION_PRECISION;
 
     s_cfgActions[s_cfgActionCount++] = CFG_ACTION_CHANNEL_CFG;
+    // After the channels: like them, it decides what this node hears.
+    s_cfgActions[s_cfgActionCount++] = CFG_ACTION_SIG_POLICY;
 
     // ── How it looks ─────────────────────────────────────────────────────────
 #if HAS_UI_THEMES
@@ -42176,6 +42228,29 @@ static void performCfgAction(int actionId) {
             openCfgPosPrecModal();
         } break;
 
+        case CFG_ACTION_SIG_POLICY: {
+            if (s_cfgDebugLog) Serial.println("[lvgl-cfg] exec SIG_POLICY");
+            showActionPopup = false;   // row already reads the policy
+            // Three stops, so a cycling row: Compatible -> Balanced -> Strict.
+            s_cfg.packetSigPolicy =
+                sigPolicyCoerce((sigPolicyCoerce(s_cfg.packetSigPolicy) + 1) % SIG_POLICY_COUNT);
+            markConfigDirty();
+            switch (s_cfg.packetSigPolicy) {
+                case SIG_POLICY_BALANCED:
+                    snprintf(s_cfgStatus, sizeof(s_cfgStatus), "%s",
+                             TR("Unsigned broadcasts from signers dropped"));
+                    break;
+                case SIG_POLICY_STRICT:
+                    snprintf(s_cfgStatus, sizeof(s_cfgStatus), "%s",
+                             TR("Only signed packets accepted (no 2.7 nodes)"));
+                    break;
+                default:
+                    snprintf(s_cfgStatus, sizeof(s_cfgStatus), "%s",
+                             TR("Unsigned packets accepted"));
+                    break;
+            }
+        } break;
+
         case CFG_ACTION_EXPORT: {
             if (s_cfgDebugLog) Serial.println("[lvgl-cfg] exec EXPORT");
             // The user picked this from a menu; if they just inserted a card,
@@ -54128,22 +54203,6 @@ static bool processMeshPacket(const MeshPacket &rxPkt) {
     // (display, rebroadcast, or node-state updates).
     if (s_cfg.ignoreMqtt && (pkt.hdr.flags & 0x10)) return false;
 
-    // Store-and-Forward is the one port where hdr.from is not who we just heard.
-    // On a replay it is the *original author* of a message the router stored
-    // hours ago, while the SNR, hop count and arrival time all describe the
-    // router's transmission right now — so feeding it here marks a node that has
-    // been silent all afternoon as freshly heard, at someone else's signal
-    // strength, and reshuffles the node list every time a burst lands. The S&F
-    // case below calls this itself for the frames a router really did originate
-    // (heartbeats, pings, stats), where hdr.from means what it usually means.
-    if (!(pkt.decrypted && pkt.portnum == STORE_FORWARD_APP)) {
-        Nodes.updateFromPacket(pkt);
-    }
-
-    // Live SNR/RSSI sparkline samples (one per received packet).
-    chartPushSample(s_snrHist, pkt.snr);
-    chartPushSample(s_rssiHist, pkt.rssi);
-
     if (!pkt.decrypted && pkt.hdr.channel == 0 && pkt.rawLen > 12) {
         NodeEntry *sender = Nodes.find(pkt.hdr.from);
         if (sender && sender->hasPubKey) {
@@ -54172,7 +54231,28 @@ static bool processMeshPacket(const MeshPacket &rxPkt) {
         }
     }
 
-    notePacketSignature(pkt);
+    // Before the node list hears of the packet: one the policy drops does not
+    // mark its sender as heard, any more than it is relayed or shown.
+    const SigPolicyResult sig = checkPacketSignature(pkt);
+    if (!sig.accept) return false;
+
+    // Store-and-Forward is the one port where hdr.from is not who we just heard.
+    // On a replay it is the *original author* of a message the router stored
+    // hours ago, while the SNR, hop count and arrival time all describe the
+    // router's transmission right now — so feeding it here marks a node that has
+    // been silent all afternoon as freshly heard, at someone else's signal
+    // strength, and reshuffles the node list every time a burst lands. The S&F
+    // case below calls this itself for the frames a router really did originate
+    // (heartbeats, pings, stats), where hdr.from means what it usually means.
+    if (!(pkt.decrypted && pkt.portnum == STORE_FORWARD_APP)) {
+        Nodes.updateFromPacket(pkt);
+    }
+    // After the update above, which creates the entry for a first contact.
+    if (sig.markSigner) Nodes.markSigner(pkt.hdr.from);
+
+    // Live SNR/RSSI sparkline samples (one per received packet).
+    chartPushSample(s_snrHist, pkt.snr);
+    chartPushSample(s_rssiHist, pkt.rssi);
 
     // Managed flood: relay new traffic onward before handling it locally. Held
     // while a preset scan has the radio parked: relaying there makes this node a

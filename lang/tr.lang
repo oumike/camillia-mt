@@ -138,6 +138,7 @@ BT Keyboard: %s	BT klavye: %s
 BT Keyboard: Off	BT klavye: Kapalı
 Back	Geri
 Back = Cancel	Geri = İptal
+Balanced	Dengeli
 Bass	Bas
 Battery Calibration	Pil kalibrasyonu
 Battery Calibration: %s	Pil kalibrasyonu: %s
@@ -219,6 +220,7 @@ Clock Format: %s	Saat biçimi: %s
 Clock set from web config	Saat web yapılandırmasından ayarlandı
 Clock set: %04d-%02d-%02d %02d:%02d	Saat ayarlandı: %04d-%02d-%02d %02d:%02d
 Close	Kapat
+Compatible	Uyumlu
 Configuration	Yapılandırma
 Configuration exported to /camillia/config.yaml.\n\nThe card is formatted and holds nothing else. Chat history, the node database and any map tiles were on the old filesystem and are gone.	Yapılandırma /camillia/config.yaml konumuna aktarıldı.\n\nKart biçimlendirildi ve başka bir şey içermiyor. Sohbet geçmişi, düğüm veritabanı ve harita karoları eski dosya sistemindeydi ve silindi.
 Configured WiFi is empty	Yapılandırılmış WiFi boş
@@ -467,6 +469,7 @@ N=Choose WiFi   Enter=Finish   Bksp=Back	N=WiFi seç   Enter=Bitir   Bksp=Geri
 NO LINE OF SIGHT	GÖRÜŞ HATTI YOK
 NODEINFO + telemetry queued.	NODEINFO + telemetri kuyruğa alındı.
 No GPS fix	GPS konumu yok
+Only signed packets accepted (no 2.7 nodes)	Yalnızca imzalı paketler (2.7 düğümü yok)
 Send NODEINFO and telemetry to the mesh now?	NODEINFO ve telemetri şimdi ağa gönderilsin mi?
 NODES	DÜĞÜMLER
 NODES (%d%s)	DÜĞÜMLER (%d%s)
@@ -687,6 +690,7 @@ Short: %s	Kısa: %s
 Show Archived Nodes: %s	Arşivlenen düğümleri göster: %s
 Show Archived Nodes: %s%s	Arşivlenen düğümleri göster: %s%s
 Signal: SNR %.1f dB, RSSI %.0f dBm	Sinyal: SNR %.1f dB, RSSI %.0f dBm
+Signed Packets: %s	İmzalı paketler: %s
 Silver	Gümüş
 Sky	Gök mavisi
 Small	Küçük
@@ -702,6 +706,7 @@ State map unavailable	Bölge haritası kullanılamıyor
 Stay on	Hep açık
 Storage: %s %s	Depolama: %s %s
 Storage: %s (not mounted)	Depolama: %s (bağlı değil)
+Strict	Katı
 Sun	Paz
 Sweep	Tarama
 Sweep already running	Tarama zaten çalışıyor
@@ -770,6 +775,8 @@ Uni(g)nore	Yoksaymayı bırak (G)
 Unignore	Yoksaymayı bırak
 Units: %s	Birimler: %s
 Unknown	Bilinmiyor
+Unsigned broadcasts from signers dropped	İmzalayanların imzasız yayınları atıldı
+Unsigned packets accepted	İmzasız paketler kabul ediliyor
 Until read	Okunana kadar
 Up to date (%s)	Güncel (%s)
 Up/Down	Yukarı/Aşağı
