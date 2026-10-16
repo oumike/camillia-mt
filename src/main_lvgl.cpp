@@ -1327,6 +1327,14 @@ static constexpr int kNodesTopAll = 1;
 static constexpr int kNodesTopMap = 2;
 static bool s_nodesSearchBtnFocused = false;
 static int s_nodesTopBtn = kNodesTopSearch;
+// Where the keyboard cursor can walk onto those buttons: every keyboard board,
+// and the T-Display P4, which builds touch-only but has a keyboard expansion
+// (#116: without this its arrows had nowhere to go from an empty list).
+#if !UI_TOUCH_ONLY_PROFILE || defined(DEVICE_TDISPLAY_P4)
+#  define NODES_KEYBOARD_TOP_BUTTONS 1
+#else
+#  define NODES_KEYBOARD_TOP_BUTTONS 0
+#endif
 // Locate is compiled out on the Cardputer, for the same reason Message Actions
 // is (see HAS_MESSAGE_ACTIONS below): no PSRAM, and decoding a PNG into a
 // full-panel image object is exactly the allocation that board has no room to
@@ -25597,6 +25605,34 @@ static bool nodesFilterIsAll() {
     return s_nodesFilterOpen && strcmp(s_nodesFilter, "*") == 0;
 }
 
+#if NODES_KEYBOARD_TOP_BUTTONS
+// Whether the keyboard cursor is drawn at all: always where there are keys,
+// and on the P4 only while its keyboard is attached, so a P4 used by touch
+// never shows a cursor it cannot move.
+static bool nodesKeyboardCursorShown() {
+#if UI_TOUCH_ONLY_PROFILE
+    return keyboardAttached();
+#else
+    return true;
+#endif
+}
+#endif
+
+// An empty list has no row to hold the cursor, which left it nowhere and the
+// arrows doing nothing (#116). Put it on the button that gets you a list:
+// All for an empty Favorites, Clear search for a search with no matches.
+// Enter presses it (nodesFocusedButtonActivate()). Left alone when it is
+// already on a button, which is where the user put it.
+static void nodesFocusCursorForEmptyList() {
+#if NODES_KEYBOARD_TOP_BUTTONS
+    if (s_nodesSearchBtnFocused || !nodesKeyboardCursorShown()) return;
+    s_nodesSearchBtnFocused = true;
+    s_nodesTopBtn = s_nodesFilterOpen ? kNodesTopSearch : kNodesTopAll;
+    refreshNodesSearchButton();
+    refreshNodesHint();
+#endif
+}
+
 static void nodesApplyFilter() {
     s_nodesFilteredCount = 0;
 
@@ -25635,6 +25671,7 @@ static void nodesApplyFilter() {
     if (s_nodesFilteredCount <= 0) {
         s_nodesSelected = -1;
         s_nodesRenderStart = 0;
+        nodesFocusCursorForEmptyList();
         return;
     }
 
@@ -25947,7 +25984,7 @@ static void refreshNodesSearchButton() {
                         s_nodesSearchBtnFocused && s_nodesTopBtn == kNodesTopSearch);
 }
 
-#if !UI_TOUCH_ONLY_PROFILE
+#if NODES_KEYBOARD_TOP_BUTTONS
 // Moves the keyboard cursor between the buttons above the list and the rows.
 // btn picks which button (kNodesTop*) when focused is set.
 static void nodesSetSearchBtnFocus(bool focused, int btn = kNodesTopSearch) {
@@ -28130,8 +28167,24 @@ static bool nodeLocateBuildModal(const char *titleText, bool allNodes) {
 
     const int scrW = lv_disp_get_hor_res(NULL);
     const int scrH = lv_disp_get_ver_res(NULL);
+#if defined(DEVICE_TDISPLAY_P4)
+    // Edge to edge (#116). The 300 px card below was sized for 320-wide
+    // panels; on the P4 (284 or 616 UI px across) it left a band of backdrop
+    // either side, and in landscape used less than half the screen. The title
+    // rides on the map as a chip and the touch X is the way back, so the
+    // canvas gets the whole display. Locate and the node map both.
+    const bool fullScreen = true;
+#else
+    const bool fullScreen = false;
+#endif
     int modalW = scrW - 24;
     if (modalW > 300) modalW = 300;
+    if (fullScreen) modalW = scrW;
+#if UI_TOUCH_ONLY_PROFILE
+    const int closeXSize = kHeltecCloseXSize;   // the X that is the way back
+#else
+    const int closeXSize = 0;
+#endif
     // Full viewport height. The map box is the modal's only flex-grow child, so
     // every row reclaimed here lands in the canvas rather than in padding.
     //
@@ -28174,7 +28227,7 @@ static bool nodeLocateBuildModal(const char *titleText, bool allNodes) {
     lv_obj_clear_flag(s_nodeLocateBackdrop, LV_OBJ_FLAG_SCROLLABLE);
     lv_obj_add_flag(s_nodeLocateBackdrop, LV_OBJ_FLAG_CLICKABLE);
     lv_obj_set_style_bg_color(s_nodeLocateBackdrop, lv_color_hex(0x000000), 0);
-    lv_obj_set_style_bg_opa(s_nodeLocateBackdrop, LV_OPA_50, 0);
+    lv_obj_set_style_bg_opa(s_nodeLocateBackdrop, fullScreen ? LV_OPA_COVER : LV_OPA_50, 0);
     lv_obj_set_style_border_width(s_nodeLocateBackdrop, 0, 0);
     lv_obj_set_style_pad_all(s_nodeLocateBackdrop, 0, 0);
     lv_obj_add_event_cb(s_nodeLocateBackdrop, onNodeLocateBackdropPressed, LV_EVENT_CLICKED, nullptr);
@@ -28186,22 +28239,28 @@ static bool nodeLocateBuildModal(const char *titleText, bool allNodes) {
     lv_obj_add_flag(s_nodeLocateModal, LV_OBJ_FLAG_CLICKABLE);
     lv_obj_set_style_bg_color(s_nodeLocateModal, modalBg, 0);
     lv_obj_set_style_bg_opa(s_nodeLocateModal, LV_OPA_COVER, 0);
-    lv_obj_set_style_border_width(s_nodeLocateModal, 1, 0);
+    lv_obj_set_style_border_width(s_nodeLocateModal, fullScreen ? 0 : 1, 0);
     lv_obj_set_style_border_color(s_nodeLocateModal, modalBorder, 0);
-    lv_obj_set_style_pad_all(s_nodeLocateModal, 6, 0);
-    lv_obj_set_style_pad_row(s_nodeLocateModal, 3, 0);
+    lv_obj_set_style_pad_all(s_nodeLocateModal, fullScreen ? 0 : 6, 0);
+    lv_obj_set_style_pad_row(s_nodeLocateModal, fullScreen ? 0 : 3, 0);
+    if (fullScreen) lv_obj_set_style_radius(s_nodeLocateModal, 0, 0);
     lv_obj_set_flex_flow(s_nodeLocateModal, LV_FLEX_FLOW_COLUMN);
     lv_obj_set_flex_align(s_nodeLocateModal, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_CENTER,
                           LV_FLEX_ALIGN_CENTER);
     lv_obj_move_foreground(s_nodeLocateBackdrop);
 
-    lv_obj_t *title = lv_label_create(s_nodeLocateModal);
-    lv_obj_set_width(title, lv_pct(100));
-    lv_obj_set_style_text_font(title, &lv_font_montserrat_12, 0);
-    lv_obj_set_style_text_color(title, titleColor, 0);
-    lv_obj_set_style_text_align(title, LV_TEXT_ALIGN_CENTER, 0);
-    lv_label_set_long_mode(title, LV_LABEL_LONG_DOT);
-    setLabelTextEmojiSafe(title, titleText);
+    // Full screen, the title is a chip on the map instead (below, once the
+    // map has its size).
+    lv_obj_t *title = nullptr;
+    if (!fullScreen) {
+        title = lv_label_create(s_nodeLocateModal);
+        lv_obj_set_width(title, lv_pct(100));
+        lv_obj_set_style_text_font(title, &lv_font_montserrat_12, 0);
+        lv_obj_set_style_text_color(title, titleColor, 0);
+        lv_obj_set_style_text_align(title, LV_TEXT_ALIGN_CENTER, 0);
+        lv_label_set_long_mode(title, LV_LABEL_LONG_DOT);
+        setLabelTextEmojiSafe(title, titleText);
+    }
 
     // The map area. Its own container so the renderer can position the image and
     // the pin in coordinates that belong to nobody else.
@@ -28211,10 +28270,10 @@ static bool nodeLocateBuildModal(const char *titleText, bool allNodes) {
     lv_obj_clear_flag(mapBox, LV_OBJ_FLAG_SCROLLABLE);
     lv_obj_set_style_bg_color(mapBox, nodeLocateCanvasBgColor(), 0);
     lv_obj_set_style_bg_opa(mapBox, LV_OPA_COVER, 0);
-    lv_obj_set_style_border_width(mapBox, 1, 0);
+    lv_obj_set_style_border_width(mapBox, fullScreen ? 0 : 1, 0);
     lv_obj_set_style_border_color(mapBox, modalBorder, 0);
     lv_obj_set_style_pad_all(mapBox, 0, 0);
-    lv_obj_set_style_radius(mapBox, 3, 0);
+    lv_obj_set_style_radius(mapBox, fullScreen ? 0 : 3, 0);
     s_nodeLocateMapBox = mapBox;
 #if HAS_TOUCH
     // The drag surface. The layers above it — tile layer, image, pin — are
@@ -28232,8 +28291,12 @@ static bool nodeLocateBuildModal(const char *titleText, bool allNodes) {
 #if UI_TOUCH_ONLY_PROFILE
     // Node names run long, and the title is LV_LABEL_LONG_DOT across the full
     // width, so it has to be told to stop short of the X.
-    reserveHeltecCloseXRow(title);
-    appendHeltecCloseX(s_nodeLocateModal, onNodeLocateClosePressed);
+    if (title) reserveHeltecCloseXRow(title);
+    {
+        lv_obj_t *closeX = appendHeltecCloseX(s_nodeLocateModal, onNodeLocateClosePressed);
+        // On the map itself, full screen: in from the corner like the chips.
+        if (closeX && fullScreen) lv_obj_align(closeX, LV_ALIGN_TOP_RIGHT, -4, 4);
+    }
 #endif
 
     // Build one RGB565 viewport. Live PNG tiles are decoded into this canvas
@@ -28281,6 +28344,23 @@ static bool nodeLocateBuildModal(const char *titleText, bool allNodes) {
     lv_obj_set_style_pad_right(attribution, 2, 0);
     lv_label_set_text(attribution, TR("(c) OpenStreetMap"));
     lv_obj_align(attribution, LV_ALIGN_BOTTOM_LEFT, 2, -2);
+
+    if (fullScreen) {
+        // The title as a chip, top left, stopping short of the X and the
+        // zoom column on the right.
+        lv_obj_t *chip = lv_label_create(s_nodeLocateTileLayer);
+        lv_obj_set_style_text_font(chip, &lv_font_montserrat_12, 0);
+        lv_obj_set_style_text_color(chip, titleColor, 0);
+        lv_obj_set_style_bg_color(chip, chipBg, 0);
+        lv_obj_set_style_bg_opa(chip, chipOpa, 0);
+        lv_obj_set_style_pad_all(chip, 3, 0);
+        lv_obj_set_style_radius(chip, 3, 0);
+        lv_label_set_long_mode(chip, LV_LABEL_LONG_DOT);
+        lv_obj_set_width(chip, LV_SIZE_CONTENT);
+        lv_obj_set_style_max_width(chip, mapW - closeXSize - 20, 0);
+        setLabelTextEmojiSafe(chip, titleText);
+        lv_obj_align(chip, LV_ALIGN_TOP_LEFT, 4, 4);
+    }
 
     // The node map draws its nodes into the canvas instead (nodeMapPaintRect()).
     if (!allNodes) {
@@ -28401,7 +28481,9 @@ static bool nodeLocateBuildModal(const char *titleText, bool allNodes) {
         Local::btn(ctlCol, LV_SYMBOL_MINUS, onNodeLocateZoomOutPressed);
         Local::btn(ctlCol, LV_SYMBOL_GPS, onNodeLocateCenterPressed);
 
-        lv_obj_align(ctlCol, LV_ALIGN_TOP_RIGHT, -4, 4);
+        // Full screen the close X has the corner, so the column starts under it.
+        lv_obj_align(ctlCol, LV_ALIGN_TOP_RIGHT, -4,
+                     fullScreen ? 4 + closeXSize + 4 : 4);
         lv_obj_move_foreground(ctlCol);
     }
 #endif
@@ -47321,7 +47403,7 @@ static void pumpKeyboardInput() {
                 // Pager wheel orientation: UP should move to the next row.
                 const int step = invertScrollNav ? ((k == KEY_SCROLL_UP) ? 1 : -1)
                                                  : ((k == KEY_SCROLL_UP) ? -1 : 1);
-#if !UI_TOUCH_ONLY_PROFILE
+#if NODES_KEYBOARD_TOP_BUTTONS
                 // The Map, All and Search / Clear buttons sit above the first
                 // row: Up from there (or from an empty list) moves onto Search,
                 // Up again onto All, then Map, and Down walks back.
