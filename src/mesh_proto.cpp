@@ -1028,7 +1028,10 @@ size_t encodeAdminData(const uint8_t *admin, size_t adminLen,
     buf[n++] = (5 << 3) | 5;
     memcpy(buf + n, &fromNode, 4); n += 4;
 
-    return n;
+    // field 9: bitfield. Its presence is what tells a 2.8.1 node a hop_start of
+    // 0 is a zero-hop send and not pre-2.3 firmware, which it drops
+    // (classifyHopStart()); a hop limit of 0 makes every admin send one.
+    return pbWriteDataBitfield(buf, n, bufLen, 0);
 }
 
 size_t encodeTextMessageUnicast(const char *text,
@@ -1160,7 +1163,11 @@ size_t encodeSharedNodeInfo(uint32_t nodeId, const char *longName,
     n += pbWriteVarint(buf + n, u);
     if (n + u > bufLen) return 0;
     memcpy(buf + n, user, u); n += u;
-    return n;
+    // field 9: bitfield. A share goes out zero-hop (hop_start 0), and a 2.8.1
+    // node drops a hop_start-0 packet with no bitfield as pre-2.3 firmware
+    // (classifyHopStart()). No OK_TO_MQTT bit: the node shared is not ours to
+    // consent for.
+    return pbWriteDataBitfield(buf, n, bufLen, 0);
 }
 
 void applyPositionPrecision(int32_t &latI, int32_t &lonI, uint8_t precisionBits) {

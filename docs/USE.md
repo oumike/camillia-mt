@@ -2549,7 +2549,15 @@ broadcast it sends — channel messages, position, node info, telemetry, neighbo
 info — carries a signature whenever the signed packet still fits in one radio
 frame. Direct messages are not signed, because their encryption already proves
 who sent them, and nothing is signed on a node's behalf when Camillia shares
-someone else's node info. There is nothing to turn on.
+someone else's node info.
+
+Signing is on only when your node ID is derived from your public key
+(**Node ID from public key** in Web Config, or a typed ID that happens to equal
+it), which is how every 2.8.1 node numbers itself. A 2.8.1 node that does not
+yet have your key accepts a signed node info only if the ID matches that hash,
+and drops it otherwise, whatever its policy. So with the ID taken from the
+radio's MAC, Camillia signs nothing and behaves exactly like a 2.7 node: every
+2.7 and 2.8.1 node hears it, except a 2.8.1 node on **Strict**.
 
 What that means against a stock 2.8.1 node: once it has learned your key, your
 broadcasts show as signed, and on any of its three signature policies it treats
@@ -2558,7 +2566,8 @@ your traffic exactly as it treats another 2.8.1 node's. On the default
 packets, no longer drops your broadcasts. **Balanced**, having seen a node sign,
 drops an unsigned broadcast from it that would have fit with a signature — so a
 Camillia build from before this change should not share a node ID with one
-after it. A 2.8.1
+after it, and switching **Node ID from public key** off again gives the node a
+new ID rather than an unsigned old one. A 2.8.1
 node also drops any packet whose signature fails outright, where Camillia only
 logs it.
 

@@ -11881,7 +11881,20 @@ static void deriveNodeId() {
 
     // Sign our broadcasts as this node (Meshtastic 2.8.1). Every path that
     // changes the key or the ID comes through here.
-    xeddsaInitSigner(myPrivKey, s_myNodeId);
+    //
+    // Only when the ID is crc32(public key), as every 2.8.1 node's is. A 2.8.1
+    // node that has no key for us yet accepts a signed NodeInfo only if that
+    // hash matches the sender (verifyFirstContactNodeInfo()), and drops it
+    // otherwise, under every signature policy -- so a MAC-derived ID that signs
+    // could never be learned by a 2.8.1 node at all. Signing some packets but
+    // not NodeInfo is no better: once a Balanced node has seen us sign, it
+    // drops our unsigned NodeInfo broadcasts. Unsigned throughout, we are
+    // exactly the 2.7 node every policy but Strict accepts.
+    const bool idIsKeyHash = (s_myNodeId == meshCrc32(myPubKey, 32));
+    xeddsaInitSigner(myPrivKey, idIsKeyHash ? s_myNodeId : 0);
+    if (!idIsKeyHash) {
+        Serial.println("[xeddsa] node ID is not crc32(public key): broadcasts go unsigned");
+    }
 
     // Remember the ID we previously announced under, so chat history written by
     // the old identity can still be recognised as ours. Stored rather than
