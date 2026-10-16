@@ -54781,12 +54781,18 @@ static void mqttDownlinkInject(const MeshHdr &hdrIn, const uint8_t *cipherIn,
                           (unsigned long)hdr.from);
             return;
         }
-        if (!encryptPayload(hdr.id, hdr.from, CHANNEL_KEYS[idx].key,
-                            CHANNEL_KEYS[idx].keyLen, cipher, sealed, cipherLen)) {
+        // Sealed the way the channel is: AES-CCM with its tag on an AEAD
+        // channel, so decryptPacket() and every node we relay it to can open it
+        // under the hash set below. Never signed here: our own packets were
+        // dropped above, and the signer only signs as us.
+        const size_t sealedLen = encryptChannelPayload(CHANNEL_KEYS[idx], hdr.id, hdr.from, hdr.to,
+                                                       cipher, cipherLen, sealed, sizeof(sealed));
+        if (sealedLen == 0) {
             Serial.println("[mqtt] downlink drop: could not encrypt decoded packet");
             return;
         }
         cipher = sealed;
+        cipherLen = sealedLen;
         // A decoded packet's channel field is the sender's channel index, not
         // the on-air hash decryptPacket() and the relay need.
         hdr.channel = CHANNEL_KEYS[idx].hash;
