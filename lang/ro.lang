@@ -685,6 +685,7 @@ Short: %s	Scurt: %s
 Show Archived Nodes: %s	Arată nodurile arhivate: %s
 Show Archived Nodes: %s%s	Arată nodurile arhivate: %s%s
 Signal: SNR %.1f dB, RSSI %.0f dBm	Semnal: SNR %.1f dB, RSSI %.0f dBm
+Signed Packets	Pachete semnate
 Signed Packets: %s	Pachete semnate: %s
 Silver	Argintiu
 Sky	Bleu

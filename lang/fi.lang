@@ -689,6 +689,7 @@ Short: %s	Lyhyt: %s
 Show Archived Nodes: %s	Näytä arkistoidut solmut: %s
 Show Archived Nodes: %s%s	Näytä arkistoidut solmut: %s%s
 Signal: SNR %.1f dB, RSSI %.0f dBm	Signaali: SNR %.1f dB, RSSI %.0f dBm
+Signed Packets	Allekirjoitetut paketit
 Signed Packets: %s	Allekirjoitetut paketit: %s
 Silver	Hopea
 Sky	Taivaansininen

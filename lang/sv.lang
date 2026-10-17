@@ -677,6 +677,7 @@ Short name cannot be empty	Kortnamn får inte vara tomt
 Short: %s	Kort: %s
 Show Archived Nodes: %s	Visa arkiverade noder: %s
 Show Archived Nodes: %s%s	Visa arkiverade noder: %s%s
+Signed Packets	Signerade paket
 Signed Packets: %s	Signerade paket: %s
 Sky	Himmelsblå
 Small	Liten

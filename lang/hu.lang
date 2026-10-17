@@ -690,6 +690,7 @@ Short: %s	Rövid: %s
 Show Archived Nodes: %s	Archivált csomópontok mutatása: %s
 Show Archived Nodes: %s%s	Archivált csomópontok mutatása: %s%s
 Signal: SNR %.1f dB, RSSI %.0f dBm	Jel: SNR %.1f dB, RSSI %.0f dBm
+Signed Packets	Aláírt csomagok
 Signed Packets: %s	Aláírt csomagok: %s
 Silver	Ezüst
 Sky	Égszínkék

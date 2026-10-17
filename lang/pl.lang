@@ -687,6 +687,7 @@ Short: %s	Krótka: %s
 Show Archived Nodes: %s	Pokaż zarchiwizowane węzły: %s
 Show Archived Nodes: %s%s	Pokaż zarchiwizowane węzły: %s%s
 Signal: SNR %.1f dB, RSSI %.0f dBm	Sygnał: SNR %.1f dB, RSSI %.0f dBm
+Signed Packets	Podpisane pakiety
 Signed Packets: %s	Podpisane pakiety: %s
 Silver	Srebrny
 Sky	Błękitny

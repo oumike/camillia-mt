@@ -687,6 +687,7 @@ Short name cannot be empty	Kratko ime ne sme biti prazno
 Short: %s	Kratko: %s
 Show Archived Nodes: %s	Pokaži arhivirana vozlišča: %s
 Show Archived Nodes: %s%s	Pokaži arhivirana vozlišča: %s%s
+Signed Packets	Podpisani paketi
 Signed Packets: %s	Podpisani paketi: %s
 Silver	Srebrna
 Sky	Nebesna

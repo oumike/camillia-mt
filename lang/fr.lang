@@ -687,6 +687,7 @@ Short: %s	Court : %s
 Show Archived Nodes: %s	Afficher les nœuds archivés : %s
 Show Archived Nodes: %s%s	Afficher les nœuds archivés : %s%s
 Signal: SNR %.1f dB, RSSI %.0f dBm	Signal : SNR %.1f dB, RSSI %.0f dBm
+Signed Packets	Paquets signés
 Signed Packets: %s	Paquets signés : %s
 Silver	Argent
 Sky	Ciel

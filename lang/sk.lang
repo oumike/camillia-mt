@@ -686,6 +686,7 @@ Short: %s	Krátke: %s
 Show Archived Nodes: %s	Zobraziť archivované uzly: %s
 Show Archived Nodes: %s%s	Zobraziť archivované uzly: %s%s
 Signal: SNR %.1f dB, RSSI %.0f dBm	Signál: SNR %.1f dB, RSSI %.0f dBm
+Signed Packets	Podpísané pakety
 Signed Packets: %s	Podpísané pakety: %s
 Silver	Strieborná
 Sky	Nebeská

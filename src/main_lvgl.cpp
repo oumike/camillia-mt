@@ -830,6 +830,20 @@ static lv_obj_t *s_fontSizeBackdrop = nullptr;
 static lv_obj_t *s_fontSizeModal = nullptr;
 static lv_obj_t *s_fontSizeRows[FONT_SIZE_MAX + 1] = {};
 static int s_fontSizeSelection = 0;
+static lv_obj_t *s_sigPolicyBackdrop = nullptr;
+static lv_obj_t *s_sigPolicyModal = nullptr;
+static lv_obj_t *s_sigPolicyRows[SIG_POLICY_COUNT] = {};
+static int s_sigPolicySelection = 0;
+// sigPolicyName()'s spellings, marked here for translation; that header stays
+// free of the UI. Each with the consequence the picker and status line show.
+static const char *const kSigPolicyLabel[SIG_POLICY_COUNT] = {
+    TR_NOOP("Compatible"), TR_NOOP("Balanced"), TR_NOOP("Strict"),
+};
+static const char *const kSigPolicyDesc[SIG_POLICY_COUNT] = {
+    TR_NOOP("Unsigned packets accepted"),
+    TR_NOOP("Unsigned broadcasts from signers dropped"),
+    TR_NOOP("Only signed packets accepted (no 2.7 nodes)"),
+};
 
 struct KnownWifiEntry {
     char ssid[sizeof(RhinoConfig::wifiSsid)];
@@ -5451,15 +5465,10 @@ static const char *cfgActionLabel(int actionId, char *buf, size_t bufLen) {
             snprintf(buf, bufLen, TR("Location Precision: %s"),
                      TR(positionPrecisionLabel(s_cfg.positionPrecision)));
             break;
-        case CFG_ACTION_SIG_POLICY: {
-            // sigPolicyName()'s spellings, marked here for translation; that
-            // header stays free of the UI.
-            static const char *const kNames[SIG_POLICY_COUNT] = {
-                TR_NOOP("Compatible"), TR_NOOP("Balanced"), TR_NOOP("Strict"),
-            };
+        case CFG_ACTION_SIG_POLICY:
             snprintf(buf, bufLen, TR("Signed Packets: %s"),
-                     TR(kNames[sigPolicyCoerce(s_cfg.packetSigPolicy)]));
-        } break;
+                     TR(kSigPolicyLabel[sigPolicyCoerce(s_cfg.packetSigPolicy)]));
+            break;
         case CFG_ACTION_NODE_NAME:
             snprintf(buf, bufLen, TR("Node Name: %s (%s)"),
                      s_cfg.nodeLong[0]  ? s_cfg.nodeLong  : TR("unset"),
@@ -18463,6 +18472,168 @@ static void openFontSizeModal() {
     }
 
     refreshFontSizeSelection();
+}
+
+// ── Signed Packets picker ────────────────────────────────────────────────────
+// Picks the packet signature policy (src/sig_policy.h). Each option carries
+// its one-line consequence, so a policy is chosen knowing what it drops rather
+// than by cycling past it. Applies without a reboot: processMeshPacket() reads
+// s_cfg.packetSigPolicy per packet.
+static void closeSigPolicyModal() {
+    if (lvObjValid(s_sigPolicyBackdrop)) {
+        lv_obj_del(s_sigPolicyBackdrop);
+    } else if (lvObjValid(s_sigPolicyModal)) {
+        lv_obj_del(s_sigPolicyModal);
+    }
+    s_sigPolicyBackdrop = nullptr;
+    s_sigPolicyModal = nullptr;
+    memset(s_sigPolicyRows, 0, sizeof(s_sigPolicyRows));
+}
+
+static void refreshSigPolicySelection() {
+    if (!s_sigPolicyModal) return;
+    paintPickerRows(s_sigPolicyRows, SIG_POLICY_COUNT, s_sigPolicySelection, PICKER_SCROLL_VIEW);
+}
+
+static void applySigPolicySelection(int policy) {
+    if (policy < 0 || policy >= SIG_POLICY_COUNT) return;
+    const bool changed = ((uint8_t)policy != sigPolicyCoerce(s_cfg.packetSigPolicy));
+    s_cfg.packetSigPolicy = (uint8_t)policy;
+    if (changed) markConfigDirty();
+    snprintf(s_cfgStatus, sizeof(s_cfgStatus), "%s", TR(kSigPolicyDesc[policy]));
+    closeSigPolicyModal();
+    refreshCfgModal();
+}
+
+static void onSigPolicyRowPressed(lv_event_t *e) {
+    int idx = (int)(intptr_t)lv_event_get_user_data(e);
+    s_sigPolicySelection = idx;
+    applySigPolicySelection(idx);
+}
+
+static void onSigPolicyBackdropPressed(lv_event_t *e) {
+    if (lv_event_get_target_obj(e) != s_sigPolicyBackdrop) return;
+    closeSigPolicyModal();
+    refreshCfgModal();
+}
+
+static void openSigPolicyModal() {
+    if (!s_rootScreen || s_sigPolicyModal || s_sigPolicyBackdrop) return;
+    s_sigPolicySelection = sigPolicyCoerce(s_cfg.packetSigPolicy);
+
+    const int w = lv_disp_get_hor_res(NULL);
+    const int h = lv_disp_get_ver_res(NULL);
+    int modalW = w - 24;
+    if (modalW < 170) modalW = w - 8;
+    if (modalW > 280) modalW = 280;
+
+    s_sigPolicyBackdrop = lv_obj_create(s_rootScreen);
+    lv_obj_set_size(s_sigPolicyBackdrop, w, h);
+    lv_obj_align(s_sigPolicyBackdrop, LV_ALIGN_CENTER, 0, 0);
+    lv_obj_clear_flag(s_sigPolicyBackdrop, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_add_flag(s_sigPolicyBackdrop, LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_set_style_bg_color(s_sigPolicyBackdrop, lv_color_hex(0x000000), 0);
+    lv_obj_set_style_bg_opa(s_sigPolicyBackdrop, LV_OPA_40, 0);
+    lv_obj_set_style_border_width(s_sigPolicyBackdrop, 0, 0);
+    lv_obj_set_style_pad_all(s_sigPolicyBackdrop, 0, 0);
+    lv_obj_add_event_cb(s_sigPolicyBackdrop, onSigPolicyBackdropPressed, LV_EVENT_CLICKED, nullptr);
+
+    s_sigPolicyModal = lv_obj_create(s_sigPolicyBackdrop);
+    lv_obj_set_size(s_sigPolicyModal, modalW, LV_SIZE_CONTENT);
+    lv_obj_set_style_max_height(s_sigPolicyModal, (h > 40) ? (h - 16) : LV_SIZE_CONTENT, 0);
+    lv_obj_align(s_sigPolicyModal, LV_ALIGN_CENTER, 0, 0);
+    // Content taller than the height cap must stay reachable; the refresh
+    // helpers scroll the selected row into view.
+    lv_obj_add_flag(s_sigPolicyModal, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_set_scroll_dir(s_sigPolicyModal, LV_DIR_VER);
+    lv_obj_add_flag(s_sigPolicyModal, LV_OBJ_FLAG_CLICKABLE);
+#if defined(DEVICE_TDECK_PRO)
+    lv_obj_set_style_bg_color(s_sigPolicyModal, lv_color_make(255, 255, 255), 0);
+    lv_obj_set_style_border_color(s_sigPolicyModal, lv_color_make(0, 0, 0), 0);
+#else
+    lv_obj_set_style_bg_color(s_sigPolicyModal, lv_color_hex(0x0E285B), 0);
+    lv_obj_set_style_border_color(s_sigPolicyModal, lv_color_hex(0x5C86C6), 0);
+#endif
+    lv_obj_set_style_bg_opa(s_sigPolicyModal, LV_OPA_COVER, 0);
+    lv_obj_set_style_border_width(s_sigPolicyModal, 1, 0);
+    lv_obj_set_style_pad_all(s_sigPolicyModal, 8, 0);
+    lv_obj_set_style_pad_row(s_sigPolicyModal, 6, 0);
+    lv_obj_set_flex_flow(s_sigPolicyModal, LV_FLEX_FLOW_COLUMN);
+    lv_obj_set_flex_align(s_sigPolicyModal, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER,
+                          LV_FLEX_ALIGN_CENTER);
+    lv_obj_move_foreground(s_sigPolicyBackdrop);
+
+    lv_obj_t *title = lv_label_create(s_sigPolicyModal);
+    lv_obj_set_width(title, lv_pct(100));
+    lv_obj_set_style_text_font(title, &lv_font_montserrat_16, 0);
+#if defined(DEVICE_TDECK_PRO)
+    lv_obj_set_style_text_color(title, lv_color_make(0, 0, 0), 0);
+#else
+    lv_obj_set_style_text_color(title, lv_color_hex(0xD9E8FF), 0);
+#endif
+    lv_obj_set_style_text_align(title, LV_TEXT_ALIGN_CENTER, 0);
+    lv_label_set_text(title, TR("Signed Packets"));
+
+    lv_obj_t *hint = lv_label_create(s_sigPolicyModal);
+    lv_obj_set_width(hint, lv_pct(100));
+    lv_obj_set_style_text_font(hint, &lv_font_montserrat_10, 0);
+#if defined(DEVICE_TDECK_PRO)
+    lv_obj_set_style_text_color(hint, lv_color_make(0, 0, 0), 0);
+#else
+    lv_obj_set_style_text_color(hint, lv_color_hex(0xA7C7FF), 0);
+#endif
+    lv_obj_set_style_text_align(hint, LV_TEXT_ALIGN_CENTER, 0);
+#if UI_TOUCH_ONLY_PROFILE
+    lv_label_set_text(hint, TR("Tap one to apply."));
+#else
+    lv_label_set_text_fmt(hint, TR("Move  Enter=OK  %s=Cancel"), modalCloseKeyLabel());
+#endif
+
+#if defined(DEVICE_TDECK_PRO)
+    const lv_color_t rowTextColor = lv_color_make(0, 0, 0);
+#else
+    const lv_color_t rowTextColor = (s_cfg.uiMode == UI_MODE_LIGHT)
+                                        ? lv_color_hex(0x13233D) : lv_color_hex(0xD9E8FF);
+#endif
+
+    for (int i = 0; i < SIG_POLICY_COUNT; i++) {
+        lv_obj_t *row = lv_btn_create(s_sigPolicyModal);
+#if defined(DEVICE_TDECK_PRO)
+        lv_obj_remove_style_all(row);
+        lv_obj_add_flag(row, LV_OBJ_FLAG_CLICKABLE);
+#endif
+        s_sigPolicyRows[i] = row;
+        lv_obj_set_width(row, lv_pct(100));
+        lv_obj_set_height(row, LV_SIZE_CONTENT);
+        lv_obj_set_style_radius(row, 4, 0);
+        lv_obj_set_style_pad_all(row, 5, 0);
+        lv_obj_set_style_pad_row(row, 1, 0);
+        lv_obj_set_style_shadow_width(row, 0, 0);
+        lv_obj_set_flex_flow(row, LV_FLEX_FLOW_COLUMN);
+        lv_obj_set_flex_align(row, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_START);
+        lv_obj_add_event_cb(row, onSigPolicyRowPressed, LV_EVENT_CLICKED, (void *)(intptr_t)i);
+
+        lv_obj_t *name = lv_label_create(row);
+        lv_obj_set_style_text_font(name, &lv_font_montserrat_12, 0);
+        lv_obj_set_style_text_color(name, rowTextColor, 0);
+        lv_label_set_text(name, TR(kSigPolicyLabel[i]));
+
+        if (kModalRowDescriptions) {
+            lv_obj_t *desc = lv_label_create(row);
+            lv_obj_set_width(desc, lv_pct(100));
+            lv_label_set_long_mode(desc, LV_LABEL_LONG_WRAP);
+            lv_obj_set_style_text_font(desc, &lv_font_montserrat_10, 0);
+            lv_obj_set_style_text_color(desc, rowTextColor, 0);
+#if defined(DEVICE_TDECK_PRO)
+            lv_obj_set_style_text_opa(desc, LV_OPA_COVER, 0);
+#else
+            lv_obj_set_style_text_opa(desc, LV_OPA_70, 0);
+#endif
+            lv_label_set_text(desc, TR(kSigPolicyDesc[i]));
+        }
+    }
+
+    refreshSigPolicySelection();
 }
 
 // ── Channel configuration ────────────────────────────────────────────────────
@@ -42230,25 +42401,10 @@ static void performCfgAction(int actionId) {
 
         case CFG_ACTION_SIG_POLICY: {
             if (s_cfgDebugLog) Serial.println("[lvgl-cfg] exec SIG_POLICY");
-            showActionPopup = false;   // row already reads the policy
-            // Three stops, so a cycling row: Compatible -> Balanced -> Strict.
-            s_cfg.packetSigPolicy =
-                sigPolicyCoerce((sigPolicyCoerce(s_cfg.packetSigPolicy) + 1) % SIG_POLICY_COUNT);
-            markConfigDirty();
-            switch (s_cfg.packetSigPolicy) {
-                case SIG_POLICY_BALANCED:
-                    snprintf(s_cfgStatus, sizeof(s_cfgStatus), "%s",
-                             TR("Unsigned broadcasts from signers dropped"));
-                    break;
-                case SIG_POLICY_STRICT:
-                    snprintf(s_cfgStatus, sizeof(s_cfgStatus), "%s",
-                             TR("Only signed packets accepted (no 2.7 nodes)"));
-                    break;
-                default:
-                    snprintf(s_cfgStatus, sizeof(s_cfgStatus), "%s",
-                             TR("Unsigned packets accepted"));
-                    break;
-            }
+            showActionPopup = false;   // the picker is the feedback
+            // A picker rather than a cycling row: each policy drops different
+            // traffic, so it is chosen with its consequence in view.
+            openSigPolicyModal();
         } break;
 
         case CFG_ACTION_EXPORT: {
@@ -44759,6 +44915,7 @@ static bool prepareGlobalNavigation() {
     closeThemeModal();
     closeChatNameModal();
     closeFontSizeModal();
+    closeSigPolicyModal();
     closeChanCfgModal();
     closeNodesActionMenu();
     closeLiveModal();
@@ -46274,6 +46431,31 @@ static void pumpKeyboardInput() {
             if (next != s_fontSizeSelection) {
                 s_fontSizeSelection = next;
                 refreshFontSizeSelection();
+            }
+            continue;
+        }
+
+        if (s_sigPolicyModal) {
+            if (isModalCloseKey(k)) {
+                closeSigPolicyModal();
+                refreshCfgModal();
+                continue;
+            }
+            if (k == KEY_ENTER || k == KEY_ROLLER) {
+                applySigPolicySelection(s_sigPolicySelection);
+                continue;
+            }
+            int delta = 0;
+            if (k == KEY_SCROLL_UP)      delta = invertScrollNav ? 1 : -1;
+            else if (k == KEY_SCROLL_DN) delta = invertScrollNav ? -1 : 1;
+            if (delta != 0) {
+                int next = s_sigPolicySelection + delta;
+                if (next < 0) next = 0;
+                if (next >= SIG_POLICY_COUNT) next = SIG_POLICY_COUNT - 1;
+                if (next != s_sigPolicySelection) {
+                    s_sigPolicySelection = next;
+                    refreshSigPolicySelection();
+                }
             }
             continue;
         }

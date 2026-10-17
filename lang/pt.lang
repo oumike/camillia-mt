@@ -685,6 +685,7 @@ Short: %s	Curto: %s
 Show Archived Nodes: %s	Mostrar nós arquivados: %s
 Show Archived Nodes: %s%s	Mostrar nós arquivados: %s%s
 Signal: SNR %.1f dB, RSSI %.0f dBm	Sinal: SNR %.1f dB, RSSI %.0f dBm
+Signed Packets	Pacotes assinados
 Signed Packets: %s	Pacotes assinados: %s
 Silver	Prata
 Sky	Céu

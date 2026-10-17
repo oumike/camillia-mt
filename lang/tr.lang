@@ -690,6 +690,7 @@ Short: %s	Kısa: %s
 Show Archived Nodes: %s	Arşivlenen düğümleri göster: %s
 Show Archived Nodes: %s%s	Arşivlenen düğümleri göster: %s%s
 Signal: SNR %.1f dB, RSSI %.0f dBm	Sinyal: SNR %.1f dB, RSSI %.0f dBm
+Signed Packets	İmzalı paketler
 Signed Packets: %s	İmzalı paketler: %s
 Silver	Gümüş
 Sky	Gök mavisi

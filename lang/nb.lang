@@ -677,6 +677,7 @@ Short name cannot be empty	Kortnavnet kan ikke være tomt
 Short: %s	Kort: %s
 Show Archived Nodes: %s	Vis arkiverte noder: %s
 Show Archived Nodes: %s%s	Vis arkiverte noder: %s%s
+Signed Packets	Signerte pakker
 Signed Packets: %s	Signerte pakker: %s
 Silver	Sølv
 Sky	Himmelblå

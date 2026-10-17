@@ -687,6 +687,7 @@ Short: %s	Lühike: %s
 Show Archived Nodes: %s	Näita arhiveeritud sõlmi: %s
 Show Archived Nodes: %s%s	Näita arhiveeritud sõlmi: %s%s
 Signal: SNR %.1f dB, RSSI %.0f dBm	Signaal: SNR %.1f dB, RSSI %.0f dBm
+Signed Packets	Allkirjastatud paketid
 Signed Packets: %s	Allkirjastatud paketid: %s
 Silver	Hõbe
 Sky	Taevasinine

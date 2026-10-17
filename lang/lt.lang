@@ -689,6 +689,7 @@ Short: %s	Trumpas: %s
 Show Archived Nodes: %s	Rodyti archyvuotus mazgus: %s
 Show Archived Nodes: %s%s	Rodyti archyvuotus mazgus: %s%s
 Signal: SNR %.1f dB, RSSI %.0f dBm	Signalas: SNR %.1f dB, RSSI %.0f dBm
+Signed Packets	Pasirašyti paketai
 Signed Packets: %s	Pasirašyti paketai: %s
 Silver	Sidabrinė
 Sky	Dangaus mėlyna

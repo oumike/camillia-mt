@@ -683,6 +683,7 @@ Short: %s	Breve: %s
 Show Archived Nodes: %s	Mostra nodi archiviati: %s
 Show Archived Nodes: %s%s	Mostra nodi archiviati: %s%s
 Signal: SNR %.1f dB, RSSI %.0f dBm	Segnale: SNR %.1f dB, RSSI %.0f dBm
+Signed Packets	Pacchetti firmati
 Signed Packets: %s	Pacchetti firmati: %s
 Silver	Argento
 Sky	Celeste

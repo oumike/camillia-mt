@@ -669,6 +669,7 @@ Short: %s	Kort: %s
 Show Archived Nodes: %s	Gearchiveerde nodes tonen: %s
 Show Archived Nodes: %s%s	Gearchiveerde nodes tonen: %s%s
 Signal: SNR %.1f dB, RSSI %.0f dBm	Signaal: SNR %.1f dB, RSSI %.0f dBm
+Signed Packets	Ondertekende pakketten
 Signed Packets: %s	Ondertekende pakketten: %s
 Silver	Zilver
 Sky	Hemelsblauw

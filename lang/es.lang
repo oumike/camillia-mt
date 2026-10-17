@@ -710,6 +710,7 @@ Short: %s	Corto: %s
 Show Archived Nodes: %s	Mostrar nodos archivados: %s
 Show Archived Nodes: %s%s	Mostrar nodos archivados: %s%s
 Signal: SNR %.1f dB, RSSI %.0f dBm	Señal: SNR %.1f dB, RSSI %.0f dBm
+Signed Packets	Paquetes firmados
 Signed Packets: %s	Paquetes firmados: %s
 Silver	Plata
 Sky	Cielo

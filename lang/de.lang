@@ -658,6 +658,7 @@ Short name cannot be empty	Kurzname darf nicht leer sein
 Short: %s	Kurz: %s
 Show Archived Nodes: %s	Archivierte Knoten zeigen: %s
 Show Archived Nodes: %s%s	Archivierte Knoten zeigen: %s%s
+Signed Packets	Signierte Pakete
 Signed Packets: %s	Signierte Pakete: %s
 Silver	Silber
 Sky	Himmelblau

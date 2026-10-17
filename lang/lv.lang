@@ -689,6 +689,7 @@ Short: %s	Īsais: %s
 Show Archived Nodes: %s	Rādīt arhivētos mezglus: %s
 Show Archived Nodes: %s%s	Rādīt arhivētos mezglus: %s%s
 Signal: SNR %.1f dB, RSSI %.0f dBm	Signāls: SNR %.1f dB, RSSI %.0f dBm
+Signed Packets	Parakstītas paketes
 Signed Packets: %s	Parakstītas paketes: %s
 Silver	Sudraba
 Sky	Debeszils
