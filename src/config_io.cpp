@@ -1042,6 +1042,17 @@ static uint8_t findName(const char *val, const char **table, int n) {
     return 0;
 }
 
+// A number, or the policy's name in any case, with or without upstream's
+// PACKET_SIGNATURE_POLICY_ prefix. Anything else is the default.
+static uint8_t sigPolicyParse(const char *val) {
+    if (!val || !val[0]) return SIG_POLICY_COMPATIBLE;
+    if (isdigit((unsigned char)val[0])) return sigPolicyCoerce(atoi(val));
+    if (!strncasecmp(val, "PACKET_SIGNATURE_POLICY_", 24)) val += 24;
+    for (int i = 0; i < SIG_POLICY_COUNT; i++)
+        if (!strcasecmp(val, sigPolicyName((uint8_t)i))) return (uint8_t)i;
+    return SIG_POLICY_COMPATIBLE;
+}
+
 static uint8_t parseMsgAlertSound(const char *val) {
     if (!val || !val[0]) return MSG_ALERT_SOUND_DEFAULT;
     if (isdigit((unsigned char)val[0])) {
@@ -1109,6 +1120,7 @@ void cfgInitDefaults(RhinoConfig &cfg) {
     utf8util::copyTruncate(cfg.nodeLong, MESH_LONG_NAME_MAX_BYTES + 1, MY_LONG_NAME);
     utf8util::copyTruncate(cfg.nodeShort, sizeof(cfg.nodeShort), MY_SHORT_NAME);
     cfg.nodeIdFromPubKey = false;
+    cfg.packetSigPolicy  = SIG_POLICY_COMPATIBLE;
     cfg.gpsEnabled   = (bool)MY_GPS_ENABLED;
     cfg.latI         = MY_LAT_I;
     cfg.lonI         = MY_LON_I;
@@ -1885,6 +1897,8 @@ void cfgToYaml(const RhinoConfig &cfg, String &out) {
     snprintf(tmp, sizeof(tmp), "    mapReportingEnabled: %s\n", cfg.mqttMapReport ? "true" : "false"); out += tmp;
     snprintf(tmp, sizeof(tmp), "    ok_to_mqtt: %s\n", cfg.okToMqtt ? "true" : "false"); out += tmp;
     snprintf(tmp, sizeof(tmp), "    node_id_from_pubkey: %s\n", cfg.nodeIdFromPubKey ? "true" : "false"); out += tmp;
+    snprintf(tmp, sizeof(tmp), "    packet_signature_policy: %s   # Compatible, Balanced or Strict\n",
+             sigPolicyName(cfg.packetSigPolicy)); out += tmp;
     snprintf(tmp, sizeof(tmp), "    ignore_mqtt: %s\n", cfg.ignoreMqtt ? "true" : "false"); out += tmp;
     out += "  telemetry:\n";
     snprintf(tmp, sizeof(tmp), "    deviceTelemetryEnabled: %s\n", cfg.telDeviceEnabled ? "true" : "false"); out += tmp;
@@ -1920,6 +1934,9 @@ void cfgToYaml(const RhinoConfig &cfg, String &out) {
         snprintf(tmp, sizeof(tmp), "    mute: %s\n", ch.muted ? "true" : "false");
         out += tmp;
         snprintf(tmp, sizeof(tmp), "    shareLocation: %s\n", ch.shareLocation ? "true" : "false");
+        out += tmp;
+        // Meshtastic 2.8.1 ChannelSettings.use_aead, under its upstream name.
+        snprintf(tmp, sizeof(tmp), "    use_aead: %s\n", ch.useAead ? "true" : "false");
         out += tmp;
         // Written only when the channel has an override. Absent means "follow the
         // device default", which is also how a file from a build without this
@@ -2234,6 +2251,8 @@ bool cfgImportFromBuf(const char *buf, size_t len, RhinoConfig &cfg) {
                     CHANNEL_KEYS[chanIdx].muted = parseBoolValue(val);
                 } else if (!strcmp(key, "shareLocation")) {
                     CHANNEL_KEYS[chanIdx].shareLocation = parseBoolValue(val);
+                } else if (!strcmp(key, "use_aead")) {
+                    CHANNEL_KEYS[chanIdx].useAead = parseBoolValue(val);
                 } else if (!strcmp(key, "hop_limit")) {
                     // Camillia-only: Meshtastic has no per-channel hop field, so
                     // a config from stock tooling never carries this and the
@@ -2516,6 +2535,7 @@ bool cfgImportFromBuf(const char *buf, size_t len, RhinoConfig &cfg) {
                 else if (!strcmp(key, "username"))           strncpy(cfg.mqttUser,    val, sizeof(cfg.mqttUser)    - 1);
                 else if (!strcmp(key, "ok_to_mqtt"))         cfg.okToMqtt     = parseBoolValue(val);
                 else if (!strcmp(key, "node_id_from_pubkey")) cfg.nodeIdFromPubKey = parseBoolValue(val);
+                else if (!strcmp(key, "packet_signature_policy")) cfg.packetSigPolicy = sigPolicyParse(val);
                 else if (!strcmp(key, "ignore_mqtt"))        cfg.ignoreMqtt   = parseBoolValue(val);
             } else if (!strcmp(section, "module_config") && !strcmp(subsection, "telemetry")) {
                 if      (!strcmp(key, "deviceTelemetryEnabled"))        cfg.telDeviceEnabled   = (!strcmp(val,"true"));

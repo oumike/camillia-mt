@@ -24,7 +24,8 @@
 #include "cs_client.h"
 #include "cs_proto.h"
 #include "mesh_proto.h"
-#include "xeddsa.h"
+#include "xeddsa_sig.h"
+#include "ack_proof.h"
 #include "mesh_radio.h"
 #include "mqtt_bridge.h"
 #include "i18n.h"   // TR(): UI translations (issue #99)
@@ -829,6 +830,20 @@ static lv_obj_t *s_fontSizeBackdrop = nullptr;
 static lv_obj_t *s_fontSizeModal = nullptr;
 static lv_obj_t *s_fontSizeRows[FONT_SIZE_MAX + 1] = {};
 static int s_fontSizeSelection = 0;
+static lv_obj_t *s_sigPolicyBackdrop = nullptr;
+static lv_obj_t *s_sigPolicyModal = nullptr;
+static lv_obj_t *s_sigPolicyRows[SIG_POLICY_COUNT] = {};
+static int s_sigPolicySelection = 0;
+// sigPolicyName()'s spellings, marked here for translation; that header stays
+// free of the UI. Each with the consequence the picker and status line show.
+static const char *const kSigPolicyLabel[SIG_POLICY_COUNT] = {
+    TR_NOOP("Compatible"), TR_NOOP("Balanced"), TR_NOOP("Strict"),
+};
+static const char *const kSigPolicyDesc[SIG_POLICY_COUNT] = {
+    TR_NOOP("Unsigned packets accepted"),
+    TR_NOOP("Unsigned broadcasts from signers dropped"),
+    TR_NOOP("Only signed packets accepted (no 2.7 nodes)"),
+};
 
 struct KnownWifiEntry {
     char ssid[sizeof(RhinoConfig::wifiSsid)];
@@ -2884,35 +2899,83 @@ static void openDestructiveConfirm(DestructiveConfirmAction action, uint32_t nod
 // Message Actions: the same modal with the tapback/Reply rows, acting on a chat
 // message. Falls back to the node menu when there is no packet id.
 static void openMessageActionMenu(uint32_t packetId, uint32_t senderNodeId);
-// Check a Data.xeddsa_signature against the sender's stored public key and
-// record the outcome on the node.
+// Apply the packet signature policy (s_cfg.packetSigPolicy, src/sig_policy.h)
+// to a decrypted packet: check its Data.xeddsa_signature against the sender's
+// stored public key, then decide whether to accept it the way a 2.8.1 node on
+// the same policy would. Called once per packet from processMeshPacket(), after
+// any PKI decrypt and before anything else touches it — node list, relay, MQTT
+// uplink — so RF, MQTT and PKI traffic are all judged the same way, and a
+// dropped packet goes no further, as upstream drops it in its routing gate.
 //
-// Verification is advisory here: an unsigned or unverifiable packet is handled
-// exactly as before. Meshtastic's own default receive policy is COMPATIBLE,
-// which accepts unsigned traffic, and we do not have the signing half yet — so
-// treating a failed check as a reason to drop would punish the majority of the
-// mesh for a feature almost nobody is using. What it buys today is the ability
-// to say a node has proved it holds the key we have for it.
-static void notePacketSignature(MeshPacket &pkt, const uint8_t *signature,
-                                const uint8_t *payload, size_t payloadLen) {
-    if (!signature) return;
-    NodeEntry *n = Nodes.find(pkt.hdr.from);
-    if (!n || !n->hasPubKey) return;
-    // Already proved; the crypto is cheap but not free, and the answer cannot
-    // change while the entry holds the same key.
-    if (n->xeddsaVerified) return;
+// A packet we could not decrypt has no Data to check and is not judged here;
+// it is relayed opaquely, as upstream does.
+static SigPolicyResult checkPacketSignature(const MeshPacket &pkt) {
+    if (!pkt.decrypted) return {true, false};
 
-    if (xeddsaVerify(n->pubKey, pkt.hdr.from, pkt.hdr.id, pkt.portnum,
-                     payload, payloadLen, signature)) {
-        n->xeddsaVerified = true;
-        Serial.printf("[xeddsa] verified signature from !%08lx port=%lu\n",
-                      (unsigned long)pkt.hdr.from, (unsigned long)pkt.portnum);
+    SigPolicyInput in = {};
+    in.policy       = s_cfg.packetSigPolicy;
+    in.bootstrap    = SIG_BOOTSTRAP_NA;
+    in.pkiEncrypted = (pkt.chanIdx == -2);
+    in.broadcast    = (pkt.hdr.to == 0xFFFFFFFF);
+    in.dataLen      = pkt.env.dataLen;
+
+    NodeEntry *n = Nodes.find(pkt.hdr.from);
+    const bool haveKey = n && n->hasPubKey;
+    in.knownSigner = haveKey && n->xeddsaVerified;
+
+    XeddsaSignedFields f = {};
+    f.from         = pkt.hdr.from;
+    f.id           = pkt.hdr.id;
+    f.to           = pkt.hdr.to;
+    f.portnum      = pkt.portnum;
+    f.requestId    = pkt.requestId;
+    f.replyId      = pkt.env.replyId;
+    f.emoji        = pkt.env.emoji;
+    f.bitfield     = pkt.env.bitfield;
+    f.hasBitfield  = pkt.env.hasBitfield;
+    f.wantResponse = pkt.wantResponse;
+
+    if (pkt.env.badSignature) {
+        in.check = SIG_CHECK_MALFORMED;
+    } else if (!pkt.env.hasSignature) {
+        in.check = SIG_CHECK_UNSIGNED;
+    } else if (haveKey) {
+        // Checked on every signed packet, not just until the node first proves
+        // itself: a failure drops the packet, so every one has to be judged.
+        in.check = xeddsaVerify(n->pubKey, f, pkt.payload, pkt.payloadLen, pkt.env.signature)
+                       ? SIG_CHECK_VERIFIED : SIG_CHECK_FAILED;
     } else {
-        // Worth a line: a signature that does not verify means either the key
-        // we hold is not theirs any more, or something is impersonating them.
-        Serial.printf("[xeddsa] signature FAILED from !%08lx port=%lu\n",
-                      (unsigned long)pkt.hdr.from, (unsigned long)pkt.portnum);
+        in.check = SIG_CHECK_NO_KEY;
+        // First contact. A signed NodeInfo carries the key to check it with,
+        // and 2.8.1 trusts that key only if it hashes to the sender's ID.
+        if (pkt.portnum == NODEINFO_APP) {
+            UserInfo u = {};
+            const bool ok = decodeUser(pkt.payload, pkt.payloadLen, u) && u.hasPubKey
+                && meshCrc32(u.pubKey, 32) == pkt.hdr.from
+                && xeddsaVerify(u.pubKey, f, pkt.payload, pkt.payloadLen, pkt.env.signature);
+            in.bootstrap = ok ? SIG_BOOTSTRAP_VERIFIED : SIG_BOOTSTRAP_INVALID;
+        }
     }
+
+    const SigPolicyResult r = sigPolicyDecide(in);
+    if (in.check == SIG_CHECK_VERIFIED || in.bootstrap == SIG_BOOTSTRAP_VERIFIED) {
+        if (!in.knownSigner) {
+            Serial.printf("[xeddsa] verified signature from !%08lx port=%lu\n",
+                          (unsigned long)pkt.hdr.from, (unsigned long)pkt.portnum);
+        }
+    } else if (!r.accept) {
+        // Worth a line each time: a failed signature means either the key we
+        // hold is not theirs any more, or something is impersonating them.
+        static const char *const kWhy[] = {
+            "unsigned", "malformed signature", "", "signature FAILED", "unverifiable signature",
+        };
+        const char *why = (in.bootstrap == SIG_BOOTSTRAP_INVALID)
+                              ? "invalid first-contact NodeInfo" : kWhy[in.check];
+        Serial.printf("[xeddsa] drop %s from !%08lx port=%lu (policy %s)\n", why,
+                      (unsigned long)pkt.hdr.from, (unsigned long)pkt.portnum,
+                      sigPolicyName(s_cfg.packetSigPolicy));
+    }
+    return r;
 }
 
 static void closeNodesActionMenu();
@@ -3516,6 +3579,7 @@ enum CfgActionId {
 #endif
     CFG_ACTION_SHARE_LOCATION,
     CFG_ACTION_POSITION_PRECISION,
+    CFG_ACTION_SIG_POLICY,     // which signed/unsigned packets to accept
     CFG_ACTION_EXPORT,
     CFG_ACTION_IMPORT,
     CFG_ACTION_THEME,
@@ -5400,6 +5464,10 @@ static const char *cfgActionLabel(int actionId, char *buf, size_t bufLen) {
         case CFG_ACTION_POSITION_PRECISION:
             snprintf(buf, bufLen, TR("Location Precision: %s"),
                      TR(positionPrecisionLabel(s_cfg.positionPrecision)));
+            break;
+        case CFG_ACTION_SIG_POLICY:
+            snprintf(buf, bufLen, TR("Signed Packets: %s"),
+                     TR(kSigPolicyLabel[sigPolicyCoerce(s_cfg.packetSigPolicy)]));
             break;
         case CFG_ACTION_NODE_NAME:
             snprintf(buf, bufLen, TR("Node Name: %s (%s)"),
@@ -10993,12 +11061,16 @@ struct ChanBlobRecord {
     // defaults ON for the primary channel — every upgraded device would quietly
     // stop announcing its position. Bit0 marks the byte as written; only then is
     // bit1 believed, and an older blob keeps the compiled defaults instead.
-    uint8_t extFlags;    // bit0 extFlags valid, bit1 shareLocation
+    // bit2 is use_aead (Meshtastic 2.8.1). Off is its default, so unlike
+    // shareLocation it would have been safe as a plain bit, but it lives here
+    // with the other bits that postdate the record.
+    uint8_t extFlags;    // bit0 extFlags valid, bit1 shareLocation, bit2 useAead
 };
 
 enum : uint8_t {
     CHAN_EXT_VALID          = 0x01,
     CHAN_EXT_SHARE_LOCATION = 0x02,
+    CHAN_EXT_AEAD           = 0x04,
 };
 
 struct ChanBlob {
@@ -11048,7 +11120,8 @@ static void persistChannelsToPrefs() {
                                        | (ck.downlinkEnabled ? 2 : 0)
                                        | (ck.muted           ? 4 : 0));
         blob.chans[i].extFlags = (uint8_t)(CHAN_EXT_VALID
-                                         | (ck.shareLocation ? CHAN_EXT_SHARE_LOCATION : 0));
+                                         | (ck.shareLocation ? CHAN_EXT_SHARE_LOCATION : 0)
+                                         | (ck.useAead       ? CHAN_EXT_AEAD           : 0));
         blob.hopLimitPlus1[i] = ck.hopLimitPlus1;
     }
 
@@ -11196,6 +11269,8 @@ static void applyLoadedConfigInvariants() {
     // particular must not survive: applyPositionPrecision() treats it as "do
     // not coarsen", which is the opposite of what a stray 0 looks like.
     s_cfg.positionPrecision = positionPrecisionCoerce(s_cfg.positionPrecision);
+    // A stray byte must not become Strict and silence the mesh.
+    s_cfg.packetSigPolicy = sigPolicyCoerce(s_cfg.packetSigPolicy);
     // An off-list value would show on the row as "Never" while behaving as
     // something else entirely, and the row could not cycle back to it.
     s_cfg.notifyLightTimeoutS = cfgCoerceNotifyLightTimeout((long)s_cfg.notifyLightTimeoutS);
@@ -11641,6 +11716,7 @@ static void loadChannelsFromPrefs() {
             // compiled default (primary on, secondary off) — see ChanBlobRecord.
             if (r.extFlags & CHAN_EXT_VALID) {
                 CHANNEL_KEYS[i].shareLocation = (r.extFlags & CHAN_EXT_SHARE_LOCATION) != 0;
+                CHANNEL_KEYS[i].useAead       = (r.extFlags & CHAN_EXT_AEAD) != 0;
             }
             if (haveHop) {
                 const uint8_t p1 = raw[hopOff + (size_t)i];
@@ -11862,6 +11938,23 @@ static void deriveNodeId() {
         }
     }
 
+    // Sign our broadcasts as this node (Meshtastic 2.8.1). Every path that
+    // changes the key or the ID comes through here.
+    //
+    // Only when the ID is crc32(public key), as every 2.8.1 node's is. A 2.8.1
+    // node that has no key for us yet accepts a signed NodeInfo only if that
+    // hash matches the sender (verifyFirstContactNodeInfo()), and drops it
+    // otherwise, under every signature policy -- so a MAC-derived ID that signs
+    // could never be learned by a 2.8.1 node at all. Signing some packets but
+    // not NodeInfo is no better: once a Balanced node has seen us sign, it
+    // drops our unsigned NodeInfo broadcasts. Unsigned throughout, we are
+    // exactly the 2.7 node every policy but Strict accepts.
+    const bool idIsKeyHash = (s_myNodeId == meshCrc32(myPubKey, 32));
+    xeddsaInitSigner(myPrivKey, idIsKeyHash ? s_myNodeId : 0);
+    if (!idIsKeyHash) {
+        Serial.println("[xeddsa] node ID is not crc32(public key): broadcasts go unsigned");
+    }
+
     // Remember the ID we previously announced under, so chat history written by
     // the old identity can still be recognised as ours. Stored rather than
     // recomputed because the old value is unrecoverable once the setting moves:
@@ -11903,8 +11996,7 @@ static void deriveNodeId() {
 
 static void recomputeChannelHashes() {
     for (int i = 0; i < MAX_CHANNELS; i++) {
-        const char *name = CHANNEL_KEYS[i].name_buf[0] ? CHANNEL_KEYS[i].name_buf : CHANNEL_KEYS[i].name;
-        CHANNEL_KEYS[i].hash = computeChannelHash(name, CHANNEL_KEYS[i].key, CHANNEL_KEYS[i].keyLen);
+        CHANNEL_KEYS[i].hash = channelKeyHash(CHANNEL_KEYS[i]);
     }
 }
 
@@ -14516,6 +14608,8 @@ static void initCfgActions() {
     s_cfgActions[s_cfgActionCount++] = CFG_ACTION_POSITION_PRECISION;
 
     s_cfgActions[s_cfgActionCount++] = CFG_ACTION_CHANNEL_CFG;
+    // After the channels: like them, it decides what this node hears.
+    s_cfgActions[s_cfgActionCount++] = CFG_ACTION_SIG_POLICY;
 
     // ── How it looks ─────────────────────────────────────────────────────────
 #if HAS_UI_THEMES
@@ -18380,6 +18474,168 @@ static void openFontSizeModal() {
     refreshFontSizeSelection();
 }
 
+// ── Signed Packets picker ────────────────────────────────────────────────────
+// Picks the packet signature policy (src/sig_policy.h). Each option carries
+// its one-line consequence, so a policy is chosen knowing what it drops rather
+// than by cycling past it. Applies without a reboot: processMeshPacket() reads
+// s_cfg.packetSigPolicy per packet.
+static void closeSigPolicyModal() {
+    if (lvObjValid(s_sigPolicyBackdrop)) {
+        lv_obj_del(s_sigPolicyBackdrop);
+    } else if (lvObjValid(s_sigPolicyModal)) {
+        lv_obj_del(s_sigPolicyModal);
+    }
+    s_sigPolicyBackdrop = nullptr;
+    s_sigPolicyModal = nullptr;
+    memset(s_sigPolicyRows, 0, sizeof(s_sigPolicyRows));
+}
+
+static void refreshSigPolicySelection() {
+    if (!s_sigPolicyModal) return;
+    paintPickerRows(s_sigPolicyRows, SIG_POLICY_COUNT, s_sigPolicySelection, PICKER_SCROLL_VIEW);
+}
+
+static void applySigPolicySelection(int policy) {
+    if (policy < 0 || policy >= SIG_POLICY_COUNT) return;
+    const bool changed = ((uint8_t)policy != sigPolicyCoerce(s_cfg.packetSigPolicy));
+    s_cfg.packetSigPolicy = (uint8_t)policy;
+    if (changed) markConfigDirty();
+    snprintf(s_cfgStatus, sizeof(s_cfgStatus), "%s", TR(kSigPolicyDesc[policy]));
+    closeSigPolicyModal();
+    refreshCfgModal();
+}
+
+static void onSigPolicyRowPressed(lv_event_t *e) {
+    int idx = (int)(intptr_t)lv_event_get_user_data(e);
+    s_sigPolicySelection = idx;
+    applySigPolicySelection(idx);
+}
+
+static void onSigPolicyBackdropPressed(lv_event_t *e) {
+    if (lv_event_get_target_obj(e) != s_sigPolicyBackdrop) return;
+    closeSigPolicyModal();
+    refreshCfgModal();
+}
+
+static void openSigPolicyModal() {
+    if (!s_rootScreen || s_sigPolicyModal || s_sigPolicyBackdrop) return;
+    s_sigPolicySelection = sigPolicyCoerce(s_cfg.packetSigPolicy);
+
+    const int w = lv_disp_get_hor_res(NULL);
+    const int h = lv_disp_get_ver_res(NULL);
+    int modalW = w - 24;
+    if (modalW < 170) modalW = w - 8;
+    if (modalW > 280) modalW = 280;
+
+    s_sigPolicyBackdrop = lv_obj_create(s_rootScreen);
+    lv_obj_set_size(s_sigPolicyBackdrop, w, h);
+    lv_obj_align(s_sigPolicyBackdrop, LV_ALIGN_CENTER, 0, 0);
+    lv_obj_clear_flag(s_sigPolicyBackdrop, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_add_flag(s_sigPolicyBackdrop, LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_set_style_bg_color(s_sigPolicyBackdrop, lv_color_hex(0x000000), 0);
+    lv_obj_set_style_bg_opa(s_sigPolicyBackdrop, LV_OPA_40, 0);
+    lv_obj_set_style_border_width(s_sigPolicyBackdrop, 0, 0);
+    lv_obj_set_style_pad_all(s_sigPolicyBackdrop, 0, 0);
+    lv_obj_add_event_cb(s_sigPolicyBackdrop, onSigPolicyBackdropPressed, LV_EVENT_CLICKED, nullptr);
+
+    s_sigPolicyModal = lv_obj_create(s_sigPolicyBackdrop);
+    lv_obj_set_size(s_sigPolicyModal, modalW, LV_SIZE_CONTENT);
+    lv_obj_set_style_max_height(s_sigPolicyModal, (h > 40) ? (h - 16) : LV_SIZE_CONTENT, 0);
+    lv_obj_align(s_sigPolicyModal, LV_ALIGN_CENTER, 0, 0);
+    // Content taller than the height cap must stay reachable; the refresh
+    // helpers scroll the selected row into view.
+    lv_obj_add_flag(s_sigPolicyModal, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_set_scroll_dir(s_sigPolicyModal, LV_DIR_VER);
+    lv_obj_add_flag(s_sigPolicyModal, LV_OBJ_FLAG_CLICKABLE);
+#if defined(DEVICE_TDECK_PRO)
+    lv_obj_set_style_bg_color(s_sigPolicyModal, lv_color_make(255, 255, 255), 0);
+    lv_obj_set_style_border_color(s_sigPolicyModal, lv_color_make(0, 0, 0), 0);
+#else
+    lv_obj_set_style_bg_color(s_sigPolicyModal, lv_color_hex(0x0E285B), 0);
+    lv_obj_set_style_border_color(s_sigPolicyModal, lv_color_hex(0x5C86C6), 0);
+#endif
+    lv_obj_set_style_bg_opa(s_sigPolicyModal, LV_OPA_COVER, 0);
+    lv_obj_set_style_border_width(s_sigPolicyModal, 1, 0);
+    lv_obj_set_style_pad_all(s_sigPolicyModal, 8, 0);
+    lv_obj_set_style_pad_row(s_sigPolicyModal, 6, 0);
+    lv_obj_set_flex_flow(s_sigPolicyModal, LV_FLEX_FLOW_COLUMN);
+    lv_obj_set_flex_align(s_sigPolicyModal, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER,
+                          LV_FLEX_ALIGN_CENTER);
+    lv_obj_move_foreground(s_sigPolicyBackdrop);
+
+    lv_obj_t *title = lv_label_create(s_sigPolicyModal);
+    lv_obj_set_width(title, lv_pct(100));
+    lv_obj_set_style_text_font(title, &lv_font_montserrat_16, 0);
+#if defined(DEVICE_TDECK_PRO)
+    lv_obj_set_style_text_color(title, lv_color_make(0, 0, 0), 0);
+#else
+    lv_obj_set_style_text_color(title, lv_color_hex(0xD9E8FF), 0);
+#endif
+    lv_obj_set_style_text_align(title, LV_TEXT_ALIGN_CENTER, 0);
+    lv_label_set_text(title, TR("Signed Packets"));
+
+    lv_obj_t *hint = lv_label_create(s_sigPolicyModal);
+    lv_obj_set_width(hint, lv_pct(100));
+    lv_obj_set_style_text_font(hint, &lv_font_montserrat_10, 0);
+#if defined(DEVICE_TDECK_PRO)
+    lv_obj_set_style_text_color(hint, lv_color_make(0, 0, 0), 0);
+#else
+    lv_obj_set_style_text_color(hint, lv_color_hex(0xA7C7FF), 0);
+#endif
+    lv_obj_set_style_text_align(hint, LV_TEXT_ALIGN_CENTER, 0);
+#if UI_TOUCH_ONLY_PROFILE
+    lv_label_set_text(hint, TR("Tap one to apply."));
+#else
+    lv_label_set_text_fmt(hint, TR("Move  Enter=OK  %s=Cancel"), modalCloseKeyLabel());
+#endif
+
+#if defined(DEVICE_TDECK_PRO)
+    const lv_color_t rowTextColor = lv_color_make(0, 0, 0);
+#else
+    const lv_color_t rowTextColor = (s_cfg.uiMode == UI_MODE_LIGHT)
+                                        ? lv_color_hex(0x13233D) : lv_color_hex(0xD9E8FF);
+#endif
+
+    for (int i = 0; i < SIG_POLICY_COUNT; i++) {
+        lv_obj_t *row = lv_btn_create(s_sigPolicyModal);
+#if defined(DEVICE_TDECK_PRO)
+        lv_obj_remove_style_all(row);
+        lv_obj_add_flag(row, LV_OBJ_FLAG_CLICKABLE);
+#endif
+        s_sigPolicyRows[i] = row;
+        lv_obj_set_width(row, lv_pct(100));
+        lv_obj_set_height(row, LV_SIZE_CONTENT);
+        lv_obj_set_style_radius(row, 4, 0);
+        lv_obj_set_style_pad_all(row, 5, 0);
+        lv_obj_set_style_pad_row(row, 1, 0);
+        lv_obj_set_style_shadow_width(row, 0, 0);
+        lv_obj_set_flex_flow(row, LV_FLEX_FLOW_COLUMN);
+        lv_obj_set_flex_align(row, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_START);
+        lv_obj_add_event_cb(row, onSigPolicyRowPressed, LV_EVENT_CLICKED, (void *)(intptr_t)i);
+
+        lv_obj_t *name = lv_label_create(row);
+        lv_obj_set_style_text_font(name, &lv_font_montserrat_12, 0);
+        lv_obj_set_style_text_color(name, rowTextColor, 0);
+        lv_label_set_text(name, TR(kSigPolicyLabel[i]));
+
+        if (kModalRowDescriptions) {
+            lv_obj_t *desc = lv_label_create(row);
+            lv_obj_set_width(desc, lv_pct(100));
+            lv_label_set_long_mode(desc, LV_LABEL_LONG_WRAP);
+            lv_obj_set_style_text_font(desc, &lv_font_montserrat_10, 0);
+            lv_obj_set_style_text_color(desc, rowTextColor, 0);
+#if defined(DEVICE_TDECK_PRO)
+            lv_obj_set_style_text_opa(desc, LV_OPA_COVER, 0);
+#else
+            lv_obj_set_style_text_opa(desc, LV_OPA_70, 0);
+#endif
+            lv_label_set_text(desc, TR(kSigPolicyDesc[i]));
+        }
+    }
+
+    refreshSigPolicySelection();
+}
+
 // ── Channel configuration ────────────────────────────────────────────────────
 // Two nested modals. The slot picker lists all MESH_CHANNELS slots, showing the
 // channel name where one is set and "Channel N" where the slot is still empty.
@@ -18428,7 +18684,7 @@ static const lv_font_t *kChanModalTitleFont = &lv_font_montserrat_12;
 static const lv_font_t *kChanModalRowFont   = &lv_font_montserrat_10;
 // A half-width cell here is ~112px. "Encryption" plus its value does not fit,
 // and an ellipsised field name is worse than a short one.
-#define CHAN_EDIT_LABELS { TR_NOOP("Name"), TR_NOOP("Enc"), TR_NOOP("Save"), TR_NOOP("Loc"), TR_NOOP("Key"), TR_NOOP("Hops") }
+#define CHAN_EDIT_LABELS { TR_NOOP("Name"), TR_NOOP("Enc"), TR_NOOP("AEAD"), TR_NOOP("Save"), TR_NOOP("Loc"), TR_NOOP("Key"), TR_NOOP("Hops") }
 #elif defined(DEVICE_TLORA_PAGER_TFT)
 static constexpr int  kChanModalCols  = 2;
 static constexpr int  kChanModalMaxW  = 448;
@@ -18437,7 +18693,7 @@ static constexpr int  kChanModalGap   = 5;
 static constexpr int  kChanModalRowH  = 28;
 static const lv_font_t *kChanModalTitleFont = &lv_font_montserrat_16;
 static const lv_font_t *kChanModalRowFont   = &lv_font_montserrat_12;
-#define CHAN_EDIT_LABELS { TR_NOOP("Name"), TR_NOOP("Encryption"), TR_NOOP("Save"), TR_NOOP("Location"), TR_NOOP("Key"), TR_NOOP("Hops") }
+#define CHAN_EDIT_LABELS { TR_NOOP("Name"), TR_NOOP("Encryption"), TR_NOOP("AEAD"), TR_NOOP("Save"), TR_NOOP("Location"), TR_NOOP("Key"), TR_NOOP("Hops") }
 #else
 // 320x240 boards (T-Deck, Heltec V4, Mesh Deck). At 300px wide a 49% cell is
 // ~138px, which holds "0  LongFast" at montserrat_12 with room to spare.
@@ -18450,7 +18706,7 @@ static const lv_font_t *kChanModalTitleFont = &lv_font_montserrat_16;
 static const lv_font_t *kChanModalRowFont   = &lv_font_montserrat_12;
 // ~138px cells at montserrat_12: "Location" plus "Off" fits, "Encryption" plus
 // "AES-256" is the tightest pairing and ellipsises its value, not its name.
-#define CHAN_EDIT_LABELS { TR_NOOP("Name"), TR_NOOP("Encryption"), TR_NOOP("Save"), TR_NOOP("Location"), TR_NOOP("Key"), TR_NOOP("Hops") }
+#define CHAN_EDIT_LABELS { TR_NOOP("Name"), TR_NOOP("Encryption"), TR_NOOP("AEAD"), TR_NOOP("Save"), TR_NOOP("Location"), TR_NOOP("Key"), TR_NOOP("Hops") }
 #endif
 static constexpr int kChanModalRowsPerCol =
     (MESH_CHANNELS + kChanModalCols - 1) / kChanModalCols;
@@ -18591,6 +18847,7 @@ struct BeaconOffer {
     bool     hasChannel;
     char     channelName[16];
     bool     channelHasPsk;
+    bool     channelUsesAead;   // an AEAD channel: joining it means turning AEAD on here too
     int      preset;            // our PRESET_* index, or -1 when not offered/unmappable
     char     region[12];        // "" when not offered
     int8_t   chanIdx;           // channel it arrived on, for legacy-split pairing
@@ -18703,6 +18960,7 @@ static void beaconOfferStore(const MeshPacket &pkt, const MeshBeaconPayload &b, 
     if (b.hasOfferChannel) {
         utf8util::copyTruncate(o.channelName, sizeof(o.channelName), b.offerChannelName);
         o.channelHasPsk = (b.offerPskLen > 0);
+        o.channelUsesAead = b.offerUsesAead;
     }
     o.preset = b.hasOfferPreset ? presetFromMeshtastic(b.offerPreset) : -1;
     const char *rc = regionCodeFromMeshtastic(b.offerRegion);
@@ -19040,24 +19298,27 @@ static int       s_chanCfgSelection = 0;
 // step with them. Laid out, that is:
 //     Name  | Location
 //     Enc   | Key
-//     Save  | Hops
+//     AEAD  | Hops
+//     Save  |
+// AEAD sits under Enc because it is part of how the channel is encrypted, and
+// Save stays bottom-left where it has always been. Seven rows come to four per
+// column -- the height of the channel picker's eight, so the editor fits
+// wherever the picker already does.
 enum ChanEditRow : uint8_t {
     CHAN_EDIT_NAME = 0,
     CHAN_EDIT_ENC,
+    CHAN_EDIT_AEAD,
     CHAN_EDIT_SAVE,
     CHAN_EDIT_LOCATION,
     CHAN_EDIT_KEY,
-    // Appended deliberately: five rows and six both come to three per column, so
-    // this takes the cell the short column used to leave empty and every other
-    // row keeps the position it had.
     CHAN_EDIT_HOPS,
     CHAN_EDIT_ROW_COUNT
 };
 
 // The editor uses the picker's grid, so its rows fill column-major too and a
-// step of one keeps walking down a column. Five rows over two columns leaves the
-// last cell empty rather than a gap mid-grid, which is why the build loop can
-// use the same index mapping without special-casing the short column.
+// step of one keeps walking down a column. Seven rows over two columns leaves
+// the last cell empty rather than a gap mid-grid, which is why the build loop
+// can use the same index mapping without special-casing the short column.
 static constexpr int kChanEditRowsPerCol =
     (CHAN_EDIT_ROW_COUNT + kChanModalCols - 1) / kChanModalCols;
 
@@ -19073,6 +19334,7 @@ static char    s_chanEditName[16] = {};
 static uint8_t s_chanEditKey[32]  = {};
 static uint8_t s_chanEditKeyLen   = 0;
 static bool    s_chanEditShareLoc = false;
+static bool    s_chanEditAead     = false;
 // Staged per-channel hop budget in the ChannelKey encoding: 0 = follow the
 // device default, else hops + 1.
 static uint8_t s_chanEditHopPlus1 = 0;
@@ -19194,6 +19456,11 @@ static void chanEditSave() {
     ck.keyLen = s_chanEditKeyLen;
     ck.shareLocation = s_chanEditShareLoc;
     ck.hopLimitPlus1 = s_chanEditHopPlus1;
+    // Cleared on a channel with no key, as Meshtastic's fixupChannel() does:
+    // there is nothing to authenticate with, and a flag left set would switch
+    // AEAD on by surprise the day a key is added.
+    ck.useAead = s_chanEditAead;
+    if (!channelUsesAead(ck)) ck.useAead = false;
 
     // Role is deliberately untouched — the web config owns it, and an empty
     // secondary slot already ships as SECONDARY, so naming one is enough to put
@@ -19434,6 +19701,9 @@ static void refreshChanEditRows() {
             case CHAN_EDIT_LOCATION:
                 lv_label_set_text(val, s_chanEditShareLoc ? TR("On") : TR("Off"));
                 break;
+            case CHAN_EDIT_AEAD:
+                lv_label_set_text(val, s_chanEditAead ? TR("On") : TR("Off"));
+                break;
             case CHAN_EDIT_HOPS:
                 // "Default" names where the number comes from when unset, and
                 // shows it, because "this channel follows the device" is only
@@ -19452,6 +19722,11 @@ static void refreshChanEditRows() {
 
 static void chanEditToggleShareLoc() {
     s_chanEditShareLoc = !s_chanEditShareLoc;
+    refreshChanEditRows();
+}
+
+static void chanEditToggleAead() {
+    s_chanEditAead = !s_chanEditAead;
     refreshChanEditRows();
 }
 
@@ -19480,6 +19755,9 @@ static void chanEditActivateRow(int row) {
             break;
         case CHAN_EDIT_LOCATION:
             chanEditToggleShareLoc();
+            break;
+        case CHAN_EDIT_AEAD:
+            chanEditToggleAead();
             break;
         case CHAN_EDIT_HOPS:
             chanEditCycleHops(1);
@@ -19518,6 +19796,7 @@ static void openChanEditModal(int slot) {
     memset(s_chanEditKey, 0, sizeof(s_chanEditKey));
     memcpy(s_chanEditKey, ck.key, s_chanEditKeyLen);
     s_chanEditShareLoc = ck.shareLocation;
+    s_chanEditAead     = ck.useAead;
     s_chanEditHopPlus1 = ck.hopLimitPlus1;
 
     const int w = lv_disp_get_hor_res(NULL);
@@ -19598,7 +19877,8 @@ static void openChanEditModal(int slot) {
 
     for (int pos = 0; pos < CHAN_EDIT_ROW_COUNT; pos++) {
         // Same column-major mapping as the picker grid, so a step of one walks
-        // down a column: left holds Name/Encryption/Key, right Location/Save.
+        // down a column: left holds Name/Encryption/AEAD/Save, right
+        // Location/Key/Hops.
         const int i = (pos % kChanModalCols) * kChanEditRowsPerCol + (pos / kChanModalCols);
         if (i >= CHAN_EDIT_ROW_COUNT) continue;
 
@@ -30410,12 +30690,14 @@ static bool sendTracerouteToNode(uint32_t toNodeId, uint32_t *packetIdOut) {
     bool ok = false;
     if (s_myNodeId != 0 && Radio.isReady()) {
         uint8_t proto[64];
-        uint8_t cipher[96];
+        uint8_t cipher[96 + MESH_AEAD_OVERHEAD];
         size_t protoLen = encodeTracerouteRequest(proto, sizeof(proto), true,
                                                   s_cfg.okToMqtt ? 0x01 : 0);
         if (protoLen > 0) {
             const ChannelKey &ck = CHANNEL_KEYS[0];  // LongFast
-            if (encryptPayload(packetId, s_myNodeId, ck.key, ck.keyLen, proto, cipher, protoLen)) {
+            const size_t cipherLen = encryptChannelPayload(ck, packetId, s_myNodeId, toNodeId,
+                                                           proto, protoLen, cipher, sizeof(cipher));
+            if (cipherLen > 0) {
                 uint8_t frame[sizeof(MeshHdr) + sizeof(cipher)];
                 MeshHdr hdr = {};
                 hdr.to = toNodeId;
@@ -30426,8 +30708,8 @@ static bool sendTracerouteToNode(uint32_t toNodeId, uint32_t *packetIdOut) {
                 hdr.relay_node = (uint8_t)(s_myNodeId & 0xFF);
 
                 memcpy(frame, &hdr, sizeof(hdr));
-                memcpy(frame + sizeof(hdr), cipher, protoLen);
-                ok = Radio.transmit(frame, sizeof(hdr) + protoLen);
+                memcpy(frame + sizeof(hdr), cipher, cipherLen);
+                ok = Radio.transmit(frame, sizeof(hdr) + cipherLen);
             }
         }
     }
@@ -34846,14 +35128,18 @@ static void beaconsBuildList() {
         }
 
         // What is on offer: channel, preset, region — whichever the beacon
-        // carried. A trailing * means the channel came with a key. Shown even
-        // when empty, because "this beacon offered nothing" is itself an answer.
-        char offer[64] = {};
+        // carried. A trailing * means the channel came with a key, and "AEAD"
+        // that it uses Meshtastic 2.8.1's authenticated encryption -- a channel
+        // set up here with the same name and key but AEAD off would not hear it.
+        // Shown even when empty, because "this beacon offered nothing" is itself
+        // an answer.
+        char offer[72] = {};
         int n = 0;
         if (o.hasChannel) {
-            n += snprintf(offer + n, sizeof(offer) - n, "%s%s",
+            n += snprintf(offer + n, sizeof(offer) - n, "%s%s%s",
                           o.channelName[0] ? o.channelName : "(unnamed)",
-                          o.channelHasPsk ? "*" : "");
+                          o.channelHasPsk ? "*" : "",
+                          o.channelUsesAead ? " AEAD" : "");
         }
         if (o.preset >= 0 && o.preset < PRESET_COUNT) {
             n += snprintf(offer + n, sizeof(offer) - n, "%s%s",
@@ -42113,6 +42399,14 @@ static void performCfgAction(int actionId) {
             openCfgPosPrecModal();
         } break;
 
+        case CFG_ACTION_SIG_POLICY: {
+            if (s_cfgDebugLog) Serial.println("[lvgl-cfg] exec SIG_POLICY");
+            showActionPopup = false;   // the picker is the feedback
+            // A picker rather than a cycling row: each policy drops different
+            // traffic, so it is chosen with its consequence in view.
+            openSigPolicyModal();
+        } break;
+
         case CFG_ACTION_EXPORT: {
             if (s_cfgDebugLog) Serial.println("[lvgl-cfg] exec EXPORT");
             // The user picked this from a menu; if they just inserted a card,
@@ -44621,6 +44915,7 @@ static bool prepareGlobalNavigation() {
     closeThemeModal();
     closeChatNameModal();
     closeFontSizeModal();
+    closeSigPolicyModal();
     closeChanCfgModal();
     closeNodesActionMenu();
     closeLiveModal();
@@ -45961,6 +46256,10 @@ static void pumpKeyboardInput() {
                 if (k == KEY_PREV_CHAN || k == KEY_PAGE_UP
                     || k == KEY_NEXT_CHAN || k == KEY_PAGE_DN) { chanEditToggleShareLoc(); continue; }
             }
+            if (s_chanEditSelection == CHAN_EDIT_AEAD) {
+                if (k == KEY_PREV_CHAN || k == KEY_PAGE_UP
+                    || k == KEY_NEXT_CHAN || k == KEY_PAGE_DN) { chanEditToggleAead(); continue; }
+            }
             if (s_chanEditSelection == CHAN_EDIT_HOPS) {
                 if (k == KEY_PREV_CHAN || k == KEY_PAGE_UP)  { chanEditCycleHops(-1); continue; }
                 if (k == KEY_NEXT_CHAN || k == KEY_PAGE_DN)  { chanEditCycleHops(1);  continue; }
@@ -46132,6 +46431,31 @@ static void pumpKeyboardInput() {
             if (next != s_fontSizeSelection) {
                 s_fontSizeSelection = next;
                 refreshFontSizeSelection();
+            }
+            continue;
+        }
+
+        if (s_sigPolicyModal) {
+            if (isModalCloseKey(k)) {
+                closeSigPolicyModal();
+                refreshCfgModal();
+                continue;
+            }
+            if (k == KEY_ENTER || k == KEY_ROLLER) {
+                applySigPolicySelection(s_sigPolicySelection);
+                continue;
+            }
+            int delta = 0;
+            if (k == KEY_SCROLL_UP)      delta = invertScrollNav ? 1 : -1;
+            else if (k == KEY_SCROLL_DN) delta = invertScrollNav ? -1 : 1;
+            if (delta != 0) {
+                int next = s_sigPolicySelection + delta;
+                if (next < 0) next = 0;
+                if (next >= SIG_POLICY_COUNT) next = SIG_POLICY_COUNT - 1;
+                if (next != s_sigPolicySelection) {
+                    s_sigPolicySelection = next;
+                    refreshSigPolicySelection();
+                }
             }
             continue;
         }
@@ -53393,21 +53717,65 @@ int webCfgAdminRescanFavorites(uint32_t &waitSecs) {
 }
 #endif  // HAS_ADMIN_TERMINAL
 
+// Check the Routing.ack_proof on an ack or nak that answered one of our DMs, and
+// log the verdict. The caller has matched it to a DM sent to pkt.hdr.from, which
+// is what binds the proof to the node we addressed (upstream #11932).
+static void noteAckProof(const MeshPacket &pkt) {
+    uint8_t claimed[ACK_PROOF_BYTES];
+    uint8_t routing[sizeof(pkt.payload)];
+    size_t routingLen = 0;
+    const AckProofFind found = ackProofExtract(pkt.payload, pkt.payloadLen, claimed,
+                                               routing, &routingLen);
+    if (found == ACK_PROOF_ABSENT) return;
+    if (found == ACK_PROOF_MALFORMED) {
+        Serial.printf("[ackproof] malformed proof from !%08lx for %08lx\n",
+                      (unsigned long)pkt.hdr.from, (unsigned long)pkt.requestId);
+        return;
+    }
+    const NodeEntry *peer = Nodes.find(pkt.hdr.from);
+    uint8_t key[32];
+    if (!peer || !peer->hasPubKey || !pkiSharedKey(peer->pubKey, key)) {
+        Serial.printf("[ackproof] proof from !%08lx, but no key to check it\n",
+                      (unsigned long)pkt.hdr.from);
+        return;
+    }
+    uint8_t expected[ACK_PROOF_BYTES];
+    ackProofCompute(key, pkt.hdr.from, pkt.hdr.to, pkt.requestId, routing, routingLen, expected);
+    memset(key, 0, sizeof(key));
+    const bool valid = memcmp(claimed, expected, ACK_PROOF_BYTES) == 0;
+    Serial.printf("[ackproof] %s proof from !%08lx for %08lx\n", valid ? "valid" : "INVALID",
+                  (unsigned long)pkt.hdr.from, (unsigned long)pkt.requestId);
+}
+
 static bool sendRoutingResult(uint32_t toNodeId, uint32_t requestId, uint32_t errorReason) {
     if (!Radio.isReady()) return false;
     if (toNodeId == 0 || toNodeId == 0xFFFFFFFF || requestId == 0) return false;
     if (s_myNodeId == 0) deriveNodeId();
     if (s_myNodeId == 0) return false;
 
+    // Prove the receipt when we share a key with the sender (Meshtastic 2.8.1
+    // Routing.ack_proof): their client can then show the message as delivered to
+    // us rather than to whoever sent an ack with our number on it. Upstream
+    // proves every ack to a keyed peer, PKI-encrypted original or not.
+    uint8_t proofKey[32];
+    bool haveProofKey = false;
+    if (const NodeEntry *peer = Nodes.find(toNodeId)) {
+        haveProofKey = peer->hasPubKey && pkiSharedKey(peer->pubKey, proofKey);
+    }
+
     uint8_t proto[64];
     size_t protoLen = encodeRouting(requestId, s_myNodeId, errorReason, proto, sizeof(proto),
-                                    s_cfg.okToMqtt ? 0x01 : 0);
+                                    s_cfg.okToMqtt ? 0x01 : 0,
+                                    haveProofKey ? proofKey : nullptr, toNodeId);
+    memset(proofKey, 0, sizeof(proofKey));
     if (protoLen == 0) return false;
 
     const ChannelKey &ck = CHANNEL_KEYS[0];  // ROUTING replies on primary channel.
-    uint8_t cipher[96];
+    uint8_t cipher[96 + MESH_AEAD_OVERHEAD];
     uint32_t packetId = nextMeshPacketId();
-    if (!encryptPayload(packetId, s_myNodeId, ck.key, ck.keyLen, proto, cipher, protoLen)) {
+    const size_t cipherLen = encryptChannelPayload(ck, packetId, s_myNodeId, toNodeId,
+                                                   proto, protoLen, cipher, sizeof(cipher));
+    if (cipherLen == 0) {
         return false;
     }
 
@@ -53421,8 +53789,8 @@ static bool sendRoutingResult(uint32_t toNodeId, uint32_t requestId, uint32_t er
     hdr.relay_node = (uint8_t)(s_myNodeId & 0xFF);
 
     memcpy(frame, &hdr, sizeof(hdr));
-    memcpy(frame + sizeof(hdr), cipher, protoLen);
-    return Radio.transmit(frame, sizeof(hdr) + protoLen);
+    memcpy(frame + sizeof(hdr), cipher, cipherLen);
+    return Radio.transmit(frame, sizeof(hdr) + cipherLen);
 }
 
 // Answer a traceroute aimed at us. Stock Meshtastic's destination node echoes
@@ -53450,9 +53818,11 @@ static bool sendTracerouteReply(uint32_t toNodeId, uint32_t requestId,
     // Reply on the channel the request arrived on: that is the one the sender is
     // listening to, and it need not be the primary.
     const ChannelKey &ck = CHANNEL_KEYS[chanIdx];
-    uint8_t cipher[sizeof(proto)];
+    uint8_t cipher[sizeof(proto) + MESH_AEAD_OVERHEAD];
     uint32_t packetId = nextMeshPacketId();
-    if (!encryptPayload(packetId, s_myNodeId, ck.key, ck.keyLen, proto, cipher, protoLen)) {
+    const size_t cipherLen = encryptChannelPayload(ck, packetId, s_myNodeId, toNodeId,
+                                                   proto, protoLen, cipher, sizeof(cipher));
+    if (cipherLen == 0) {
         return false;
     }
 
@@ -53466,8 +53836,8 @@ static bool sendTracerouteReply(uint32_t toNodeId, uint32_t requestId,
     hdr.relay_node = (uint8_t)(s_myNodeId & 0xFF);
 
     memcpy(frame, &hdr, sizeof(hdr));
-    memcpy(frame + sizeof(hdr), cipher, protoLen);
-    const bool ok = Radio.transmit(frame, sizeof(hdr) + protoLen);
+    memcpy(frame + sizeof(hdr), cipher, cipherLen);
+    const bool ok = Radio.transmit(frame, sizeof(hdr) + cipherLen);
 
     // Logged like the outbound request, so the Live feed shows both halves of a
     // traceroute and answering one can be confirmed without a second device.
@@ -53497,25 +53867,44 @@ static bool roleRebroadcasts(uint8_t role) {
     return role != 1 /*CLIENT_MUTE*/ && role != 8 /*CLIENT_HIDDEN*/;
 }
 
+// A PKI direct message between two other nodes, at least one of whom we know.
+// LOCAL_ONLY and KNOWN_ONLY relay these although they cannot read them (upstream
+// #11898): DMs, remote administration and key verification all travel this way,
+// and a relay that drops them black-holes them for the two nodes either side.
+// An unreadable broadcast, or a unicast between two strangers, is still dropped
+// -- ignoring foreign meshes is what those modes are for.
+static bool isPkiUnicastWithKnownParty(const MeshPacket &pkt) {
+    if (pkt.decrypted || pkt.hdr.channel != 0 || pkt.hdr.to == 0xFFFFFFFF) return false;
+    return Nodes.find(pkt.hdr.from) != nullptr || Nodes.find(pkt.hdr.to) != nullptr;
+}
+
 // Apply the configured rebroadcastMode filter to a received packet.
 static bool rebroadcastModeAllows(const MeshPacket &pkt) {
     switch (s_cfg.rebroadcastMode) {
         case 2: // LOCAL_ONLY — only packets we decrypted on a known channel
-            return pkt.decrypted && pkt.chanIdx >= 0;
+            return (pkt.decrypted && pkt.chanIdx >= 0) || isPkiUnicastWithKnownParty(pkt);
         case 3: // KNOWN_ONLY — only from nodes already in our DB
-            return Nodes.find(pkt.hdr.from) != nullptr;
+            return Nodes.find(pkt.hdr.from) != nullptr || isPkiUnicastWithKnownParty(pkt);
         case 4: // CORE_PORTNUMS_ONLY — only decoded core portnums
-            if (!pkt.decrypted) return false;
+            // A packet we cannot read is relayed as it is (upstream #11844): the
+            // portnum filter cannot apply to a payload nobody here can see, and
+            // dropping it broke remote admin through ROUTER-role nodes, whose
+            // default this mode is.
+            if (!pkt.decrypted) return true;
+            // Upstream Router.cpp's list, exactly (unchanged from 2.8.0 to
+            // 2.8.1). This is about what we relay for the rest of the mesh, not
+            // what we handle ourselves: a node in this mode that drops key
+            // verification or admin cuts off whoever it is the only path for,
+            // and one that relays neighbor info or beacons spends airtime that
+            // every stock node in the same mode saves.
             switch (pkt.portnum) {
-                case TEXT_MESSAGE_APP: case POSITION_APP: case NODEINFO_APP:
-                case ROUTING_APP: case TELEMETRY_APP: case NEIGHBORINFO_APP:
-                case TRACEROUTE_APP: case MESH_BEACON_APP:
-                // ADMIN_APP is in upstream Router.cpp's core-portnum list. It is
-                // here for the same reason the others are: this is about what we
-                // relay for the rest of the mesh, not about what we ourselves
-                // send -- and dropping it would quietly break someone else's
-                // remote administration wherever we are the only path.
-                case ADMIN_APP: return true;
+                case TEXT_MESSAGE_APP: case TEXT_MESSAGE_COMPRESSED_APP:
+                case POSITION_APP: case NODEINFO_APP: case ROUTING_APP:
+                case TELEMETRY_APP: case ADMIN_APP: case ALERT_APP:
+                case KEY_VERIFICATION_APP: case WAYPOINT_APP:
+                case STORE_FORWARD_APP: case TRACEROUTE_APP:
+                case STORE_FORWARD_PLUSPLUS_APP:
+                    return true;
                 default: return false;
             }
         default: // ALL / ALL_SKIP_DECODING — relay raw regardless of decode
@@ -53585,9 +53974,25 @@ static void maybeRebroadcastPacket(const MeshPacket &pkt) {
         return;
     }
 
+    // A unicast routed through a chosen relay names it in next_hop (the low byte
+    // of its node number). As upstream's NextHopRouter, relay only one that
+    // names nobody or names us: the sender picked another path, and a node that
+    // floods it anyway spends airtime and makes duplicates for nothing.
+    const uint8_t ourRelayByte = (uint8_t)(s_myNodeId & 0xFF);
+    if (pkt.hdr.next_hop != 0 && pkt.hdr.next_hop != ourRelayByte) {
+        debugLogMessages("[fwd] skip (next_hop %02x is not us) from=%08lx id=%08lx\n",
+                         pkt.hdr.next_hop,
+                         (unsigned long)pkt.hdr.from, (unsigned long)pkt.hdr.id);
+        return;
+    }
+
     MeshHdr hdr = pkt.hdr;
     hdr.flags = (uint8_t)((pkt.hdr.flags & 0xF8) | ((hopLimit - 1) & 0x07));
-    hdr.relay_node = (uint8_t)(s_myNodeId & 0xFF);
+    hdr.relay_node = ourRelayByte;
+    // Upstream rewrites next_hop from its route table as it relays. We keep no
+    // routes, which upstream treats as no preference: left as our own byte, the
+    // nodes after us would see a packet routed to someone else and drop it.
+    hdr.next_hop = 0;
 
     PendingRebroadcast *slot = allocPendingRebroadcast();
     if (!slot) {                             // queue full: drop rather than block
@@ -53729,26 +54134,29 @@ static bool csTransmit(const csc::Send &out) {
     data[n++] = (9 << 3) | 0;                 // Data.bitfield = 0 (2.8 drops Data without it)
     data[n++] = 0;
 
-    const uint8_t *key;
-    uint8_t keyLen, hash;
-    if (out.chanIdx < 0) {
-        key = csp::DISCOVERY_KEY; keyLen = 16; hash = csDiscoveryHash();
-    } else {
-        const ChannelKey &ck = CHANNEL_KEYS[out.chanIdx];
-        key = ck.key; keyLen = ck.keyLen; hash = ck.hash;
-    }
-    uint8_t frame[sizeof(MeshHdr) + sizeof(data)];
+    uint8_t frame[sizeof(MeshHdr) + sizeof(data) + MESH_AEAD_OVERHEAD];
     MeshHdr hdr = {};
     hdr.to = out.to;
     hdr.from = s_myNodeId;
     hdr.id = nextMeshPacketId();
-    hdr.channel = hash;
     const uint8_t hop = out.hopLimit & 0x07;
     hdr.flags = (uint8_t)(hop | (hop << 5));
     hdr.relay_node = (uint8_t)(s_myNodeId & 0xFF);
-    if (!encryptPayload(hdr.id, s_myNodeId, key, keyLen, data, frame + sizeof(MeshHdr), n)) return false;
+    size_t cipherLen = 0;
+    if (out.chanIdx < 0) {
+        // The discovery channel is ours alone and stays AES-CTR.
+        hdr.channel = csDiscoveryHash();
+        if (encryptPayload(hdr.id, s_myNodeId, csp::DISCOVERY_KEY, 16, data, frame + sizeof(MeshHdr), n))
+            cipherLen = n;
+    } else {
+        const ChannelKey &ck = CHANNEL_KEYS[out.chanIdx];
+        hdr.channel = ck.hash;
+        cipherLen = encryptChannelPayload(ck, hdr.id, s_myNodeId, hdr.to, data, n,
+                                          frame + sizeof(MeshHdr), sizeof(frame) - sizeof(MeshHdr));
+    }
+    if (cipherLen == 0) return false;
     memcpy(frame, &hdr, sizeof(hdr));
-    const bool ok = Radio.transmit(frame, sizeof(hdr) + n);
+    const bool ok = Radio.transmit(frame, sizeof(hdr) + cipherLen);
 
     csp::Type t = csp::DISCOVER;
     csp::peekType(out.payload, out.len, t);
@@ -53977,22 +54385,6 @@ static bool processMeshPacket(const MeshPacket &rxPkt) {
     // (display, rebroadcast, or node-state updates).
     if (s_cfg.ignoreMqtt && (pkt.hdr.flags & 0x10)) return false;
 
-    // Store-and-Forward is the one port where hdr.from is not who we just heard.
-    // On a replay it is the *original author* of a message the router stored
-    // hours ago, while the SNR, hop count and arrival time all describe the
-    // router's transmission right now — so feeding it here marks a node that has
-    // been silent all afternoon as freshly heard, at someone else's signal
-    // strength, and reshuffles the node list every time a burst lands. The S&F
-    // case below calls this itself for the frames a router really did originate
-    // (heartbeats, pings, stats), where hdr.from means what it usually means.
-    if (!(pkt.decrypted && pkt.portnum == STORE_FORWARD_APP)) {
-        Nodes.updateFromPacket(pkt);
-    }
-
-    // Live SNR/RSSI sparkline samples (one per received packet).
-    chartPushSample(s_snrHist, pkt.snr);
-    chartPushSample(s_rssiHist, pkt.rssi);
-
     if (!pkt.decrypted && pkt.hdr.channel == 0 && pkt.rawLen > 12) {
         NodeEntry *sender = Nodes.find(pkt.hdr.from);
         if (sender && sender->hasPubKey) {
@@ -54003,13 +54395,11 @@ static bool processMeshPacket(const MeshPacket &rxPkt) {
                 pkt.chanIdx = -2;
                 const uint8_t *payPtr = nullptr;
                 size_t payLen = 0;
-                const uint8_t *sig = nullptr;
                 decodeData(plain, plainLen, pkt.portnum, payPtr, payLen,
                            pkt.requestId, pkt.wantResponse,
                            &pkt.dataDest, &pkt.hasDataDest,
                            &pkt.dataSource, &pkt.hasDataSource,
-                           &sig);
-                notePacketSignature(pkt, sig, payPtr, payLen);
+                           &pkt.env);
                 if (payPtr && payLen <= sizeof(pkt.payload)) {
                     memcpy(pkt.payload, payPtr, payLen);
                     pkt.payloadLen = payLen;
@@ -54022,6 +54412,29 @@ static bool processMeshPacket(const MeshPacket &rxPkt) {
             }
         }
     }
+
+    // Before the node list hears of the packet: one the policy drops does not
+    // mark its sender as heard, any more than it is relayed or shown.
+    const SigPolicyResult sig = checkPacketSignature(pkt);
+    if (!sig.accept) return false;
+
+    // Store-and-Forward is the one port where hdr.from is not who we just heard.
+    // On a replay it is the *original author* of a message the router stored
+    // hours ago, while the SNR, hop count and arrival time all describe the
+    // router's transmission right now — so feeding it here marks a node that has
+    // been silent all afternoon as freshly heard, at someone else's signal
+    // strength, and reshuffles the node list every time a burst lands. The S&F
+    // case below calls this itself for the frames a router really did originate
+    // (heartbeats, pings, stats), where hdr.from means what it usually means.
+    if (!(pkt.decrypted && pkt.portnum == STORE_FORWARD_APP)) {
+        Nodes.updateFromPacket(pkt);
+    }
+    // After the update above, which creates the entry for a first contact.
+    if (sig.markSigner) Nodes.markSigner(pkt.hdr.from);
+
+    // Live SNR/RSSI sparkline samples (one per received packet).
+    chartPushSample(s_snrHist, pkt.snr);
+    chartPushSample(s_rssiHist, pkt.rssi);
 
     // Managed flood: relay new traffic onward before handling it locally. Held
     // while a preset scan has the radio parked: relaying there makes this node a
@@ -54254,6 +54667,11 @@ static bool processMeshPacket(const MeshPacket &rxPkt) {
             }
 #endif
             bool dmRoutingMatched = DMs.handleRoutingResult(pkt.hdr.from, pkt.requestId, errorReason);
+            // Routing.ack_proof (Meshtastic 2.8.1). Only for an answer to one of
+            // our DMs, from the node it went to -- a nak from a relay is not a
+            // receipt -- and advisory, as upstream's is: the verdict is logged,
+            // and the ack counts the same either way.
+            if (dmRoutingMatched) noteAckProof(pkt);
             tracerouteProgressOnRouting(pkt.hdr.from,
                                         pkt.requestId,
                                         errorReason,
@@ -54625,12 +55043,18 @@ static void mqttDownlinkInject(const MeshHdr &hdrIn, const uint8_t *cipherIn,
                           (unsigned long)hdr.from);
             return;
         }
-        if (!encryptPayload(hdr.id, hdr.from, CHANNEL_KEYS[idx].key,
-                            CHANNEL_KEYS[idx].keyLen, cipher, sealed, cipherLen)) {
+        // Sealed the way the channel is: AES-CCM with its tag on an AEAD
+        // channel, so decryptPacket() and every node we relay it to can open it
+        // under the hash set below. Never signed here: our own packets were
+        // dropped above, and the signer only signs as us.
+        const size_t sealedLen = encryptChannelPayload(CHANNEL_KEYS[idx], hdr.id, hdr.from, hdr.to,
+                                                       cipher, cipherLen, sealed, sizeof(sealed));
+        if (sealedLen == 0) {
             Serial.println("[mqtt] downlink drop: could not encrypt decoded packet");
             return;
         }
         cipher = sealed;
+        cipherLen = sealedLen;
         // A decoded packet's channel field is the sender's channel index, not
         // the on-air hash decryptPacket() and the relay need.
         hdr.channel = CHANNEL_KEYS[idx].hash;
@@ -54652,19 +55076,16 @@ static void mqttDownlinkInject(const MeshHdr &hdrIn, const uint8_t *cipherIn,
         memcpy(pkt.rawCipher, cipher, cipherLen);
         pkt.rawLen = cipherLen;
         uint8_t plain[256];
-        pkt.chanIdx = decryptPacket(pkt.hdr, cipher, plain, cipherLen);
+        size_t plainLen = 0;
+        pkt.chanIdx = decryptPacket(pkt.hdr, cipher, plain, cipherLen, plainLen);
         pkt.decrypted = (pkt.chanIdx >= 0);
         if (pkt.decrypted) {
             const uint8_t *payPtr; size_t payLen;
-            const uint8_t *sig = nullptr;
-            decodeData(plain, cipherLen, pkt.portnum, payPtr, payLen,
+            decodeData(plain, plainLen, pkt.portnum, payPtr, payLen,
                        pkt.requestId, pkt.wantResponse,
                        &pkt.dataDest, &pkt.hasDataDest,
                        &pkt.dataSource, &pkt.hasDataSource,
-                       &sig);
-            // Before the payload is copied out: the signature covers the
-            // payload as it arrived, and both pointers are into `plain`.
-            notePacketSignature(pkt, sig, payPtr, payLen);
+                       &pkt.env);
             if (payPtr && payLen <= sizeof(pkt.payload)) {
                 memcpy(pkt.payload, payPtr, payLen);
                 pkt.payloadLen = payLen;

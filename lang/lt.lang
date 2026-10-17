@@ -137,6 +137,7 @@ BT Keyboard: %s	BT klaviatūra: %s
 BT Keyboard: Off	BT klaviatūra: Išj.
 Back	Atgal
 Back = Cancel	Atgal = Atšaukti
+Balanced	Subalansuota
 Bass	Žemi tonai
 Battery Calibration	Baterijos kalibravimas
 Battery Calibration: %s	Baterijos kalibravimas: %s
@@ -218,6 +219,7 @@ Clock Format: %s	Laikrodžio formatas: %s
 Clock set from web config	Laikrodis nustatytas iš žiniatinklio nustatymų
 Clock set: %04d-%02d-%02d %02d:%02d	Laikrodis nustatytas: %04d-%02d-%02d %02d:%02d
 Close	Uždaryti
+Compatible	Suderinama
 Configuration	Nustatymai
 Configuration exported to /camillia/config.yaml.\n\nThe card is formatted and holds nothing else. Chat history, the node database and any map tiles were on the old filesystem and are gone.	Nustatymai eksportuoti į /camillia/config.yaml.\n\nKortelė suformatuota ir daugiau nieko neturi. Pokalbių istorija, mazgų duomenų bazė ir žemėlapio plytelės buvo senoje failų sistemoje ir dingo.
 Configured WiFi is empty	Nustatytas WiFi tuščias
@@ -466,6 +468,7 @@ N=Choose WiFi   Enter=Finish   Bksp=Back	N=Pasirinkti WiFi   Enter=Baigti   Bksp
 NO LINE OF SIGHT	NĖRA MATOMUMO LINIJOS
 NODEINFO + telemetry queued.	NODEINFO + telemetrija eilėje.
 No GPS fix	Nėra GPS fiksacijos
+Only signed packets accepted (no 2.7 nodes)	Tik pasirašyti paketai (be 2.7 mazgų)
 Send NODEINFO and telemetry to the mesh now?	Siųsti NODEINFO ir telemetriją į tinklą dabar?
 NODES	MAZGAI
 NODES (%d%s)	MAZGAI (%d%s)
@@ -686,6 +689,8 @@ Short: %s	Trumpas: %s
 Show Archived Nodes: %s	Rodyti archyvuotus mazgus: %s
 Show Archived Nodes: %s%s	Rodyti archyvuotus mazgus: %s%s
 Signal: SNR %.1f dB, RSSI %.0f dBm	Signalas: SNR %.1f dB, RSSI %.0f dBm
+Signed Packets	Pasirašyti paketai
+Signed Packets: %s	Pasirašyti paketai: %s
 Silver	Sidabrinė
 Sky	Dangaus mėlyna
 Small	Mažas
@@ -701,6 +706,7 @@ State map unavailable	Regiono žemėlapis nepasiekiamas
 Stay on	Visada įjungta
 Storage: %s %s	Saugykla: %s %s
 Storage: %s (not mounted)	Saugykla: %s (neprijungta)
+Strict	Griežta
 Sun	s
 Sweep	Šukavimas
 Sweep already running	Šukavimas jau vyksta
@@ -769,6 +775,8 @@ Uni(g)nore	Nebeignoruoti (G)
 Unignore	Nebeignoruoti
 Units: %s	Vienetai: %s
 Unknown	Nežinomas
+Unsigned broadcasts from signers dropped	Pasirašančiųjų nepasirašytos transliacijos atmetamos
+Unsigned packets accepted	Nepasirašyti paketai priimami
 Until read	Kol perskaitoma
 Up to date (%s)	Naujausia (%s)
 Up/Down	Aukštyn/Žemyn

@@ -136,6 +136,7 @@ BT Keyboard: %s	BT-tastatur: %s
 BT Keyboard: Off	BT-tastatur: Av
 Back	Tilbake
 Back = Cancel	Tilbake = Avbryt
+Balanced	Balansert
 Battery Calibration	Batterikalibrering
 Battery Calibration: %s	Batterikalibrering: %s
 Battery Calibration: Off	Batterikalibrering: Av
@@ -215,6 +216,7 @@ Clock Format: %s	Klokkeformat: %s
 Clock set from web config	Klokken stilt fra webkonfigurasjonen
 Clock set: %04d-%02d-%02d %02d:%02d	Klokken stilt: %04d-%02d-%02d %02d:%02d
 Close	Lukk
+Compatible	Kompatibel
 Configuration	Konfigurasjon
 Configuration exported to /camillia/config.yaml.\n\nThe card is formatted and holds nothing else. Chat history, the node database and any map tiles were on the old filesystem and are gone.	Konfigurasjonen eksportert til /camillia/config.yaml.\n\nKortet er formatert og inneholder ikke noe annet. Chathistorikk, nodedatabase og kartfliser lå på det gamle filsystemet og er borte.
 Configured WiFi is empty	Konfigurert WiFi er tomt
@@ -457,6 +459,7 @@ N=Choose WiFi   Enter=Finish   Bksp=Back	N=Velg WiFi   Enter=Fullfør   Bksp=Til
 NO LINE OF SIGHT	IKKE FRI SIKT
 NODEINFO + telemetry queued.	NODEINFO + telemetri satt i kø.
 No GPS fix	Ingen GPS-fix
+Only signed packets accepted (no 2.7 nodes)	Bare signerte pakker (ingen 2.7-noder)
 Send NODEINFO and telemetry to the mesh now?	Sende NODEINFO og telemetri til nettet nå?
 NODES	NODER
 NODES (%d%s)	NODER (%d%s)
@@ -674,6 +677,8 @@ Short name cannot be empty	Kortnavnet kan ikke være tomt
 Short: %s	Kort: %s
 Show Archived Nodes: %s	Vis arkiverte noder: %s
 Show Archived Nodes: %s%s	Vis arkiverte noder: %s%s
+Signed Packets	Signerte pakker
+Signed Packets: %s	Signerte pakker: %s
 Silver	Sølv
 Sky	Himmelblå
 Small	Liten
@@ -689,6 +694,7 @@ State map unavailable	Regionkart ikke tilgjengelig
 Stay on	Alltid på
 Storage: %s %s	Lagring: %s %s
 Storage: %s (not mounted)	Lagring: %s (ikke montert)
+Strict	Streng
 Sun	søn
 Sweep	Sveip
 Sweep already running	Sveip pågår allerede
@@ -757,6 +763,8 @@ Uni(g)nore	Slutt å i(g)norere
 Unignore	Slutt å ignorere
 Units: %s	Enheter: %s
 Unknown	Ukjent
+Unsigned broadcasts from signers dropped	Usignerte kringkastinger fra signerere forkastes
+Unsigned packets accepted	Usignerte pakker godtas
 Until read	Til lest
 Up to date (%s)	Oppdatert (%s)
 Up/Down	Opp/Ned

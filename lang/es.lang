@@ -145,6 +145,7 @@ BT Keyboard: %s	Teclado BT: %s
 BT Keyboard: Off	Teclado BT: Apagado
 Back	Atrás
 Back = Cancel	Atrás = Cancelar
+Balanced	Equilibrado
 Bass	Grave
 Battery Calibration	Calibración de batería
 Battery Calibration: %s	Calibración de batería: %s
@@ -229,6 +230,7 @@ Clock Format: %s	Formato de hora: %s
 Clock set from web config	Hora ajustada desde la configuración web
 Clock set: %04d-%02d-%02d %02d:%02d	Hora ajustada: %04d-%02d-%02d %02d:%02d
 Close	Cerrar
+Compatible	Compatible
 Configuration	Configuración
 Configuration exported to /camillia/config.yaml.\n\nThe card is formatted and holds nothing else. Chat history, the node database and any map tiles were on the old filesystem and are gone.	Configuración exportada a /camillia/config.yaml.\n\nLa tarjeta está formateada y no contiene nada más. El historial de chat, la base de nodos y los mosaicos de mapa estaban en el sistema de archivos anterior y se han perdido.
 Configured WiFi is empty	El WiFi configurado está vacío
@@ -482,6 +484,7 @@ N=Choose WiFi   Enter=Finish   Bksp=Back	N=Elegir WiFi   Enter=Terminar   Bksp=A
 NO LINE OF SIGHT	SIN LÍNEA DE VISIÓN
 NODEINFO + telemetry queued.	NODEINFO + telemetría en cola.
 No GPS fix	Sin señal GPS
+Only signed packets accepted (no 2.7 nodes)	Solo paquetes firmados (sin nodos 2.7)
 Send NODEINFO and telemetry to the mesh now?	¿Enviar NODEINFO y telemetría a la malla ahora?
 NODES	NODOS
 NODES (%d%s)	NODOS (%d%s)
@@ -707,6 +710,8 @@ Short: %s	Corto: %s
 Show Archived Nodes: %s	Mostrar nodos archivados: %s
 Show Archived Nodes: %s%s	Mostrar nodos archivados: %s%s
 Signal: SNR %.1f dB, RSSI %.0f dBm	Señal: SNR %.1f dB, RSSI %.0f dBm
+Signed Packets	Paquetes firmados
+Signed Packets: %s	Paquetes firmados: %s
 Silver	Plata
 Sky	Cielo
 Small	Pequeño
@@ -722,6 +727,7 @@ State map unavailable	Mapa de estado no disponible
 Stay on	Siempre encendida
 Storage: %s %s	Almacenamiento: %s %s
 Storage: %s (not mounted)	Almacenamiento: %s (sin montar)
+Strict	Estricto
 Sun	dom
 Sweep	Barrido
 Sweep already running	Barrido ya en curso
@@ -791,6 +797,8 @@ Uni(g)nore	Dejar de i(g)norar
 Unignore	No ignorar
 Units: %s	Unidades: %s
 Unknown	Desconocido
+Unsigned broadcasts from signers dropped	Difusiones sin firma de firmantes descartadas
+Unsigned packets accepted	Paquetes sin firma aceptados
 Until read	Hasta leer
 Up to date (%s)	Actualizado (%s)
 Up/Down	Arriba/Abajo

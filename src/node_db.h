@@ -51,11 +51,12 @@ struct NodeEntry {
     uint32_t lastPosMs;       // millis() when we last processed a POSITION packet for this node (RAM only)
     uint32_t lastPersistMs;   // throttles NVS writes for hot update paths
     // Meshtastic 2.8 XEdDSA. Set once a packet from this node carries a
-    // signature that verifies against the public key we hold for it, and never
-    // cleared while the entry lives: it records "this node has proved it holds
-    // the private key for the key we have", which stays true afterwards.
-    // RAM only, like everything else down here — a claim about what we saw this
-    // session, not a fact worth carrying across a reboot on someone's say-so.
+    // signature that verifies against the public key we hold for it (or a
+    // signed first-contact NodeInfo checks out): "this node has proved it holds
+    // the private key for the key we have". Cleared when that key is replaced.
+    // Unlike the fields around it this one is saved (flags bit 7), as upstream
+    // keeps its signer bit: it is our own check, not someone's say-so, and the
+    // Balanced signature policy relies on it to spot a signer going unsigned.
     bool     xeddsaVerified;
 
     // ── Wardriving: where WE were when we heard this node ────────────────────
@@ -203,6 +204,10 @@ public:
     void updatePosition(uint32_t nodeId, const PositionInfo &p);
     void updateTelemetry(uint32_t nodeId, const TelemetryInfo &t);
     bool setFavorite(uint32_t nodeId, bool favorite);
+    // Record that this node has passed a signature check, and persist it: the
+    // Balanced signature policy drops a later unsigned broadcast from a node
+    // marked here, and that protection should not lapse with a reboot.
+    void markSigner(uint32_t nodeId);
 
     // Write one node's current fields to NVS now. upsert() persists the *blank*
     // record it creates, so a caller that fills the entry in afterwards — the

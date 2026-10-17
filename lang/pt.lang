@@ -137,6 +137,7 @@ BT Keyboard: %s	Teclado BT: %s
 BT Keyboard: Off	Teclado BT: Desligado
 Back	Voltar
 Back = Cancel	Voltar = Cancelar
+Balanced	Equilibrado
 Bass	Grave
 Battery Calibration	Calibração da bateria
 Battery Calibration: %s	Calibração da bateria: %s
@@ -218,6 +219,7 @@ Clock Format: %s	Formato do relógio: %s
 Clock set from web config	Relógio ajustado pela config web
 Clock set: %04d-%02d-%02d %02d:%02d	Relógio ajustado: %04d-%02d-%02d %02d:%02d
 Close	Fechar
+Compatible	Compatível
 Configuration	Configuração
 Configuration exported to /camillia/config.yaml.\n\nThe card is formatted and holds nothing else. Chat history, the node database and any map tiles were on the old filesystem and are gone.	Configuração exportada para /camillia/config.yaml.\n\nO cartão está formatado e não contém mais nada. O histórico de chat, o banco de nós e os blocos de mapa estavam no sistema de arquivos antigo e foram perdidos.
 Configured WiFi is empty	O WiFi configurado está vazio
@@ -465,6 +467,7 @@ N=Choose WiFi   Enter=Finish   Bksp=Back	N=Escolher WiFi   Enter=Concluir   Bksp
 NO LINE OF SIGHT	SEM LINHA DE VISADA
 NODEINFO + telemetry queued.	NODEINFO + telemetria na fila.
 No GPS fix	Sem fix GPS
+Only signed packets accepted (no 2.7 nodes)	Só pacotes assinados (sem nós 2.7)
 Send NODEINFO and telemetry to the mesh now?	Enviar NODEINFO e telemetria para a malha agora?
 NODES	NÓS
 NODES (%d%s)	NÓS (%d%s)
@@ -682,6 +685,8 @@ Short: %s	Curto: %s
 Show Archived Nodes: %s	Mostrar nós arquivados: %s
 Show Archived Nodes: %s%s	Mostrar nós arquivados: %s%s
 Signal: SNR %.1f dB, RSSI %.0f dBm	Sinal: SNR %.1f dB, RSSI %.0f dBm
+Signed Packets	Pacotes assinados
+Signed Packets: %s	Pacotes assinados: %s
 Silver	Prata
 Sky	Céu
 Small	Pequeno
@@ -697,6 +702,7 @@ State map unavailable	Mapa regional indisponível
 Stay on	Sempre acesa
 Storage: %s %s	Armazenamento: %s %s
 Storage: %s (not mounted)	Armazenamento: %s (não montado)
+Strict	Estrito
 Sun	dom
 Sweep	Varredura
 Sweep already running	Varredura já em andamento
@@ -765,6 +771,8 @@ Uni(g)nore	Deixar de i(g)norar
 Unignore	Deixar de ignorar
 Units: %s	Unidades: %s
 Unknown	Desconhecido
+Unsigned broadcasts from signers dropped	Difusões não assinadas de assinantes descartadas
+Unsigned packets accepted	Pacotes não assinados aceitos
 Until read	Até ler
 Up to date (%s)	Atualizado (%s)
 Up/Down	Cima/Baixo

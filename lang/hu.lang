@@ -137,6 +137,7 @@ BT Keyboard: %s	BT-billentyűzet: %s
 BT Keyboard: Off	BT-billentyűzet: Ki
 Back	Vissza
 Back = Cancel	Vissza = Mégse
+Balanced	Kiegyensúlyozott
 Bass	Basszus
 Battery Calibration	Akku kalibrálása
 Battery Calibration: %s	Akku kalibrálása: %s
@@ -218,6 +219,7 @@ Clock Format: %s	Időformátum: %s
 Clock set from web config	Óra beállítva a webes beállításokból
 Clock set: %04d-%02d-%02d %02d:%02d	Óra beállítva: %04d-%02d-%02d %02d:%02d
 Close	Bezárás
+Compatible	Kompatibilis
 Configuration	Beállítások
 Configuration exported to /camillia/config.yaml.\n\nThe card is formatted and holds nothing else. Chat history, the node database and any map tiles were on the old filesystem and are gone.	Beállítások exportálva ide: /camillia/config.yaml.\n\nA kártya formázva van, és semmi mást nem tartalmaz. A chat előzmények, a csomópont-adatbázis és a térképcsempék a régi fájlrendszeren voltak, és elvesztek.
 Configured WiFi is empty	A beállított WiFi üres
@@ -467,6 +469,7 @@ N=Choose WiFi   Enter=Finish   Bksp=Back	N=WiFi kiválasztása   Enter=Befejezé
 NO LINE OF SIGHT	NINCS RÁLÁTÁS
 NODEINFO + telemetry queued.	NODEINFO + telemetria sorba állítva.
 No GPS fix	Nincs GPS-fix
+Only signed packets accepted (no 2.7 nodes)	Csak aláírt csomagok (2.7-es csomópont nélkül)
 Send NODEINFO and telemetry to the mesh now?	Elküldöd most a NODEINFO-t és a telemetriát a hálózatra?
 NODES	CSOMÓPONTOK
 NODES (%d%s)	CSOMÓPONTOK (%d%s)
@@ -687,6 +690,8 @@ Short: %s	Rövid: %s
 Show Archived Nodes: %s	Archivált csomópontok mutatása: %s
 Show Archived Nodes: %s%s	Archivált csomópontok mutatása: %s%s
 Signal: SNR %.1f dB, RSSI %.0f dBm	Jel: SNR %.1f dB, RSSI %.0f dBm
+Signed Packets	Aláírt csomagok
+Signed Packets: %s	Aláírt csomagok: %s
 Silver	Ezüst
 Sky	Égszínkék
 Small	Kicsi
@@ -702,6 +707,7 @@ State map unavailable	A régiótérkép nem érhető el
 Stay on	Mindig be
 Storage: %s %s	Tárhely: %s %s
 Storage: %s (not mounted)	Tárhely: %s (nincs csatolva)
+Strict	Szigorú
 Sun	V
 Sweep	Pásztázás
 Sweep already running	A pásztázás már fut
@@ -770,6 +776,8 @@ Uni(g)nore	Mellőzés vége (G)
 Unignore	Mellőzés vége
 Units: %s	Mértékegységek: %s
 Unknown	Ismeretlen
+Unsigned broadcasts from signers dropped	Aláírók aláíratlan adásai eldobva
+Unsigned packets accepted	Aláíratlan csomagok elfogadva
 Until read	Olvasásig
 Up to date (%s)	Naprakész (%s)
 Up/Down	Fel/Le

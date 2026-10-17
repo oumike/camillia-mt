@@ -138,6 +138,7 @@ BT Keyboard: %s	BT-klaviatuur: %s
 BT Keyboard: Off	BT-klaviatuur: Väljas
 Back	Tagasi
 Back = Cancel	Tagasi = Tühista
+Balanced	Tasakaalus
 Battery Calibration	Aku kalibreerimine
 Battery Calibration: %s	Aku kalibreerimine: %s
 Battery Calibration: Off	Aku kalibreerimine: Väljas
@@ -218,6 +219,7 @@ Clock Format: %s	Kella vorming: %s
 Clock set from web config	Kell seatud veebiseadetest
 Clock set: %04d-%02d-%02d %02d:%02d	Kell seatud: %04d-%02d-%02d %02d:%02d
 Close	Sulge
+Compatible	Ühilduv
 Configuration	Seaded
 Configuration exported to /camillia/config.yaml.\n\nThe card is formatted and holds nothing else. Chat history, the node database and any map tiles were on the old filesystem and are gone.	Seaded eksporditud faili /camillia/config.yaml.\n\nKaart on vormindatud ega sisalda muud. Vestluste ajalugu, sõlmede andmebaas ja kaardipaanid olid vanas failisüsteemis ja on kadunud.
 Configured WiFi is empty	Seadistatud WiFi on tühi
@@ -464,6 +466,7 @@ N=Choose WiFi   Enter=Finish   Bksp=Back	N=Vali WiFi   Enter=Lõpeta   Bksp=Taga
 NO LINE OF SIGHT	OTSENÄHTAVUST POLE
 NODEINFO + telemetry queued.	NODEINFO + telemeetria järjekorras.
 No GPS fix	GPS-fiks puudub
+Only signed packets accepted (no 2.7 nodes)	Ainult allkirjastatud paketid (2.7 sõlmedeta)
 Send NODEINFO and telemetry to the mesh now?	Kas saata NODEINFO ja telemeetria kohe võrku?
 NODES	SÕLMED
 NODES (%d%s)	SÕLMED (%d%s)
@@ -684,6 +687,8 @@ Short: %s	Lühike: %s
 Show Archived Nodes: %s	Näita arhiveeritud sõlmi: %s
 Show Archived Nodes: %s%s	Näita arhiveeritud sõlmi: %s%s
 Signal: SNR %.1f dB, RSSI %.0f dBm	Signaal: SNR %.1f dB, RSSI %.0f dBm
+Signed Packets	Allkirjastatud paketid
+Signed Packets: %s	Allkirjastatud paketid: %s
 Silver	Hõbe
 Sky	Taevasinine
 Small	Väike
@@ -699,6 +704,7 @@ State map unavailable	Piirkonnakaart pole saadaval
 Stay on	Alati sees
 Storage: %s %s	Salvestusruum: %s %s
 Storage: %s (not mounted)	Salvestusruum: %s (pole ühendatud)
+Strict	Range
 Sun	P
 Sweep	Läbikamm
 Sweep already running	Läbikamm juba käib
@@ -767,6 +773,8 @@ Uni(g)nore	Lõpeta i(g)noreerimine
 Unignore	Lõpeta ignoreerimine
 Units: %s	Ühikud: %s
 Unknown	Tundmatu
+Unsigned broadcasts from signers dropped	Allkirjastajate allkirjata saated visatakse ära
+Unsigned packets accepted	Allkirjata paketid lubatud
 Until read	Kuni lugemiseni
 Up to date (%s)	Ajakohane (%s)
 Up/Down	Üles/Alla
