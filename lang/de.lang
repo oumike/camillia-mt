@@ -133,6 +133,7 @@ BT Keyboard: %s	BT-Tastatur: %s
 BT Keyboard: Off	BT-Tastatur: Aus
 Back	Zurück
 Back = Cancel	Zurück = Abbrechen
+Balanced	Ausgewogen
 Battery Calibration	Akku-Kalibrierung
 Battery Calibration: %s	Akku-Kalibrierung: %s
 Battery Calibration: Off	Akku-Kalibrierung: Aus
@@ -213,6 +214,7 @@ Clock Format: %s	Uhrformat: %s
 Clock set from web config	Uhr über Web-Konfiguration gestellt
 Clock set: %04d-%02d-%02d %02d:%02d	Uhr gestellt: %04d-%02d-%02d %02d:%02d
 Close	Schließen
+Compatible	Kompatibel
 Configuration	Konfiguration
 Configuration exported to /camillia/config.yaml.\n\nThe card is formatted and holds nothing else. Chat history, the node database and any map tiles were on the old filesystem and are gone.	Konfiguration nach /camillia/config.yaml exportiert.\n\nDie Karte ist formatiert und enthält sonst nichts. Chatverlauf, Knotendatenbank und Kartenkacheln lagen im alten Dateisystem und sind weg.
 Configured WiFi is empty	Konfiguriertes WLAN ist leer
@@ -447,6 +449,7 @@ N=Choose WiFi   Enter=Finish   Bksp=Back	N=WLAN wählen   Enter=Fertig   Bksp=Zu
 NO LINE OF SIGHT	KEINE SICHTVERBINDUNG
 NODEINFO + telemetry queued.	NODEINFO + Telemetrie eingereiht.
 No GPS fix	Kein GPS-Fix
+Only signed packets accepted (no 2.7 nodes)	Nur signierte Pakete (keine 2.7-Knoten)
 Send NODEINFO and telemetry to the mesh now?	NODEINFO und Telemetrie jetzt ans Mesh senden?
 NODES	KNOTEN
 NODES (%d%s)	KNOTEN (%d%s)
@@ -655,6 +658,8 @@ Short name cannot be empty	Kurzname darf nicht leer sein
 Short: %s	Kurz: %s
 Show Archived Nodes: %s	Archivierte Knoten zeigen: %s
 Show Archived Nodes: %s%s	Archivierte Knoten zeigen: %s%s
+Signed Packets	Signierte Pakete
+Signed Packets: %s	Signierte Pakete: %s
 Silver	Silber
 Sky	Himmelblau
 Small	Klein
@@ -670,6 +675,7 @@ State map unavailable	Regionalkarte nicht verfügbar
 Stay on	Bleibt an
 Storage: %s %s	Speicher: %s %s
 Storage: %s (not mounted)	Speicher: %s (nicht eingebunden)
+Strict	Streng
 Sun	So
 Sweep already running	Sweep läuft bereits
 Sweep cancelled	Sweep abgebrochen
@@ -736,6 +742,8 @@ Uni(g)nore	Nicht i(g)norieren
 Unignore	Nicht ignorieren
 Units: %s	Einheiten: %s
 Unknown	Unbekannt
+Unsigned broadcasts from signers dropped	Unsignierte Broadcasts von Signierern verworfen
+Unsigned packets accepted	Unsignierte Pakete angenommen
 Until read	Bis gelesen
 Up to date (%s)	Aktuell (%s)
 Up/Down	Hoch/Runter

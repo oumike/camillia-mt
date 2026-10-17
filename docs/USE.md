@@ -740,8 +740,11 @@ it.
   and when it was last heard
 - The offer line reads *channel / preset / region* — whichever parts the beacon
   carried, `(nothing)` when it carried none. A `*` after a channel name means the
-  offer included a key. Nothing here is ever applied to your radio; acting on an
-  offer is manual, on the Config screen
+  offer included a key, and `AEAD` means the channel uses Meshtastic 2.8.1's
+  authenticated encryption, so joining it means turning AEAD on for that channel
+  here too (see [Authenticated channels (AEAD)](#authenticated-channels-aead)).
+  Nothing here is
+  ever applied to your radio; acting on an offer is manual, on the Config screen
 - Once a sender has beaconed twice, its card also says how many have been heard
   and roughly how far apart they have been — which is the number that tells you
   when it is worth looking again
@@ -2516,7 +2519,17 @@ Two things worth knowing:
 
 Meshtastic 2.8 can sign a packet with the same identity key it already uses for
 direct messages, so a receiver can tell that a packet genuinely came from the
-node it claims to. Camillia checks those signatures when they arrive.
+node it claims to. Camillia checks those signatures when they arrive, whether
+the packet came over the radio, over MQTT, or as a direct message.
+
+The signature covers the whole message as Meshtastic 2.8.1 defines it: who sent
+it and to whom, its packet number and port, which message it replies to, whether
+it is a reaction, its MQTT-consent flag, and the text itself. So a signed reply
+cannot be moved under a different message, turned into a reaction, re-addressed
+as a private message, or released to MQTT against its sender's wishes without
+the check failing. Meshtastic 2.8.0 signed less than that and was withdrawn for
+it; its signatures do not verify under 2.8.1 or here, and nothing in use still
+sends them.
 
 The node detail panel gains a **Signed** row with three states. **yes** means a
 packet from that node carried a signature that verified against the key we hold
@@ -2525,14 +2538,127 @@ means we have their key but no signed packet yet, which is the ordinary case
 today: almost nothing on the mesh signs. **no key** means we have not learned
 their public key at all, so there is nothing to check against.
 
-Nothing is rejected for being unsigned, and nothing is rejected for failing.
-Meshtastic's own default accepts unsigned traffic, and dropping packets on a
-failed check would punish the whole mesh for a feature barely in use. A failed
-check is logged rather than acted on — it means either the key we hold is stale
-or something is claiming to be that node.
+What Camillia does with a packet once it has checked it is the **Signed
+Packets** setting (Settings on the device, or Web Config under the node ID
+option). It has Meshtastic 2.8.1's three signature policies and behaves exactly
+as a 2.8.1 node on the same one would:
 
-Camillia does not sign its own packets yet. That needs a signing primitive the
-cryptography library here does not provide, and is tracked separately.
+- **Compatible**, the default here as in 2.8.1, accepts unsigned packets, so it
+  hears every 2.7 node.
+- **Balanced** also drops an unsigned broadcast from a node that has signed
+  before, when that broadcast would have fitted in a frame with a signature. A
+  node that signs always signs such a broadcast, so an unsigned one claiming to
+  be from it is a downgrade.
+- **Strict** accepts only packets with a verified signature, or that arrived as
+  an encrypted direct message. It ignores every 2.7 node, and every 2.8.1 node
+  whose key you do not have yet, apart from that node's own signed node info.
+
+Under all three, a packet is dropped if its signature fails to verify, if the
+signature is malformed, or if it is a signed node info from a node we have no
+key for whose key does not hash to its node ID. A failed signature means either
+the key we hold is stale or something is claiming to be that node. A dropped
+packet goes no further: it is not shown, relayed, uplinked to MQTT, or counted
+as hearing the node. Each drop is logged on the serial console with the reason.
+
+Camillia remembers which nodes have passed a signature check (the **Signed:
+yes** row), across reboots, as Balanced needs it to. Replacing a node's key
+clears it.
+
+Camillia also signs its own packets, by the same rule as Meshtastic 2.8.1: every
+broadcast it sends — channel messages, position, node info, telemetry, neighbor
+info — carries a signature whenever the signed packet still fits in one radio
+frame. Direct messages are not signed, because their encryption already proves
+who sent them, and nothing is signed on a node's behalf when Camillia shares
+someone else's node info.
+
+Signing is on only when your node ID is derived from your public key
+(**Node ID from public key** in Web Config, or a typed ID that happens to equal
+it), which is how every 2.8.1 node numbers itself. A 2.8.1 node that does not
+yet have your key accepts a signed node info only if the ID matches that hash,
+and drops it otherwise, whatever its policy. So with the ID taken from the
+radio's MAC, Camillia signs nothing and behaves exactly like a 2.7 node: every
+2.7 and 2.8.1 node hears it, except a 2.8.1 node on **Strict**.
+
+What that means against a stock 2.8.1 node: once it has learned your key, your
+broadcasts show as signed, and on any of its three signature policies it treats
+your traffic exactly as it treats another 2.8.1 node's. On the default
+**Compatible** policy that changes nothing. **Strict**, which drops unsigned
+packets, no longer drops your broadcasts. **Balanced**, having seen a node sign,
+drops an unsigned broadcast from it that would have fit with a signature — so a
+Camillia build from before this change should not share a node ID with one
+after it, and switching **Node ID from public key** off again gives the node a
+new ID rather than an unsigned old one. A 2.8.1
+node also drops any packet whose signature fails outright, as Camillia does.
+
+### Delivery proofs
+
+When you acknowledge a direct message from a node whose key you hold, Camillia
+adds a **delivery proof** to the acknowledgement, as Meshtastic 2.8.1 does. It is
+eight bytes computed from the key the two of you share, so only you could have
+produced it; the sender's app can then show the message as received by you,
+rather than by anyone who sent an acknowledgement with your number on it.
+
+It works the other way too. When a node acknowledges a direct message you sent
+and includes a proof, Camillia checks it and writes the result to the serial log
+under `[ackproof]` — `valid`, `INVALID`, or `malformed`. The proof is advisory,
+on both firmwares: a missing or failed proof does not stop the message counting
+as delivered, because a node that never learned your key cannot produce one, and
+that is not something either of you can see from your end.
+
+### Relaying traffic you cannot read
+
+The **Rebroadcast** setting in web config decides what this node relays for
+others. Three of its modes now treat packets this node cannot decrypt the way Meshtastic 2.8.1
+does:
+
+- **CORE_PORTNUMS_ONLY** relays them. It filters by what a packet is for, and
+  that cannot be read from a packet nobody here can decrypt. Dropping them broke
+  remote administration through any node in this mode — which is the default for
+  the Router role. For packets it can read, it relays the same set Meshtastic
+  does: text (plain and compressed), position, node info, routing, telemetry,
+  admin, alerts, key verification, waypoints, store and forward (both kinds) and
+  traceroute. Neighbor info and beacons are not relayed in this mode.
+- **LOCAL_ONLY** and **KNOWN_ONLY** relay a direct message between two other
+  nodes when this node knows at least one of them. Direct messages, remote
+  administration and key verification all travel that way, and a relay that
+  drops them cuts the two nodes either side off from each other. An unreadable
+  broadcast, or a direct message between two nodes this one has never heard of,
+  is still dropped: ignoring foreign meshes is what those modes are for.
+
+In every mode, a direct message that its sender routed through a particular
+relay is left to that relay, as Meshtastic does. Camillia relays one only when
+it names no relay or names this node, and since Camillia keeps no routing table
+of its own, a packet it does relay goes on with no relay named.
+
+### Authenticated channels (AEAD)
+
+Meshtastic 2.8.1 can encrypt a channel with **AES-CCM** instead of AES-CTR, so
+that a packet altered in flight is rejected rather than decrypted into something
+the sender never wrote. It is an experimental, per-channel switch (`use_aead`),
+off by default, and Camillia supports it the same way.
+
+- **Turning it on**: on the device, Config &rarr; Channels &rarr; pick a slot
+  &rarr; **AEAD**, then **Save**. In Web Config, tick **AEAD** on the channel's
+  row and save. In an exported config it is the channel's `use_aead: true` line.
+  It is off unless you turn it on.
+- **Every node on the channel has to turn it on.** An AEAD channel goes by a
+  different channel hash from the same name and key without it, so the two never
+  hear each other. That includes nodes on Meshtastic older than 2.8.1 and on older
+  Camillia builds: they cannot join an AEAD channel at all, and stop hearing it
+  the moment it is switched over.
+- **Older nodes can still relay it** if their **Rebroadcast** mode is `ALL`. In
+  any other mode a node before 2.8.1 drops what it cannot decrypt, so a mesh whose
+  routers run older firmware can cut AEAD traffic off.
+- **It needs a key.** Saving a channel with no encryption turns AEAD back off.
+- **Messages get 12 bytes shorter.** Each packet carries a 12-byte authentication
+  tag. A full-length text still fits, but there is less room left over.
+- **Direct messages are unaffected.** They already use their own authenticated
+  encryption, whatever the channel says.
+
+Keep the primary channel off AEAD unless every node you talk to is on 2.8.1 or
+later: node names and keys are announced there, and a node that cannot hear the
+primary cannot learn them or send you a direct message. A secondary channel is
+the safer place to try it.
 
 ### Traffic this node no longer relays
 

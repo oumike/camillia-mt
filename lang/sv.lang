@@ -135,6 +135,7 @@ BT Keyboard: %s	BT-tangentbord: %s
 BT Keyboard: Off	BT-tangentbord: Av
 Back	Tillbaka
 Back = Cancel	Tillbaka = Avbryt
+Balanced	Balanserad
 Bass	Bas
 Battery Calibration	Batterikalibrering
 Battery Calibration: %s	Batterikalibrering: %s
@@ -215,6 +216,7 @@ Clock Format: %s	Klockformat: %s
 Clock set from web config	Klockan ställd från webbkonfigurationen
 Clock set: %04d-%02d-%02d %02d:%02d	Klockan ställd: %04d-%02d-%02d %02d:%02d
 Close	Stäng
+Compatible	Kompatibel
 Configuration	Konfiguration
 Configuration exported to /camillia/config.yaml.\n\nThe card is formatted and holds nothing else. Chat history, the node database and any map tiles were on the old filesystem and are gone.	Konfigurationen exporterad till /camillia/config.yaml.\n\nKortet är formaterat och innehåller inget annat. Chatthistorik, noddatabas och kartbrickor låg på det gamla filsystemet och är borta.
 Configured WiFi is empty	Konfigurerat WiFi är tomt
@@ -457,6 +459,7 @@ N=Choose WiFi   Enter=Finish   Bksp=Back	N=Välj WiFi   Enter=Slutför   Bksp=Ti
 NO LINE OF SIGHT	INGEN FRI SIKT
 NODEINFO + telemetry queued.	NODEINFO + telemetri köade.
 No GPS fix	Ingen GPS-fix
+Only signed packets accepted (no 2.7 nodes)	Bara signerade paket (inga 2.7-noder)
 Send NODEINFO and telemetry to the mesh now?	Skicka NODEINFO och telemetri till nätet nu?
 NODES	NODER
 NODES (%d%s)	NODER (%d%s)
@@ -674,6 +677,8 @@ Short name cannot be empty	Kortnamn får inte vara tomt
 Short: %s	Kort: %s
 Show Archived Nodes: %s	Visa arkiverade noder: %s
 Show Archived Nodes: %s%s	Visa arkiverade noder: %s%s
+Signed Packets	Signerade paket
+Signed Packets: %s	Signerade paket: %s
 Sky	Himmelsblå
 Small	Liten
 Source	Källa
@@ -688,6 +693,7 @@ State map unavailable	Regionkarta inte tillgänglig
 Stay on	Alltid på
 Storage: %s %s	Lagring: %s %s
 Storage: %s (not mounted)	Lagring: %s (inte monterad)
+Strict	Strikt
 Sun	sön
 Sweep	Svep
 Sweep already running	Svep pågår redan
@@ -755,6 +761,8 @@ Uni(g)nore	Sluta i(g)norera
 Unignore	Sluta ignorera
 Units: %s	Enheter: %s
 Unknown	Okänd
+Unsigned broadcasts from signers dropped	Osignerade sändningar från signerare kastas
+Unsigned packets accepted	Osignerade paket tas emot
 Until read	Tills läst
 Up to date (%s)	Aktuell (%s)
 Up/Down	Upp/Ner

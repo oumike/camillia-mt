@@ -4,6 +4,7 @@
 #include "config.h"
 #include "mesh_proto.h"
 #include "mesh_channel_plan.h"
+#include "sig_policy.h"     // SigPolicy, for packetSigPolicy
 
 enum UiThemeFamily : uint8_t {
     UI_THEME_CAMELLIA = 0,
@@ -732,6 +733,20 @@ struct RhinoConfig {
     // For whoever appends next: the struct's trailing padding, spelled out.
     // Past it is the old sizeof(RhinoConfig).
     uint8_t  _reservedPad18[1];
+
+    // ── Packet signature policy ──────────────────────────────────────────────
+    // Which received packets to accept given their XEdDSA signature: a SigPolicy
+    // (src/sig_policy.h), the same values as Meshtastic 2.8.1's
+    // SecurityConfig.packet_signature_policy. Compatible (0) is the default
+    // there and here.
+    //
+    // Safe at the end: _reservedPad18 above keeps the old struct's trailing
+    // padding, so this starts at exactly the previous sizeof(RhinoConfig) and
+    // an upgrading device keeps the compiled default.
+    uint8_t  packetSigPolicy;
+    // For whoever appends next: the struct's trailing padding, spelled out.
+    // Past it is the old sizeof(RhinoConfig).
+    uint8_t  _reservedPad19[3];
 };
 
 #define CHAT_SERVER_MODE_OFF     0
