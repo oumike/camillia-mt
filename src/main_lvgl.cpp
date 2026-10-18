@@ -28694,8 +28694,9 @@ static bool nodeLocateBuildModal(const char *titleText, bool allNodes) {
     }
 
 #if HAS_TOUCH
-    // Compact zoom / center controls overlaid on the map. Smaller buttons leave
-    // most of the map unobstructed while keeping one-tap access.
+    // Zoom / center controls overlaid on the map. Twice the size they started
+    // at (24x18, glyphs at 10), which was smaller than the fingertip aiming at
+    // them; a column of these still leaves most of the map clear.
     {
         lv_obj_t *ctlCol = lv_obj_create(mapBox);
         lv_obj_set_size(ctlCol, LV_SIZE_CONTENT, LV_SIZE_CONTENT);
@@ -28711,8 +28712,8 @@ static bool nodeLocateBuildModal(const char *titleText, bool allNodes) {
 #endif
         lv_obj_set_style_border_width(ctlCol, 1, 0);
         lv_obj_set_style_radius(ctlCol, 4, 0);
-        lv_obj_set_style_pad_all(ctlCol, 2, 0);
-        lv_obj_set_style_pad_row(ctlCol, 2, 0);
+        lv_obj_set_style_pad_all(ctlCol, 3, 0);
+        lv_obj_set_style_pad_row(ctlCol, 4, 0);
         lv_obj_set_flex_flow(ctlCol, LV_FLEX_FLOW_COLUMN);
         lv_obj_set_flex_align(ctlCol, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER,
                               LV_FLEX_ALIGN_CENTER);
@@ -28732,20 +28733,20 @@ static bool nodeLocateBuildModal(const char *titleText, bool allNodes) {
                 // antialiased edges to the same threshold, so the whole control
                 // arrives as one filled rectangle. The larger face and the 12 px
                 // font are what keep the glyph legible once it is ink on white.
-                lv_obj_set_size(b, 28, 22);
-                lv_obj_set_style_radius(b, 2, 0);
+                lv_obj_set_size(b, 56, 44);
+                lv_obj_set_style_radius(b, 3, 0);
                 lv_obj_set_style_bg_color(b, lv_color_hex(0xFFFFFF), 0);
                 lv_obj_set_style_bg_opa(b, LV_OPA_COVER, 0);
                 lv_obj_set_style_border_color(b, lv_color_hex(0x000000), 0);
-                lv_obj_set_style_text_font(l, &lv_font_montserrat_12, 0);
+                lv_obj_set_style_text_font(l, &lv_font_montserrat_20, 0);
                 lv_obj_set_style_text_color(l, lv_color_hex(0x000000), 0);
 #else
-                lv_obj_set_size(b, 24, 18);
-                lv_obj_set_style_radius(b, 3, 0);
+                lv_obj_set_size(b, 48, 36);
+                lv_obj_set_style_radius(b, 5, 0);
                 lv_obj_set_style_bg_color(b, lv_color_hex(0x16386F), 0);
                 lv_obj_set_style_bg_opa(b, LV_OPA_80, 0);
                 lv_obj_set_style_border_color(b, lv_color_hex(0x335D9D), 0);
-                lv_obj_set_style_text_font(l, &lv_font_montserrat_10, 0);
+                lv_obj_set_style_text_font(l, &lv_font_montserrat_18, 0);
                 lv_obj_set_style_text_color(l, lv_color_hex(0xE8F1FF), 0);
 #endif
                 lv_obj_add_event_cb(b, cb, LV_EVENT_CLICKED, nullptr);
@@ -28759,11 +28760,11 @@ static bool nodeLocateBuildModal(const char *titleText, bool allNodes) {
         s_nodeLocateZoomLabel = lv_label_create(ctlCol);
 #if defined(DEVICE_TDECK_PRO)
         // Matches the button face above and below it.
-        lv_obj_set_width(s_nodeLocateZoomLabel, 28);
-        lv_obj_set_style_text_font(s_nodeLocateZoomLabel, &lv_font_montserrat_12, 0);
+        lv_obj_set_width(s_nodeLocateZoomLabel, 56);
+        lv_obj_set_style_text_font(s_nodeLocateZoomLabel, &lv_font_montserrat_20, 0);
 #else
-        lv_obj_set_width(s_nodeLocateZoomLabel, 24);
-        lv_obj_set_style_text_font(s_nodeLocateZoomLabel, &lv_font_montserrat_10, 0);
+        lv_obj_set_width(s_nodeLocateZoomLabel, 48);
+        lv_obj_set_style_text_font(s_nodeLocateZoomLabel, &lv_font_montserrat_16, 0);
 #endif
         lv_obj_set_style_text_color(s_nodeLocateZoomLabel, bodyColor, 0);
         lv_obj_set_style_text_align(s_nodeLocateZoomLabel, LV_TEXT_ALIGN_CENTER, 0);
