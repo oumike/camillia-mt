@@ -6827,10 +6827,48 @@ static void wifiPromoteConnectedNetwork() {
 // reboot, which is what happens after a charge.
 static bool s_powerWifiHold = false;
 
+#if defined(DEVICE_TDISPLAY_P4)
+// ── P4 Wi-Fi start-up load ───────────────────────────────────────────────────
+// On the keyboard accessory's supply, the board browned out or tripped a
+// watchdog in the first seconds of loop() -- but only with Wi-Fi on and the
+// AMOLED bright together; either alone booted clean every time. The first full
+// screen at full brightness and a scan-and-associate are the two biggest draws
+// it has, and they landed on the same moment. So nothing starts Wi-Fi until
+// the screen has been up a while, and the C6 transmits at a lower ceiling,
+// which trims every burst after that too.
+static constexpr uint32_t kP4WifiSettleMs = 10000;
+// 15 dBm against the default 19.5: a few metres of range for a smaller spike.
+static constexpr wifi_power_t kP4WifiTxPower = WIFI_POWER_15dBm;
+static uint32_t s_p4LoopStartMs = 0;
+// startWebConfigAuto() held back from setup() until the settle has passed.
+static bool s_p4WebAutoStartPending = false;
+
+static bool p4WifiSettled(uint32_t now) {
+    if (s_p4LoopStartMs == 0) s_p4LoopStartMs = now ? now : 1;
+    return (uint32_t)(now - s_p4LoopStartMs) >= kP4WifiSettleMs;
+}
+
+// Every path that brings the station or the AP up -- web config, the reconnect
+// below, the picker, the OTA retry -- ends in one of these events, so the cap
+// is applied there rather than at each call site. It has to follow the start:
+// the driver resets the limit when the interface comes up.
+static void p4WifiCapTxPowerInit() {
+    WiFi.onEvent([](arduino_event_id_t, arduino_event_info_t) {
+        WiFi.setTxPower(kP4WifiTxPower);
+    }, ARDUINO_EVENT_WIFI_STA_START);
+    WiFi.onEvent([](arduino_event_id_t, arduino_event_info_t) {
+        WiFi.setTxPower(kP4WifiTxPower);
+    }, ARDUINO_EVENT_WIFI_AP_START);
+}
+#endif
+
 static void serviceWifiStation(uint32_t now) {
     // Ahead of the web-config check: the shed stops that too, and this must not
     // let the station come back up underneath it.
     if (s_powerWifiHold) return;
+#if defined(DEVICE_TDISPLAY_P4)
+    if (!p4WifiSettled(now)) return;
+#endif
     // Web config owns the radio while it's up: webCfgBegin() sets up STA (or an
     // AP fallback when the saved station won't connect) and webCfgEnd() tears it
     // down. Kicking a station reconnect here mid-session flips WiFi.mode() to
@@ -59286,7 +59324,13 @@ void setup() {
     // them for Wi-Fi — it starts at the end of setup() instead. Starting here
     // would reclaim 0 bytes and then get starved when the buffers allocate.
     bootSplashStatus("Web config");
+#if defined(DEVICE_TDISPLAY_P4)
+    // Not yet: loop() starts it once the screen has settled (kP4WifiSettleMs).
+    p4WifiCapTxPowerInit();
+    if (!(skipWebAutoStartOnce || otaWorkerHandled)) s_p4WebAutoStartPending = true;
+#else
     if (!(skipWebAutoStartOnce || otaWorkerHandled)) startWebConfigAuto();
+#endif
 #endif
 #if HAS_ENV_SENSOR_TELEMETRY
     // Detect at boot, independent of whether env telemetry is switched on.
@@ -60154,6 +60198,12 @@ void loop() {
     // phase time into the next one and the measured total could then exceed the
     // iteration it claimed to describe -- 3875ms "in phases" of a 2257ms pass.
     loopPhaseBeginPass();
+#if defined(DEVICE_TDISPLAY_P4)
+    if (s_p4WebAutoStartPending && p4WifiSettled(now)) {
+        s_p4WebAutoStartPending = false;
+        startWebConfigAuto();
+    }
+#endif
 
     // Sample loop-iteration rate once per second as a lightweight CPU-activity
     // proxy for the hidden system-stats screen (no direct CPU-load counter
