@@ -1777,6 +1777,11 @@ static int kBottomNavHeight = 42;
 // Twice the usual 28: an 800x480 panel has the height, and these are the
 // targets a finger aims at most.
 static constexpr int kBottomNavHeight = 56;
+#elif defined(DEVICE_CROWPANEL_35)
+// Twice the usual 28 in portrait, where the 480 px height can pay for it;
+// landscape's 320 cannot, and keeps 28. Set once the boot's orientation is
+// read (loadBootOrientation()); nothing reads it before then.
+static int kBottomNavHeight = 28;
 #else
 static constexpr int kBottomNavHeight = 28;
 #endif
@@ -24463,6 +24468,11 @@ static void populateHeltecBottomNav(lv_obj_t *bar, int activeTarget) {
     // largest size the CrowPanels give an emoji face (emoji_font.cpp), and
     // Chat, Nodes and Tools draw from it.
     const lv_font_t *const navIconFont = &lv_font_montserrat_24;
+#elif defined(DEVICE_CROWPANEL_35)
+    // Portrait's doubled bar takes 24, as the 5" does: the largest size the
+    // CrowPanels give an emoji face. Landscape's 28 px bar keeps 14.
+    const lv_font_t *const navIconFont = uiPortrait() ? &lv_font_montserrat_24
+                                                      : &lv_font_montserrat_14;
 #else
     const lv_font_t *const navIconFont = &lv_font_montserrat_14;
 #endif
@@ -58976,6 +58986,8 @@ void setup() {
     // orientation is known and before any UI is built. Here rather than inside
     // loadBootOrientation(), which has early returns that would skip it.
     kBottomNavHeight = uiPortrait() ? 63 : 42;
+#elif defined(DEVICE_CROWPANEL_35) && UI_TOUCH_NAV_BAR
+    kBottomNavHeight = uiPortrait() ? 56 : 28;
 #endif
 
 #if (BOARD_VEXT_ENABLE >= 0) && defined(BOARD_VEXT_RAIL_ON_AT_DISPLAY) && BOARD_VEXT_RAIL_ON_AT_DISPLAY
