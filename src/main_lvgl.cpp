@@ -1777,6 +1777,11 @@ static int kBottomNavHeight = 42;
 // Twice the usual 28: an 800x480 panel has the height, and these are the
 // targets a finger aims at most.
 static constexpr int kBottomNavHeight = 56;
+#elif defined(DEVICE_CROWPANEL_35)
+// Twice the usual 28 in portrait, where the 480 px height can pay for it;
+// landscape's 320 cannot, and keeps 28. Set once the boot's orientation is
+// read (loadBootOrientation()); nothing reads it before then.
+static int kBottomNavHeight = 28;
 #else
 static constexpr int kBottomNavHeight = 28;
 #endif
@@ -6822,10 +6827,48 @@ static void wifiPromoteConnectedNetwork() {
 // reboot, which is what happens after a charge.
 static bool s_powerWifiHold = false;
 
+#if defined(DEVICE_TDISPLAY_P4)
+// ── P4 Wi-Fi start-up load ───────────────────────────────────────────────────
+// On the keyboard accessory's supply, the board browned out or tripped a
+// watchdog in the first seconds of loop() -- but only with Wi-Fi on and the
+// AMOLED bright together; either alone booted clean every time. The first full
+// screen at full brightness and a scan-and-associate are the two biggest draws
+// it has, and they landed on the same moment. So nothing starts Wi-Fi until
+// the screen has been up a while, and the C6 transmits at a lower ceiling,
+// which trims every burst after that too.
+static constexpr uint32_t kP4WifiSettleMs = 10000;
+// 15 dBm against the default 19.5: a few metres of range for a smaller spike.
+static constexpr wifi_power_t kP4WifiTxPower = WIFI_POWER_15dBm;
+static uint32_t s_p4LoopStartMs = 0;
+// startWebConfigAuto() held back from setup() until the settle has passed.
+static bool s_p4WebAutoStartPending = false;
+
+static bool p4WifiSettled(uint32_t now) {
+    if (s_p4LoopStartMs == 0) s_p4LoopStartMs = now ? now : 1;
+    return (uint32_t)(now - s_p4LoopStartMs) >= kP4WifiSettleMs;
+}
+
+// Every path that brings the station or the AP up -- web config, the reconnect
+// below, the picker, the OTA retry -- ends in one of these events, so the cap
+// is applied there rather than at each call site. It has to follow the start:
+// the driver resets the limit when the interface comes up.
+static void p4WifiCapTxPowerInit() {
+    WiFi.onEvent([](arduino_event_id_t, arduino_event_info_t) {
+        WiFi.setTxPower(kP4WifiTxPower);
+    }, ARDUINO_EVENT_WIFI_STA_START);
+    WiFi.onEvent([](arduino_event_id_t, arduino_event_info_t) {
+        WiFi.setTxPower(kP4WifiTxPower);
+    }, ARDUINO_EVENT_WIFI_AP_START);
+}
+#endif
+
 static void serviceWifiStation(uint32_t now) {
     // Ahead of the web-config check: the shed stops that too, and this must not
     // let the station come back up underneath it.
     if (s_powerWifiHold) return;
+#if defined(DEVICE_TDISPLAY_P4)
+    if (!p4WifiSettled(now)) return;
+#endif
     // Web config owns the radio while it's up: webCfgBegin() sets up STA (or an
     // AP fallback when the saved station won't connect) and webCfgEnd() tears it
     // down. Kicking a station reconnect here mid-session flips WiFi.mode() to
@@ -24463,6 +24506,11 @@ static void populateHeltecBottomNav(lv_obj_t *bar, int activeTarget) {
     // largest size the CrowPanels give an emoji face (emoji_font.cpp), and
     // Chat, Nodes and Tools draw from it.
     const lv_font_t *const navIconFont = &lv_font_montserrat_24;
+#elif defined(DEVICE_CROWPANEL_35)
+    // Portrait's doubled bar takes 24, as the 5" does: the largest size the
+    // CrowPanels give an emoji face. Landscape's 28 px bar keeps 14.
+    const lv_font_t *const navIconFont = uiPortrait() ? &lv_font_montserrat_24
+                                                      : &lv_font_montserrat_14;
 #else
     const lv_font_t *const navIconFont = &lv_font_montserrat_14;
 #endif
@@ -28684,8 +28732,9 @@ static bool nodeLocateBuildModal(const char *titleText, bool allNodes) {
     }
 
 #if HAS_TOUCH
-    // Compact zoom / center controls overlaid on the map. Smaller buttons leave
-    // most of the map unobstructed while keeping one-tap access.
+    // Zoom / center controls overlaid on the map. Twice the size they started
+    // at (24x18, glyphs at 10), which was smaller than the fingertip aiming at
+    // them; a column of these still leaves most of the map clear.
     {
         lv_obj_t *ctlCol = lv_obj_create(mapBox);
         lv_obj_set_size(ctlCol, LV_SIZE_CONTENT, LV_SIZE_CONTENT);
@@ -28701,8 +28750,8 @@ static bool nodeLocateBuildModal(const char *titleText, bool allNodes) {
 #endif
         lv_obj_set_style_border_width(ctlCol, 1, 0);
         lv_obj_set_style_radius(ctlCol, 4, 0);
-        lv_obj_set_style_pad_all(ctlCol, 2, 0);
-        lv_obj_set_style_pad_row(ctlCol, 2, 0);
+        lv_obj_set_style_pad_all(ctlCol, 3, 0);
+        lv_obj_set_style_pad_row(ctlCol, 4, 0);
         lv_obj_set_flex_flow(ctlCol, LV_FLEX_FLOW_COLUMN);
         lv_obj_set_flex_align(ctlCol, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER,
                               LV_FLEX_ALIGN_CENTER);
@@ -28722,20 +28771,20 @@ static bool nodeLocateBuildModal(const char *titleText, bool allNodes) {
                 // antialiased edges to the same threshold, so the whole control
                 // arrives as one filled rectangle. The larger face and the 12 px
                 // font are what keep the glyph legible once it is ink on white.
-                lv_obj_set_size(b, 28, 22);
-                lv_obj_set_style_radius(b, 2, 0);
+                lv_obj_set_size(b, 56, 44);
+                lv_obj_set_style_radius(b, 3, 0);
                 lv_obj_set_style_bg_color(b, lv_color_hex(0xFFFFFF), 0);
                 lv_obj_set_style_bg_opa(b, LV_OPA_COVER, 0);
                 lv_obj_set_style_border_color(b, lv_color_hex(0x000000), 0);
-                lv_obj_set_style_text_font(l, &lv_font_montserrat_12, 0);
+                lv_obj_set_style_text_font(l, &lv_font_montserrat_20, 0);
                 lv_obj_set_style_text_color(l, lv_color_hex(0x000000), 0);
 #else
-                lv_obj_set_size(b, 24, 18);
-                lv_obj_set_style_radius(b, 3, 0);
+                lv_obj_set_size(b, 48, 36);
+                lv_obj_set_style_radius(b, 5, 0);
                 lv_obj_set_style_bg_color(b, lv_color_hex(0x16386F), 0);
                 lv_obj_set_style_bg_opa(b, LV_OPA_80, 0);
                 lv_obj_set_style_border_color(b, lv_color_hex(0x335D9D), 0);
-                lv_obj_set_style_text_font(l, &lv_font_montserrat_10, 0);
+                lv_obj_set_style_text_font(l, &lv_font_montserrat_18, 0);
                 lv_obj_set_style_text_color(l, lv_color_hex(0xE8F1FF), 0);
 #endif
                 lv_obj_add_event_cb(b, cb, LV_EVENT_CLICKED, nullptr);
@@ -28749,11 +28798,11 @@ static bool nodeLocateBuildModal(const char *titleText, bool allNodes) {
         s_nodeLocateZoomLabel = lv_label_create(ctlCol);
 #if defined(DEVICE_TDECK_PRO)
         // Matches the button face above and below it.
-        lv_obj_set_width(s_nodeLocateZoomLabel, 28);
-        lv_obj_set_style_text_font(s_nodeLocateZoomLabel, &lv_font_montserrat_12, 0);
+        lv_obj_set_width(s_nodeLocateZoomLabel, 56);
+        lv_obj_set_style_text_font(s_nodeLocateZoomLabel, &lv_font_montserrat_20, 0);
 #else
-        lv_obj_set_width(s_nodeLocateZoomLabel, 24);
-        lv_obj_set_style_text_font(s_nodeLocateZoomLabel, &lv_font_montserrat_10, 0);
+        lv_obj_set_width(s_nodeLocateZoomLabel, 48);
+        lv_obj_set_style_text_font(s_nodeLocateZoomLabel, &lv_font_montserrat_16, 0);
 #endif
         lv_obj_set_style_text_color(s_nodeLocateZoomLabel, bodyColor, 0);
         lv_obj_set_style_text_align(s_nodeLocateZoomLabel, LV_TEXT_ALIGN_CENTER, 0);
@@ -58976,6 +59025,8 @@ void setup() {
     // orientation is known and before any UI is built. Here rather than inside
     // loadBootOrientation(), which has early returns that would skip it.
     kBottomNavHeight = uiPortrait() ? 63 : 42;
+#elif defined(DEVICE_CROWPANEL_35) && UI_TOUCH_NAV_BAR
+    kBottomNavHeight = uiPortrait() ? 56 : 28;
 #endif
 
 #if (BOARD_VEXT_ENABLE >= 0) && defined(BOARD_VEXT_RAIL_ON_AT_DISPLAY) && BOARD_VEXT_RAIL_ON_AT_DISPLAY
@@ -59273,7 +59324,13 @@ void setup() {
     // them for Wi-Fi — it starts at the end of setup() instead. Starting here
     // would reclaim 0 bytes and then get starved when the buffers allocate.
     bootSplashStatus("Web config");
+#if defined(DEVICE_TDISPLAY_P4)
+    // Not yet: loop() starts it once the screen has settled (kP4WifiSettleMs).
+    p4WifiCapTxPowerInit();
+    if (!(skipWebAutoStartOnce || otaWorkerHandled)) s_p4WebAutoStartPending = true;
+#else
     if (!(skipWebAutoStartOnce || otaWorkerHandled)) startWebConfigAuto();
+#endif
 #endif
 #if HAS_ENV_SENSOR_TELEMETRY
     // Detect at boot, independent of whether env telemetry is switched on.
@@ -60141,6 +60198,12 @@ void loop() {
     // phase time into the next one and the measured total could then exceed the
     // iteration it claimed to describe -- 3875ms "in phases" of a 2257ms pass.
     loopPhaseBeginPass();
+#if defined(DEVICE_TDISPLAY_P4)
+    if (s_p4WebAutoStartPending && p4WifiSettled(now)) {
+        s_p4WebAutoStartPending = false;
+        startWebConfigAuto();
+    }
+#endif
 
     // Sample loop-iteration rate once per second as a lightweight CPU-activity
     // proxy for the hidden system-stats screen (no direct CPU-load counter
