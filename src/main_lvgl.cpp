@@ -27640,7 +27640,17 @@ static constexpr int kNodeLocateTilePx = kMapTileSizePx;
 static constexpr int kNodeLocateZoomMin = kMapTileZoomMin;
 static constexpr int kNodeLocateZoomDefault = kMapTileZoomRoads;
 static constexpr int kNodeLocateZoomMax = kMapTileZoomMax;
-static constexpr int kNodeLocateMaxTileJobs = 9;
+// Every tile the viewport can touch: as many as span it on each axis, plus one,
+// since a view rarely starts on a tile edge. The map is full screen, so the
+// panel sets the count, either way up -- 6 at 320x240, 9 at 480x320, 12 on the
+// P4 and 15 on the CrowPanel 5". The job list fills row by row and stops here,
+// so a cap below that leaves the bottom of the map unrequested.
+static constexpr int nodeLocateTilesSpanned(int px) {
+    return (px + kNodeLocateTilePx - 1) / kNodeLocateTilePx + 1;
+}
+static constexpr int kNodeLocateMaxTileJobs =
+    nodeLocateTilesSpanned(DEVICE_LCD_LANDSCAPE_W / UI_PIXEL_SCALE)
+    * nodeLocateTilesSpanned(DEVICE_LCD_LANDSCAPE_H / UI_PIXEL_SCALE);
 static constexpr size_t kNodeLocateMaxTileBytes = 256U * 1024U;
 static constexpr uint32_t kNodeLocatePanDebounceMs = 180UL;
 
@@ -28480,11 +28490,6 @@ static void onNodeLocateClosePressed(lv_event_t *e) {
     closeNodeLocateModal();
 }
 
-static void onNodeLocateBackdropPressed(lv_event_t *e) {
-    if (lv_event_get_target_obj(e) != s_nodeLocateBackdrop) return;
-    closeNodeLocateModal();
-}
-
 // Builds the modal around titleText: map box, canvas, chips, controls, and the
 // pin when there is one node to show. Sets s_locateMapW/H; the caller picks the
 // view and requests tiles. Returns false when nothing was built.
@@ -28495,22 +28500,20 @@ static bool nodeLocateBuildModal(const char *titleText, bool allNodes) {
 
     const int scrW = lv_disp_get_hor_res(NULL);
     const int scrH = lv_disp_get_ver_res(NULL);
-#if defined(DEVICE_TDISPLAY_P4)
-    // Edge to edge (#116). The 300 px card below was sized for 320-wide
-    // panels; on the P4 (284 or 616 UI px across) it left a band of backdrop
-    // either side, and in landscape used less than half the screen. The title
-    // rides on the map as a chip and the touch X is the way back, so the
-    // canvas gets the whole display. Locate and the node map both.
-    const bool fullScreen = true;
-#else
-    const bool fullScreen = false;
-#endif
-    int modalW = scrW - 24;
-    if (modalW > 300) modalW = 300;
-    if (fullScreen) modalW = scrW;
+    // Edge to edge on every board (#116 began it on the P4). This was a card at
+    // most 300 px wide, sized for 320-wide panels: wider ones kept a band of
+    // backdrop either side -- on the CrowPanel 5"'s 800x480 the map was a strip
+    // down the middle -- and even at 320 it spent a frame and a title row. The
+    // title rides on the map as a chip instead and the canvas gets the whole
+    // display, Locate and the node map both. The canvas is RGB565 from the LVGL
+    // pool, which is 2 MB of PSRAM on every board that compiles maps
+    // (lv_conf.h): 150 KB at 320x240, 300 KB at 480x320, 750 KB at 800x480.
+    const int modalW = scrW;
 #if UI_TOUCH_ONLY_PROFILE
     const int closeXSize = kHeltecCloseXSize;   // the X that is the way back
 #else
+    // A key is the way back (the close key or Enter; see the key handler), as
+    // from every modal on a keyboard build. There is no outside left to tap.
     const int closeXSize = 0;
 #endif
     // Full viewport height. The map box is the modal's only flex-grow child, so
@@ -28531,7 +28534,6 @@ static bool nodeLocateBuildModal(const char *titleText, bool allNodes) {
     // opacities that separate them on a TFT have no middle tone to land on.
     LV_UNUSED(lightUi);
     const lv_color_t modalBg = lv_color_hex(0xFFFFFF);
-    const lv_color_t modalBorder = lv_color_hex(0x000000);
     const lv_color_t titleColor = lv_color_hex(0x000000);
     const lv_color_t bodyColor = lv_color_hex(0x000000);
     // The status and attribution chips sit on the map, so they stay opaque: a
@@ -28541,7 +28543,6 @@ static bool nodeLocateBuildModal(const char *titleText, bool allNodes) {
     const lv_opa_t chipOpa = LV_OPA_COVER;
 #else
     const lv_color_t modalBg = lightUi ? lv_color_hex(0xEAF1FB) : lv_color_hex(0x0E285B);
-    const lv_color_t modalBorder = lightUi ? lv_color_hex(0x6E8FB8) : lv_color_hex(0x5C86C6);
     const lv_color_t titleColor = lightUi ? lv_color_hex(0x16233A) : lv_color_hex(0xD9E8FF);
     const lv_color_t bodyColor = lightUi ? lv_color_hex(0x13243D) : lv_color_hex(0xE8F1FF);
     const lv_color_t chipBg = lightUi ? lv_color_hex(0xEAF1FB) : lv_color_hex(0x0E285B);
@@ -28555,10 +28556,9 @@ static bool nodeLocateBuildModal(const char *titleText, bool allNodes) {
     lv_obj_clear_flag(s_nodeLocateBackdrop, LV_OBJ_FLAG_SCROLLABLE);
     lv_obj_add_flag(s_nodeLocateBackdrop, LV_OBJ_FLAG_CLICKABLE);
     lv_obj_set_style_bg_color(s_nodeLocateBackdrop, lv_color_hex(0x000000), 0);
-    lv_obj_set_style_bg_opa(s_nodeLocateBackdrop, fullScreen ? LV_OPA_COVER : LV_OPA_50, 0);
+    lv_obj_set_style_bg_opa(s_nodeLocateBackdrop, LV_OPA_COVER, 0);
     lv_obj_set_style_border_width(s_nodeLocateBackdrop, 0, 0);
     lv_obj_set_style_pad_all(s_nodeLocateBackdrop, 0, 0);
-    lv_obj_add_event_cb(s_nodeLocateBackdrop, onNodeLocateBackdropPressed, LV_EVENT_CLICKED, nullptr);
 
     s_nodeLocateModal = lv_obj_create(s_nodeLocateBackdrop);
     lv_obj_set_size(s_nodeLocateModal, modalW, modalH);
@@ -28567,28 +28567,14 @@ static bool nodeLocateBuildModal(const char *titleText, bool allNodes) {
     lv_obj_add_flag(s_nodeLocateModal, LV_OBJ_FLAG_CLICKABLE);
     lv_obj_set_style_bg_color(s_nodeLocateModal, modalBg, 0);
     lv_obj_set_style_bg_opa(s_nodeLocateModal, LV_OPA_COVER, 0);
-    lv_obj_set_style_border_width(s_nodeLocateModal, fullScreen ? 0 : 1, 0);
-    lv_obj_set_style_border_color(s_nodeLocateModal, modalBorder, 0);
-    lv_obj_set_style_pad_all(s_nodeLocateModal, fullScreen ? 0 : 6, 0);
-    lv_obj_set_style_pad_row(s_nodeLocateModal, fullScreen ? 0 : 3, 0);
-    if (fullScreen) lv_obj_set_style_radius(s_nodeLocateModal, 0, 0);
+    lv_obj_set_style_border_width(s_nodeLocateModal, 0, 0);
+    lv_obj_set_style_pad_all(s_nodeLocateModal, 0, 0);
+    lv_obj_set_style_pad_row(s_nodeLocateModal, 0, 0);
+    lv_obj_set_style_radius(s_nodeLocateModal, 0, 0);
     lv_obj_set_flex_flow(s_nodeLocateModal, LV_FLEX_FLOW_COLUMN);
     lv_obj_set_flex_align(s_nodeLocateModal, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_CENTER,
                           LV_FLEX_ALIGN_CENTER);
     lv_obj_move_foreground(s_nodeLocateBackdrop);
-
-    // Full screen, the title is a chip on the map instead (below, once the
-    // map has its size).
-    lv_obj_t *title = nullptr;
-    if (!fullScreen) {
-        title = lv_label_create(s_nodeLocateModal);
-        lv_obj_set_width(title, lv_pct(100));
-        lv_obj_set_style_text_font(title, &lv_font_montserrat_12, 0);
-        lv_obj_set_style_text_color(title, titleColor, 0);
-        lv_obj_set_style_text_align(title, LV_TEXT_ALIGN_CENTER, 0);
-        lv_label_set_long_mode(title, LV_LABEL_LONG_DOT);
-        setLabelTextEmojiSafe(title, titleText);
-    }
 
     // The map area. Its own container so the renderer can position the image and
     // the pin in coordinates that belong to nobody else.
@@ -28598,10 +28584,9 @@ static bool nodeLocateBuildModal(const char *titleText, bool allNodes) {
     lv_obj_clear_flag(mapBox, LV_OBJ_FLAG_SCROLLABLE);
     lv_obj_set_style_bg_color(mapBox, nodeLocateCanvasBgColor(), 0);
     lv_obj_set_style_bg_opa(mapBox, LV_OPA_COVER, 0);
-    lv_obj_set_style_border_width(mapBox, fullScreen ? 0 : 1, 0);
-    lv_obj_set_style_border_color(mapBox, modalBorder, 0);
+    lv_obj_set_style_border_width(mapBox, 0, 0);
     lv_obj_set_style_pad_all(mapBox, 0, 0);
-    lv_obj_set_style_radius(mapBox, fullScreen ? 0 : 3, 0);
+    lv_obj_set_style_radius(mapBox, 0, 0);
     s_nodeLocateMapBox = mapBox;
 #if HAS_TOUCH
     // The drag surface. The layers above it — tile layer, image, pin — are
@@ -28617,13 +28602,10 @@ static bool nodeLocateBuildModal(const char *titleText, bool allNodes) {
 #endif
 
 #if UI_TOUCH_ONLY_PROFILE
-    // Node names run long, and the title is LV_LABEL_LONG_DOT across the full
-    // width, so it has to be told to stop short of the X.
-    if (title) reserveHeltecCloseXRow(title);
     {
         lv_obj_t *closeX = appendHeltecCloseX(s_nodeLocateModal, onNodeLocateClosePressed);
-        // On the map itself, full screen: in from the corner like the chips.
-        if (closeX && fullScreen) lv_obj_align(closeX, LV_ALIGN_TOP_RIGHT, -4, 4);
+        // On the map itself, in from the corner like the chips.
+        if (closeX) lv_obj_align(closeX, LV_ALIGN_TOP_RIGHT, -4, 4);
     }
 #endif
 
@@ -28673,22 +28655,21 @@ static bool nodeLocateBuildModal(const char *titleText, bool allNodes) {
     lv_label_set_text(attribution, TR("(c) OpenStreetMap"));
     lv_obj_align(attribution, LV_ALIGN_BOTTOM_LEFT, 2, -2);
 
-    if (fullScreen) {
-        // The title as a chip, top left, stopping short of the X and the
-        // zoom column on the right.
-        lv_obj_t *chip = lv_label_create(s_nodeLocateTileLayer);
-        lv_obj_set_style_text_font(chip, &lv_font_montserrat_12, 0);
-        lv_obj_set_style_text_color(chip, titleColor, 0);
-        lv_obj_set_style_bg_color(chip, chipBg, 0);
-        lv_obj_set_style_bg_opa(chip, chipOpa, 0);
-        lv_obj_set_style_pad_all(chip, 3, 0);
-        lv_obj_set_style_radius(chip, 3, 0);
-        lv_label_set_long_mode(chip, LV_LABEL_LONG_DOT);
-        lv_obj_set_width(chip, LV_SIZE_CONTENT);
-        lv_obj_set_style_max_width(chip, mapW - closeXSize - 20, 0);
-        setLabelTextEmojiSafe(chip, titleText);
-        lv_obj_align(chip, LV_ALIGN_TOP_LEFT, 4, 4);
-    }
+    // The title as a chip, top left, stopping short of whatever holds the top
+    // right corner: the X, or the zoom column on a keyboard build with touch
+    // (narrowed to that below, once the column has its width).
+    lv_obj_t *titleChip = lv_label_create(s_nodeLocateTileLayer);
+    lv_obj_set_style_text_font(titleChip, &lv_font_montserrat_12, 0);
+    lv_obj_set_style_text_color(titleChip, titleColor, 0);
+    lv_obj_set_style_bg_color(titleChip, chipBg, 0);
+    lv_obj_set_style_bg_opa(titleChip, chipOpa, 0);
+    lv_obj_set_style_pad_all(titleChip, 3, 0);
+    lv_obj_set_style_radius(titleChip, 3, 0);
+    lv_label_set_long_mode(titleChip, LV_LABEL_LONG_DOT);
+    lv_obj_set_width(titleChip, LV_SIZE_CONTENT);
+    lv_obj_set_style_max_width(titleChip, mapW - closeXSize - 20, 0);
+    setLabelTextEmojiSafe(titleChip, titleText);
+    lv_obj_align(titleChip, LV_ALIGN_TOP_LEFT, 4, 4);
 
     // The node map draws its nodes into the canvas instead (nodeMapPaintRect()).
     if (!allNodes) {
@@ -28810,10 +28791,15 @@ static bool nodeLocateBuildModal(const char *titleText, bool allNodes) {
         Local::btn(ctlCol, LV_SYMBOL_MINUS, onNodeLocateZoomOutPressed);
         Local::btn(ctlCol, LV_SYMBOL_GPS, onNodeLocateCenterPressed);
 
-        // Full screen the close X has the corner, so the column starts under it.
-        lv_obj_align(ctlCol, LV_ALIGN_TOP_RIGHT, -4,
-                     fullScreen ? 4 + closeXSize + 4 : 4);
+        // Where there is a close X it holds the corner, so the column starts
+        // under it. Where there is not, the column takes the corner and the
+        // title chip stops short of it instead.
+        lv_obj_align(ctlCol, LV_ALIGN_TOP_RIGHT, -4, closeXSize ? 4 + closeXSize + 4 : 4);
         lv_obj_move_foreground(ctlCol);
+        if (!closeXSize) {
+            lv_obj_update_layout(ctlCol);
+            lv_obj_set_style_max_width(titleChip, mapW - lv_obj_get_width(ctlCol) - 20, 0);
+        }
     }
 #endif
 

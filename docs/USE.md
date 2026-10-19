@@ -2922,7 +2922,8 @@ under the pin.
 - On keyboard builds, `H` or `C` recenters the selected node at the current zoom
 - Locate uses cached `z/x/y` tiles first. Missing tiles remain gaps offline; with
   internet access they are downloaded, displayed, and saved for later
-- Close it with the device close key, Enter, or by tapping outside it
+- It fills the whole screen. Close it with the device close key or Enter; on
+  touch-only boards, the X in its top-right corner
 - **Not available on the Cardputer or the Heltec V4.** Neither has the memory to
   decode a map — the Cardputer has no PSRAM at all, and the Heltec shares 2 MB
   with everything else. The row and live-map worker are compiled out entirely
