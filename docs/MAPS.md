@@ -33,9 +33,9 @@ identity through the proxy as required by OpenStreetMap's tile policy.
 3. Open **Actions**.
 4. Choose **Locate**.
 
-Locate opens at zoom `13` with the selected node exactly at the center of the
-viewport. A pin remains tied to that geographic position as the map moves. If
-the node has no position, Locate is disabled in the Actions menu.
+Locate opens full screen at zoom `13` with the selected node exactly at the
+center of the viewport. A pin remains tied to that geographic position as the
+map moves. If the node has no position, Locate is disabled in the Actions menu.
 
 ## Pan and zoom
 
@@ -60,8 +60,10 @@ near the poles.
 ## Offline downloads
 
 Web Config's **Maps Download** section builds coverage from every positioned
-node currently in the node database. Each node is treated as the center of the
-same 282x188 viewport used by Locate. Overlapping tiles are deduplicated.
+node currently in the node database. Each node is treated as the center of a
+282x188 viewport. Overlapping tiles are deduplicated. Locate's full-screen view
+reaches past that box, and fills its edges in whenever internet access is
+available.
 
 The detail dropdown selects the highest zoom to include:
 
