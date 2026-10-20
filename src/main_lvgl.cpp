@@ -3015,10 +3015,10 @@ static void closeNodeLocateModal();
 static void nodeLocateOnDetailMapUpdated();
 static void serviceNodeLocateLiveMap(uint32_t nowMs);
 #endif
-#if HAS_NODE_LOS || HAS_WEATHER
+#if HAS_NODE_LOS || HAS_WEATHER || HAS_NODE_LOCATE
 // GPS fix if there is one, else the configured/last-known position. Shared by
-// LOS and the weather screen — both ask the same question, and a second copy
-// would be a second answer waiting to drift.
+// LOS, the weather screen and the node map — all ask the same question, and a
+// second copy would be a second answer waiting to drift.
 static bool nodeLosSelfPosition(double &lat, double &lon);
 #endif
 #if HAS_NODE_LOS
@@ -27633,13 +27633,19 @@ static lv_obj_t *s_nodeLocateTileLayer = nullptr;
 static lv_obj_t *s_nodeLocateMarker = nullptr;
 static int   s_locateMapW = 0;
 static int   s_locateMapH = 0;
+// Where the pin goes: the node being located or, on the node map, this node,
+// which the node table never holds. No pin while s_locateHasPin is false.
 static float s_locateNodeLat = 0.0f;
 static float s_locateNodeLon = 0.0f;
+static bool  s_locateHasPin = false;
 
 static constexpr int kNodeLocateTilePx = kMapTileSizePx;
 static constexpr int kNodeLocateZoomMin = kMapTileZoomMin;
 static constexpr int kNodeLocateZoomDefault = kMapTileZoomRoads;
 static constexpr int kNodeLocateZoomMax = kMapTileZoomMax;
+// The node map's location button: this node with the mesh around it, about
+// 35 km across a 320 px map at 45 degrees latitude.
+static constexpr int kNodeMapSelfZoom = 10;
 // Every tile the viewport can touch: as many as span it on each axis, plus one,
 // since a view rarely starts on a tile edge. The map is full screen, so the
 // panel sets the count, either way up -- 6 at 320x240, 9 at 480x320, 12 on the
@@ -27747,6 +27753,7 @@ static void closeNodeLocateModal() {
     s_nodeLocateHasPixels = false;
     s_locateNodeLat = 0.0f;
     s_locateNodeLon = 0.0f;
+    s_locateHasPin = false;
     s_nodeLocateAllNodes = false;
     s_nodeMapPointCount = 0;
     if (s_nodeMapHeat) {
@@ -27817,6 +27824,10 @@ static void nodeLocateUpdateLiveMarker() {
     }
     if (!s_nodeLocateMarker || !lvObjValid(s_nodeLocateMarker)
         || s_locateMapW <= 0 || s_locateMapH <= 0) {
+        return;
+    }
+    if (!s_locateHasPin) {
+        lv_obj_add_flag(s_nodeLocateMarker, LV_OBJ_FLAG_HIDDEN);
         return;
     }
 
@@ -28408,13 +28419,30 @@ static void serviceNodeLocateLiveMap(uint32_t nowMs) {
 
 static void nodeMapFitAll();
 
-// Puts the node back under the middle of the map box at the current zoom. On
-// the node map, frames every node again instead.
+// Points the node map's pin at this node. Read afresh each time, since a GPS
+// fix can arrive or move while the map is open. False with no position.
+static bool nodeMapLoadSelfPin() {
+    double lat = 0.0;
+    double lon = 0.0;
+    s_locateHasPin = nodeLosSelfPosition(lat, lon);
+    if (s_locateHasPin) {
+        s_locateNodeLat = (float)lat;
+        s_locateNodeLon = (float)lon;
+    }
+    return s_locateHasPin;
+}
+
+// The location button, and H/C. Puts the node back under the middle of the map
+// box at the current zoom. On the node map, centres on this node at
+// kNodeMapSelfZoom instead, or frames every node when it has no position.
 static void nodeLocateCenterOnNode() {
     if (s_locateMapW <= 0 || s_locateMapH <= 0) return;
     if (s_nodeLocateAllNodes) {
-        nodeMapFitAll();
-        return;
+        if (!nodeMapLoadSelfPin()) {
+            nodeMapFitAll();
+            return;
+        }
+        s_nodeLocateZoom = kNodeMapSelfZoom;
     }
     nodeLocateLatLonToWorld(s_locateNodeLat, s_locateNodeLon, s_nodeLocateZoom,
                             s_nodeLocateCenterWorldX, s_nodeLocateCenterWorldY);
@@ -28671,8 +28699,9 @@ static bool nodeLocateBuildModal(const char *titleText, bool allNodes) {
     setLabelTextEmojiSafe(titleChip, titleText);
     lv_obj_align(titleChip, LV_ALIGN_TOP_LEFT, 4, 4);
 
-    // The node map draws its nodes into the canvas instead (nodeMapPaintRect()).
-    if (!allNodes) {
+    // The pin: the node being located or, on the node map, this node. The node
+    // map draws every other node into the canvas (nodeMapPaintRect()).
+    {
         // A map pin rather than a dot: a round head over a short stem, tip down.
         // Built from two plain objects because there is no pin glyph to lean on —
         // this build already falls back LV_SYMBOL_GPS to LV_SYMBOL_DRIVE — and a
@@ -28827,6 +28856,7 @@ static void openNodeLocateModal(uint32_t nodeId) {
     // so its pin starts exactly at the center of the map viewport.
     s_locateNodeLat = lat;
     s_locateNodeLon = lon;
+    s_locateHasPin = true;
     s_nodeLocateZoom = kNodeLocateZoomDefault;
     nodeLocateLatLonToWorld(lat, lon, s_nodeLocateZoom,
                             s_nodeLocateCenterWorldX, s_nodeLocateCenterWorldY);
@@ -29043,10 +29073,10 @@ static void nodeMapFitAll() {
     static constexpr int kFitMargin = 28;
 
     if (s_nodeMapPointCount == 0) {
-        // Nothing to frame. Our own position if we have one, else the world.
-        if (s_cfg.latI != 0 || s_cfg.lonI != 0) {
+        // Nothing to frame. Our own node if it has a position, else the world.
+        if (s_locateHasPin) {
             s_nodeLocateZoom = kNodeLocateZoomDefault;
-            nodeLocateLatLonToWorld((double)s_cfg.latI / 1e7, (double)s_cfg.lonI / 1e7,
+            nodeLocateLatLonToWorld(s_locateNodeLat, s_locateNodeLon,
                                     s_nodeLocateZoom, s_nodeLocateCenterWorldX,
                                     s_nodeLocateCenterWorldY);
         } else {
@@ -29112,6 +29142,7 @@ static void openNodesMapModal() {
     }
     s_nodeMapHeatZoom = -1;
     s_nodeLocateHasPixels = false;
+    nodeMapLoadSelfPin();
     if (s_nodeLocateCanvasBuf) {
         nodeMapFitAll();
     } else {
@@ -29120,15 +29151,15 @@ static void openNodesMapModal() {
 }
 #endif  // HAS_NODE_LOCATE
 
-#if HAS_NODE_LOS || HAS_WEATHER
+#if HAS_NODE_LOS || HAS_WEATHER || HAS_NODE_LOCATE
 // Where this node thinks it is: the GPS fix when there is one, otherwise the
 // configured or last-known position, otherwise nothing.
 //
-// Outside both feature blocks because both ask it — LOS for one end of the
-// path, the weather screen for the only end it has. It lived inside the LOS
-// block when LOS was the only caller; leaving it there would have made the two
-// features' gates load-bearing for each other, and a board that ever wanted one
-// without the other would have found out at link time.
+// Outside the feature blocks because several ask it — LOS for one end of the
+// path, the weather screen for the only end it has, the node map for its pin.
+// It lived inside the LOS block when LOS was the only caller; leaving it there
+// would have made the features' gates load-bearing for each other, and a board
+// that ever wanted one without the others would have found out at link time.
 static bool nodeLosSelfPosition(double &lat, double &lon) {
 #if HAS_GPS
     if (gpsHasFix() && (gpsLatI() != 0 || gpsLonI() != 0)) {
@@ -47561,7 +47592,8 @@ static void pumpKeyboardInput() {
             }
 
             // Pan with the trackball or arrows, zoom with page keys or +/-,
-            // recentre on the node with C, and reset zoom/pan with Space.
+            // recentre with H or C (on the node map, on this node at zoom 10),
+            // and go back to the opening view with Space.
             switch (k) {
                 case KEY_SCROLL_UP:   nodeLocatePanBy(0,  step); continue;
                 case KEY_SCROLL_DN:   nodeLocatePanBy(0, -step); continue;
@@ -47580,8 +47612,12 @@ static void pumpKeyboardInput() {
                 case 'h': case 'H': nodeLocateCenterOnNode(); continue;
                 case 'c': case 'C': nodeLocateCenterOnNode(); continue;
                 case ' ':
-                    s_nodeLocateZoom = kNodeLocateZoomDefault;
-                    nodeLocateCenterOnNode();
+                    if (s_nodeLocateAllNodes) {
+                        nodeMapFitAll();
+                    } else {
+                        s_nodeLocateZoom = kNodeLocateZoomDefault;
+                        nodeLocateCenterOnNode();
+                    }
                     continue;
                 default: break;
             }

@@ -2840,6 +2840,12 @@ fields including map position details.
 - **All**, the button above Search, lists every node at once (live, plus
   archived while **Show Archived Nodes** is on). The title reads
   `All nodes (n)`; Clear search returns to the favorites
+- **Map**, the button above All, puts every node with a position on one
+  full-screen map, zoomed to fit them all: a heat map on color screens, a dot
+  per node on the T-Deck Pro. A pin marks this node. The GPS button (`H` or `C`
+  on keyboard builds) centers on the pin at zoom `10`, and Space goes back to
+  every node. With no position of its own there is no pin, and the button
+  frames every node instead. Not on the Cardputer or the Heltec V4
 - **Wildcards:** `*` matches any run of characters and `?` any one character.
   A query with a wildcard must match the whole name or id, so `mi*` finds names
   starting with "mi", `*base` names ending in "base", and `!1a2b*` ids starting
