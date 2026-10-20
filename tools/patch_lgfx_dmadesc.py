@@ -38,10 +38,19 @@
 # Scope: PlatformIO gives each environment its own libdeps copy, so this only
 # touches the env that lists the script in extra_scripts.
 #
+# The source has moved between releases: Bus_SPI.cpp up to LovyanGFX 1.2.27,
+# then Bus_SPI.inl (compiled as part of lgfx_v1_platforms.cpp); and from
+# LovyanGFX 1.2.32 and M5GFX 0.2.32 the descriptor type is dma_desc_t instead
+# of lldesc_t. The bug is the same in every one of them, so the patch takes
+# each layout.
+#
 # Idempotent, and safe to run before libdeps exist: on a fresh checkout the first
 # build may run this before the graphics library has been downloaded, in which
-# case it warns and the patch lands on the next build. If Bus_SPI.cpp exists but
-# no longer matches, fail the build rather than silently shipping it unpatched.
+# case it warns and the patch lands on the next build. Once the library is there,
+# anything short of a patched source fails the build -- no Bus_SPI source where
+# one should be, or one that no longer matches -- rather than shipping it
+# unpatched. The rename to Bus_SPI.inl once looked like a library not yet
+# fetched, and a run of releases went out unpatched because of it.
 Import("env")
 import os
 
@@ -87,51 +96,75 @@ NEW_SETUP = """    if (_dmadesc_size * SPI_MAX_DMA_LEN < len)
     if (_dmadesc == nullptr || _dmadesc_size * SPI_MAX_DMA_LEN < len) { return; }
     lldesc_t *dmadesc = _dmadesc;"""
 
-CANDIDATES = (
-    os.path.join("M5GFX", "src", "lgfx", "v1", "platforms", "esp32", "Bus_SPI.cpp"),
-    os.path.join("LovyanGFX", "src", "lgfx", "v1", "platforms", "esp32", "Bus_SPI.cpp"),
+# The patterns above are written with lldesc_t; newer releases use dma_desc_t.
+DESC_TYPES = ("lldesc_t", "dma_desc_t")
+
+# Where the Bus_SPI source lives in a graphics library, by release.
+SOURCES = (
+    os.path.join("src", "lgfx", "v1", "platforms", "esp32", "Bus_SPI.cpp"),
+    os.path.join("src", "lgfx", "v1", "platforms", "esp32", "Bus_SPI.inl"),
 )
 
 libdeps = os.path.join(env.subst("$PROJECT_LIBDEPS_DIR"), env.subst("$PIOENV"))
-patched_any = False
-found_any = False
+
+# LovyanGFX, or M5GFX vendoring it: recognised by its source tree rather than
+# by folder name, so a renamed install cannot pass for one not yet fetched.
+libs = []
+if os.path.isdir(libdeps):
+    libs = sorted(name for name in os.listdir(libdeps)
+                  if os.path.isdir(os.path.join(libdeps, name, "src", "lgfx", "v1")))
+
 drifted = []
 
-for rel in CANDIDATES:
-    path = os.path.join(libdeps, rel)
-    if not os.path.isfile(path):
-        continue
-    found_any = True
+
+def patch_file(lib, path):
+    """Patches one Bus_SPI source; False if it does not define the allocator."""
+    rel = os.path.relpath(path, libdeps)
     with open(path, encoding='utf-8') as f:
         src = f.read()
+    if "Bus_SPI::_alloc_dmadesc(" not in src:
+        return False
     marker_count = src.count(MARKER)
     if marker_count == 2:
-        print("[patch_lgfx_dmadesc] already patched: %s" % rel.split(os.sep)[0])
-        patched_any = True
-        continue
+        print("[patch_lgfx_dmadesc] already patched: %s" % lib)
+        return True
     if marker_count != 0:
         print("[patch_lgfx_dmadesc] ERROR: partial patch in %s" % rel)
         drifted.append(rel)
-        continue
-    if OLD_ALLOC in src and OLD_SETUP in src:
-        src = src.replace(OLD_ALLOC, NEW_ALLOC, 1).replace(OLD_SETUP, NEW_SETUP, 1)
-        with open(path, 'w', encoding='utf-8') as f:
-            f.write(src)
-        print("[patch_lgfx_dmadesc] patched %s Bus_SPI DMA descriptor handling"
-              % rel.split(os.sep)[0])
-        patched_any = True
-    else:
-        print("[patch_lgfx_dmadesc] ERROR: pattern not found in %s - version drift?" % rel)
-        drifted.append(rel)
+        return True
+    for desc in DESC_TYPES:
+        old_alloc = OLD_ALLOC.replace("lldesc_t", desc)
+        old_setup = OLD_SETUP.replace("lldesc_t", desc)
+        if old_alloc in src and old_setup in src:
+            src = (src.replace(old_alloc, NEW_ALLOC.replace("lldesc_t", desc), 1)
+                      .replace(old_setup, NEW_SETUP.replace("lldesc_t", desc), 1))
+            with open(path, 'w', encoding='utf-8') as f:
+                f.write(src)
+            print("[patch_lgfx_dmadesc] patched %s Bus_SPI DMA descriptor handling (%s)"
+                  % (lib, os.path.basename(path)))
+            return True
+    print("[patch_lgfx_dmadesc] ERROR: pattern not found in %s - version drift?" % rel)
+    drifted.append(rel)
+    return True
+
+
+for lib in libs:
+    found = False
+    for rel in SOURCES:
+        path = os.path.join(libdeps, lib, rel)
+        if os.path.isfile(path) and patch_file(lib, path):
+            found = True
+    if not found:
+        print("[patch_lgfx_dmadesc] ERROR: no Bus_SPI.cpp or Bus_SPI.inl in %s"
+              " defines _alloc_dmadesc - layout changed?" % lib)
+        drifted.append(lib)
 
 if drifted:
     raise RuntimeError(
-        "[patch_lgfx_dmadesc] refusing to build with unpatched Bus_SPI.cpp: %s"
+        "[patch_lgfx_dmadesc] refusing to build with an unpatched Bus_SPI source: %s"
         % ", ".join(drifted)
     )
 
-if not found_any:
+if not libs:
     print("[patch_lgfx_dmadesc] graphics library not fetched yet under %s" % libdeps)
     print("[patch_lgfx_dmadesc] NOT patched - run the build once more")
-elif not patched_any:
-    print("[patch_lgfx_dmadesc] nothing patched")

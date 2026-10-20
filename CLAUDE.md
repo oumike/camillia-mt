@@ -54,5 +54,9 @@ which. It checks that the PR's Build passed and it merges cleanly, writes the
 release notes from it for review, merges it, commits the notes to `main` and
 dispatches `release.yml`, which builds, signs and publishes. `--dry-run`
 previews; `--pr N` picks a PR or resumes a release whose PR was merged;
-`--from-main` releases `main` without a PR, for emergencies. Releases are the
-user's to start: do not run the release script unless asked.
+`--from-main` releases `main` without a PR, for emergencies.
+`--dist-only [--only ENVS] [--version V]` builds the release images into
+`dist/` from the working tree, uncommitted changes included, and releases
+nothing. Name special builds with `+` metadata (e.g. `6.0.2+bob`), never `-`,
+which would put devices on the alpha track. Releases are the user's to start:
+do not run the release script unless asked.

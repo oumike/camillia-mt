@@ -216,6 +216,193 @@ delete_existing_release_and_tags() {
     fi
 }
 
+# ── Build, merge, sign and verify ─────────────────────────────────────────────
+# Shared by the release and by --dist-only (lib/release_dist.sh), so a dist/
+# built without releasing comes out exactly as a release's would. Each takes
+# the environments to work on after its fixed arguments; the merge and the
+# check default to every release environment.
+
+# Off only for a --dist-only build on a machine without the signing key. A
+# release always signs: with no key it fails rather than ship unsigned images.
+SIGN_ASSETS=true
+
+# Builds the given environments, then copies each one's boot_app0.bin beside
+# its build output for the merge.
+build_release_envs() {
+    local env_name env_core_dir boot_app0
+
+    # The clean is here so a release image can never contain a stale object file —
+    # PlatformIO's dependency tracking misses enough (a changed build flag, a header
+    # reached through a symlink) that "it rebuilt what mattered" is not something to
+    # stake a signed, published binary on. --no-clean trades that guarantee for the
+    # several minutes it costs, which is a fair trade when re-cutting a release from
+    # sources you just built and no trade at all otherwise.
+    if [[ "$NO_CLEAN" == true ]]; then
+        echo "Skipping full clean (--no-clean); building on existing .pio output."
+    else
+        echo "Running full clean for release environments..."
+        for env_name in "$@"; do
+            run_pio_for_env "$env_name" run -e "$env_name" -t fullclean
+        done
+    fi
+
+    # --disable-auto-clean: at the start of every `pio run`, PlatformIO compares a
+    # checksum of the project (its config, its version, and the names of every
+    # source file) with the one stored in .pio/build, and deletes the WHOLE build
+    # directory when they differ -- every environment's output, not just this
+    # one's. Anything that shifts that checksum between two environments here
+    # (src/release_notes.h, for one, is generated during the first build on a
+    # fresh checkout) then silently throws away every image already built, and the
+    # merge below finds nothing to merge. That is how v5.4.0's first cut died, with
+    # the tag already pushed. The clean this script wants is the explicit one
+    # above; nothing should be deleted behind its back in the middle of the loop.
+    for env_name in "$@"; do
+        run_pio_for_env "$env_name" run -e "$env_name" --disable-auto-clean
+        # Official espressif32 and pioarduino use the same global framework package
+        # name but carry different Arduino cores. Snapshot boot_app0 immediately
+        # after each environment resolves so a later toolchain swap cannot make an
+        # S3 factory image contain the P4 boot app (or vice versa).
+        env_core_dir="$(pio_core_dir_for_env "$env_name")"
+        boot_app0=$(find "$env_core_dir/packages/framework-arduinoespressif32/tools/partitions" \
+            -name boot_app0.bin 2>/dev/null | head -1)
+        if [[ -z "$boot_app0" ]]; then
+            echo "Error: boot_app0.bin missing after building ${env_name}." >&2
+            exit 1
+        fi
+        cp "$boot_app0" ".pio/build/${env_name}/boot_app0.bin"
+    done
+    echo "Build successful."
+}
+
+# Turns the current .pio build output into distributable, tag-named factory and
+# OTA images plus detached signatures, written to dist/ for the given tag ($1).
+merge_sign_assets() {
+    local tag="$1" env_name out_name flash_size chip boot_offset flash_mode d out ota_out
+    local with_p4=false
+    shift
+    if [[ $# -eq 0 ]]; then
+        set -- "${RELEASE_ENVS[@]}"
+    fi
+    for env_name in "$@"; do
+        if ! has_env "$env_name"; then continue; fi
+        if is_p4_env "$env_name"; then with_p4=true; fi
+        out_name="$(env_out_name "$env_name")"
+        flash_size="$(env_flash_size "$env_name")"
+        chip="$(env_chip "$env_name")"
+        boot_offset="$(env_bootloader_offset "$env_name")"
+        flash_mode="$(env_flash_mode "$env_name")"
+        d=".pio/build/${env_name}"
+        out="dist/camillia-mt-${out_name}-${tag}.bin"
+        ota_out="dist/camillia-mt-${out_name}-${tag}-ota.bin"
+        echo "  ${env_name} (${flash_size}) -> ${out}"
+        "${ESPTOOL[@]}" --chip "$chip" merge_bin \
+            -o "${out}" \
+            -fm "$flash_mode" \
+            -ff 80m \
+            -fs "${flash_size}" \
+            "$boot_offset" "${d}/bootloader.bin" \
+            0x8000  "${d}/partitions.bin" \
+            0xe000  "${d}/boot_app0.bin" \
+            0x10000 "${d}/firmware.bin"
+        cp "${d}/firmware.bin" "${ota_out}"
+        cp "${d}/firmware.elf" "dist/camillia-mt-${out_name}-${tag}.elf"
+        if [[ "$SIGN_ASSETS" == true ]]; then
+            # Detached ECDSA-P256/SHA-256 signature over the OTA image. The device
+            # verifies this against the baked-in public key before committing the
+            # update, which is what makes plain-HTTP (TLS-free) OTA safe.
+            openssl dgst -sha256 -sign "$SIGNING_KEY" -out "${ota_out}.sig" "${ota_out}"
+            echo "    signed -> ${ota_out}.sig"
+        fi
+    done
+
+    # The T-Display P4's C6 companion image and its flasher go with P4 images.
+    if [[ "$with_p4" == true ]]; then
+        local hosted_c6
+        hosted_c6=$(find "$P4_PIO_CORE_DIR/packages/framework-arduinoespressif32-libs/hosted" \
+            -name 'esp32c6-v2.12.13.bin' 2>/dev/null | head -1)
+        if [[ -z "$hosted_c6" ]]; then
+            echo "Error: pinned ESP-Hosted C6 firmware not found after P4 builds." >&2
+            return 1
+        fi
+        cp "$hosted_c6" \
+            "dist/camillia-mt-tdisplay-p4-c6-esp-hosted-v2.12.13.bin"
+        install -m 0755 scripts/flash-tdisplay-p4-c6.sh \
+            dist/flash-tdisplay-p4-c6.sh
+    fi
+    install -m 0755 scripts/flash.sh dist/flash.sh
+}
+
+# Checks dist/ for the given tag ($1) against the build output. The public half
+# of the signing key is written to the scratch directory $2.
+verify_release_assets() {
+    local tag="$1" workdir="$2" env_name out_name d factory ota sig verify_key asset
+    local with_p4=false
+    local required=()
+    shift 2
+    if [[ $# -eq 0 ]]; then
+        set -- "${RELEASE_ENVS[@]}"
+    fi
+    if [[ "$SIGN_ASSETS" == true ]]; then
+        verify_key="$workdir/ota-signing-public.pem"
+        openssl ec -in "$SIGNING_KEY" -pubout -out "$verify_key" 2>/dev/null
+    fi
+
+    echo "Verifying release assets..."
+    for env_name in "$@"; do
+        if is_p4_env "$env_name"; then with_p4=true; fi
+        out_name="$(env_out_name "$env_name")"
+        d=".pio/build/${env_name}"
+        factory="dist/camillia-mt-${out_name}-${tag}.bin"
+        ota="dist/camillia-mt-${out_name}-${tag}-ota.bin"
+        sig="${ota}.sig"
+
+        required=( "$factory" "$ota" )
+        if [[ "$SIGN_ASSETS" == true ]]; then
+            required+=( "$sig" )
+        fi
+        for asset in "${required[@]}"; do
+            if [[ ! -s "$asset" ]]; then
+                echo "Error: required release asset is missing or empty: $asset" >&2
+                return 1
+            fi
+        done
+        if ! cmp -s "${d}/firmware.bin" "$ota"; then
+            echo "Error: OTA asset does not match ${env_name}/firmware.bin: $ota" >&2
+            return 1
+        fi
+        if [[ "$SIGN_ASSETS" != true ]]; then
+            echo "  OK ${env_name}: $(basename "$factory"), $(basename "$ota") (unsigned)"
+            continue
+        fi
+        if ! openssl dgst -sha256 -verify "$verify_key" -signature "$sig" "$ota" \
+                >/dev/null 2>&1; then
+            echo "Error: OTA signature verification failed: $sig" >&2
+            return 1
+        fi
+        echo "  OK ${env_name}: $(basename "$factory"), $(basename "$ota"), $(basename "$sig")"
+    done
+
+    local helpers=( dist/flash.sh )
+    if [[ "$with_p4" == true ]]; then
+        local hosted_c6="dist/camillia-mt-tdisplay-p4-c6-esp-hosted-v2.12.13.bin"
+        if [[ ! -s "$hosted_c6" ]]; then
+            echo "Error: required ESP-Hosted C6 release asset is missing: $hosted_c6" >&2
+            return 1
+        fi
+        echo "  OK T-Display P4 C6: $(basename "$hosted_c6")"
+        helpers+=( dist/flash-tdisplay-p4-c6.sh )
+    fi
+
+    local helper
+    for helper in "${helpers[@]}"; do
+        if [[ ! -s "$helper" || ! -x "$helper" ]]; then
+            echo "Error: required release helper is missing or not executable: $helper" >&2
+            return 1
+        fi
+        echo "  OK helper: $(basename "$helper")"
+    done
+}
+
 # ── Parse flags ───────────────────────────────────────────────────────────────
 ASSUME_YES=false
 NO_CLEAN=false
@@ -231,6 +418,8 @@ DRY_RUN=false
 FROM_MAIN=false
 AUDIT=false
 SKIP_BUILDS=false
+DIST_ONLY=false
+ONLY_ARG=""
 while [[ $# -gt 0 ]]; do
     case "$1" in
         -h|--help)
@@ -239,6 +428,7 @@ while [[ $# -gt 0 ]]; do
             echo "          [--use-committed-notes] [--build-local]"
             echo "          [--pr N] [--dry-run] [--from-main]"
             echo "       ./scripts/release.sh --audit [--pr N] [--skip-builds]"
+            echo "       ./scripts/release.sh --dist-only [--only ENVS] [--version V] [--no-clean]"
             echo "  Releases one pull request into main. Picks the PR (the"
             echo "  only ready one, or asks which), checks its Build passed,"
             echo "  writes and reviews release notes from it, merges it, then"
@@ -264,6 +454,17 @@ while [[ $# -gt 0 ]]; do
             echo "              build or a blocking finding."
             echo "  --skip-builds"
             echo "              With --audit: review only, no local builds."
+            echo "  --dist-only Build the release images into dist/ on this"
+            echo "              machine and release nothing: no commit, tag,"
+            echo "              push or GitHub release. Builds the working tree"
+            echo "              as it stands, uncommitted changes included,"
+            echo "              and signs with ota_signing_key.pem if it is"
+            echo "              here. The images carry VERSION on the tagged"
+            echo "              release commit, else VERSION+<commit> (plus"
+            echo "              .custom with uncommitted changes); --version"
+            echo "              names them instead (e.g. 6.0.2+bob)."
+            echo "  --only ENVS With --dist-only: build just these environments,"
+            echo "              comma-separated (e.g. --only tdeck,m9)."
             echo ""
             echo "  --alpha     Cut an ALPHA release instead: tags"
             echo "              v<version>-alpha.<n> and publishes it as a GitHub"
@@ -322,6 +523,16 @@ while [[ $# -gt 0 ]]; do
         --from-main) FROM_MAIN=true ;;
         --audit) AUDIT=true ;;
         --skip-builds) SKIP_BUILDS=true ;;
+        --dist-only) DIST_ONLY=true ;;
+        --only)
+            if [[ -z "${2:-}" ]]; then
+                echo "--only requires environments (e.g. --only tdeck,m9)" >&2
+                exit 1
+            fi
+            ONLY_ARG="${ONLY_ARG:+$ONLY_ARG,}$2"
+            shift
+            ;;
+        --only=*) ONLY_ARG="${ONLY_ARG:+$ONLY_ARG,}${1#*=}" ;;
         --pr)
             if [[ ! "${2:-}" =~ ^[0-9]+$ ]]; then
                 echo "--pr requires a PR number (e.g. --pr 106)" >&2
@@ -345,12 +556,14 @@ while [[ $# -gt 0 ]]; do
     shift
 done
 
-# The PR stage and the audit live in their own files.
+# The PR stage, the audit and the dist-only build live in their own files.
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=lib/release_pr.sh
 source "$SCRIPT_DIR/lib/release_pr.sh"
 # shellcheck source=lib/release_audit.sh
 source "$SCRIPT_DIR/lib/release_audit.sh"
+# shellcheck source=lib/release_dist.sh
+source "$SCRIPT_DIR/lib/release_dist.sh"
 
 if [[ -n "$PR_ARG" && ! "$PR_ARG" =~ ^[0-9]+$ ]]; then
     echo "--pr requires a PR number (got '$PR_ARG')." >&2
@@ -360,6 +573,10 @@ if [[ "$SKIP_BUILDS" == true && "$AUDIT" != true ]]; then
     echo "--skip-builds only applies to --audit." >&2
     exit 1
 fi
+if [[ -n "$ONLY_ARG" && "$DIST_ONLY" != true ]]; then
+    echo "--only applies only to --dist-only." >&2
+    exit 1
+fi
 
 # ── Audit: a separate job, not a release ─────────────────────────────────────
 if [[ "$AUDIT" == true ]]; then
@@ -367,11 +584,25 @@ if [[ "$AUDIT" == true ]]; then
           || "$NO_CLEAN" == true || "$APPEND_LAST_NOTES" == true \
           || "$CHECK_TARGETS_ONLY" == true || "$NOTES_ONLY" == true \
           || "$USE_COMMITTED_NOTES" == true || "$BUILD_LOCAL" == true \
-          || "$DRY_RUN" == true || "$FROM_MAIN" == true ]]; then
+          || "$DRY_RUN" == true || "$FROM_MAIN" == true \
+          || "$DIST_ONLY" == true ]]; then
         echo "--audit takes only --pr N and --skip-builds." >&2
         exit 1
     fi
     audit_main
+fi
+
+# ── Dist-only: the release's images, built here and released nowhere ────────
+if [[ "$DIST_ONLY" == true ]]; then
+    if [[ "$ASSUME_YES" == true || "$ALPHA" == true \
+          || "$APPEND_LAST_NOTES" == true || "$CHECK_TARGETS_ONLY" == true \
+          || "$NOTES_ONLY" == true || "$USE_COMMITTED_NOTES" == true \
+          || "$BUILD_LOCAL" == true || -n "$PR_ARG" || "$DRY_RUN" == true \
+          || "$FROM_MAIN" == true ]]; then
+        echo "--dist-only takes only --only, --version and --no-clean." >&2
+        exit 1
+    fi
+    dist_main
 fi
 
 if [[ -n "$PR_ARG" || "$DRY_RUN" == true ]] \
@@ -645,7 +876,7 @@ fi
 if [[ "$REMOTE" == true || "$NOTES_ONLY" == true ]]; then
     # Neither mode compiles anything here, so a missing toolchain is not a
     # reason to refuse — this can run on a machine that has never built.
-    BOOT_APP0=""; PIO=""; ESPTOOL=""
+    BOOT_APP0=""; PIO=""; ESPTOOL=()
 else
     BOOT_APP0=$(find ~/.platformio/packages/framework-arduinoespressif32/tools/partitions \
         -name boot_app0.bin 2>/dev/null | head -1)
@@ -668,9 +899,9 @@ else
     fi
 
     if python -m esptool version >/dev/null 2>&1; then
-        ESPTOOL="python -m esptool"
+        ESPTOOL=(python -m esptool)
     elif command -v esptool.py >/dev/null 2>&1; then
-        ESPTOOL="esptool.py"
+        ESPTOOL=(esptool.py)
     else
         echo "Error: esptool not found. Run: pip install esptool" >&2
         exit 1
@@ -1263,47 +1494,7 @@ fi
 } > "$PUBKEY_HEADER"
 echo "Regenerated $PUBKEY_HEADER from $SIGNING_KEY"
 
-# The clean is here so a release image can never contain a stale object file —
-# PlatformIO's dependency tracking misses enough (a changed build flag, a header
-# reached through a symlink) that "it rebuilt what mattered" is not something to
-# stake a signed, published binary on. --no-clean trades that guarantee for the
-# several minutes it costs, which is a fair trade when re-cutting a release from
-# sources you just built and no trade at all otherwise.
-if [[ "$NO_CLEAN" == true ]]; then
-    echo "Skipping full clean (--no-clean); building on existing .pio output."
-else
-    echo "Running full clean for release environments..."
-    for env_name in "${BUILD_ENVS[@]}"; do
-        run_pio_for_env "$env_name" run -e "$env_name" -t fullclean
-    done
-fi
-
-# --disable-auto-clean: at the start of every `pio run`, PlatformIO compares a
-# checksum of the project (its config, its version, and the names of every
-# source file) with the one stored in .pio/build, and deletes the WHOLE build
-# directory when they differ -- every environment's output, not just this
-# one's. Anything that shifts that checksum between two environments here
-# (src/release_notes.h, for one, is generated during the first build on a
-# fresh checkout) then silently throws away every image already built, and the
-# merge below finds nothing to merge. That is how v5.4.0's first cut died, with
-# the tag already pushed. The clean this script wants is the explicit one
-# above; nothing should be deleted behind its back in the middle of the loop.
-for env_name in "${BUILD_ENVS[@]}"; do
-    run_pio_for_env "$env_name" run -e "$env_name" --disable-auto-clean
-    # Official espressif32 and pioarduino use the same global framework package
-    # name but carry different Arduino cores. Snapshot boot_app0 immediately
-    # after each environment resolves so a later toolchain swap cannot make an
-    # S3 factory image contain the P4 boot app (or vice versa).
-    env_core_dir="$(pio_core_dir_for_env "$env_name")"
-    BOOT_APP0=$(find "$env_core_dir/packages/framework-arduinoespressif32/tools/partitions" \
-        -name boot_app0.bin 2>/dev/null | head -1)
-    if [[ -z "$BOOT_APP0" ]]; then
-        echo "Error: boot_app0.bin missing after building ${env_name}." >&2
-        exit 1
-    fi
-    cp "$BOOT_APP0" ".pio/build/${env_name}/boot_app0.bin"
-done
-echo "Build successful."
+build_release_envs "${BUILD_ENVS[@]}"
 
 # ── Commit, push, and tag ─────────────────────────────────────────────────────
 GUARD_STAGED=true
@@ -1347,107 +1538,12 @@ git push origin "$TAG"
 echo "Tag $TAG pushed."
 
 # ── Merge factory images ──────────────────────────────────────────────────────
-# Turns the current .pio build output into distributable, tag-named factory and
-# OTA images plus detached signatures, written to dist/ for the given tag ($1).
-merge_sign_assets() {
-    local tag="$1" env_name out_name flash_size chip boot_offset flash_mode d out ota_out
-    for env_name in "${RELEASE_ENVS[@]}"; do
-        if ! has_env "$env_name"; then continue; fi
-        out_name="$(env_out_name "$env_name")"
-        flash_size="$(env_flash_size "$env_name")"
-        chip="$(env_chip "$env_name")"
-        boot_offset="$(env_bootloader_offset "$env_name")"
-        flash_mode="$(env_flash_mode "$env_name")"
-        d=".pio/build/${env_name}"
-        out="dist/camillia-mt-${out_name}-${tag}.bin"
-        ota_out="dist/camillia-mt-${out_name}-${tag}-ota.bin"
-        echo "  ${env_name} (${flash_size}) -> ${out}"
-        $ESPTOOL --chip "$chip" merge_bin \
-            -o "${out}" \
-            -fm "$flash_mode" \
-            -ff 80m \
-            -fs "${flash_size}" \
-            "$boot_offset" "${d}/bootloader.bin" \
-            0x8000  "${d}/partitions.bin" \
-            0xe000  "${d}/boot_app0.bin" \
-            0x10000 "${d}/firmware.bin"
-        cp "${d}/firmware.bin" "${ota_out}"
-        cp "${d}/firmware.elf" "dist/camillia-mt-${out_name}-${tag}.elf"
-        # Detached ECDSA-P256/SHA-256 signature over the OTA image. The device
-        # verifies this against the baked-in public key before committing the update,
-        # which is what makes plain-HTTP (TLS-free) OTA safe.
-        openssl dgst -sha256 -sign "$SIGNING_KEY" -out "${ota_out}.sig" "${ota_out}"
-        echo "    signed -> ${ota_out}.sig"
-    done
-
-    local hosted_c6
-    hosted_c6=$(find "$P4_PIO_CORE_DIR/packages/framework-arduinoespressif32-libs/hosted" \
-        -name 'esp32c6-v2.12.13.bin' 2>/dev/null | head -1)
-    if [[ -z "$hosted_c6" ]]; then
-        echo "Error: pinned ESP-Hosted C6 firmware not found after P4 builds." >&2
-        return 1
-    fi
-    cp "$hosted_c6" \
-        "dist/camillia-mt-tdisplay-p4-c6-esp-hosted-v2.12.13.bin"
-    install -m 0755 scripts/flash.sh dist/flash.sh
-    install -m 0755 scripts/flash-tdisplay-p4-c6.sh \
-        dist/flash-tdisplay-p4-c6.sh
-}
-
-verify_release_assets() {
-    local tag="$1" env_name out_name d factory ota sig verify_key
-    verify_key="$GUARD_DIR/ota-signing-public.pem"
-    openssl ec -in "$SIGNING_KEY" -pubout -out "$verify_key" 2>/dev/null
-
-    echo "Verifying release assets..."
-    for env_name in "${RELEASE_ENVS[@]}"; do
-        out_name="$(env_out_name "$env_name")"
-        d=".pio/build/${env_name}"
-        factory="dist/camillia-mt-${out_name}-${tag}.bin"
-        ota="dist/camillia-mt-${out_name}-${tag}-ota.bin"
-        sig="${ota}.sig"
-
-        for asset in "$factory" "$ota" "$sig"; do
-            if [[ ! -s "$asset" ]]; then
-                echo "Error: required release asset is missing or empty: $asset" >&2
-                return 1
-            fi
-        done
-        if ! cmp -s "${d}/firmware.bin" "$ota"; then
-            echo "Error: OTA asset does not match ${env_name}/firmware.bin: $ota" >&2
-            return 1
-        fi
-        if ! openssl dgst -sha256 -verify "$verify_key" -signature "$sig" "$ota" \
-                >/dev/null 2>&1; then
-            echo "Error: OTA signature verification failed: $sig" >&2
-            return 1
-        fi
-        echo "  OK ${env_name}: $(basename "$factory"), $(basename "$ota"), $(basename "$sig")"
-    done
-
-    local hosted_c6="dist/camillia-mt-tdisplay-p4-c6-esp-hosted-v2.12.13.bin"
-    if [[ ! -s "$hosted_c6" ]]; then
-        echo "Error: required ESP-Hosted C6 release asset is missing: $hosted_c6" >&2
-        return 1
-    fi
-    echo "  OK T-Display P4 C6: $(basename "$hosted_c6")"
-
-    local helper
-    for helper in dist/flash.sh dist/flash-tdisplay-p4-c6.sh; do
-        if [[ ! -s "$helper" || ! -x "$helper" ]]; then
-            echo "Error: required release helper is missing or not executable: $helper" >&2
-            return 1
-        fi
-        echo "  OK helper: $(basename "$helper")"
-    done
-}
-
 echo ""
 echo "Merging factory images..."
 rm -rf dist
 mkdir -p dist
 merge_sign_assets "$TAG"
-verify_release_assets "$TAG"
+verify_release_assets "$TAG" "$GUARD_DIR"
 
 ls -lh dist/
 

@@ -430,6 +430,40 @@ builds, signs and publishes. The notes end with a link to the PR. If a run fails
 after the merge, `--pr <number>` resumes it. `--from-main` releases `main`
 without a PR, for emergencies.
 
+**Builds without a release.** To get release-style images without releasing
+anything, build them into `dist/` on your machine. Use this for another
+download site, or for a one-off build for someone:
+
+```bash
+./scripts/release.sh --dist-only                       # every board
+./scripts/release.sh --dist-only --only tdeck,m9       # just these boards
+./scripts/release.sh --dist-only --version 6.0.2+bob   # name the build
+```
+
+It builds the working tree as it stands, uncommitted changes included. It uses
+the release's own build, merge and checks, but it never commits, tags, pushes
+or talks to GitHub. Each run replaces `dist/`. Besides the images, it writes
+`BUILD-INFO.txt` (version, commit, boards and uncommitted files) and
+`SHA256SUMS`.
+
+- **Version.** On the tagged release commit with nothing changed, the images
+  carry `VERSION` (e.g. `v6.0.2`). Otherwise they get build metadata:
+  `v6.0.2+<commit>`, with `.custom` added when uncommitted changes went in.
+  `VERSION` is put back afterwards, even if the build fails or is interrupted.
+  Name special builds with `+`, never `-`. The firmware treats anything after
+  a `-` as an alpha, and a device on the Auto release channel then follows the
+  alpha track. A `+` build stays on stable and is offered the next release as
+  usual.
+- **Signing.** If `ota_signing_key.pem` is present, the OTA images are signed,
+  after checking that the key matches `src/ota_signing_pubkey.h`. Without the
+  key they are left unsigned, with no `.sig` files. A build is refused if
+  `src/ota_signing_pubkey.h` has been edited, because devices running it would
+  reject every official update.
+- **Toolchain.** It needs the full PlatformIO setup described above. The first
+  run installs esptool 4.11.0, the version the release workflow uses, into
+  `~/.cache/camillia-mt/`. Each board takes a few minutes from clean;
+  `--no-clean` reuses the existing `.pio` output.
+
 ---
 
 ## Build settings
@@ -494,9 +528,11 @@ that lists the script.
   the memory budget that causes the failure in the first place.
 - `tools/patch_radiolib_lr11x0.py` — `m9` only; see the ThinkNode M9 notes below.
 
-Both are idempotent. The LovyanGFX patch fails the build if an existing
-`Bus_SPI.cpp` no longer matches or is only partially patched; the RadioLib patch
-still emits a warning on version drift. If you see `NOT patched - run the build
+Both are idempotent. The LovyanGFX patch accepts `Bus_SPI.cpp` (LovyanGFX up
+to 1.2.27) or `Bus_SPI.inl` (later releases and M5GFX), with either descriptor
+type. Once the graphics library is in `.pio/libdeps`, it fails the build if that
+source is missing, no longer matches, or is only partially patched. The RadioLib
+patch still only warns on version drift. If you see `NOT patched - run the build
 once more` on a fresh checkout, the library had not been fetched yet; build again.
 
 ### LilyGo T-Display P4 AMOLED
