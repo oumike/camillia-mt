@@ -10,17 +10,24 @@
 #endif
 
 // ── State that has to outlive a reset ────────────────────────────────────────
-// RTC slow memory survives a brownout reset and does not survive a real power
+// RTC memory survives a brownout reset and does not survive a real power
 // cycle, which is exactly the lifetime these want: a brownout loop must be
 // remembered across its own resets, and pulling the battery must clear it so a
 // device with a fresh cell re-evaluates from scratch.
 //
-// Magic-guarded because RTC memory is uninitialised on a cold boot: without it,
-// whatever bytes happened to be there would read as a brownout count.
-static const uint32_t kPowerRtcMagic = 0x504D4731UL;   // "PMG1"
-RTC_DATA_ATTR static uint32_t s_pmRtcMagic = 0;
-RTC_DATA_ATTR static uint32_t s_pmBrownouts = 0;
-RTC_DATA_ATTR static uint32_t s_pmLowBattOff = 0;
+// RTC_NOINIT_ATTR, not RTC_DATA_ATTR: the bootloader reloads .rtc.data from the
+// image on every reset except a deep-sleep wake, so an RTC_DATA_ATTR counter
+// reads 0 again after each brownout and the latch below could never fire.
+//
+// Magic- and checksum-guarded because noinit memory holds garbage after a
+// power-on reset: without it, whatever bytes happened to be there would read as
+// a brownout count. A power-on reset also re-initialises it explicitly.
+static const uint32_t kPowerRtcMagic = 0x504D4732UL;   // "PMG2"
+RTC_NOINIT_ATTR static uint32_t s_pmRtcMagic;
+RTC_NOINIT_ATTR static uint32_t s_pmBrownouts;
+RTC_NOINIT_ATTR static uint32_t s_pmLowBattOff;
+RTC_NOINIT_ATTR static uint32_t s_pmRtcCheck;
+static bool s_pmRtcValidated = false;
 
 // Three consecutive brownout resets is the backstop for the case the boot gate
 // misses — a cell that reads fine at rest and collapses the moment the radio
@@ -48,11 +55,28 @@ static const uint32_t kTierHoldMs = 30000UL;
 static const uint32_t kWarnHoldMs = 5000UL;
 static const uint32_t kSampleIntervalMs = 1000UL;
 
-static void pmRtcInit() {
-    if (s_pmRtcMagic == kPowerRtcMagic) return;
+static uint32_t pmRtcChecksum() {
+    return (kPowerRtcMagic ^ 0xA5C3F00DUL) ^ (s_pmBrownouts * 0x9E3779B1UL)
+           ^ (s_pmLowBattOff * 0x85EBCA6BUL);
+}
+
+// Call after every write to the RTC state, so the next boot accepts it.
+static void pmRtcSeal() {
     s_pmRtcMagic = kPowerRtcMagic;
+    s_pmRtcCheck = pmRtcChecksum();
+}
+
+// Validated once per boot, before the first use.
+static void pmRtcInit() {
+    if (s_pmRtcValidated) return;
+    s_pmRtcValidated = true;
+    if (esp_reset_reason() != ESP_RST_POWERON && s_pmRtcMagic == kPowerRtcMagic
+        && s_pmRtcCheck == pmRtcChecksum()) {
+        return;
+    }
     s_pmBrownouts = 0;
     s_pmLowBattOff = 0;
+    pmRtcSeal();
 }
 
 void powerMgrSetHooks(const PowerMgrHooks &hooks) { s_hooks = hooks; }
@@ -88,6 +112,7 @@ bool powerMgrConsumeLowBatteryBootNotice() {
     pmRtcInit();
     if (!s_pmLowBattOff) return false;
     s_pmLowBattOff = 0;
+    pmRtcSeal();
     return true;
 }
 
@@ -151,6 +176,7 @@ void powerMgrShutdown(const char *reason) {
     // The run is over — this is a deliberate stop, not another brownout. Left
     // set and the next boot would latch immediately on a charged battery.
     s_pmBrownouts = 0;
+    pmRtcSeal();
 
     if (s_hooks.showMessage) s_hooks.showMessage("Battery empty\nShutting down");
     // Persistence before power: this is the clean shutdown path that never
@@ -179,6 +205,7 @@ void powerMgrBootGate() {
 #endif
     if (why == ESP_RST_BROWNOUT) {
         s_pmBrownouts++;
+        pmRtcSeal();
         Serial.printf("[power] brownout reset (%lu in a row)\n",
                       (unsigned long)s_pmBrownouts);
         if (s_pmBrownouts >= kBrownoutLatchCount) {
@@ -192,6 +219,7 @@ void powerMgrBootGate() {
         // over. Deep-sleep and software resets are left alone because they are
         // how this module and the OTA path restart the device on purpose.
         s_pmBrownouts = 0;
+        pmRtcSeal();
     }
 
 #if !HAS_BATTERY_SENSE
@@ -258,19 +286,21 @@ static PowerBatteryTier pmTierFor(float v, PowerBatteryTier current) {
 #endif
 
 void powerMgrService(uint32_t nowMs) {
-#if !HAS_BATTERY_SENSE
-    (void)nowMs;
-#else
     // Clear a brownout run once this boot has proved itself. Without it the
     // count would accumulate across unrelated resets days apart and eventually
-    // latch a perfectly healthy device off.
+    // latch a perfectly healthy device off. Done on every board, battery sense
+    // or not, because the boot-gate latch counts brownouts on all of them.
     if (!s_brownoutRunCleared && nowMs >= kHealthyUptimeMs) {
         s_brownoutRunCleared = true;
+        pmRtcInit();
         if (s_pmBrownouts != 0) {
             Serial.println("[power] uptime healthy; brownout run cleared");
             s_pmBrownouts = 0;
+            pmRtcSeal();
         }
     }
+
+#if HAS_BATTERY_SENSE
 
     if ((uint32_t)(nowMs - s_lastSampleMs) < kSampleIntervalMs) return;
     s_lastSampleMs = nowMs;

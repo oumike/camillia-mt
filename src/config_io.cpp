@@ -8,6 +8,7 @@
 #include "ignore_list.h"
 #include "storage.h"
 #include <Preferences.h>
+#include <Curve25519.h>      // validate an imported identity keypair
 #include <SPI.h>
 #include <Wire.h>
 #include <stdio.h>
@@ -409,6 +410,15 @@ void applyPresetParams(RhinoConfig &cfg) {
 
 // ── Storage paths ─────────────────────────────────────────────────────────────
 static const char *kPath = "/camillia/config.yaml";
+static const char *kTmpPath = "/camillia/config.yaml.tmp";
+static const char *kBakPath = "/camillia/config.yaml.bak";
+// Comment lines, so older builds and the Meshtastic CLI ignore them. A file
+// with the format marker was written by a build that also ends it with the end
+// marker, which lets the importer tell a complete export from a truncated one.
+static const char *kCfgFormatMarker = "# camillia_export_format: 2";
+static const char *kCfgEndMarker    = "# end of camillia config";
+// Larger than any real export; the web import caps uploads at 8 KB.
+static const size_t kCfgImportMaxBytes = 32 * 1024;
 static const char *kWebCfgUser = "admin";
 static bool sdReady = false;
 // How many times the probe has failed. Used only to decide how hard to try
@@ -835,7 +845,23 @@ void uiCustomThemesLoad() {
     uint8_t buf[sizeof(CustomThemeBlobHeader)
                 + (sizeof(UiCustomTheme) * UI_CUSTOM_THEME_SLOTS)];
     memset(buf, 0, sizeof(buf));
-    const size_t got = p.getBytes(kCustomThemeBlobKey, buf, sizeof(buf));
+    // getBytes() copies nothing when the stored blob is longer than maxLen, and
+    // a build with more slots writes a longer blob. Read such a blob whole and
+    // keep the prefix this build understands.
+    size_t got = 0;
+    const size_t stored = p.getBytesLength(kCustomThemeBlobKey);
+    if (stored > sizeof(buf)) {
+        uint8_t *big = (uint8_t *)malloc(stored);
+        if (big) {
+            if (p.getBytes(kCustomThemeBlobKey, big, stored) == stored) {
+                memcpy(buf, big, sizeof(buf));
+                got = sizeof(buf);
+            }
+            free(big);
+        }
+    } else if (stored > 0) {
+        got = p.getBytes(kCustomThemeBlobKey, buf, sizeof(buf));
+    }
     p.end();
     if (got < sizeof(CustomThemeBlobHeader)) return;
 
@@ -1604,6 +1630,7 @@ uint32_t cfgOtaAutoUpdatePeriodMs(uint8_t period) {
 void cfgToYaml(const RhinoConfig &cfg, String &out) {
     char tmp[96];
     out  = "# start of Meshtastic configure yaml\n";
+    out += kCfgFormatMarker; out += "\n";
     // WiFi credentials (for web config export/import portability)
     out += "wifi_ssid: "; out += cfg.wifiSsid; out += "\n";
     out += "wifi_pass: "; out += cfg.wifiPass; out += "\n";
@@ -1977,12 +2004,82 @@ void cfgToYaml(const RhinoConfig &cfg, String &out) {
     }
     out += "\n";
 #endif
+    // Must stay the last line: an import of a file carrying kCfgFormatMarker
+    // but not this is a truncated write and is refused.
+    out += kCfgEndMarker; out += "\n";
 }
 
 // Set by the parse below when an import carried a complete identity keypair, so
 // the caller knows to write the restored keys to NVS (the parser only reaches
 // the in-RAM globals). Valid until the next import.
 static bool s_importRestoredKeys = false;
+static char s_importWarning[96] = "";
+
+const char *cfgImportWarning() { return s_importWarning[0] ? s_importWarning : nullptr; }
+
+// Decode one identity key. Accepts the Meshtastic CLI's "base64:" prefix (and
+// YAML quotes); base64Decode() would otherwise decode the letters of "base64"
+// as key bits. Requires exactly 32 bytes.
+static bool decodeIdentityKey(const char *val, uint8_t out[32]) {
+    char tmp[72];
+    copyTrimmed(tmp, sizeof(tmp), val);
+    char *v = tmp;
+    size_t n = strlen(v);
+    if (n >= 2 && (v[0] == '\'' || v[0] == '"') && v[n - 1] == v[0]) {
+        v[n - 1] = '\0';
+        v++;
+    }
+    if (!strncasecmp(v, "base64:", 7)) v += 7;
+    uint8_t k[33];
+    if (base64Decode(v, k, sizeof(k)) != 32) return false;
+    memcpy(out, k, 32);
+    return true;
+}
+
+// True when pub is the X25519 public key of priv, the same check
+// initPkiIdentity() makes at boot. Like that check, a byte-reversed pub is
+// accepted and corrected in place.
+static bool importedKeypairValid(uint8_t pub[32], const uint8_t priv[32]) {
+    bool nonZero = false;
+    for (int i = 0; i < 32 && !nonZero; i++) nonZero = (priv[i] != 0);
+    if (!nonZero) return false;
+    uint8_t derived[32];
+    if (!Curve25519::eval(derived, priv, nullptr)) return false;
+    if (!memcmp(derived, pub, 32)) return true;
+    for (int i = 0; i < 32; i++) {
+        if (derived[i] != pub[31 - i]) return false;
+    }
+    memcpy(pub, derived, 32);
+    return true;
+}
+
+// A file carrying the format marker must end with the end marker; anything
+// else is a write that stopped partway. Files without the marker (older
+// exports, Meshtastic CLI dumps, hand-written files) cannot be checked that
+// way and are only required to have some content.
+static bool cfgYamlComplete(const char *buf, size_t len) {
+    const char *end = buf + len;
+    bool anyContent = false;
+    bool hasFormat = false;
+    bool hasEnd = false;
+    const size_t fmtLen = strlen(kCfgFormatMarker);
+    const size_t endLen = strlen(kCfgEndMarker);
+    for (const char *p = buf; p < end; ) {
+        const char *eol = (const char *)memchr(p, '\n', (size_t)(end - p));
+        if (!eol) eol = end;
+        size_t n = (size_t)(eol - p);
+        if (n > 0 && p[n - 1] == '\r') n--;
+        hasEnd = (n == endLen && !memcmp(p, kCfgEndMarker, endLen)) ? true
+               : (n > 0 ? false : hasEnd);
+        if (n == fmtLen && !memcmp(p, kCfgFormatMarker, fmtLen)) hasFormat = true;
+        for (size_t i = 0; i < n && !anyContent; i++) {
+            if (!isspace((unsigned char)p[i])) anyContent = true;
+        }
+        p = eol + 1;
+    }
+    if (!anyContent) return false;
+    return !hasFormat || hasEnd;
+}
 
 // The three Node Management settings, shared by both indent levels of the
 // parser. cfgToYaml() writes the "nodes:" section with two-space keys, but this
@@ -2015,14 +2112,35 @@ bool cfgImportFromBuf(const char *buf, size_t len, RhinoConfig &cfg) {
     int         wifiNetIdx     = -1;
     bool        gotPubKey      = false;
     bool        gotPrivKey     = false;
+    bool        sawKeyLine     = false;
+    uint8_t     impPub[32]     = {0};
+    uint8_t     impPriv[32]    = {0};
     const char *p              = buf;
     const char *end            = buf + len;
 
+    s_importRestoredKeys = false;
+    s_importWarning[0] = '\0';
+    if (!buf || !cfgYamlComplete(buf, len)) {
+        Serial.println("[cfg] import refused: file is empty or truncated");
+        return false;
+    }
+
     while (p < end) {
-        char   line[128];
+        // Static: long enough for a full ignored_nodes list (64 IDs) without
+        // putting it on the main loop's 8 KB stack.
+        static char line[1024];
         size_t n = 0;
         while (p < end && *p != '\n' && n < sizeof(line) - 1)
             line[n++] = *p++;
+        if (p < end && *p != '\n') {
+            // Overlong line: drop all of it rather than parse a cut-off value
+            // (a half-written node ID) and then the tail as a line of its own.
+            while (p < end && *p != '\n') p++;
+            if (p < end) p++;
+            Serial.printf("[cfg] import: skipped overlong line (> %u bytes)\n",
+                          (unsigned)(sizeof(line) - 1));
+            continue;
+        }
         if (p < end) p++;
         if (n > 0 && line[n-1] == '\r') n--;
         line[n] = '\0';
@@ -2237,7 +2355,8 @@ bool cfgImportFromBuf(const char *buf, size_t len, RhinoConfig &cfg) {
                                 sizeof(CHANNEL_KEYS[0].name_buf), val);
                     CHANNEL_KEYS[chanIdx].name = CHANNEL_KEYS[chanIdx].name_buf;
                 } else if (!strcmp(key, "key")) {
-                    int kl = base64Decode(val, CHANNEL_KEYS[chanIdx].key, 32);
+                    int kl = base64Decode(strncasecmp(val, "base64:", 7) ? val : val + 7,
+                                          CHANNEL_KEYS[chanIdx].key, 32);
                     if (kl > 0) CHANNEL_KEYS[chanIdx].keyLen = (uint8_t)kl;
                 } else if (!strcmp(key, "hash")) {
                     CHANNEL_KEYS[chanIdx].hash = (uint8_t)strtol(val, nullptr, 16);
@@ -2345,11 +2464,11 @@ bool cfgImportFromBuf(const char *buf, size_t len, RhinoConfig &cfg) {
                 // keys before we claim a restore — a half-applied pair would boot
                 // as a mismatched identity and get regenerated anyway.
                 if (!strcmp(key, "publicKey")) {
-                    uint8_t k[32];
-                    if (base64Decode(val, k, 32) == 32) { memcpy(myPubKey, k, 32); gotPubKey = true; }
+                    sawKeyLine = true;
+                    gotPubKey = decodeIdentityKey(val, impPub);
                 } else if (!strcmp(key, "privateKey")) {
-                    uint8_t k[32];
-                    if (base64Decode(val, k, 32) == 32) { memcpy(myPrivKey, k, 32); gotPrivKey = true; }
+                    sawKeyLine = true;
+                    gotPrivKey = decodeIdentityKey(val, impPriv);
                 }
             } else if (!strcmp(section, "config") && !strcmp(subsection, "bluetooth")) {
                 if      (!strcmp(key, "enabled"))  cfg.btEnabled  = (!strcmp(val,"true"));
@@ -2603,6 +2722,15 @@ bool cfgImportFromBuf(const char *buf, size_t len, RhinoConfig &cfg) {
     if (cfg.neighborInfoIntervalS < NEIGHBORINFO_MIN_INTERVAL_S) {
         cfg.neighborInfoIntervalS = NEIGHBORINFO_MIN_INTERVAL_S;
     }
+    // atol() saturates and wraps negatives, so a large or negative file value
+    // lands near 0xFFFFFFFF; clamp to what the announce scheduler can hold.
+    if (cfg.nodeInfoIntervalS     > CFG_BROADCAST_INTERVAL_MAX_S) cfg.nodeInfoIntervalS     = CFG_BROADCAST_INTERVAL_MAX_S;
+    if (cfg.posIntervalS          > CFG_BROADCAST_INTERVAL_MAX_S) cfg.posIntervalS          = CFG_BROADCAST_INTERVAL_MAX_S;
+    if (cfg.telDeviceIntervalS    > CFG_BROADCAST_INTERVAL_MAX_S) cfg.telDeviceIntervalS    = CFG_BROADCAST_INTERVAL_MAX_S;
+    if (cfg.telEnvIntervalS       > CFG_BROADCAST_INTERVAL_MAX_S) cfg.telEnvIntervalS       = CFG_BROADCAST_INTERVAL_MAX_S;
+    if (cfg.neighborInfoIntervalS > CFG_BROADCAST_INTERVAL_MAX_S) cfg.neighborInfoIntervalS = CFG_BROADCAST_INTERVAL_MAX_S;
+    // Same 0..3600 s range the web form and the legacy migration allow.
+    if (cfg.gpsPollIntervalS > 3600UL) cfg.gpsPollIntervalS = 3600UL;
 #if !HAS_ENV_SENSOR_TELEMETRY
     cfg.telEnvEnabled = false;
 #endif
@@ -2641,41 +2769,128 @@ bool cfgImportFromBuf(const char *buf, size_t len, RhinoConfig &cfg) {
     // Re-derive freq/BW/SF/CR from region + preset; any imported loraFreq is
     // advisory and must not override the name-hashed channel slot.
     applyPresetParams(cfg);
-    // Both halves or neither: the caller persists the pair only on a full restore.
-    s_importRestoredKeys = (gotPubKey && gotPrivKey);
+    // Both halves or neither, and only a pair that really belongs together: the
+    // caller persists the pair to NVS, so a garbage or mismatched one would
+    // replace the node identity for good. On failure myPubKey/myPrivKey keep
+    // the existing identity.
+    if (gotPubKey && gotPrivKey && importedKeypairValid(impPub, impPriv)) {
+        memcpy(myPubKey, impPub, 32);
+        memcpy(myPrivKey, impPriv, 32);
+        s_importRestoredKeys = true;
+    } else if (sawKeyLine) {
+        snprintf(s_importWarning, sizeof(s_importWarning), "%s",
+                 "Identity keys in file invalid or incomplete; kept existing identity");
+        Serial.printf("[cfg] import: %s\n", s_importWarning);
+    }
+    memset(impPriv, 0, sizeof(impPriv));
     return true;
 }
 
 bool cfgImportRestoredKeys() { return s_importRestoredKeys; }
 
 // ── Export to SD ──────────────────────────────────────────────
+// The existing file is the user's only backup (identity key, PSKs), so it is
+// replaced only once the new one is fully on the card: write a temp file, check
+// it, move the old one aside, rename the temp into place, then drop the old one.
 bool cfgExport(const RhinoConfig &cfg) {
     if (!ensureSdMounted()) return false;
-    storageFs().mkdir("/camillia");
-    File f = storageFs().open(kPath, FILE_WRITE);
-    if (!f) return false;
+    fs::FS &fsys = storageFs();
+    fsys.mkdir("/camillia");
+
     String yaml;
+    // Room for any real export up front, so String's silent drop-on-OOM
+    // concatenation cannot leave holes in it.
+    if (!yaml.reserve(8192)) {
+        Serial.println("[cfg] export FAILED: out of memory");
+        return false;
+    }
     cfgToYaml(cfg, yaml);
-    f.print(yaml);
+    String tail = String(kCfgEndMarker) + "\n";
+    if (!yaml.endsWith(tail)) {
+        Serial.println("[cfg] export FAILED: YAML build incomplete (low memory?)");
+        return false;
+    }
+    const size_t len = yaml.length();
+
+    fsys.remove(kTmpPath);
+    File f = fsys.open(kTmpPath, FILE_WRITE);
+    if (!f) {
+        Serial.printf("[cfg] export FAILED: cannot create %s\n", kTmpPath);
+        return false;
+    }
+    const size_t wrote = f.write((const uint8_t *)yaml.c_str(), len);
+    f.flush();
     f.close();
+    bool ok = (wrote == len);
+    if (ok) {
+        File chk = fsys.open(kTmpPath, FILE_READ);
+        ok = chk && (size_t)chk.size() == len;
+        if (chk) chk.close();
+    }
+    if (!ok) {
+        Serial.printf("[cfg] export FAILED: wrote %u of %u bytes\n",
+                      (unsigned)wrote, (unsigned)len);
+        fsys.remove(kTmpPath);
+        return false;
+    }
+
+    const bool hadOld = fsys.exists(kPath);
+    if (hadOld) {
+        fsys.remove(kBakPath);
+        if (!fsys.rename(kPath, kBakPath)) {
+            Serial.println("[cfg] export FAILED: cannot move old config aside");
+            fsys.remove(kTmpPath);
+            return false;
+        }
+    }
+    if (!fsys.rename(kTmpPath, kPath)) {
+        Serial.println("[cfg] export FAILED: cannot rename temp file into place");
+        if (hadOld) fsys.rename(kBakPath, kPath);
+        fsys.remove(kTmpPath);
+        return false;
+    }
+    if (hadOld) fsys.remove(kBakPath);
     Serial.printf("[cfg] exported to %s on %s (%u bytes)\n",
-                  kPath, storageName(), (unsigned)yaml.length());
+                  kPath, storageName(), (unsigned)len);
     return true;
 }
 
 // ── Import from SD ────────────────────────────────────────────
 bool cfgImport(RhinoConfig &cfg) {
     if (!ensureSdMounted()) return false;
-    File f = storageFs().open(kPath, FILE_READ);
+    fs::FS &fsys = storageFs();
+    // An export interrupted between its two renames leaves the old file at
+    // kBakPath; it is complete, so fall back to it.
+    const char *path = fsys.exists(kPath) ? kPath : kBakPath;
+    File f = fsys.open(path, FILE_READ);
     if (!f) return false;
-    String content = f.readString();
+    const size_t size = (size_t)f.size();
+    if (size == 0 || size > kCfgImportMaxBytes) {
+        Serial.printf("[cfg] import refused: %s is %u bytes\n", path, (unsigned)size);
+        f.close();
+        return false;
+    }
+    char *content = (char *)malloc(size + 1);
+    if (!content) {
+        f.close();
+        return false;
+    }
+    const size_t got = f.read((uint8_t *)content, size);
     f.close();
-    bool ok = cfgImportFromBuf(content.c_str(), content.length(), cfg);
-    if (ok) Serial.printf("[cfg] imported from %s on %s\n", kPath, storageName());
+    if (got != size) {
+        Serial.printf("[cfg] import refused: read %u of %u bytes\n",
+                      (unsigned)got, (unsigned)size);
+        free(content);
+        return false;
+    }
+    content[size] = '\0';
+    bool ok = cfgImportFromBuf(content, size, cfg);
+    free(content);
+    if (ok) Serial.printf("[cfg] imported from %s on %s\n", path, storageName());
     return ok;
 }
 
 bool cfgSdConfigExists() {
     if (!ensureSdMounted()) return false;
-    return storageFs().exists(kPath);
+    return storageFs().exists(kPath) || storageFs().exists(kBakPath);
 }

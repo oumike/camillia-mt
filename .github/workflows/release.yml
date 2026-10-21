@@ -21,6 +21,11 @@ name: Release
 # sign firmware: anyone able to merge a change to a workflow file can also make
 # a job read that secret. The environment gate is what keeps it out of reach of
 # ordinary workflow runs — do not reference OTA_SIGNING_KEY from any other job.
+#
+# The job also runs only from main (stable and alpha) or the alpha branch (alpha
+# only). That check lives in this file, so it stops mistakes, not someone who
+# edits the file on another branch; the `release` environment's deployment
+# branch policy must allow only those branches for the secret to be safe.
 
 on:
   workflow_dispatch:
@@ -39,6 +44,10 @@ on:
         type: choice
         options: [committed, generate]
         default: committed
+      recreate:
+        description: 'Replace an existing release of this version (re-cut)'
+        type: boolean
+        default: false
 
 # One release at a time. Two concurrent runs would race on the tag, the release
 # commit, and dist/ — and never cancel a run mid-publish.
@@ -55,8 +64,25 @@ jobs:
     runs-on: ubuntu-latest
     environment: release
     timeout-minutes: 120
+    if: >-
+      github.ref == 'refs/heads/main' ||
+      (github.ref == 'refs/heads/alpha' && inputs.channel == 'alpha')
 
     steps:
+      - name: Refuse to sign from any other branch
+        env:
+          REF: ${{ github.ref }}
+          CHANNEL: ${{ inputs.channel }}
+        run: |
+          set -euo pipefail
+          case "$REF:$CHANNEL" in
+            refs/heads/main:*|refs/heads/alpha:alpha) ;;
+            *)
+              echo "::error::Releases are signed only from main (or alphas from alpha), not $REF."
+              exit 1
+              ;;
+          esac
+
       - name: Checkout
         uses: actions/checkout@v4
         with:
@@ -107,6 +133,8 @@ jobs:
           PLATFORMIO_CORE_DIR="$HOME/.platformio-p4" pio pkg install -e p4-amoled-sx1262
 
       - name: Install OTA signing key
+        # Outside the checkout, so no `git add` in the release can ever pick it
+        # up. release.sh finds it through OTA_SIGNING_KEY_FILE.
         env:
           OTA_SIGNING_KEY: ${{ secrets.OTA_SIGNING_KEY }}
         run: |
@@ -116,9 +144,11 @@ jobs:
             echo "::error::Add the contents of ota_signing_key.pem as that secret."
             exit 1
           fi
-          printf '%s\n' "$OTA_SIGNING_KEY" > ota_signing_key.pem
-          chmod 600 ota_signing_key.pem
-          if ! openssl ec -in ota_signing_key.pem -noout 2>/dev/null; then
+          key="$RUNNER_TEMP/ota_signing_key.pem"
+          (umask 077 && printf '%s\n' "$OTA_SIGNING_KEY" > "$key")
+          chmod 600 "$key"
+          echo "OTA_SIGNING_KEY_FILE=$key" >> "$GITHUB_ENV"
+          if ! openssl ec -in "$key" -noout 2>/dev/null; then
             echo "::error::OTA_SIGNING_KEY is not a readable EC private key."
             exit 1
           fi
@@ -131,7 +161,7 @@ jobs:
         # against the committed header catches that here instead.
         run: |
           set -euo pipefail
-          fresh=$(openssl ec -in ota_signing_key.pem -pubout 2>/dev/null \
+          fresh=$(openssl ec -in "$OTA_SIGNING_KEY_FILE" -pubout 2>/dev/null \
                   | grep -v -- '-----' | tr -d '\n')
           baked=$(grep -o '"[A-Za-z0-9+/=]\+' src/ota_signing_pubkey.h \
                   | tr -d '"' | tr -d '\n')
@@ -158,6 +188,7 @@ jobs:
           CHANNEL: ${{ inputs.channel }}
           REQ_VERSION: ${{ inputs.version }}
           NOTES_SOURCE: ${{ inputs.notes }}
+          RECREATE: ${{ inputs.recreate }}
         run: |
           set -euo pipefail
           # --no-clean is safe here and nowhere else: the fullclean exists to
@@ -167,6 +198,7 @@ jobs:
           if [ "$CHANNEL" = "alpha" ]; then args+=(--alpha); fi
           if [ -n "$REQ_VERSION" ]; then args+=(--version "$REQ_VERSION"); fi
           if [ "$NOTES_SOURCE" = "committed" ]; then args+=(--use-committed-notes); fi
+          if [ "$RECREATE" = "true" ]; then args+=(--force); fi
           ./scripts/release.sh "${args[@]}"
           echo "tag=$(cat VERSION)" >> "$GITHUB_OUTPUT"
 
@@ -183,6 +215,6 @@ jobs:
           path: dist/*.elf
           retention-days: 90
 
-      - name: Remove the signing key from the workspace
+      - name: Remove the signing key
         if: always()
-        run: rm -f ota_signing_key.pem
+        run: rm -f "$RUNNER_TEMP/ota_signing_key.pem" ota_signing_key.pem

@@ -3200,6 +3200,25 @@ static void appendAttr(String &html, const char *s) {
     }
 }
 
+// Appends text into a quoted JS string literal inside an inline <script>.
+// '<' and '>' are hex-escaped so the value can never close the script element.
+static void appendJsStr(String &out, const char *s) {
+    if (!s) return;
+    for (const unsigned char *p = (const unsigned char *)s; *p; ++p) {
+        unsigned char c = *p;
+        if (c == '\\' || c == '\'' || c == '"') { out += '\\'; out += (char)c; }
+        else if (c == '<') out += "\\x3C";
+        else if (c == '>') out += "\\x3E";
+        else if (c < 0x20) {
+            char u[7];
+            snprintf(u, sizeof(u), "\\u%04X", (unsigned)c);
+            out += u;
+        } else {
+            out += (char)c;
+        }
+    }
+}
+
 // Config-pane section wrappers. The full page folds each section into a
 // <details> accordion; web config lite renders a plain heading with everything
 // expanded — no folding, no styling, so nothing depends on CSS being there.
@@ -3511,9 +3530,9 @@ static void sendConfigPage(const char *msg = "", bool lite = false) {
             buf += "' data-fav='";
             buf += n->favorite ? "1" : "0";
             buf += "'>";
-            buf += shortName;
+            appendAttr(buf, shortName);
             buf += " -- ";
-            buf += longName;
+            appendAttr(buf, longName);
             buf += "</option>";
             if (buf.length() > 1024) sendChunk(buf);
         }
@@ -3656,9 +3675,9 @@ static void sendConfigPage(const char *msg = "", bool lite = false) {
             buf += "<div class='node-card'>";
             buf += "<div class='node-head'>";
             buf += "<div class='node-title'>";
-            buf += shortName;
+            appendAttr(buf, shortName);
             buf += " -- ";
-            buf += longName;
+            appendAttr(buf, longName);
             // Says why this node sorted to the top of the list, and — more to
             // the point — that it is exempt from eviction and from the
             // keep-favorites clear.
@@ -3698,7 +3717,7 @@ static void sendConfigPage(const char *msg = "", bool lite = false) {
             buf += "<div class='node-meta'><b>ID:</b> ";
             buf += idBuf;
             buf += "  <b>Channel:</b> ";
-            buf += chanName;
+            appendAttr(buf, chanName);
             buf += "  <b>Last Heard:</b> ";
             buf += heardBuf;
             buf += "</div>";
@@ -3735,7 +3754,7 @@ static void sendConfigPage(const char *msg = "", bool lite = false) {
         html += " <a class='logout' href='/logout'>Logout</a>";
     html += "</h2>";
 
-    if (msg[0]) { html += "<p class='msg'>"; html += msg; html += "</p>"; }
+    if (msg[0]) { html += "<p class='msg'>"; appendAttr(html, msg); html += "</p>"; }
 
     // This board freed its chat buffers so Wi-Fi could start, so the device is
     // dropping messages for as long as this page is being served. Say so
@@ -3812,10 +3831,10 @@ static void sendConfigPage(const char *msg = "", bool lite = false) {
     // the byte cap is enforced by copyTruncate in the POST handler.
     html += "<label>Long Name (max 24 bytes)"
             "<input name='long' type='text' maxlength='24' value='";
-    html += gCfg->nodeLong; html += "'></label>";
+    appendAttr(html, gCfg->nodeLong); html += "'></label>";
     html += "<label>Short Name (max 4 chars)"
             "<input name='short' type='text' maxlength='4' value='";
-    html += gCfg->nodeShort; html += "'></label>";
+    appendAttr(html, gCfg->nodeShort); html += "'></label>";
     // Node ID override (developer option — hidden for end users)
     // snprintf(tmp, sizeof(tmp), "%08lx", (unsigned long)gCfg->nodeIdOverride);
     // html += "<label>Node ID Override ...";
@@ -3916,8 +3935,8 @@ static void sendConfigPage(const char *msg = "", bool lite = false) {
             if (strcmp(gCfg->tzDef, kTzOptions[i].posix) == 0) tzMatched = true;
         html += "<label>Timezone<select name='tzdef'>";
         if (!tzMatched && gCfg->tzDef[0]) {
-            html += "<option value='"; html += gCfg->tzDef;
-            html += "' selected>Custom: "; html += gCfg->tzDef; html += "</option>";
+            html += "<option value='"; appendAttr(html, gCfg->tzDef);
+            html += "' selected>Custom: "; appendAttr(html, gCfg->tzDef); html += "</option>";
         }
         for (int i = 0; i < kTzCount; i++) {
             html += "<option value='"; html += kTzOptions[i].posix; html += "'";
@@ -3929,7 +3948,7 @@ static void sendConfigPage(const char *msg = "", bool lite = false) {
     }
     html += "<div class='row2'>";
     html += "<label>NTP Server<input name='ntp_server' type='text' maxlength='47' value='";
-    html += gCfg->ntpServer;
+    appendAttr(html, gCfg->ntpServer);
     html += "' placeholder='pool.ntp.org'></label>";
     html += "</div>";
 
@@ -3940,7 +3959,7 @@ static void sendConfigPage(const char *msg = "", bool lite = false) {
     // address cannot be reached at all.
     html += "<div class='row2'>";
     html += "<label>Elevation Server (LOS)<input name='los_elev' type='text' maxlength='95' value='";
-    html += gCfg->losElevServer;
+    appendAttr(html, gCfg->losElevServer);
     html += "' placeholder='http://host:port'></label>";
     html += "</div>";
     html += "<p class='gps-hint'>Terrain line-of-sight fetches ground elevation from "
@@ -3954,7 +3973,7 @@ static void sendConfigPage(const char *msg = "", bool lite = false) {
     // elevation endpoint above, and a separate service — see docs/WEATHER.md.
     html += "<div class='row2'>";
     html += "<label>Weather Server<input name='weather_srv' type='text' maxlength='95' value='";
-    html += gCfg->weatherServer;
+    appendAttr(html, gCfg->weatherServer);
     html += "' placeholder='http://host:port'></label>";
     html += "</div>";
     html += "<p class='gps-hint'>The weather screen fetches current conditions from "
@@ -4109,7 +4128,7 @@ static void sendConfigPage(const char *msg = "", bool lite = false) {
     // kPresetJs registers its DOMContentLoaded handler, so the first
     // applyPreset() already sees these values.
     html += "<script>document.getElementById('sel-rgn').value='";
-    html += gCfg->region; html += "';"
+    appendJsStr(html, gCfg->region); html += "';"
             "document.getElementById('sel-pst').value='";
     html += gCfg->loraUsePreset
                 ? kPresets[gCfg->modemPreset < PRESET_COUNT ? gCfg->modemPreset : 0].name
@@ -4328,7 +4347,7 @@ static void sendConfigPage(const char *msg = "", bool lite = false) {
     if (gCfg->mqttEnabled) html += " checked";
     html += "> Enable MQTT bridge</label>";
     html += "<label>Broker<input name='mqtt_server' type='text' maxlength='63' value='";
-    html += gCfg->mqttServer;
+    appendAttr(html, gCfg->mqttServer);
     html += "'></label>";
     html += "<div class='row2'>";
     snprintf(tmp, sizeof(tmp), "%u", (unsigned)gCfg->mqttPort);
@@ -4342,13 +4361,13 @@ static void sendConfigPage(const char *msg = "", bool lite = false) {
             "firmware has no TLS client. Channel payloads stay encrypted with "
             "your channel key.</p>";
     html += "<label>Username<input name='mqtt_user' type='text' maxlength='31' value='";
-    html += gCfg->mqttUser;
+    appendAttr(html, gCfg->mqttUser);
     html += "'></label>"
             "<label>Password<input name='mqtt_pass' type='password' maxlength='47' value='";
-    html += gCfg->mqttPass;
+    appendAttr(html, gCfg->mqttPass);
     html += "'></label>";
     html += "<label>Root topic<input name='mqtt_root' type='text' maxlength='47' value='";
-    html += gCfg->mqttRoot;
+    appendAttr(html, gCfg->mqttRoot);
     html += "'></label>";
     html += "<label style='display:flex;align-items:center;gap:.5em'>"
             "<input type='checkbox' name='mqtt_encrypt' value='1'";
@@ -5446,7 +5465,7 @@ static void sendConfigPage(const char *msg = "", bool lite = false) {
         "At most once every 5 minutes.";
     if (webCfgChatServerResult()[0]) {
         html += "<br>Last attempt: ";
-        html += webCfgChatServerResult();
+        appendAttr(html, webCfgChatServerResult());
     }
     html += "</p>";
 
@@ -7667,6 +7686,10 @@ static void handleGetConfig() {
 }
 
 static void handlePostOnboard() {
+    // Overwrites the WiFi credentials and reboots, so once a network is set up
+    // it needs the same login as /save. First-boot onboarding has nothing to
+    // overwrite and no session to have; isLoggedIn() is always true with auth off.
+    if (!gOnboarding && !isLoggedIn()) { redirect("/login"); return; }
     String ssid = server.arg("ssid");
     String pass = server.arg("pass");
     ssid.trim();
@@ -7709,7 +7732,7 @@ static void handlePostOnboard() {
     html +=
         "<h2>Saved</h2>"
         "<p>The device is rebooting and will connect to <b>";
-    html += ssid;
+    appendAttr(html, ssid.c_str());
     html +=
         "</b>.</p>"
         "</body></html>";
@@ -7800,8 +7823,10 @@ static void handlePostSave() {
     // Device
     gCfg->deviceRole        = cfgCoerceDeviceRole((uint8_t)server.arg("role").toInt());
     gCfg->rebroadcastMode   = (uint8_t)constrain(server.arg("rebroadcast").toInt(), 0,  4);
-    gCfg->nodeInfoIntervalS = (uint32_t)max((long)60, server.arg("nodeinfo_intv").toInt());
-    gCfg->posIntervalS      = (uint32_t)max((long)60, server.arg("pos_intv").toInt());
+    gCfg->nodeInfoIntervalS = (uint32_t)constrain(server.arg("nodeinfo_intv").toInt(),
+                                                  (long)60, (long)CFG_BROADCAST_INTERVAL_MAX_S);
+    gCfg->posIntervalS      = (uint32_t)constrain(server.arg("pos_intv").toInt(),
+                                                  (long)60, (long)CFG_BROADCAST_INTERVAL_MAX_S);
     if (server.hasArg("gps_poll_s")) {
         gCfg->gpsPollIntervalS = (uint32_t)constrain(server.arg("gps_poll_s").toInt(), 0, 3600);
     } else if (server.hasArg("gps_poll_ms")) {
@@ -8237,12 +8262,14 @@ static void handlePostSave() {
     if (server.hasArg("tel_bcast_mins")) {
         long mins = server.arg("tel_bcast_mins").toInt();
         if (mins < 60L) mins = 60L;
+        if (mins > (long)(CFG_BROADCAST_INTERVAL_MAX_S / 60UL)) mins = (long)(CFG_BROADCAST_INTERVAL_MAX_S / 60UL);
         telemetryIntervalS = (uint32_t)mins * 60UL;
     } else if (server.hasArg("tel_dev_intv")) {
         long sec = server.arg("tel_dev_intv").toInt();
         if (sec < 3600L) sec = 3600L;
         telemetryIntervalS = (uint32_t)sec;
     }
+    if (telemetryIntervalS > CFG_BROADCAST_INTERVAL_MAX_S) telemetryIntervalS = CFG_BROADCAST_INTERVAL_MAX_S;
 
     gCfg->telDeviceEnabled   = server.arg("tel_dev_en").toInt() != 0;
     gCfg->telDeviceIntervalS = telemetryIntervalS;
@@ -8258,6 +8285,7 @@ static void handlePostSave() {
     if (server.hasArg("neighbor_info_mins")) {
         long mins = server.arg("neighbor_info_mins").toInt();
         if (mins < 240L) mins = 240L;
+        if (mins > (long)(CFG_BROADCAST_INTERVAL_MAX_S / 60UL)) mins = (long)(CFG_BROADCAST_INTERVAL_MAX_S / 60UL);
         neighborInfoIntervalS = (uint32_t)mins * 60UL;
     } else if (server.hasArg("neighbor_info_intv")) {
         long sec = server.arg("neighbor_info_intv").toInt();
@@ -8266,6 +8294,9 @@ static void handlePostSave() {
     }
     if (neighborInfoIntervalS < NEIGHBORINFO_MIN_INTERVAL_S) {
         neighborInfoIntervalS = NEIGHBORINFO_MIN_INTERVAL_S;
+    }
+    if (neighborInfoIntervalS > CFG_BROADCAST_INTERVAL_MAX_S) {
+        neighborInfoIntervalS = CFG_BROADCAST_INTERVAL_MAX_S;
     }
     if (server.hasArg("neighbor_info_en")) {
         gCfg->neighborInfoEnabled = server.arg("neighbor_info_en").toInt() != 0;
@@ -9731,6 +9762,9 @@ static bool   importOk  = false;
 static bool   importOverflow = false;
 
 static void handleImportUpload() {
+    // Same gate as handleImportDone, so an unauthenticated upload never
+    // leaves a file armed for a later cookie-bearing POST to apply.
+    if (!isLoggedIn()) { importOk = false; importLen = 0; return; }
     HTTPUpload &upload = server.upload();
     if (upload.status == UPLOAD_FILE_START) {
         importLen = 0;
@@ -9769,13 +9803,13 @@ static void sendImportResult(const char *msg) {
     page = "<!doctype html><meta name='viewport' content='width=device-width,"
            "initial-scale=1'><body style='font-family:sans-serif;background:#12161c;"
            "color:#e6e6e6;padding:1.2em'><p>";
-    page += msg;
+    appendAttr(page, msg);
     page += "</p><p><a href='/' style='color:#6cf'>Back to config</a></p></body>";
     server.send(200, "text/html", page);
 }
 
 static void handleImportDone() {
-    if (!isLoggedIn()) { redirect("/login"); return; }
+    if (!isLoggedIn()) { importOk = false; importLen = 0; redirect("/login"); return; }
     if (!gCfg) { redirect("/"); return; }
     if (importOverflow) {
         sendImportResult("Import failed: file larger than 8 KB.");
@@ -9809,7 +9843,15 @@ static void handleImportDone() {
 
     if (gOnSave) gOnSave();
     scheduleReboot(900);
-    sendImportResult("Import complete. Rebooting now...");
+    // Plain text: both result paths HTML-escape the message when rendering it.
+    const char *warn = cfgImportWarning();
+    if (warn && warn[0]) {
+        char msg[sizeof(gFlashMsg)];
+        snprintf(msg, sizeof(msg), "Import complete. %s. Rebooting now...", warn);
+        sendImportResult(msg);
+    } else {
+        sendImportResult("Import complete. Rebooting now...");
+    }
 }
 
 static void handleGetFavicon() {
@@ -10264,17 +10306,149 @@ static void handlePostFsCopy() {
 // shutting down under an active user.
 static void noteWebRequest() { gLastRequestMs = millis(); }
 
-static void onRoute(const char *uri, HTTPMethod method,
-                    WebServer::THandlerFunction fn) {
-    server.on(uri, method, [fn]() { noteWebRequest(); fn(); });
+// ── Cross-site request / DNS-rebinding guard ──
+// Requests that change state (every POST, plus GET /logout) and the two GETs
+// that hand out secrets (/export, /fs-get) must name this device in Host, and
+// any Origin/Referer the browser sent must point at that same Host. A request
+// with neither Origin nor Referer (curl, scripts) is still accepted, so this
+// never gets in the way of anything but a browser on someone else's page.
+
+// "host[:port]" or "[v6]:port" -> host, lowercased, brackets kept off.
+static String hostOnly(const String &authority) {
+    String h = authority;
+    if (h.startsWith("[")) {
+        int close = h.indexOf(']');
+        h = (close > 0) ? h.substring(1, close) : h.substring(1);
+    } else {
+        int colon = h.indexOf(':');
+        if (colon >= 0) h = h.substring(0, colon);
+    }
+    h.toLowerCase();
+    return h;
 }
 
+static bool isIpLiteralHost(const String &host, bool bracketed) {
+    if (host.isEmpty()) return false;
+    if (bracketed) return true;   // IPv6 literal
+    int dots = 0;
+    for (size_t i = 0; i < host.length(); i++) {
+        char c = host[i];
+        if (c == '.') dots++;
+        else if (c < '0' || c > '9') return false;
+    }
+    return dots == 3;
+}
+
+// The device's own name, bare or under whatever DNS suffix the local router
+// hands out (.local, .lan, .fritz.box, ...). The leftmost label must equal the
+// device's MAC-derived hostname exactly, so a rebinding attacker would need to
+// know it; the Origin/Referer check still applies on top.
+static bool hostMatchesDeviceName(const String &host, const char *name) {
+    if (!name || !name[0]) return false;
+    String n = name;
+    n.toLowerCase();
+    if (host == n) return true;
+    return host.startsWith(n) && host.length() > n.length() + 1 &&
+           host[n.length()] == '.';
+}
+
+static bool hostHeaderAllowed() {
+    String raw = server.hostHeader();
+    raw.trim();
+    if (raw.isEmpty()) return true;   // HTTP/1.0 client: nothing to rebind
+    const bool bracketed = raw.startsWith("[");
+    String host = hostOnly(raw);
+    if (host.endsWith(".") && !bracketed) host.remove(host.length() - 1);
+    if (isIpLiteralHost(host, bracketed)) return true;
+    if (host == "localhost") return true;
+    if (hostMatchesDeviceName(host, WiFi.getHostname())) return true;
+    if (gApMode && hostMatchesDeviceName(host, WiFi.softAPgetHostname())) return true;
+    return false;
+}
+
+// Origin "scheme://authority" or Referer "scheme://authority/path..." must
+// carry the same authority as Host. "null" (sandboxed frames, opaque
+// redirects) is a cross-site source and is refused.
+static bool sourceMatchesHost(const String &src) {
+    int scheme = src.indexOf("://");
+    if (scheme < 0) return false;
+    String authority = src.substring(scheme + 3);
+    int end = authority.length();
+    for (const char *stop = "/?#"; *stop; stop++) {
+        int at = authority.indexOf(*stop);
+        if (at >= 0 && at < end) end = at;
+    }
+    authority = authority.substring(0, end);
+    int at = authority.lastIndexOf('@');
+    if (at >= 0) authority = authority.substring(at + 1);
+    return authority.equalsIgnoreCase(server.hostHeader());
+}
+
+static bool originAllowed() {
+    if (server.hasHeader("Origin")) {
+        String origin = server.header("Origin");
+        origin.trim();
+        if (origin.length()) return sourceMatchesHost(origin);
+    }
+    if (server.hasHeader("Referer")) {
+        String referer = server.header("Referer");
+        referer.trim();
+        if (referer.length()) return sourceMatchesHost(referer);
+    }
+    return true;
+}
+
+static bool routeNeedsOriginGuard(const char *uri, HTTPMethod method) {
+    if (method != HTTP_GET) return true;
+    return strcmp(uri, "/logout") == 0 || strcmp(uri, "/export") == 0 ||
+           strcmp(uri, "/fs-get") == 0;
+}
+
+static bool requestPassesOriginGuard(const char *uri, HTTPMethod method) {
+    if (!routeNeedsOriginGuard(uri, method)) return true;
+    if (!hostHeaderAllowed()) {
+        Serial.printf("[web] refused %s: Host '%s'\n", uri, server.hostHeader().c_str());
+        return false;
+    }
+    // Origin/Referer only for state changes: a cross-site link to /export
+    // is harmless (the browser downloads it, the linking page reads nothing).
+    const bool changesState = method != HTTP_GET || strcmp(uri, "/logout") == 0;
+    if (changesState && !originAllowed()) {
+        Serial.printf("[web] refused %s: cross-origin request\n", uri);
+        return false;
+    }
+    return true;
+}
+
+static void sendOriginRefused() {
+    server.send(403, "text/plain", "Forbidden: cross-site request refused");
+}
+
+static void onRoute(const char *uri, HTTPMethod method,
+                    WebServer::THandlerFunction fn) {
+    server.on(uri, method, [fn, uri, method]() {
+        noteWebRequest();
+        if (!requestPassesOriginGuard(uri, method)) { sendOriginRefused(); return; }
+        fn();
+    });
+}
+
+// The upload callback runs (per chunk) before fn; a refused request never
+// reaches the route's upload handler, and fn then answers 403.
 static void onRoute(const char *uri, HTTPMethod method,
                     WebServer::THandlerFunction fn,
                     WebServer::THandlerFunction upload) {
     server.on(uri, method,
-              [fn]()     { noteWebRequest(); fn(); },
-              [upload]() { noteWebRequest(); upload(); });
+              [fn, uri, method]() {
+                  noteWebRequest();
+                  if (!requestPassesOriginGuard(uri, method)) { sendOriginRefused(); return; }
+                  fn();
+              },
+              [upload, uri, method]() {
+                  noteWebRequest();
+                  if (!requestPassesOriginGuard(uri, method)) return;
+                  upload();
+              });
 }
 
 static void registerNotFound() {
@@ -10512,8 +10686,8 @@ bool webCfgBegin(RhinoConfig *cfg, WebCfgSaveCb onSave,
         gCfg->webCfgPass[sizeof(gCfg->webCfgPass) - 1] = '\0';
     }
 
-    const char *headers[] = {"Cookie"};
-    server.collectHeaders(headers, 1);
+    const char *headers[] = {"Cookie", "Origin", "Referer"};
+    server.collectHeaders(headers, 3);
 
     auto startApMode = [&](const char *modeTag, bool onboarding) {
         gOnboarding = onboarding;

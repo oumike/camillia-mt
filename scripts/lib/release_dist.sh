@@ -212,7 +212,7 @@ dist_main() {
     cd "$repo_root" || exit 1
 
     # The same paths a release signs with.
-    SIGNING_KEY="ota_signing_key.pem"
+    SIGNING_KEY="${OTA_SIGNING_KEY_FILE:-ota_signing_key.pem}"
     PUBKEY_HEADER="src/ota_signing_pubkey.h"
 
     if ! validate_release_targets >/dev/null; then

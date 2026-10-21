@@ -10871,6 +10871,22 @@ static void saveKnownWifiNetworks() {
     }
 }
 
+// Preferences::getBytes() returns 0 for a stored blob longer than maxLen, which
+// is what a newer build leaves behind after a downgrade. Every blob here is
+// append-only, so read it whole and keep the prefix this build understands.
+// Returns the number of bytes placed in buf.
+static size_t prefsGetBytesPrefix(Preferences &p, const char *key, void *buf, size_t maxLen) {
+    const size_t stored = p.getBytesLength(key);
+    if (stored <= maxLen) return p.getBytes(key, buf, maxLen);
+    uint8_t *tmp = (uint8_t *)malloc(stored);
+    if (!tmp) return 0;
+    size_t got = p.getBytes(key, tmp, stored);
+    if (got > maxLen) got = maxLen;
+    memcpy(buf, tmp, got);
+    free(tmp);
+    return got;
+}
+
 static void loadKnownWifiNetworks() {
     s_cfgKnownWifiAddedCount = 0;
     memset(s_cfgKnownWifiAdded, 0, sizeof(s_cfgKnownWifiAdded));
@@ -10883,7 +10899,7 @@ static void loadKnownWifiNetworks() {
     if (!p.isKey(kWifiNetsBlobKey)) { p.end(); return; }
 
     uint8_t buf[sizeof(WifiNetsBlobHeader) + sizeof(s_cfgKnownWifiAdded)] = {};
-    const size_t got = p.getBytes(kWifiNetsBlobKey, buf, sizeof(buf));
+    const size_t got = prefsGetBytesPrefix(p, kWifiNetsBlobKey, buf, sizeof(buf));
     p.end();
     if (got < sizeof(WifiNetsBlobHeader)) return;
 
@@ -11350,7 +11366,7 @@ static void loadConfigFromPrefs() {
         s_firstBoot = false;
         uint8_t *buf = s_cfgBlobBuf;
         memset(buf, 0, sizeof(s_cfgBlobBuf));
-        const size_t got = prefs.getBytes(kCfgBlobKey, buf, sizeof(s_cfgBlobBuf));
+        const size_t got = prefsGetBytesPrefix(prefs, kCfgBlobKey, buf, sizeof(s_cfgBlobBuf));
         // Both live outside the blob because they are consulted before config
         // is unpacked; read them here so this path ends up in the same state as
         // the legacy one below.
@@ -11691,7 +11707,7 @@ static void loadChannelsFromPrefs() {
     if (cp.isKey(kChanBlobKey)) {
         ChanBlob &blob = s_chanBlob;
         memset(&blob, 0, sizeof(blob));
-        const size_t got = cp.getBytes(kChanBlobKey, &blob, sizeof(blob));
+        const size_t got = prefsGetBytesPrefix(cp, kChanBlobKey, &blob, sizeof(blob));
         cp.end();
 
         // Parsed by offset from the stored count, not by reading the struct's
@@ -11708,11 +11724,12 @@ static void loadChannelsFromPrefs() {
         const uint8_t *raw = reinterpret_cast<const uint8_t *>(&blob);
         const size_t recOff   = offsetof(ChanBlob, chans);
         const size_t storedN  = blob.count;
-        // Only the channels this build can hold have to be present. getBytes()
-        // truncates at our struct size, so a blob written by a build with *more*
-        // channels arrives cut short — demanding all of its records would reject
-        // it outright and reset every channel, which is the same data loss this
-        // parse exists to prevent, just in the downgrade direction.
+        // Only the channels this build can hold have to be present.
+        // prefsGetBytesPrefix() truncates at our struct size, so a blob written
+        // by a build with *more* channels arrives cut short — demanding all of
+        // its records would reject it outright and reset every channel, which is
+        // the same data loss this parse exists to prevent, just in the downgrade
+        // direction.
         const size_t readN    = (storedN < (size_t)MESH_CHANNELS) ? storedN : (size_t)MESH_CHANNELS;
         const size_t recBytes = storedN * sizeof(ChanBlobRecord);
         if (blob.version != kChanBlobVersion || storedN == 0
@@ -18956,6 +18973,16 @@ static void beaconOfferStore(const MeshPacket &pkt, const MeshBeaconPayload &b, 
     const bool repeat = (slot >= 0);
     uint32_t firstMs = repeat ? s_beaconOffers[slot].firstMs : pkt.rxMs;
     uint16_t hits    = repeat ? s_beaconOffers[slot].hits : 0;
+    // Carried across the move and memset below. A sender running Meshtastic's
+    // FLAG_LEGACY_SPLIT emits the offer and the text as two packets, so a repeat
+    // beacon from that node has no message in it -- clearing the slot outright
+    // would drop text we had already paired to this offer, and the advert would
+    // go blank on the second beacon.
+    char prevMessage[sizeof(s_beaconOffers[0].message)] = {};
+    if (repeat) {
+        utf8util::copyTruncate(prevMessage, sizeof(prevMessage), s_beaconOffers[slot].message);
+    }
+    const bool prevPaired = repeat && s_beaconOffers[slot].textPaired;
     if (slot < 0) {
         if (s_beaconOfferCount < kBeaconOfferMax) slot = s_beaconOfferCount++;
         else slot = kBeaconOfferMax - 1;          // evict the oldest
@@ -18963,15 +18990,6 @@ static void beaconOfferStore(const MeshPacket &pkt, const MeshBeaconPayload &b, 
     // Move to the front so index 0 is always the most recent.
     for (int i = slot; i > 0; i--) s_beaconOffers[i] = s_beaconOffers[i - 1];
     BeaconOffer &o = s_beaconOffers[0];
-
-    // Carried across the memset below. A sender running Meshtastic's
-    // FLAG_LEGACY_SPLIT emits the offer and the text as two packets, so a repeat
-    // beacon from that node has no message in it -- clearing the slot outright
-    // would drop text we had already paired to this offer, and the advert would
-    // go blank on the second beacon.
-    char prevMessage[sizeof(o.message)];
-    utf8util::copyTruncate(prevMessage, sizeof(prevMessage), o.message);
-    const bool prevPaired = repeat && o.textPaired;
 
     memset(&o, 0, sizeof(o));
     o.sender  = pkt.hdr.from;
@@ -21325,11 +21343,16 @@ static void onCfgWifiPassCancelPressed(lv_event_t *e) {
 static void cfgWifiConnectFromPassModal() {
     if (!s_cfgWifiPassInput || !s_cfgWifiPassTargetSsid[0]) return;
 
-    const char *pass = lv_textarea_get_text(s_cfgWifiPassInput);
-    if (!pass) pass = "";
+    // Copied out: the wait below runs LVGL, and Cancel there deletes the
+    // textarea and clears the target SSID.
+    char ssid[sizeof(s_cfgWifiPassTargetSsid)];
+    char pass[sizeof(s_wifiSelectedPass)];
+    snprintf(ssid, sizeof(ssid), "%s", s_cfgWifiPassTargetSsid);
+    const char *typed = lv_textarea_get_text(s_cfgWifiPassInput);
+    snprintf(pass, sizeof(pass), "%s", typed ? typed : "");
 
     if (s_cfgWifiPassStatus) {
-        lv_label_set_text_fmt(s_cfgWifiPassStatus, TR("Connecting to %s..."), s_cfgWifiPassTargetSsid);
+        lv_label_set_text_fmt(s_cfgWifiPassStatus, TR("Connecting to %s..."), ssid);
         lv_timer_handler();
     }
 
@@ -21341,7 +21364,7 @@ static void cfgWifiConnectFromPassModal() {
     }
 
     WiFi.disconnect(false);
-    WiFi.begin(s_cfgWifiPassTargetSsid, pass);
+    WiFi.begin(ssid, pass);
 
     bool connected = false;
     uint32_t startMs = millis();
@@ -21354,25 +21377,28 @@ static void cfgWifiConnectFromPassModal() {
         delay(120);
     }
 
+    // Cancelled (or replaced by another network's prompt) while waiting.
+    if (!s_cfgWifiPassModal || strcmp(s_cfgWifiPassTargetSsid, ssid) != 0) return;
+
     if (connected) {
         s_wifiStaKickMs = 0;
 
-        snprintf(s_cfgStatus, sizeof(s_cfgStatus), TR("WiFi connected: %s"), s_cfgWifiPassTargetSsid);
+        snprintf(s_cfgStatus, sizeof(s_cfgStatus), TR("WiFi connected: %s"), ssid);
         if (s_cfgWifiPickerOnboardingMode) {
             // Onboarding keeps this a runtime override on purpose: the scratch
             // copied below is what onboardingFinalize() folds into s_cfg once
             // the whole flow is confirmed. The network is not the configured one
             // yet, so it needs a temp entry to stay in the picker list.
-            addTempKnownWifi(s_cfgWifiPassTargetSsid, pass);
+            addTempKnownWifi(ssid, pass);
             s_wifiUsingKnownOverride = true;
-            strncpy(s_wifiSelectedSsid, s_cfgWifiPassTargetSsid, sizeof(s_wifiSelectedSsid) - 1);
+            strncpy(s_wifiSelectedSsid, ssid, sizeof(s_wifiSelectedSsid) - 1);
             strncpy(s_wifiSelectedPass, pass, sizeof(s_wifiSelectedPass) - 1);
             utf8util::copyTruncate(s_onboardingWifiSsidScratch,
                                    sizeof(s_onboardingWifiSsidScratch),
-                                   s_cfgWifiPassTargetSsid);
+                                   ssid);
             utf8util::copyTruncate(s_onboardingWifiPassScratch,
                                    sizeof(s_onboardingWifiPassScratch),
-                                   pass ? pass : "");
+                                   pass);
             closeCfgWifiPassModal();
             closeCfgWifiScanModal();
             closeCfgWifiPickerModal();
@@ -21393,7 +21419,7 @@ static void cfgWifiConnectFromPassModal() {
         // the remembered list, so adding a second network does not lose the
         // first — and it makes sure the new one is not listed twice, as both the
         // configured entry and a remembered copy.
-        wifiSetConfiguredNetwork(s_cfgWifiPassTargetSsid, pass);
+        wifiSetConfiguredNetwork(ssid, pass);
         s_wifiUsingKnownOverride = false;
         memset(s_wifiSelectedSsid, 0, sizeof(s_wifiSelectedSsid));
         memset(s_wifiSelectedPass, 0, sizeof(s_wifiSelectedPass));
@@ -21415,7 +21441,7 @@ static void cfgWifiConnectFromPassModal() {
     if (s_cfgWifiScanStatus) {
         lv_label_set_text_fmt(s_cfgWifiScanStatus,
                               TR("Connection failed: %s"),
-                              s_cfgWifiPassTargetSsid);
+                              ssid);
     }
     closeCfgWifiPassModal();
     refreshCfgWifiScanModal(false);
@@ -30295,8 +30321,8 @@ static void tracerouteProgressRenderRoutesPayload(const uint8_t *payload, size_t
             uint64_t sz = 0;
             size_t j = pbReadVarint(buf, len, off, sz);
             if (!j) return 0;
-            if (j + sz > len) return 0;
-            return j + sz;
+            if (sz > len - j) return 0;
+            return j + (size_t)sz;
         }
         return 0;
     };
@@ -30333,8 +30359,8 @@ static void tracerouteProgressRenderRoutesPayload(const uint8_t *payload, size_t
             uint64_t sz = 0;
             size_t j = pbReadVarint(payload, payloadLen, i, sz);
             if (!j) break;
-            if (j + sz > payloadLen) break;
-            size_t end = j + sz;
+            if (sz > payloadLen - j) break;
+            size_t end = j + (size_t)sz;
             while (j + 4 <= end) {
                 uint32_t node = (uint32_t)payload[j]
                               | ((uint32_t)payload[j + 1] << 8)
@@ -30371,8 +30397,8 @@ static void tracerouteProgressRenderRoutesPayload(const uint8_t *payload, size_t
             uint64_t sz = 0;
             size_t j = pbReadVarint(payload, payloadLen, i, sz);
             if (!j) break;
-            if (j + sz > payloadLen) break;
-            const size_t end = j + sz;
+            if (sz > payloadLen - j) break;
+            const size_t end = j + (size_t)sz;
             while (j < end) {
                 uint64_t v = 0;
                 const size_t k = pbReadVarint(payload, payloadLen, j, v);
@@ -30694,6 +30720,8 @@ static void tracerouteProgressOnResponse(const MeshPacket &pkt) {
     if (!s_tracerouteModal) return;
     if (!s_tracerouteAwaitingRouting && !s_tracerouteAwaitingReply) return;
     if (s_tracerouteNodeId != 0 && pkt.hdr.from != s_tracerouteNodeId) return;
+    if (pkt.hdr.to != s_myNodeId) return;
+    if (s_traceroutePacketId == 0 || pkt.requestId != s_traceroutePacketId) return;
 
     s_tracerouteAwaitingRouting = false;
     s_tracerouteAwaitingReply = false;
@@ -42500,10 +42528,13 @@ static void performCfgAction(int actionId) {
                 refreshHeaderStatus(true);
                 refreshChannelGlow(true);
                 refreshChatView(true);
-                snprintf(s_cfgStatus, sizeof(s_cfgStatus), "%s", TR("Imported OK - rebooting..."));
+                const char *importWarn = cfgImportWarning();
+                const bool hasImportWarn = importWarn && importWarn[0];
+                snprintf(s_cfgStatus, sizeof(s_cfgStatus), "%s",
+                         hasImportWarn ? importWarn : TR("Imported OK - rebooting..."));
                 refreshCfgModal();
                 lv_timer_handler();
-                delay(1000);
+                delay(hasImportWarn ? 4000 : 1000);
                 flushPersistentState();   // settings and transcripts must land before we go
                 ESP.restart();
             } else {
@@ -44797,8 +44828,11 @@ static void onboardingAcceptImport() {
     // restore quietly loses the node's identity.
     persistImportedIdentityKeys("onboarding");
     Serial.println("[onboarding] imported OK - rebooting");
+    const char *importWarn = cfgImportWarning();
+    const bool hasImportWarn = importWarn && importWarn[0];
+    if (hasImportWarn) onboardingSetStatus(importWarn);
     lv_timer_handler();
-    delay(500);
+    delay(hasImportWarn ? 4000 : 500);
     flushPersistentState();   // settings and transcripts must land before we go
     ESP.restart();
 }
@@ -53564,9 +53598,10 @@ static void adminProbeTellSession(uint32_t nodeId, bool authorised) {
 
 // Called from the RX arms. Returns true when the packet belonged to the probe,
 // so the session is not also handed a reply that was never its request.
-static bool adminProbeOnReply(uint32_t requestId, const uint8_t *payload, size_t len,
-                              AdminClient::Transport via) {
+static bool adminProbeOnReply(uint32_t fromNode, uint32_t requestId, const uint8_t *payload,
+                              size_t len, AdminClient::Transport via) {
     if (!s_adminProbe.pendingId || s_adminProbe.pendingId != requestId) return false;
+    if (fromNode != s_adminProbe.pendingNode) return false;
 
     AdminProto::Response r;
     const bool authorised = decodeResponse(payload, len, r) && r.hasPasskey;
@@ -54501,7 +54536,10 @@ static bool processMeshPacket(const MeshPacket &rxPkt) {
     // strength, and reshuffles the node list every time a burst lands. The S&F
     // case below calls this itself for the frames a router really did originate
     // (heartbeats, pings, stats), where hdr.from means what it usually means.
-    if (!(pkt.decrypted && pkt.portnum == STORE_FORWARD_APP)) {
+    if (!(pkt.decrypted && pkt.portnum == STORE_FORWARD_APP)
+        // Nothing vouches for the sender of a packet no key opened, so it may
+        // refresh a node already known but never create (and persist) one.
+        && (pkt.decrypted || Nodes.find(pkt.hdr.from))) {
         Nodes.updateFromPacket(pkt);
     }
     // After the update above, which creates the entry for a first contact.
@@ -54704,12 +54742,12 @@ static bool processMeshPacket(const MeshPacket &rxPkt) {
                     uint64_t sz = 0;
                     size_t j = pbReadVarint(pkt.payload, pkt.payloadLen, i, sz);
                     if (!j) break;
-                    if (j + sz > pkt.payloadLen) break;
+                    if (sz > pkt.payloadLen - j) break;
                     if (field == 2) {
                         routeReplyPayload = pkt.payload + j;
                         routeReplyLen = (size_t)sz;
                     }
-                    i = j + sz;
+                    i = j + (size_t)sz;
                 } else if (wt == 5) {
                     if (i + 4 > pkt.payloadLen) break;
                     i += 4;
@@ -54833,8 +54871,12 @@ static bool processMeshPacket(const MeshPacket &rxPkt) {
             // via_mqtt is flags bit 4 (see MeshHdr), not a member.
             const AdminClient::Transport via = (pkt.hdr.flags & 0x10)
                 ? AdminClient::TRANSPORT_MQTT : AdminClient::TRANSPORT_RF;
-            if (pkt.requestId && addressedToMe
-                && !adminProbeOnReply(pkt.requestId, pkt.payload, pkt.payloadLen, via)) {
+            // Only a PKI reply from the node asked: the request id and `from`
+            // are cleartext, and a channel-key packet can claim any sender.
+            if (pkt.requestId && addressedToMe && pkt.chanIdx == -2
+                && !adminProbeOnReply(pkt.hdr.from, pkt.requestId, pkt.payload,
+                                      pkt.payloadLen, via)
+                && s_adminSession.isOpen() && s_adminSession.nodeId() == pkt.hdr.from) {
                 s_adminSession.onAdminReply(pkt.requestId, pkt.payload, pkt.payloadLen,
                                             via, millis());
             }
@@ -55173,7 +55215,9 @@ static void mqttDownlinkInject(const MeshHdr &hdrIn, const uint8_t *cipherIn,
 
 static uint32_t announceIntervalMs(uint32_t intervalS) {
     if (intervalS == 0) return 0;
-    if (intervalS >= (0xFFFFFFFFUL / 1000UL)) return 0xFFFFFFFFUL;
+    // announceDue() compares as a signed difference, so a deadline more than
+    // 2^31 ms ahead would read as already passed.
+    if (intervalS >= (0x7FFFFFFFUL / 1000UL)) return 0x7FFFFFFFUL;
     uint32_t ms = intervalS * 1000UL;
     return (ms < 1000UL) ? 1000UL : ms;
 }
@@ -55223,6 +55267,7 @@ static void scheduleAnnounceNext(uint32_t &nextMs, uint8_t &fails,
         return;
     }
     nextMs = nowMs + intervalMs;
+    if (nextMs == 0) nextMs = 1;   // 0 means "due now" to announceDue()
 }
 
 // Exponential backoff, capped both by a hard ceiling and by the announce's own
@@ -58441,6 +58486,92 @@ static void buildUi() {
     lv_scr_load(screen);
 }
 
+// Everything parented to s_rootScreen has to be closed through its own path
+// while the old tree is still alive: once the root is deleted, lvObjValid()
+// cannot tell a stale pointer from a new widget at the same address.
+static void closeAllModalsForRebuild() {
+    // The accent and spell boxes delete asynchronously; the root delete would
+    // free them first and the queued delete would then hit freed memory.
+    if (lvObjValid(s_accentBox)) lv_obj_del(s_accentBox);
+    s_accentBox = nullptr;
+    accentBoxHide();
+#if HAS_SPELLCHECK
+    if (lvObjValid(s_spellBox)) lv_obj_del(s_spellBox);
+    s_spellBox = nullptr;
+    spellBoxHide();
+#endif
+
+#if HAS_STATE_MAPS
+    closeLegacyMapPrompt();
+#endif
+    closeOtaUpdatePrompt();
+#if HAS_SD_MALWARE_SCAN
+    closeSdScanProgressModal();
+#endif
+#if HAS_ADMIN_TERMINAL
+    closeAdminTerminalModal();
+#endif
+    closeEmojiPicker();
+#if HAS_MESSAGE_ACTIONS
+    closeMsgSenderInfoModal();
+#endif
+    closeTracerouteProgressModal();
+#if HAS_NODE_LOCATE
+    closeNodeLocateModal();
+#endif
+#if HAS_NODE_LOS
+    closeNodeLosModal();
+#endif
+    closeChUtilChartModal();
+    closeSnrRssiChartModal();
+#if FEATURE_DISCOVERY
+    closeDiscoveryPresetModal();
+    closeDiscoveryModal();
+#endif
+    closeBeaconsModal();
+#if HAS_WEATHER
+    closeWeatherModal();
+#endif
+#if FEATURE_MQTT_MONITOR
+    closeMqttConfirmModal();
+    closeMqttSendModal();
+    closeMqttMonitorModal();
+#endif
+
+    closeComposePrompt();
+    closeChannelActionsModal();
+    closeDmDeleteConfirm();
+    closeDmNodePicker();
+    closeDmModal();
+    closeLiveFilterModal();
+    closeLiveToolsModal();
+    closeLiveModal();
+    closeNodesFilterDialog();
+    closeNodesActionMenu();
+    closeNodesModal();
+    closeLegendModal();
+    closeCfgModal();
+    closeCfgWifiDeleteConfirm();
+    closeCfgColorPickerModal();
+    closeAlertSoundModal();
+    closeChatStyleModal();
+    closeThemeModal();
+    closeChatNameModal();
+    closeFontSizeModal();
+    closeSigPolicyModal();
+    closeChanCfgModal();
+#if !defined(DEVICE_TLORA_PAGER_TFT)
+    lvObjDeleteSafe(s_nodeInfoModal);
+#endif
+#if HAS_HOME_DASHBOARD
+    closeHomeDashboard();
+#endif
+
+    // Rows registered for blinking live in the old tree.
+    s_chatBlink.count = 0;
+    s_dmBlink.count = 0;
+}
+
 static void rebuildUiForThemeChange(bool reopenCfg) {
     int preservedChannel = constrain(s_activeChannel, 0, MESH_CHANNELS - 1);
     int preservedCfgSelection = s_cfgSelection;
@@ -58450,16 +58581,7 @@ static void rebuildUiForThemeChange(bool reopenCfg) {
         lv_indev_reset(indev, nullptr);
     }
 
-    closeComposePrompt();
-    closeChannelActionsModal();
-    closeDmModal();
-    closeLiveModal();
-    closeNodesModal();
-    closeLegendModal();
-    closeCfgModal();
-#if HAS_HOME_DASHBOARD
-    closeHomeDashboard();
-#endif
+    closeAllModalsForRebuild();
 
     lvObjDeleteSafe(s_rootScreen);
 
@@ -58524,6 +58646,15 @@ static void processPendingUiRebuild() {
     if (s_screenAsleep) return;
 #endif
     if (!s_uiRebuildPending) return;
+    // These own the screen and end on their own; rebuild once they have gone
+    // rather than tearing them down mid-flow.
+    if (s_onboardingModal) return;
+#if HAS_SLEEP_OVERLAY
+    if (s_tdeckProSleepOverlay) return;
+#endif
+#if HAS_RUNTIME_ORIENTATION && defined(DEVICE_TDISPLAY_P4)
+    if (s_kbLandscapeBackdrop) return;
+#endif
 
     const bool reopenCfg = s_uiRebuildReopenCfg;
     s_uiRebuildPending = false;

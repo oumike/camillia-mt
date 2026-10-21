@@ -9,6 +9,8 @@
 
 #include <stdio.h>
 #include <string.h>
+#include <sys/wait.h>
+#include <unistd.h>
 #include <vector>
 
 using namespace AdminClient;
@@ -309,6 +311,52 @@ static void testConfigResponseNamesItsBlock() {
     s.close();
 }
 
+// A length of 2^64 - 1 wraps j + sz back below the end. On the ESP32's 32-bit
+// size_t, FF FF FF FF 0F does the same.
+static const uint8_t kWrapLen[] = {0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0x01};
+
+// A field claiming more bytes than the reply holds must not render what lies
+// past it in memory.
+static void testFieldLengthWrapDoesNotOverRead() {
+    Fake f; Session s; s.open(1, hooksFor(f));
+    s.submit("info", 1000);
+    uint8_t meta[16] = {0x0A};                                  // firmware_version, WT_LEN
+    memcpy(meta + 1, kWrapLen, sizeof(kWrapLen));
+    uint8_t resp[64];
+    memset(resp, 'A', sizeof(resp) - 1);
+    resp[sizeof(resp) - 1] = 0;
+    const size_t rn = writeBytesField(resp, sizeof(resp), 0, GET_DEVICE_METADATA_RESPONSE,
+                                      meta, 1 + sizeof(kWrapLen));
+    s.onAdminReply(f.sent[0].id, resp, rn, TRANSPORT_RF, 2000);
+    ok(!transcriptHas(s, "AAAA") && !transcriptHas(s, "4141"),
+       "a wrapped field length does not over-read the reply");
+    s.close();
+}
+
+// The same wrap on a config block. Unguarded, its fields are walked against a
+// near-infinite length and the walk faults, so it runs in a child.
+static void testConfigBlockLengthWrapIsRefused() {
+    fflush(stdout);
+    const pid_t pid = fork();
+    if (pid == 0) {
+        Fake f; Session s; s.open(1, hooksFor(f));
+        s.submit("config lora", 1000);
+        uint8_t cfg[40];
+        size_t cn = 0;
+        cfg[cn++] = (uint8_t)((CONFIG_LORA << 3) | WT_LEN);
+        memcpy(cfg + cn, kWrapLen, sizeof(kWrapLen)); cn += sizeof(kWrapLen);
+        const uint8_t inner[] = {0x0A, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x40};  // 2^62
+        memcpy(cfg + cn, inner, sizeof(inner)); cn += sizeof(inner);
+        uint8_t resp[64];
+        const size_t rn = writeBytesField(resp, sizeof(resp), 0, GET_CONFIG_RESPONSE, cfg, cn);
+        s.onAdminReply(f.sent[0].id, resp, rn, TRANSPORT_RF, 2000);
+        _exit(transcriptHas(s, "lora:") ? 1 : 0);
+    }
+    int st = 0;
+    waitpid(pid, &st, 0);
+    ok(WIFEXITED(st) && WEXITSTATUS(st) == 0, "a wrapped config block length is refused");
+}
+
 // The commands that were advertised but not wired. Each asserts it now reaches
 // the radio rather than printing "unknown command".
 static void testPreviouslyUnwiredCommands() {
@@ -412,6 +460,8 @@ int main() {
     testPreviouslyUnwiredCommands();
     testInfoRendersFields();
     testConfigResponseNamesItsBlock();
+    testFieldLengthWrapDoesNotOverRead();
+    testConfigBlockLengthWrapIsRefused();
     testOpenAndHelp();
     testReadSends();
     testAutoPrefersMqttWhenNoRf();

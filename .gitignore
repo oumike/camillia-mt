@@ -25,3 +25,9 @@ src/i18n_builtin.h
 
 # Generated from dict/en.txt by tools/gen_spell_dict.py on every build.
 src/spell_dict_en.h
+
+# Per-checkout PlatformIO core dirs and the file that selects them
+# (scripts/lib/pio_core.sh). Gigabytes of toolchain and a machine-specific path.
+.pio-core/
+.pio-core-p4/
+platformio_local.ini

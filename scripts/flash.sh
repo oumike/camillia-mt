@@ -5,7 +5,10 @@
 # That layout is written at 0x0; an app-only firmware.bin from .pio/build/<env>
 # is NOT compatible with this script.
 #
-# Usage: ./flash.sh [--erase|-E] <firmware.bin> [port]
+# Usage: ./flash.sh [--erase|-E] <firmware.bin | board> [port]
+#   board         A release board name (e.g. tdeck, tdeck-pro, heltec-v4): flashes
+#                 that board's factory image, camillia-mt-<board>-vX.Y.Z.bin, from
+#                 the current directory. Never an -ota.bin or another board's.
 #   --erase, -E   Erase the whole chip before writing.
 # Default port: /dev/ttyUSB0 (Linux) — use /dev/cu.usbmodem* on macOS.
 #
@@ -25,16 +28,45 @@ for arg in "$@"; do
     esac
 done
 
-FIRMWARE=${ARGS[0]:-}
+TARGET=${ARGS[0]:-}
 PORT=${ARGS[1]:-/dev/ttyUSB0}
 
-if [[ -z "$FIRMWARE" ]]; then
-    # Fall back to any matching binary in the current directory
-    FIRMWARE=$(ls camillia-mt-*.bin 2>/dev/null | sort -V | tail -1)
+usage() {
+    echo "Usage: ./flash.sh [--erase|-E] <camillia-mt-<board>-vX.Y.Z.bin | board> [port]" >&2
+}
+
+if [[ -z "$TARGET" ]]; then
+    usage
+    exit 1
 fi
 
-if [[ -z "$FIRMWARE" || ! -f "$FIRMWARE" ]]; then
-    echo "Usage: ./flash.sh [--erase|-E] <camillia-mt-vX.Y.Z.bin> [port]"
+if [[ -f "$TARGET" ]]; then
+    FIRMWARE="$TARGET"
+else
+    # A board name: its factory image only, newest version first.
+    BOARD="$TARGET"
+    [[ "$BOARD" == "heltec-v4" ]] && BOARD="heltec"
+    FIRMWARE=""
+    for f in camillia-mt-"$BOARD"-v*.bin; do
+        [[ -f "$f" ]] || continue
+        case "$f" in *-ota.bin) continue ;; esac
+        [[ "$f" =~ ^camillia-mt-${BOARD}-v[0-9]+\.[0-9]+\.[0-9]+(-alpha\.[0-9]+)?\.bin$ ]] || continue
+        FIRMWARE="$(printf '%s\n%s\n' "$FIRMWARE" "$f" | sed '/^$/d' | sort -V | tail -1)"
+    done
+    if [[ -z "$FIRMWARE" ]]; then
+        echo "No factory image for '$TARGET' here (camillia-mt-${BOARD}-vX.Y.Z.bin)." >&2
+        usage
+        exit 1
+    fi
+fi
+
+# A factory image carries the partition table at 0x8000 (magic AA 50). An
+# app-only image (-ota.bin, firmware.bin) does not, and written at 0x0 it
+# replaces the bootloader and leaves the board unbootable.
+PT_MAGIC="$(od -An -tx1 -j 32768 -N 2 "$FIRMWARE" 2>/dev/null | tr -d ' \n')"
+if [[ "$PT_MAGIC" != "aa50" ]]; then
+    echo "$FIRMWARE is not a merged factory image (no partition table at 0x8000)." >&2
+    echo "Use camillia-mt-<board>-vX.Y.Z.bin, not the -ota.bin or a .pio firmware.bin." >&2
     exit 1
 fi
 

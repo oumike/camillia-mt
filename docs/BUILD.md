@@ -167,6 +167,12 @@ Examples:
 The port argument is optional and defaults to `/dev/ttyUSB0`, so on macOS you
 almost always want to pass it.
 
+Instead of a file name you can give the board name (for example
+`./flash.sh tdeck-pro /dev/cu.usbmodem1101`); `flash.sh` then picks the newest
+`camillia-mt-tdeck-pro-vX.Y.Z.bin` in the current directory. It only ever
+writes a merged factory image: an `-ota.bin` or a `.pio` `firmware.bin` is
+refused, because written at 0x0 it would replace the bootloader.
+
 ### Flash it — Windows (PowerShell)
 
 `flash.sh` is a shell script and does not run on Windows. Run esptool directly —
@@ -205,6 +211,14 @@ board's dedicated **3.3 V UART** connector:
 ```
 
 4. Tap the coprocessor RESET button and reboot the ESP32-P4.
+
+The C6 file is an ESP-Hosted application image, not a merged image: it has no
+bootloader or partition table. The script first reads the C6's own partition
+table, writes the image into its app partition (the factory partition, or
+`ota_0`) and blanks `otadata` so the C6 boots it. The C6's bootloader and
+partition table are left as they are. If the C6 has no valid partition table,
+or the image does not fit, the script stops without writing anything. Do not
+write the file at 0x0 by hand.
 
 The C6 image version must match the ESP-Hosted host libraries in the P4
 toolchain. Do not substitute LilyGO's ESP-AT image; Camillia uses Arduino's
@@ -413,7 +427,8 @@ Optionally, audit it first:
 
 The audit runs in a temporary worktree (your checkout is not touched), posts its
 report as a PR comment, and exits non-zero on a failed build or a blocking
-finding.
+finding. It builds the PR's code, build scripts included, on your machine, so a
+PR from a fork is refused unless you pass `--allow-fork` after reading its diff.
 
 **Releasing** (maintainers) is one PR at a time, from a clean working tree:
 
@@ -429,6 +444,19 @@ commits the notes to `main`, and dispatches the GitHub release workflow, which
 builds, signs and publishes. The notes end with a link to the PR. If a run fails
 after the merge, `--pr <number>` resumes it. `--from-main` releases `main`
 without a PR, for emergencies.
+
+Releases are cut from `main` (alphas from `main` or `alpha`); the release
+workflow refuses to sign from any other branch. Re-cutting a version that is
+already tagged replaces its published release, so the script asks first, and
+an unattended run needs `--force`. The old release and tag are only removed
+once the new images are built, signed and verified.
+
+`--build-local` builds, signs and publishes from your machine instead. It needs
+a clean working tree and the release signing key, `ota_signing_key.pem` (or
+the file named by `OTA_SIGNING_KEY_FILE`), which must match the committed
+`src/ota_signing_pubkey.h`. A missing or different key is an error.
+`--new-signing-key` overrides that to create or rotate the key on purpose;
+every device in the field then needs a USB reflash to take later updates.
 
 **Builds without a release.** To get release-style images without releasing
 anything, build them into `dist/` on your machine. Use this for another
@@ -457,7 +485,8 @@ or talks to GitHub. Each run replaces `dist/`. Besides the images, it writes
   a `-` as an alpha, and a device on the Auto release channel then follows the
   alpha track. A `+` build stays on stable and is offered the next release as
   usual.
-- **Signing.** If `ota_signing_key.pem` is present, the OTA images are signed,
+- **Signing.** If `ota_signing_key.pem` (or the file named by
+  `OTA_SIGNING_KEY_FILE`) is present, the OTA images are signed,
   after checking that the key matches `src/ota_signing_pubkey.h`. Without the
   key they are left unsigned, with no `.sig` files. A build is refused if
   `src/ota_signing_pubkey.h` has been edited, because devices running it would

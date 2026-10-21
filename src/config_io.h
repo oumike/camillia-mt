@@ -1214,13 +1214,25 @@ uint32_t cfgOtaAutoUpdatePeriodMs(uint8_t period);
 void cfgToYaml(const RhinoConfig &cfg, String &out);
 
 // Parse YAML from an in-memory buffer. Updates CHANNEL_KEYS[] and fills cfg.
-// Returns true on success.
+// Returns true on success. Returns false, applying nothing, for a buffer with no
+// content or for a file that carries the export-format marker but lacks the
+// end marker cfgToYaml() writes last (a truncated export).
 bool cfgImportFromBuf(const char *buf, size_t len, RhinoConfig &cfg);
 
 // True when the last import restored a complete identity keypair into
 // myPubKey/myPrivKey. The parser only touches RAM, so the caller must write
 // them to NVS for the identity to survive the reboot that follows an import.
 bool cfgImportRestoredKeys();
+
+// Non-fatal problem found by the last cfgImportFromBuf(), e.g. an identity
+// keypair that failed validation and was not applied (the existing identity is
+// kept). nullptr when there was none. Valid until the next import.
+const char *cfgImportWarning();
+
+// Longest broadcast/announce interval an import may set, in seconds. Anything
+// at or above 2^31 ms wraps the announce scheduler's signed due test, so keep
+// intervalS * 1000 below INT32_MAX (just under 24.86 days).
+#define CFG_BROADCAST_INTERVAL_MAX_S 2147483UL
 
 // Mount the configured storage backend. SPI-SD boards initialize their bus in
 // this path; SD_MMC, software-SPI and internal-flash boards use storageBegin().
@@ -1260,11 +1272,14 @@ struct SdProbeStatus {
 };
 void sdGetProbeStatus(SdProbeStatus &out);
 
-// Write /camillia/config.yaml. Returns true on success.
+// Write /camillia/config.yaml via a temp file renamed over the old one, so a
+// failed write leaves the previous backup intact. Returns true only when every
+// byte was written and the file is in place.
 bool cfgExport(const RhinoConfig &cfg);
 
 // Read /camillia/config.yaml.
-// Updates CHANNEL_KEYS[] and fills cfg. Returns true on success.
+// Updates CHANNEL_KEYS[] and fills cfg. Returns true on success; false for a
+// missing, empty, oversized or truncated file (nothing is applied then).
 bool cfgImport(RhinoConfig &cfg);
 
 // Returns true if /camillia/config.yaml is present on the configured storage.

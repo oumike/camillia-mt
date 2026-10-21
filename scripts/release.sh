@@ -420,14 +420,17 @@ AUDIT=false
 SKIP_BUILDS=false
 DIST_ONLY=false
 ONLY_ARG=""
+NEW_SIGNING_KEY=false
+FORCE=false
+ALLOW_FORK=false
 while [[ $# -gt 0 ]]; do
     case "$1" in
         -h|--help)
             echo "Usage: ./scripts/release.sh [-y|--yes] [--alpha] [--version V] [--no-clean]"
             echo "          [--append-last-notes] [--check-targets] [--notes-only]"
-            echo "          [--use-committed-notes] [--build-local]"
-            echo "          [--pr N] [--dry-run] [--from-main]"
-            echo "       ./scripts/release.sh --audit [--pr N] [--skip-builds]"
+            echo "          [--use-committed-notes] [--build-local] [--new-signing-key]"
+            echo "          [--pr N] [--dry-run] [--from-main] [--force]"
+            echo "       ./scripts/release.sh --audit [--pr N] [--skip-builds] [--allow-fork]"
             echo "       ./scripts/release.sh --dist-only [--only ENVS] [--version V] [--no-clean]"
             echo "  Releases one pull request into main. Picks the PR (the"
             echo "  only ready one, or asks which), checks its Build passed,"
@@ -454,6 +457,10 @@ while [[ $# -gt 0 ]]; do
             echo "              build or a blocking finding."
             echo "  --skip-builds"
             echo "              With --audit: review only, no local builds."
+            echo "  --allow-fork"
+            echo "              With --audit: audit a PR from a fork. Refused"
+            echo "              by default, since the audit builds the PR's"
+            echo "              code (and runs its build scripts) on this machine."
             echo "  --dist-only Build the release images into dist/ on this"
             echo "              machine and release nothing: no commit, tag,"
             echo "              push or GitHub release. Builds the working tree"
@@ -505,6 +512,18 @@ while [[ $# -gt 0 ]]; do
             echo "              instead of dispatching the GitHub workflow."
             echo "              Needs the full toolchain and the signing key."
             echo "              The workflow's own run is in this mode."
+            echo "              The key is ota_signing_key.pem, or the file named"
+            echo "              by OTA_SIGNING_KEY_FILE. It must match the"
+            echo "              committed src/ota_signing_pubkey.h."
+            echo "  --new-signing-key"
+            echo "              With --build-local: create a signing key when"
+            echo "              none exists, or sign with one that does not"
+            echo "              match the committed public key. Devices in the"
+            echo "              field then reject every update until reflashed"
+            echo "              over USB. Without it, either case is an error."
+            echo "  --force     Re-cut a version whose tag already exists,"
+            echo "              replacing its published release, without asking."
+            echo "              Without it the run asks, or (unattended) stops."
             echo "  --use-committed-notes"
             echo "              Publish RELEASE_NOTES.md exactly as it stands"
             echo "              instead of generating a summary. This is how an"
@@ -525,6 +544,9 @@ while [[ $# -gt 0 ]]; do
         --audit) AUDIT=true ;;
         --skip-builds) SKIP_BUILDS=true ;;
         --dist-only) DIST_ONLY=true ;;
+        --new-signing-key) NEW_SIGNING_KEY=true ;;
+        --force) FORCE=true ;;
+        --allow-fork) ALLOW_FORK=true ;;
         --only)
             if [[ -z "${2:-}" ]]; then
                 echo "--only requires environments (e.g. --only tdeck,m9)" >&2
@@ -578,6 +600,15 @@ if [[ -n "$ONLY_ARG" && "$DIST_ONLY" != true ]]; then
     echo "--only applies only to --dist-only." >&2
     exit 1
 fi
+if [[ "$ALLOW_FORK" == true && "$AUDIT" != true ]]; then
+    echo "--allow-fork only applies to --audit." >&2
+    exit 1
+fi
+if [[ "$NEW_SIGNING_KEY" == true && "$BUILD_LOCAL" != true \
+      && "${GITHUB_ACTIONS:-}" != "true" ]]; then
+    echo "--new-signing-key only applies to --build-local." >&2
+    exit 1
+fi
 
 # ── Audit: a separate job, not a release ─────────────────────────────────────
 if [[ "$AUDIT" == true ]]; then
@@ -586,8 +617,9 @@ if [[ "$AUDIT" == true ]]; then
           || "$CHECK_TARGETS_ONLY" == true || "$NOTES_ONLY" == true \
           || "$USE_COMMITTED_NOTES" == true || "$BUILD_LOCAL" == true \
           || "$DRY_RUN" == true || "$FROM_MAIN" == true \
-          || "$DIST_ONLY" == true ]]; then
-        echo "--audit takes only --pr N and --skip-builds." >&2
+          || "$DIST_ONLY" == true || "$NEW_SIGNING_KEY" == true \
+          || "$FORCE" == true ]]; then
+        echo "--audit takes only --pr N, --skip-builds and --allow-fork." >&2
         exit 1
     fi
     audit_main
@@ -599,7 +631,8 @@ if [[ "$DIST_ONLY" == true ]]; then
           || "$APPEND_LAST_NOTES" == true || "$CHECK_TARGETS_ONLY" == true \
           || "$NOTES_ONLY" == true || "$USE_COMMITTED_NOTES" == true \
           || "$BUILD_LOCAL" == true || -n "$PR_ARG" || "$DRY_RUN" == true \
-          || "$FROM_MAIN" == true ]]; then
+          || "$FROM_MAIN" == true || "$NEW_SIGNING_KEY" == true \
+          || "$FORCE" == true ]]; then
         echo "--dist-only takes only --only, --version and --no-clean." >&2
         exit 1
     fi
@@ -698,6 +731,16 @@ if [[ "$REMOTE" == true ]]; then
         git checkout -q main
         BRANCH="main"
     fi
+    # release.yml signs only on main (and alphas on the alpha branch). Stop
+    # here rather than after pushing, when the workflow would refuse the run.
+    case "$ALPHA:$BRANCH" in
+        false:main|true:main|true:alpha) ;;
+        *)
+            echo "Releases are cut from main (alphas from main or alpha), not '$BRANCH'." >&2
+            echo "Check out the right branch and rerun." >&2
+            exit 1
+            ;;
+    esac
 
     git fetch -q --tags origin 2>/dev/null || true
     if git rev-parse --verify -q "origin/$BRANCH" >/dev/null 2>&1; then
@@ -721,6 +764,20 @@ validate_release_targets
 if [[ "$CHECK_TARGETS_ONLY" == true ]]; then
     echo "Release target contract OK."
     exit 0
+fi
+
+# --build-local commits only VERSION, the notes and the public-key header, so
+# anything else uncommitted would be built into the images but missing from the
+# release commit. Ship only committed work here too.
+if [[ "$BUILD_LOCAL" == true && "${GITHUB_ACTIONS:-}" != "true" ]]; then
+    DIRTY="$(git status --porcelain || true)"
+    if [[ -n "$DIRTY" ]]; then
+        echo "The working tree has uncommitted changes:" >&2
+        printf '%s\n' "$DIRTY" | sed 's/^/  /' >&2
+        echo "" >&2
+        echo "A release ships only committed work. Commit it (or stash it) and rerun." >&2
+        exit 1
+    fi
 fi
 
 # ── Pick and check the pull request ──────────────────────────────────────────
@@ -909,15 +966,86 @@ else
     fi
 fi
 
+# ── OTA image signing key ─────────────────────────────────────────────────────
+# Signed OTA images let the device verify authenticity over plain HTTP (no TLS).
+# The private key is gitignored and must be backed up; the matching public key is
+# committed in src/ota_signing_pubkey.h and baked into every image. Devices only
+# accept updates signed by that key, so the key here must be its private half.
+# OTA_SIGNING_KEY_FILE points elsewhere (the workflow keeps it outside the
+# checkout); the default is the file at the repo root.
+PUBKEY_HEADER="src/ota_signing_pubkey.h"
+SIGNING_KEY="${OTA_SIGNING_KEY_FILE:-ota_signing_key.pem}"
+if [[ "$REMOTE" != true && "$NOTES_ONLY" != true ]]; then
+    if ! command -v openssl >/dev/null 2>&1; then
+        echo "Error: openssl is required to sign OTA images. Install it and retry." >&2
+        exit 1
+    fi
+    if [[ ! -f "$SIGNING_KEY" ]]; then
+        if [[ "$NEW_SIGNING_KEY" != true ]]; then
+            echo "Error: OTA signing key not found: $SIGNING_KEY" >&2
+            echo "Restore the release key from its backup (or set OTA_SIGNING_KEY_FILE)." >&2
+            echo "Images signed with any other key are rejected by every device in" >&2
+            echo "the field. Only pass --new-signing-key to deliberately start over" >&2
+            echo "with a new key, which needs every device reflashed over USB." >&2
+            exit 1
+        fi
+        echo ""
+        echo "!! --new-signing-key: generating a new ECDSA P-256 key at:"
+        echo "!!     $SIGNING_KEY"
+        echo "!! BACK THIS UP SECURELY and never commit it. Devices running earlier"
+        echo "!! releases will reject images signed with it until reflashed over USB."
+        echo ""
+        (umask 077 && openssl ecparam -name prime256v1 -genkey -noout -out "$SIGNING_KEY")
+        chmod 600 "$SIGNING_KEY"
+    fi
+    KEY_PUB="$(openssl ec -in "$SIGNING_KEY" -pubout 2>/dev/null | grep -v -- '-----' | tr -d '\n' || true)"
+    if [[ -z "$KEY_PUB" ]]; then
+        echo "Error: $SIGNING_KEY is not a readable EC private key." >&2
+        exit 1
+    fi
+    # Compared with the committed header, not the working copy: the release
+    # rewrites that file from the key, and HEAD is what devices were built from.
+    COMMITTED_PUB="$(git show "HEAD:$PUBKEY_HEADER" 2>/dev/null \
+        | grep -oE '"[A-Za-z0-9+/=]+' | tr -d '"' | tr -d '\n' || true)"
+    if [[ "$KEY_PUB" != "$COMMITTED_PUB" ]]; then
+        if [[ "$NEW_SIGNING_KEY" != true ]]; then
+            echo "Error: $SIGNING_KEY does not match the committed $PUBKEY_HEADER." >&2
+            echo "Devices in the field would reject every image signed with it." >&2
+            echo "Use the release signing key. (--new-signing-key overrides this" >&2
+            echo "deliberately, at the cost of reflashing every device over USB.)" >&2
+            exit 1
+        fi
+        echo "!! --new-signing-key: $SIGNING_KEY differs from the committed"
+        echo "!! $PUBKEY_HEADER; this release rotates the OTA signing key."
+    else
+        echo "Signing key matches the committed $PUBKEY_HEADER."
+    fi
+fi
+
 # ── Recreating an existing release? ──────────────────────────────────────────
 # Only decided here — the deletion itself is deferred until the replacement is
-# built and committed (see "Commit, push, and tag"). Tearing down a published
-# release and then failing to build its successor would leave users with no
-# download at all.
+# built, signed, verified and committed (see "Commit, push, and tag"). Tearing
+# down a published release and then failing to build its successor would leave
+# users with no download at all. Replacing a version that already shipped
+# publishes different bytes under the same name, so it has to be asked for.
 RECREATE_RELEASE=false
 if remote_tag_exists "$TAG" || git tag | grep -q "^${TAG}$"; then
     RECREATE_RELEASE=true
-    echo "Tag ${TAG} already exists — it will be replaced once the build succeeds."
+    echo "Tag ${TAG} already exists."
+    if [[ "$FORCE" != true && "$NOTES_ONLY" != true && "$DRY_RUN" != true ]]; then
+        if [[ -t 0 && "$ASSUME_YES" != true ]]; then
+            read -rp "Re-cut ${TAG}, replacing its published release? [y/N]: " ans || ans="n"
+            case "${ans:-n}" in
+                y|Y|yes|Yes) ;;
+                *) echo "Aborted. Nothing was changed." >&2; exit 1 ;;
+            esac
+        else
+            echo "Refusing to replace an existing release unattended. Pass --force" >&2
+            echo "to re-cut ${TAG}, or choose a new version." >&2
+            exit 1
+        fi
+    fi
+    echo "${TAG} will be replaced once the new images are built, signed and verified."
 fi
 
 # ── Failure guard ─────────────────────────────────────────────────────────────
@@ -928,7 +1056,6 @@ fi
 # costs a hand-edited set of release notes.
 # Disarmed once the release commit exists: past that point the new contents are
 # the release, and restoring them would only leave the tree out of step with it.
-PUBKEY_HEADER="src/ota_signing_pubkey.h"
 GUARD_FILES=(VERSION RELEASE_NOTES.md "$PUBKEY_HEADER")
 GUARD_DIR="$(mktemp -d "${TMPDIR:-/tmp}/camillia-release.XXXXXX")"
 GUARD_ARMED=true
@@ -961,7 +1088,7 @@ guard_rollback() {
             cp -p "$GUARD_DIR/$f" "$f"
         fi
     done
-    # If the commit failed after `git add -A`, the index still holds the copies
+    # If the commit failed after staging, the index still holds the copies
     # just rolled back. Re-add so it agrees with what is now on disk.
     if [[ "$GUARD_STAGED" == true ]]; then
         git add -- "${GUARD_FILES[@]}" 2>/dev/null || true
@@ -1353,28 +1480,31 @@ if [[ "$REMOTE" == true ]]; then
     # BRANCH was resolved, and the branch synced with origin, up beside the
     # mode selector — both had to happen before the version was derived.
 
-    # Everything in the tree goes in, exactly as a local release has always done
-    # it: `git add -A` further down is how every "Release vX.Y.Z" commit in this
-    # history came to carry the work it was releasing and not just its notes.
+    # The tree was clean when this run started (checked above), so the only
+    # change is the reviewed RELEASE_NOTES.md. Only that file is staged: the
+    # release commit never sweeps in whatever else happens to be on disk.
     # GitHub then builds that pushed commit.
-    #
-    # Listed before the prompt rather than swept up silently. The local path
-    # never showed this, and it matters more here — what you approve is what the
-    # runner compiles, and by the time a release is public it is too late to
-    # notice that something you meant to include was still only on disk.
-    PENDING="$(git status --porcelain || true)"
+    PENDING="$(git status --porcelain -- "$NOTES_FILE" || true)"
+    STRAY="$(git status --porcelain | grep -v " ${NOTES_FILE}\$" || true)"
 
     echo ""
     echo "Ready to release $TAG on GitHub:"
     echo "  branch:   $BRANCH"
     echo "  channel:  $NOTES_CHANNEL"
     echo "  notes:    $NOTES_FILE, published verbatim"
+    if [[ "$RECREATE_RELEASE" == true ]]; then
+        echo "  replaces: the existing $TAG release and tag"
+    fi
     echo ""
     if [[ -n "$PENDING" ]]; then
         echo "  Committing to $BRANCH, and releasing:"
         printf '%s\n' "$PENDING" | sed 's/^/     /'
     else
         echo "  Nothing to commit — releasing $BRANCH as it already stands."
+    fi
+    if [[ -n "$STRAY" ]]; then
+        echo "  Not committed, so NOT part of the release:"
+        printf '%s\n' "$STRAY" | sed 's/^/     /'
     fi
     echo ""
 
@@ -1386,7 +1516,7 @@ if [[ "$REMOTE" == true ]]; then
         esac
     fi
 
-    git add -A
+    git add -- "$NOTES_FILE"
     if git diff --cached --quiet; then
         echo "Nothing to commit."
     else
@@ -1420,10 +1550,13 @@ if [[ "$REMOTE" == true ]]; then
     PREV_RUN=$(gh run list --workflow=release.yml --limit 1 \
                --json databaseId -q '.[0].databaseId' 2>/dev/null || true)
 
-    gh workflow run release.yml --ref "$BRANCH" \
-        -f channel="$NOTES_CHANNEL" \
-        -f version="$VERSION" \
-        -f notes=committed
+    DISPATCH_ARGS=(-f channel="$NOTES_CHANNEL" -f version="$VERSION" -f notes=committed)
+    if [[ "$RECREATE_RELEASE" == true ]]; then
+        # Confirmed (or --force) above; the workflow's run is unattended and
+        # refuses to replace a release without being told to.
+        DISPATCH_ARGS+=(-f recreate=true)
+    fi
+    gh workflow run release.yml --ref "$BRANCH" "${DISPATCH_ARGS[@]}"
 
     echo ""
     echo "Dispatched $TAG ($NOTES_CHANNEL) on $BRANCH. Waiting for the run..."
@@ -1461,29 +1594,10 @@ if [[ ${#BUILD_ENVS[@]} -eq 0 ]]; then
     exit 1
 fi
 
-# ── OTA image signing key ─────────────────────────────────────────────────────
-# Signed OTA images let the device verify authenticity over plain HTTP (no TLS).
-# The private key is gitignored and must be backed up; the matching public key is
-# baked into the firmware via src/ota_signing_pubkey.h, regenerated here so the
-# build always embeds the key that will sign these images.
-SIGNING_KEY="ota_signing_key.pem"
-# PUBKEY_HEADER is set up with the failure guard, which covers this file too.
-if ! command -v openssl >/dev/null 2>&1; then
-    echo "Error: openssl is required to sign OTA images. Install it and retry." >&2
-    exit 1
-fi
-if [[ ! -f "$SIGNING_KEY" ]]; then
-    echo ""
-    echo "!! No OTA signing key found — generating a new ECDSA P-256 key at:"
-    echo "!!     $SIGNING_KEY"
-    echo "!! BACK THIS UP SECURELY and never commit it. If you lose it, every"
-    echo "!! existing device will reject all future updates (you'd have to reflash"
-    echo "!! over USB to ship a new key)."
-    echo ""
-    openssl ecparam -name prime256v1 -genkey -noout -out "$SIGNING_KEY"
-    chmod 600 "$SIGNING_KEY"
-fi
-# Bake the matching public key into the firmware before building.
+# ── Public signing key header ─────────────────────────────────────────────────
+# The key was checked against the committed header in the preflight, so this
+# rewrites the header with the same contents (or, with --new-signing-key, the
+# new key's). PUBKEY_HEADER is covered by the failure guard.
 {
     echo '// AUTO-GENERATED from ota_signing_key.pem by release.sh. Do not edit by hand.'
     echo '// ECDSA P-256 public key used to verify signed OTA images (see ota_update.cpp).'
@@ -1493,13 +1607,32 @@ fi
     openssl ec -in "$SIGNING_KEY" -pubout 2>/dev/null | sed 's/.*/    "&\\n"/'
     echo '    ;'
 } > "$PUBKEY_HEADER"
-echo "Regenerated $PUBKEY_HEADER from $SIGNING_KEY"
+echo "Regenerated $PUBKEY_HEADER from the signing key"
 
 build_release_envs "${BUILD_ENVS[@]}"
 
+# ── Merge, sign and verify ────────────────────────────────────────────────────
+# Before anything is committed, pushed, tagged or deleted: a failure here rolls
+# back VERSION and the notes and leaves the existing release and tags alone.
+echo ""
+echo "Merging factory images..."
+rm -rf dist
+mkdir -p dist
+merge_sign_assets "$TAG"
+verify_release_assets "$TAG" "$GUARD_DIR"
+
+ls -lh dist/
+
 # ── Commit, push, and tag ─────────────────────────────────────────────────────
+# Only the files a release changes are staged. `git add -A` used to sweep in
+# whatever else was on disk (toolchain directories, local config, the key if
+# .gitignore ever lost it).
 GUARD_STAGED=true
-git add -A
+git add -- "${GUARD_FILES[@]}"
+if git diff --cached --name-only | grep -qiE '\.pem$'; then
+    echo "Error: a .pem file is staged for the release commit. Refusing to commit it." >&2
+    exit 1
+fi
 # [skip ci] for the same reason as the remote path above: this tree has just
 # been built right here, so build.yml compiling it again on the push tells us
 # nothing. It is a no-op on the workflow's own run — pushes made with the
@@ -1523,9 +1656,10 @@ git push
 
 echo "Changes committed and pushed."
 
-# Deferred from the preflight: drop the superseded release and tag only now that
-# the replacement is built, committed and pushed, so the window in which neither
-# exists is as short as it can be.
+# Deferred from the preflight (where re-cutting was confirmed): drop the
+# superseded release and tag only now that the replacement is built, signed,
+# verified, committed and pushed, so the window in which neither exists is as
+# short as it can be.
 if [[ "$RECREATE_RELEASE" == true ]]; then
     delete_existing_release_and_tags "$TAG"
 fi
@@ -1537,16 +1671,6 @@ git tag "$TAG"
 git push origin "$TAG"
 
 echo "Tag $TAG pushed."
-
-# ── Merge factory images ──────────────────────────────────────────────────────
-echo ""
-echo "Merging factory images..."
-rm -rf dist
-mkdir -p dist
-merge_sign_assets "$TAG"
-verify_release_assets "$TAG" "$GUARD_DIR"
-
-ls -lh dist/
 
 
 # ── Create GitHub release ─────────────────────────────────────────────────────

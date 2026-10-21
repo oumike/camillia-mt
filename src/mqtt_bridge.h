@@ -5,8 +5,10 @@
 // packets heard on LoRa as ServiceEnvelopes), and downlink callback delivery via
 // mqttBridgeSetInject() for app-side re-injection onto LoRa/UI handling.
 //
-// The bridge never blocks the main loop: mqttBridgeLoop() drives a small state
-// machine and returns immediately. WiFi mode is left to the caller (main owns
+// The bridge never blocks the main loop for long: mqttBridgeLoop() drives a
+// small state machine, resolves the broker name on a worker task, and bounds
+// the one blocking step left -- the TCP connect and CONNACK wait, a few seconds
+// each, once per backoff interval. WiFi mode is left to the caller (main owns
 // the AP/STA state machine); the bridge only requests an association and uses
 // whatever STA link is up, so it coexists with the AP web-config portal.
 #include <Arduino.h>

@@ -3,6 +3,7 @@
 #include <WiFi.h>
 #include <WiFiClient.h>
 #include <PubSubClient.h>
+#include <atomic>
 
 // ── Tunables ──────────────────────────────────────────────────
 namespace {
@@ -10,8 +11,11 @@ constexpr uint32_t kMinBackoffMs        = 2000;    // first reconnect delay
 constexpr uint32_t kMaxBackoffMs        = 60000;   // cap between reconnect tries
 constexpr int      kMqttBufferBytes     = 512;     // whole MQTT packet (topic+payload)
 // PubSubClient::connect() is blocking and defaults to MQTT_SOCKET_TIMEOUT (15s).
-// A stuck connect therefore freezes the whole UI, so cap it much lower.
-constexpr uint16_t kConnectTimeoutSecs  = 5;
+// A stuck connect therefore freezes the whole UI, so cap it much lower: the TCP
+// handshake and the CONNACK wait each get a few seconds. Name resolution, which
+// neither bounds, is done off the loop (see resolveBroker()).
+constexpr uint16_t kConnectTimeoutSecs  = 3;
+constexpr uint32_t kTcpConnectTimeoutMs = 3000;
 constexpr uint16_t kTlsPort             = 8883;    // legacy; no TLS client here
 constexpr uint16_t kPlainPort           = 1883;
 
@@ -23,6 +27,16 @@ WiFiClient       s_plain;
 PubSubClient     s_mqtt;
 
 uint16_t s_activePort     = 0;    // port actually used (may differ from cfg)
+
+// Broker address, resolved by a one-shot worker. WiFi.hostByName() can wait
+// ~15 s on a dead name, plus up to 16 s more for the process-wide DNS lock
+// (see weather.cpp), so it must never run on the loop.
+enum : uint8_t { DNS_IDLE, DNS_BUSY, DNS_OK, DNS_FAIL };
+std::atomic<uint8_t> s_dnsState{DNS_IDLE};
+char      s_dnsHost[sizeof(RhinoConfig::mqttServer)] = {0};   // owned by the worker while busy
+IPAddress s_dnsResult;
+IPAddress s_brokerIp;
+bool      s_brokerIpValid = false;
 uint32_t s_lastAttemptMs  = 0;
 uint32_t s_backoffMs      = kMinBackoffMs;
 bool     s_configured     = false;   // transport/server pushed into s_mqtt
@@ -176,8 +190,13 @@ void applyTransport() {
         s_activePort = kPlainPort;
     }
 
-    s_mqtt.setServer(s_cfg->mqttServer, s_activePort);
-    // Bound the blocking connect so a bad endpoint can't freeze the UI.
+    // Bound the blocking connect so a bad endpoint can't freeze the UI. The
+    // server is set by address in attemptConnect(), once resolved.
+#if ESP_ARDUINO_VERSION_MAJOR >= 3
+    s_plain.setConnectionTimeout(kTcpConnectTimeoutMs);
+#else
+    s_plain.setTimeout((kTcpConnectTimeoutMs + 999) / 1000);
+#endif
     s_mqtt.setSocketTimeout(kConnectTimeoutSecs);
     s_mqtt.setBufferSize(kMqttBufferBytes);
     s_mqtt.setCallback(onMessage);
@@ -196,8 +215,59 @@ void subscribeRoot() {
     s_mqtt.subscribe(topic);
 }
 
+void dnsTask(void *) {
+    IPAddress ip;
+    const bool ok = WiFi.hostByName(s_dnsHost, ip) == 1 && (uint32_t)ip != 0;
+    s_dnsResult = ip;
+    s_dnsState.store(ok ? DNS_OK : DNS_FAIL, std::memory_order_release);
+    vTaskDelete(nullptr);
+}
+
+void backOff(uint32_t now) {
+    s_backoffMs = s_backoffMs * 2 < kMaxBackoffMs ? s_backoffMs * 2 : kMaxBackoffMs;
+    s_lastAttemptMs = now;
+}
+
+// Non-blocking. True with the broker's address in ip; false while a lookup is
+// running (poll again next loop) or after one failed (backed off).
+bool resolveBroker(uint32_t now, IPAddress &ip) {
+    const char *host = s_cfg->mqttServer;
+    if (ip.fromString(host)) return true;
+    if (s_brokerIpValid) { ip = s_brokerIp; return true; }
+
+    const uint8_t st = s_dnsState.load(std::memory_order_acquire);
+    if (st == DNS_BUSY) return false;
+    if (st == DNS_OK || st == DNS_FAIL) {
+        s_dnsState.store(DNS_IDLE, std::memory_order_relaxed);
+        if (strcmp(s_dnsHost, host) != 0) return false;   // config changed mid-lookup
+        if (st == DNS_OK) {
+            s_brokerIp = s_dnsResult;
+            s_brokerIpValid = true;
+            ip = s_brokerIp;
+            return true;
+        }
+        backOff(now);
+        debugLogMessages("[mqtt] DNS failed for %s, backoff=%lums\n", host,
+                         (unsigned long)s_backoffMs);
+        return false;
+    }
+
+    strncpy(s_dnsHost, host, sizeof(s_dnsHost) - 1);
+    s_dnsHost[sizeof(s_dnsHost) - 1] = '\0';
+    s_dnsState.store(DNS_BUSY, std::memory_order_release);
+    if (xTaskCreate(dnsTask, "mqtt_dns", 3072, nullptr, 1, nullptr) != pdPASS) {
+        s_dnsState.store(DNS_IDLE, std::memory_order_relaxed);
+        backOff(now);
+    }
+    return false;
+}
+
 void attemptConnect(uint32_t now) {
     if (!s_configured) applyTransport();
+
+    IPAddress ip;
+    if (!resolveBroker(now, ip)) return;
+    s_mqtt.setServer(ip, s_activePort);
 
     char clientId[16];
     gatewayId(clientId, sizeof(clientId));
@@ -211,7 +281,9 @@ void attemptConnect(uint32_t now) {
         debugLogMessages("[mqtt] connected %s:%u\n", s_cfg->mqttServer, (unsigned)s_activePort);
         subscribeRoot();
     } else {
-        s_backoffMs = s_backoffMs * 2 < kMaxBackoffMs ? s_backoffMs * 2 : kMaxBackoffMs;
+        // Re-resolve next time: the name may have moved.
+        s_brokerIpValid = false;
+        backOff(now);
         debugLogMessages("[mqtt] connect failed state=%d, backoff=%lums\n",
                          s_mqtt.state(), (unsigned long)s_backoffMs);
     }
@@ -241,6 +313,7 @@ bool mqttBridgeGatewayFor(uint32_t from, uint32_t packetId, uint32_t &gatewayNod
 void mqttBridgeConfigChanged() {
     if (s_mqtt.connected()) s_mqtt.disconnect();
     s_configured = false;      // re-push server/transport on next attempt
+    s_brokerIpValid = false;
     s_backoffMs  = kMinBackoffMs;
     s_lastAttemptMs = 0;
 }
