@@ -86,6 +86,18 @@ static constexpr uint16_t kEnvProbeTimeoutMs = 12;
 #define ENV_WIRE_BUS Wire
 #endif
 
+// Heltec R8: the declared env route IS the touch bus (hw_heltec_r8.h puts both
+// on GPIO17/18, port 0), so it is owned by the touch driver like the touch route
+// below. Treating it as ours meant a failed probe end()ed Wire, and a sweep with
+// no failure rescan after it left touch dead for the session.
+#if defined(DEVICE_HELTEC_R8)
+static_assert(ENV_SDA == TOUCH_SDA && ENV_SCL == TOUCH_SCL && ENV_I2C_PORT == TOUCH_I2C_PORT,
+              "R8 env route is expected to be the shared touch bus");
+#define ENV_DECLARED_SHARED true
+#else
+#define ENV_DECLARED_SHARED false
+#endif
+
 struct EnvRoute {
     TwoWire *wire;
     int sda;
@@ -111,7 +123,7 @@ struct EnvRoute {
 static const EnvRoute kEnvRoutes[] = {
 #if defined(ENV_SDA) && defined(ENV_SCL)
     // Declared by the board profile: tried first.
-    { &ENV_WIRE_BUS, ENV_SDA, ENV_SCL, "env-declared", false },
+    { &ENV_WIRE_BUS, ENV_SDA, ENV_SCL, "env-declared", ENV_DECLARED_SHARED },
 #endif
     // The touch bus is always worth asking, in addition to any declared route.
     // It is already up and known-good (touch works), so probing it costs one
@@ -129,7 +141,8 @@ static const EnvRoute kEnvRoutes[] = {
     { &Wire,  TOUCH_SDA, TOUCH_SCL, "touch-route", true },
 #endif
 #endif
-#if defined(ENV_PROBE_SHOTGUN) && ENV_PROBE_SHOTGUN
+// Never on the R8, where GPIO3/4 are SD_CS and BOARD_BUZZER (see the diag list).
+#if defined(ENV_PROBE_SHOTGUN) && ENV_PROBE_SHOTGUN && !defined(DEVICE_HELTEC_R8)
     { &Wire,  3,  4, "wire0-3/4",   false },
 #endif
 };
@@ -150,7 +163,7 @@ static const EnvRoute kEnvDiagRoutes[] = {
     { &Wire,  TOUCH_SDA, TOUCH_SCL, "touch-route", true },
 #endif
 #if defined(ENV_SDA) && defined(ENV_SCL)
-    { &ENV_WIRE_BUS, ENV_SDA, ENV_SCL, "env-declared", false },
+    { &ENV_WIRE_BUS, ENV_SDA, ENV_SCL, "env-declared", ENV_DECLARED_SHARED },
 #endif
     // 41/42 is no longer probed. GPIO42 is the GPS reset line on the Heltec V4
     // (active LOW), so an "i2c scan all" drove a peripheral's reset pin — the
@@ -160,8 +173,14 @@ static const EnvRoute kEnvDiagRoutes[] = {
     // Both orderings below. Which line is SDA and which is SCL is a real ambiguity on
     // the Heltec V4 — the board JSON says 3/4, the TFT build flags say 4/3 —
     // and a scan that only tries one of them reports "nothing here" either way.
+    //
+    // Not on the R8: there GPIO3 is SD_CS and GPIO4 is BOARD_BUZZER, and
+    // TwoWire::end() never detaches pins from the GPIO matrix, so a scan left
+    // both mirroring the touch bus's SCL/SDA until reboot.
+#if !defined(DEVICE_HELTEC_R8)
     { &Wire,  3,  4, "wire0-3/4",   false },
     { &Wire,  4,  3, "wire0-4/3",   false },
+#endif
 };
 static constexpr size_t kEnvDiagRouteCount =
     sizeof(kEnvDiagRoutes) / sizeof(kEnvDiagRoutes[0]);

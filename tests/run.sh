@@ -7,6 +7,10 @@
 # names in a "// test-deps:" line. Declaring them beats globbing src/: most of
 # this firmware needs Arduino, and a test that quietly pulled in a file which
 # does would fail to link for a reason that has nothing to do with the test.
+#
+# A "// test-cflags:" line adds compiler flags, paths relative to tests/. It is
+# how a module that includes <Arduino.h> or mbedtls builds against the minimal
+# stand-ins in host/.
 set -euo pipefail
 cd "$(dirname "$0")"
 
@@ -28,8 +32,11 @@ for t in test_*.cpp; do
         srcs+=("../src/$d")
     done
 
+    cflags="$(sed -n 's|^// *test-cflags: *||p' "$t" | head -1 || true)"
+
     printf '%-28s ' "$name"
-    if ! "$CXX" -std=c++17 -Wall -Wextra -Werror -O1 -o "$OUT/$name" "${srcs[@]}" 2> "$OUT/$name.log"; then
+    # shellcheck disable=SC2086
+    if ! "$CXX" -std=c++17 -Wall -Wextra -Werror -O1 $cflags -o "$OUT/$name" "${srcs[@]}" 2> "$OUT/$name.log"; then
         echo "BUILD FAILED"
         cat "$OUT/$name.log"
         fail=1

@@ -1015,9 +1015,16 @@ char tloraReadMappedKey() {
 
 TDeckKeyboard *TDeckKeyboard::_instance = nullptr;
 
+#if defined(DEVICE_MESH_DECK)
+static bool     mdKeyboardPresent();
+static uint32_t mdKeyboardAttachSeq();
+#endif
+
 bool keyboardAttached() {
 #if defined(DEVICE_TDISPLAY_P4)
     return sP4KeyboardPresent;
+#elif defined(DEVICE_MESH_DECK)
+    return mdKeyboardPresent();
 #else
     return HAS_KEYBOARD != 0;
 #endif
@@ -1026,6 +1033,8 @@ bool keyboardAttached() {
 uint32_t keyboardAttachSeq() {
 #if defined(DEVICE_TDISPLAY_P4)
     return sP4AttachSeq;
+#elif defined(DEVICE_MESH_DECK)
+    return mdKeyboardAttachSeq();
 #else
     return 0;
 #endif
@@ -1249,6 +1258,79 @@ void meshDeckKeyboardSetLedColor(uint8_t color, bool on) {
 
     for (uint8_t half = 0; half < 2; half++) {
         if (s_mdHalfReady[half]) s_mdP1Led[half] = ledBits;
+    }
+}
+
+// ── Keyboard module presence ────────────────────────────────────────────────
+// The keyboard is a separate module on the frame, and a Mesh Deck can be built
+// without one; the board then runs on touch alone (hw_mesh_deck.h). Each half is
+// looked for at boot and then every kMdHotplugMs with one address-only I2C
+// transaction, so a module fitted or removed while running is picked up without
+// a reboot. keyboardAttached() is true while either half answers.
+//
+// Losing a half takes kMdMissesToDetach misses in a row: one NACK on a bus the
+// touch panel and the expanders share is not worth flipping the UI over.
+static constexpr uint32_t kMdHotplugMs = 1500;
+static constexpr uint8_t  kMdMissesToDetach = 2;
+static uint32_t s_mdNextHotplugMs = 0;
+static uint32_t s_mdAttachSeq = 0;
+static uint8_t  s_mdMisses[2] = {};
+
+static bool mdKeyboardPresent() {
+    return s_mdHalfReady[0] || s_mdHalfReady[1];
+}
+
+static uint32_t mdKeyboardAttachSeq() {
+    return s_mdAttachSeq;
+}
+
+// Forgets every key a half was holding, so nothing is left down across a
+// detach or reported again after a re-attach.
+static void mdClearHalfState(uint8_t half) {
+    memset(s_mdPrev[half], 0, sizeof(s_mdPrev[half]));
+    memset(s_mdStable[half], 0, sizeof(s_mdStable[half]));
+    memset(s_mdRelCand[half], 0, sizeof(s_mdRelCand[half]));
+    memset(s_mdRelCount[half], 0, sizeof(s_mdRelCount[half]));
+}
+
+static bool mdAttachHalf(uint8_t half) {
+    Aw9523 &dev = half ? s_mdKbRight : s_mdKbLeft;
+    const uint8_t addr = half ? KB_RIGHT_I2C_ADDR : KB_LEFT_I2C_ADDR;
+    mdClearHalfState(half);
+    s_mdMisses[half] = 0;
+    s_mdHalfReady[half] = dev.begin(addr, Wire) && mdConfigureHalf(dev, half);
+    return s_mdHalfReady[half];
+}
+
+static void mdHotplugTick(uint32_t now) {
+    if ((int32_t)(now - s_mdNextHotplugMs) < 0) return;
+    s_mdNextHotplugMs = now + kMdHotplugMs;
+
+    const bool wasPresent = mdKeyboardPresent();
+    for (uint8_t half = 0; half < 2; half++) {
+        const uint8_t addr = half ? KB_RIGHT_I2C_ADDR : KB_LEFT_I2C_ADDR;
+        Wire.beginTransmission(addr);
+        const bool there = (Wire.endTransmission() == 0);
+        if (there) {
+            s_mdMisses[half] = 0;
+            if (!s_mdHalfReady[half] && mdAttachHalf(half)) {
+                Serial.printf("[meshdeck-kb] %s half (0x%02X) attached\n",
+                              half ? "right" : "left", addr);
+            }
+        } else if (s_mdHalfReady[half] && ++s_mdMisses[half] >= kMdMissesToDetach) {
+            s_mdHalfReady[half] = false;
+            mdClearHalfState(half);
+            Serial.printf("[meshdeck-kb] %s half (0x%02X) removed\n",
+                          half ? "right" : "left", addr);
+        }
+    }
+    const bool present = mdKeyboardPresent();
+    if (present != wasPresent) {
+        s_mdAttachSeq++;
+        Serial.printf("[meshdeck-kb] keyboard %s; %s\n",
+                      present ? "attached" : "not attached",
+                      present ? "keys active, on-screen keyboard hidden"
+                              : "touch-only input");
     }
 }
 
@@ -1486,15 +1568,13 @@ void TDeckKeyboard::begin() {
     const char *whyR = probeHalf(KB_RIGHT_I2C_ADDR);
 #endif
 
-    const bool okL = s_mdKbLeft.begin(KB_LEFT_I2C_ADDR, Wire)
-                  && mdConfigureHalf(s_mdKbLeft, 0);
-    const bool okR = s_mdKbRight.begin(KB_RIGHT_I2C_ADDR, Wire)
-                  && mdConfigureHalf(s_mdKbRight, 1);
-    s_mdHalfReady[0] = okL;
-    s_mdHalfReady[1] = okR;
-    Serial.printf("[meshdeck-kb] left(0x%02X)=%s right(0x%02X)=%s\n",
+    const bool okL = mdAttachHalf(0);
+    const bool okR = mdAttachHalf(1);
+    s_mdNextHotplugMs = millis() + kMdHotplugMs;
+    Serial.printf("[meshdeck-kb] left(0x%02X)=%s right(0x%02X)=%s -> %s\n",
                   KB_LEFT_I2C_ADDR, okL ? "ok" : "MISSING",
-                  KB_RIGHT_I2C_ADDR, okR ? "ok" : "MISSING");
+                  KB_RIGHT_I2C_ADDR, okR ? "ok" : "MISSING",
+                  (okL || okR) ? "keyboard attached" : "no keyboard, touch-only input");
 #if defined(MESH_DECK_TOUCH_TRACE)
     Serial.printf("[meshdeck-kb] probe: left=%s right=%s\n", whyL, whyR);
 
@@ -1781,6 +1861,8 @@ char TDeckKeyboard::readKey() {
     static constexpr uint32_t kMdScanIntervalMs = 10;
     static uint32_t lastScanMs = 0;
     const uint32_t nowMs = millis();
+    mdHotplugTick(nowMs);
+    if (!mdKeyboardPresent()) return KEY_NONE;
     bool irqActive = false;
 #if (KB_INT_LEFT >= 0)
     irqActive = irqActive || (digitalRead(KB_INT_LEFT) == LOW);

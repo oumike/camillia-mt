@@ -183,7 +183,7 @@ ChannelKey CHANNEL_KEYS[MAX_CHANNELS] = {
 size_t pbReadVarint(const uint8_t *buf, size_t len, size_t off, uint64_t &val) {
     val = 0;
     int shift = 0;
-    while (off < len) {
+    while (off < len && shift < 64) {
         uint8_t b = buf[off++];
         val |= (uint64_t)(b & 0x7F) << shift;
         shift += 7;
@@ -192,13 +192,19 @@ size_t pbReadVarint(const uint8_t *buf, size_t len, size_t off, uint64_t &val) {
     return 0;
 }
 
+// True when a field of sz bytes starting at i lies within buf[0..len). Written
+// as a subtraction: i + sz can wrap, in 64 bits as well as in a 32-bit size_t.
+static inline bool pbFits(size_t i, uint64_t sz, size_t len) {
+    return i <= len && sz <= (uint64_t)(len - i);
+}
+
 static size_t pbSkip(const uint8_t *buf, size_t len, size_t i, int wtype) {
     if (wtype == 0) { uint64_t v; return pbReadVarint(buf, len, i, v); }
-    if (wtype == 1) return i + 8;
-    if (wtype == 5) return i + 4;
+    if (wtype == 1) return pbFits(i, 8, len) ? i + 8 : 0;
+    if (wtype == 5) return pbFits(i, 4, len) ? i + 4 : 0;
     if (wtype == 2) {
         uint64_t sz; size_t j = pbReadVarint(buf, len, i, sz);
-        return j ? j + sz : 0;
+        return (j && pbFits(j, sz, len)) ? j + (size_t)sz : 0;
     }
     return 0;
 }
@@ -240,6 +246,7 @@ bool decodeData(const uint8_t *buf, size_t len,
             }
         } else if (wtype == 2) {
             uint64_t sz; i = pbReadVarint(buf, len, i, sz); if (!i) break;
+            if (!pbFits(i, sz, len)) break;
             if (field == 2) { payPtr = buf + i; payLen = (size_t)sz; }
             else if (field == 10 && env && sz == XEDDSA_SIGNATURE_BYTES && i + sz <= len) {
                 memcpy(env->signature, buf + i, XEDDSA_SIGNATURE_BYTES);
@@ -247,10 +254,11 @@ bool decodeData(const uint8_t *buf, size_t len,
             } else if (field == 10 && env && sz != 0) {
                 env->badSignature = true;
             }
-            i += sz;
+            i += (size_t)sz;
         } else if (wtype == 5) {
             // fixed32 — fields 4=dest, 5=source, 6=request_id, 7=reply_id, 8=emoji
-            if (i + 4 <= len) {
+            if (!pbFits(i, 4, len)) break;
+            {
                 uint32_t v; memcpy(&v, buf + i, 4);
                 if (field == 6) requestId = v;
                 else if (field == 7 && env) env->replyId = v;
@@ -279,7 +287,7 @@ bool decodeUser(const uint8_t *buf, size_t len, UserInfo &out) {
         uint32_t field = tag >> 3, wtype = tag & 7;
         if (wtype == 2) {
             uint64_t sz; i = pbReadVarint(buf, len, i, sz); if (!i) break;
-            if (i + sz > len) break;
+            if (!pbFits(i, sz, len)) break;
             if (field == 2 && sz > 0) {
                 size_t copy = min((size_t)sz, sizeof(out.longName) - 1);
                 while (copy > 0 && ((buf[i + copy] & 0xC0u) == 0x80u)) copy--;
@@ -294,7 +302,7 @@ bool decodeUser(const uint8_t *buf, size_t len, UserInfo &out) {
                 memcpy(out.pubKey, buf + i, 32);
                 out.hasPubKey = true;
             }
-            i += sz;
+            i += (size_t)sz;
         } else { i = pbSkip(buf, len, i, wtype); if (!i) break; }
     }
     return true;
@@ -342,7 +350,8 @@ bool decodeTelemetry(const uint8_t *buf, size_t len, TelemetryInfo &out) {
         if (wtype == 2 && (field == 1 || field == 2)) {
             // DeviceMetrics submessage
             uint64_t sz; i = pbReadVarint(buf, len, i, sz); if (!i) break;
-            const uint8_t *dm = buf + i; size_t dmLen = sz; i += sz;
+            if (!pbFits(i, sz, len)) break;
+            const uint8_t *dm = buf + i; size_t dmLen = (size_t)sz; i += dmLen;
             size_t j = 0;
             while (j < dmLen) {
                 uint64_t t2; j = pbReadVarint(dm, dmLen, j, t2); if (!j) break;
@@ -351,7 +360,8 @@ bool decodeTelemetry(const uint8_t *buf, size_t len, TelemetryInfo &out) {
                     uint64_t v; j = pbReadVarint(dm, dmLen, j, v); if (!j) break;
                     if (f2 == 1) out.battPct = (float)v;
                 } else if (w2 == 5) {
-                    if (j + 4 <= dmLen) {
+                    if (!pbFits(j, 4, dmLen)) break;
+                    {
                         float fv; memcpy(&fv, dm + j, 4);
                         if (f2 == 2) out.voltage = fv;
                         else if (f2 == 3) out.chUtil  = fv;
@@ -364,13 +374,15 @@ bool decodeTelemetry(const uint8_t *buf, size_t len, TelemetryInfo &out) {
         } else if (wtype == 2 && field == 3) {
             // EnvironmentMetrics submessage
             uint64_t sz; i = pbReadVarint(buf, len, i, sz); if (!i) break;
-            const uint8_t *em = buf + i; size_t emLen = sz; i += sz;
+            if (!pbFits(i, sz, len)) break;
+            const uint8_t *em = buf + i; size_t emLen = (size_t)sz; i += emLen;
             size_t j = 0;
             while (j < emLen) {
                 uint64_t t2; j = pbReadVarint(em, emLen, j, t2); if (!j) break;
                 uint32_t f2 = t2 >> 3, w2 = t2 & 7;
                 if (w2 == 5) {
-                    if (j + 4 <= emLen) {
+                    if (!pbFits(j, 4, emLen)) break;
+                    {
                         float fv; memcpy(&fv, em + j, 4);
                         if (f2 == 1) out.temperatureC = fv;
                         else if (f2 == 2) out.humidityPct = fv;
@@ -406,7 +418,7 @@ bool decodeMeshBeacon(const uint8_t *buf, size_t len, MeshBeaconPayload &out) {
             if (wt == 2) {
                 uint64_t sz = 0;
                 size_t k = pbReadVarint(sub, subLen, j, sz);
-                if (!k || k + sz > subLen) return;
+                if (!k || !pbFits(k, sz, subLen)) return;
                 if (f == 2) {                       // psk
                     size_t n = (size_t)sz;
                     if (n > sizeof(out.offerPsk)) n = sizeof(out.offerPsk);
@@ -447,7 +459,7 @@ bool decodeMeshBeacon(const uint8_t *buf, size_t len, MeshBeaconPayload &out) {
         if (wt == 2) {
             uint64_t sz = 0;
             size_t j = pbReadVarint(buf, len, i, sz);
-            if (!j || j + sz > len) break;
+            if (!j || !pbFits(j, sz, len)) break;
             if (field == 1) {                       // message
                 size_t n = (size_t)sz;
                 if (n > sizeof(out.message) - 1) n = sizeof(out.message) - 1;
@@ -533,7 +545,7 @@ bool decodeNeighborInfo(const uint8_t *buf, size_t len, NeighborInfoPayload &out
             uint64_t sz = 0;
             size_t j = pbReadVarint(buf, len, i, sz);
             if (!j) break;
-            if (j + sz > len) break;
+            if (!pbFits(j, sz, len)) break;
 
             if (out.neighborCount < MESH_NEIGHBOR_MAX) {
                 NeighborEdgeInfo edge = {};
@@ -683,6 +695,13 @@ int decryptPacket(const MeshHdr &hdr, const uint8_t *cipher,
             return looksLikeData(plain, plainLen);
         }
         if (keyLen == 0) {
+            // A keyless channel takes cleartext as is, so only a real one the
+            // user set up may: not the virtual DM/LIVE tabs, a disabled slot,
+            // or an empty secondary slot.
+            const ChannelKey &ck = CHANNEL_KEYS[i];
+            const char *nm = ck.name_buf[0] ? ck.name_buf : ck.name;
+            if (i >= MESH_CHANNELS || ck.role == 2) return false;
+            if (ck.role != 0 && !(nm && nm[0])) return false;
             memcpy(plain, cipher, len);
         } else {
             if (!aesCtr(keyPtr, keyLen, hdr.id, hdr.from, cipher, plain, len)) return false;
@@ -1801,7 +1820,7 @@ static bool decodeMeshPacketInner(const uint8_t *buf, size_t len,
             }
         } else if (wtype == 2) {       // length-delimited
             uint64_t sz; i = pbReadVarint(buf, len, i, sz); if (!i) break;
-            if (i + sz > len) break;
+            if (!pbFits(i, sz, len)) break;
             // The two are a oneof, so a well-formed packet carries one of them.
             // Should both appear, the ciphertext wins: it is what went on air.
             if (field == MP_ENCRYPTED) {
@@ -1815,7 +1834,7 @@ static bool decodeMeshPacketInner(const uint8_t *buf, size_t len,
                 cipherLen = (size_t)sz;
                 haveDecoded = true;
             }
-            i += sz;
+            i += (size_t)sz;
         } else {
             i = pbSkip(buf, len, i, wtype);
             if (!i) break;
@@ -1842,14 +1861,14 @@ bool decodeServiceEnvelope(const uint8_t *buf, size_t len,
         uint32_t field = tag >> 3, wtype = tag & 7;
         if (wtype == 2) {
             uint64_t sz; i = pbReadVarint(buf, len, i, sz); if (!i) break;
-            if (i + sz > len) break;
+            if (!pbFits(i, sz, len)) break;
             if (field == 1) { packetPtr = buf + i; packetLen = (size_t)sz; }
             else if (field == 2 && channelName && channelNameCap) {
                 size_t copy = sz < channelNameCap - 1 ? (size_t)sz : channelNameCap - 1;
                 memcpy(channelName, buf + i, copy);
                 channelName[copy] = '\0';
             }
-            i += sz;
+            i += (size_t)sz;
         } else {
             i = pbSkip(buf, len, i, wtype);
             if (!i) break;

@@ -23,6 +23,7 @@
 # a venv of its own, so the factory images come out as the release's do.
 DIST_ESPTOOL_VERSION="4.11.0"
 DIST_TAG=""
+DIST_FILE_TAG=""        # DIST_TAG without +build metadata: the file names' version
 DIST_TMP=""
 DIST_ENVS=()
 DIST_STARTED=false      # past the checks: a failure from here on is a failed build
@@ -211,7 +212,7 @@ dist_main() {
     cd "$repo_root" || exit 1
 
     # The same paths a release signs with.
-    SIGNING_KEY="ota_signing_key.pem"
+    SIGNING_KEY="${OTA_SIGNING_KEY_FILE:-ota_signing_key.pem}"
     PUBKEY_HEADER="src/ota_signing_pubkey.h"
 
     if ! validate_release_targets >/dev/null; then
@@ -231,6 +232,9 @@ dist_main() {
         echo "with -prerelease and/or +build (e.g. 6.0.2+bob)." >&2
         exit 1
     fi
+    # Files are named as on a GitHub release (camillia-mt-<board>-vX.Y.Z.bin).
+    # The +build metadata stays in the firmware and in BUILD-INFO.txt.
+    DIST_FILE_TAG="${DIST_TAG%%+*}"
 
     # Everything that could stop the run, before anything changes.
     if ! PIO="$(audit_find_pio)"; then
@@ -243,6 +247,7 @@ dist_main() {
     echo ""
     echo "Dist-only build: nothing is committed, tagged or published."
     echo "  Version:  $DIST_TAG"
+    echo "  Files:    camillia-mt-<board>-${DIST_FILE_TAG}.bin"
     echo "  Commit:   $(git rev-parse --short HEAD) ($(git rev-parse --abbrev-ref HEAD))"
     if [[ -n "$dirty" ]]; then
         echo "  Uncommitted changes, built in:"
@@ -285,8 +290,8 @@ dist_main() {
     echo "Merging factory images..."
     rm -rf dist
     mkdir -p dist
-    merge_sign_assets "$DIST_TAG" "${DIST_ENVS[@]}"
-    verify_release_assets "$DIST_TAG" "$DIST_TMP" "${DIST_ENVS[@]}"
+    merge_sign_assets "$DIST_FILE_TAG" "${DIST_ENVS[@]}"
+    verify_release_assets "$DIST_FILE_TAG" "$DIST_TMP" "${DIST_ENVS[@]}"
     dist_write_info "$dirty" "${DIST_ENVS[@]}"
 
     echo ""

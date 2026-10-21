@@ -57,6 +57,29 @@ concurrency:
 # pair.
 
 jobs:
+  # Host tests: pure logic (signature policy, admin and chat-server protocols,
+  # spell, wardrive export) compiled with the system compiler. Seconds, not
+  # minutes, and no PlatformIO. clang++ because that is what the tests are run
+  # with locally (macOS); with -Werror a different compiler's warnings would
+  # fail the job for reasons unrelated to the change.
+  host-tests:
+    name: Host tests
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Unit tests (tests/run.sh)
+        env:
+          CXX: clang++
+        run: bash tests/run.sh
+
+      - name: Wardrive utility test
+        run: |
+          g++ -std=c++17 -I src tools/test_wardrive_util.cpp -o "$RUNNER_TEMP/wardrive"
+          "$RUNNER_TEMP/wardrive"
+
   build:
     name: PlatformIO build
     runs-on: ubuntu-latest

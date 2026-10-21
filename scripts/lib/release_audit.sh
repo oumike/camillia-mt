@@ -208,6 +208,16 @@ audit_main() {
         echo "#$PR_NUMBER is already merged; audit an open PR." >&2
         exit 1
     fi
+    # The audit builds the PR, which runs its own platformio.ini extra_scripts
+    # and tools/*.py as this user. A fork's PR is anyone's code.
+    if [[ "$PR_CROSS_REPO" != false && "${ALLOW_FORK:-false}" != true ]]; then
+        echo "#$PR_NUMBER comes from a fork. Auditing it runs its code on this machine." >&2
+        echo "Read the diff first; rerun with --allow-fork to audit it anyway." >&2
+        exit 1
+    fi
+    # Nothing the audit runs gets told where the signing key is. (No copy of
+    # the key goes into the worktree either; only tracked files are there.)
+    unset OTA_SIGNING_KEY OTA_SIGNING_KEY_FILE
     sha7="${PR_HEAD_SHA:0:7}"
     echo "Auditing #$PR_NUMBER \"$PR_TITLE\" at $sha7"
 

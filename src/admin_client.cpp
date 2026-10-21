@@ -527,7 +527,7 @@ void Session::renderMessage(const uint8_t *buf, size_t len,
         } else if (wt == WT_LEN) {
             uint64_t sz = 0;
             const size_t j = readVarint(buf, len, i, sz);
-            if (!j || j + (size_t)sz > len) break;
+            if (!j || sz > len - j) break;
             bytes = buf + j;
             bytesLen = (size_t)sz;
         }
@@ -596,7 +596,7 @@ void Session::renderPayload(const Response &r) {
             if (wt == WT_LEN) {
                 uint64_t sz = 0;
                 const size_t j = readVarint(r.payload, r.payloadLen, i, sz);
-                if (!j || j + (size_t)sz > r.payloadLen) break;
+                if (!j || sz > r.payloadLen - j) break;
                 print(LINE_PLAIN, "  %s:",
                       r.field == GET_CONFIG_RESPONSE ? configBlockName(blk)
                                                      : moduleBlockName(blk));

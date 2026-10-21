@@ -183,9 +183,8 @@ boot log says the radio was not found. The UI is slow at this resolution
 >   older than `0x0308` reject RadioLib's `DriveDiosInSleepMode`, which aborts
 >   `begin()` with `-706` on a perfectly healthy radio.
 >   [`tools/patch_radiolib_lr11x0.py`](../tools/patch_radiolib_lr11x0.py) patches
->   that tolerance into the `m9` env's own RadioLib copy at build time; on a fresh
->   checkout the first build may run before RadioLib is fetched, in which case it
->   warns and lands on the next build.
+>   that tolerance into the `m9` env's own RadioLib copy (pinned to 7.8.1) at
+>   build time, and fails the build if the patch no longer applies.
 
 ## Per-board HAL headers
 
