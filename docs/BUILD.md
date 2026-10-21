@@ -449,6 +449,9 @@ or talks to GitHub. Each run replaces `dist/`. Besides the images, it writes
 - **Version.** On the tagged release commit with nothing changed, the images
   carry `VERSION` (e.g. `v6.0.2`). Otherwise they get build metadata:
   `v6.0.2+<commit>`, with `.custom` added when uncommitted changes went in.
+  The file names leave out the `+` metadata so they match a GitHub release
+  (`camillia-mt-tdeck-v6.0.2.bin`). The full version is still built into the
+  firmware and recorded in `BUILD-INFO.txt`.
   `VERSION` is put back afterwards, even if the build fails or is interrupted.
   Name special builds with `+`, never `-`. The firmware treats anything after
   a `-` as an alpha, and a device on the Auto release channel then follows the

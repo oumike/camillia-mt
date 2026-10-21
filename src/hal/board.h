@@ -220,8 +220,13 @@ DEVICE_TDISPLAY_P4, DEVICE_CROWPANEL_35, DEVICE_CROWPANEL_50"
 // Boards with touch input but no built-in keyboard use tap-first controls,
 // an on-screen keyboard and the roomier 320x240 touch layout. Keep this
 // separate from hardware-specific Heltec paths such as CHSC6X and VEXT.
+//
+// The T-Display P4 and the Mesh Deck are here because their keyboards are
+// optional modules (HAS_OPTIONAL_KEYBOARD): the touch UI is what works with or
+// without one, and keyboardAttached() says at run time which it is.
 #if defined(DEVICE_HELTEC_V4_EXPANSION) || defined(DEVICE_WIO_TRACKER_L2) \
-    || defined(DEVICE_TDISPLAY_P4) || defined(DEVICE_CROWPANEL)
+    || defined(DEVICE_TDISPLAY_P4) || defined(DEVICE_CROWPANEL) \
+    || defined(DEVICE_MESH_DECK)
 #  define UI_TOUCH_ONLY_PROFILE 1
 #else
 #  define UI_TOUCH_ONLY_PROFILE 0
@@ -313,9 +318,13 @@ DEVICE_TDISPLAY_P4, DEVICE_CROWPANEL_35, DEVICE_CROWPANEL_50"
 // BOOT key on GPIO35 (LilyGO t_display_p4_config.h, button::kEsp32p4Boot),
 // is its screen button, with the Wio Tracker L2's rule: a touch UI has no need
 // of a hardware Enter, and a phone-shaped device wants a lock key.
+//
+// The Mesh Deck runs the touch-only UI too, but keeps the screen keys it had
+// with the keyboard profile: BTN_R2 on its expander and the BOOT button on IO38.
 #if (defined(USER_BUTTON_PIN) && (USER_BUTTON_PIN >= 0) && !UI_TOUCH_ONLY_PROFILE) \
     || (defined(DISPLAY_TOGGLE_BUTTON_PIN) && (DISPLAY_TOGGLE_BUTTON_PIN >= 0)) \
-    || defined(DEVICE_WIO_TRACKER_L2) || defined(DEVICE_TDISPLAY_P4)
+    || defined(DEVICE_WIO_TRACKER_L2) || defined(DEVICE_TDISPLAY_P4) \
+    || defined(DEVICE_MESH_DECK)
 #  define HAS_WAKE_BUTTON 1
 #else
 #  define HAS_WAKE_BUTTON 0

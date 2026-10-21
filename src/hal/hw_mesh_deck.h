@@ -237,7 +237,14 @@
 // -1 keeps the scanner on its idle cadence.
 #define KB_INT_LEFT               -1   // C-FPC5 -> expander 0x58 P14, not a GPIO
 #define KB_INT_RIGHT              -1   // C-FPC6 -> expander 0x58 P07, not a GPIO
-#define HAS_KEYBOARD               1
+// The keyboard is a separate module on the frame and a Mesh Deck can be built
+// without it, so the board runs the touch-only UI (on-screen keyboard and all)
+// and treats the keyboard as optional, the same way the T-Display P4 treats its
+// keyboard expansion. keyboard.cpp looks for the two halves at boot and again
+// every few seconds; while either answers, keyboardAttached() is true, the keys
+// type and navigate, and the on-screen keyboard stays out of the way.
+#define HAS_KEYBOARD               0
+#define HAS_OPTIONAL_KEYBOARD      1
 
 // The front buttons are all on expander 0x59, not GPIO. GPIO0 is the one real
 // button pin — wadamesh binds its user button there. Note this is NOT the IO38

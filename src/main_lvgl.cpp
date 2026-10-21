@@ -1344,8 +1344,9 @@ static bool s_nodesSearchBtnFocused = false;
 static int s_nodesTopBtn = kNodesTopSearch;
 // Where the keyboard cursor can walk onto those buttons: every keyboard board,
 // and the T-Display P4, which builds touch-only but has a keyboard expansion
-// (#116: without this its arrows had nowhere to go from an empty list).
-#if !UI_TOUCH_ONLY_PROFILE || defined(DEVICE_TDISPLAY_P4)
+// (#116: without this its arrows had nowhere to go from an empty list). The
+// Mesh Deck likewise: touch-only build, D-pad always, keyboard optional.
+#if !UI_TOUCH_ONLY_PROFILE || defined(DEVICE_TDISPLAY_P4) || defined(DEVICE_MESH_DECK)
 #  define NODES_KEYBOARD_TOP_BUTTONS 1
 #else
 #  define NODES_KEYBOARD_TOP_BUTTONS 0
@@ -2457,7 +2458,8 @@ static inline char remapCardputerUiKey(char k, bool allowScrollRemap) {
 }
 #endif
 
-#if !UI_TOUCH_ONLY_PROFILE
+// Mesh Deck builds touch-only but its keyboard is optional, so it keeps j/k.
+#if !UI_TOUCH_ONLY_PROFILE || defined(DEVICE_MESH_DECK)
 static inline char remapJkUiKey(char k, bool allowScrollRemap) {
     if (!allowScrollRemap) return k;
     // This firmware's convention is j=up, k=down — deliberately NOT vim's
@@ -10664,7 +10666,7 @@ static bool chatScreenIsForeground() {
 
 static bool pollUserButton(uint32_t nowMs) {
 #if defined(USER_BUTTON_PIN) && (USER_BUTTON_PIN >= 0)
-#if !UI_TOUCH_ONLY_PROFILE || defined(DEVICE_TDISPLAY_P4)
+#if !UI_TOUCH_ONLY_PROFILE || defined(DEVICE_TDISPLAY_P4) || defined(DEVICE_MESH_DECK)
     // Off the touch-only boards this button *is* the screen button, so it gets
     // the shared tap/hold rule rather than acting on a bare press edge. Its one
     // extra job -- standing in for Enter on the Config screen -- is checked
@@ -10693,9 +10695,9 @@ static bool pollUserButton(uint32_t nowMs) {
             return screenBtn.stablePressed;
         }
 #else
-        // The T-Display P4 (HAS_WAKE_BUTTON, board.h): lock and unlock only,
-        // exactly as the Wio Tracker L2's Wake button. Config is tapped here,
-        // so it has no use for a hardware Enter.
+        // The T-Display P4 and the Mesh Deck (HAS_WAKE_BUTTON, board.h): lock
+        // and unlock only, exactly as the Wio Tracker L2's Wake button. Config
+        // is tapped here, so it has no use for a hardware Enter.
         (void)uiIsUp;
 #endif
         if (serviceWakeButton(screenBtn, pressed, nowMs, "BOOT button")) return true;
@@ -10782,7 +10784,7 @@ static bool pollUserButton(uint32_t nowMs) {
         }
         return true;
     }
-#endif  // !UI_TOUCH_ONLY_PROFILE || DEVICE_TDISPLAY_P4
+#endif  // !UI_TOUCH_ONLY_PROFILE || DEVICE_TDISPLAY_P4 || DEVICE_MESH_DECK
 #endif  // USER_BUTTON_PIN
 
 #if defined(DISPLAY_TOGGLE_BUTTON_PIN) && (DISPLAY_TOGGLE_BUTTON_PIN >= 0)
@@ -45753,7 +45755,7 @@ static void pumpKeyboardInput() {
         k = remapCardputerUiKey(k, !typingContext);
 #endif
 
-#if !UI_TOUCH_ONLY_PROFILE
+#if !UI_TOUCH_ONLY_PROFILE || defined(DEVICE_MESH_DECK)
         navFromJk = (k == 'j' || k == 'J' || k == 'k' || k == 'K');
         jkDirectionInvert = navFromJk;
         // Enable vim-style j/k navigation for all keyboard-capable builds.
@@ -48260,7 +48262,8 @@ static void pumpKeyboardInput() {
                     continue;
                 }
             }
-#elif defined(DEVICE_TDISPLAY_P4)
+#elif defined(DEVICE_TDISPLAY_P4) || defined(DEVICE_MESH_DECK)
+            // Mesh Deck: the same, driven by its D-pad.
             // The keyboard expansion on the portrait drawer. Touch-only, so the
             // selector block above is not compiled here and the arrows already
             // switch the channel as they move (see the main-nav block below).
@@ -48597,11 +48600,12 @@ static void pumpKeyboardInput() {
                 setChannelDropdownVisible(!isChannelDropdownVisible());
                 refreshChannelGlow(true);
 #endif
-#if UI_TOUCH_ONLY_PROFILE && !defined(DEVICE_TDISPLAY_P4)
+#if UI_TOUCH_ONLY_PROFILE && !defined(DEVICE_TDISPLAY_P4) && !defined(DEVICE_MESH_DECK)
             // Touch-first build: Enter keeps its original new-message behavior.
             // Not the P4: its keyboard expansion has a space bar, so it takes
             // the keyboard builds' keys below -- Space composes, Enter steps
-            // into the messages.
+            // into the messages. Nor the Mesh Deck, whose D-pad SELECT and
+            // optional keyboard keep those same keys.
             } else if (k == KEY_ENTER
                        && s_activeChannel >= 0 && s_activeChannel < MESH_CHANNELS) {
 #if HAS_HOME_DASHBOARD
