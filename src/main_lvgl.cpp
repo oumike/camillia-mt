@@ -624,6 +624,12 @@ static uint32_t  s_cfgBleKbdPaintMs = 0;
 // asynchronously. So the request is retried from the loop until one takes,
 // rather than silently doing nothing and waiting for the user to press Scan.
 static bool      s_cfgBleKbdAutoScanned = false;
+// "Keyboard lost its pairing" prompt. Raised from the loop whenever the module
+// refuses a bonded keyboard that came back without its bond, from any screen.
+static lv_obj_t *s_bleKbdRepairBackdrop = nullptr;
+static lv_obj_t *s_bleKbdRepairModal = nullptr;
+static lv_obj_t *s_bleKbdRepairBtns[2] = {nullptr, nullptr};   // Re-pair, Ignore
+static int       s_bleKbdRepairSel = 1;                         // Ignore by default
 #endif
 static lv_obj_t *s_cfgWifiScanBackdrop = nullptr;
 static lv_obj_t *s_cfgWifiScanModal = nullptr;
@@ -1126,8 +1132,20 @@ enum DestructiveConfirmAction : uint8_t {
     // room, which is exactly the kind of side effect this prompt exists to say
     // out loud before it happens.
     DESTRUCTIVE_CONFIRM_NODE_RESTORE,
+    // A node offered a different public key than the one pinned for it (see
+    // key_pin.h). Three outcomes rather than Y/N: Accept, Reject, or close to
+    // decide later -- so it has its own buttons and keys.
+    DESTRUCTIVE_CONFIRM_KEY_CHANGE,
 };
 static DestructiveConfirmAction s_destructiveConfirmAction = DESTRUCTIVE_CONFIRM_NONE;
+// Key-change review buttons, for the keyboard/D-pad cursor. 0 = Reject (the
+// default, being the safe one), 1 = Accept.
+static lv_obj_t *s_keyReviewBtns[2] = {};
+static int s_keyReviewSel = 0;
+// The full offered key the open review shows. Accept/Reject act on exactly this
+// key: a different one arriving while the dialog is up must not be what a click
+// installs.
+static uint8_t s_keyReviewKey[32] = {};
 // Render window, mirroring the Nodes screen (s_nodesRenderStart and friends).
 // Without it the picker built a button+label for every match — up to MAX_NODES
 // of them — and tore the whole lot down again on each arrow key, which is what
@@ -2643,10 +2661,15 @@ static void onCfgWifiRowPressed(lv_event_t *e);
 static void onCfgWifiBackdropPressed(lv_event_t *e);
 static void applyCfgWifiSelection(int idx);
 #if HAS_BLE_KEYBOARD
-static void openCfgBleKbdModal();
+static void openCfgBleKbdModal(bool autoScan = true);
 static void closeCfgBleKbdModal();
 static void refreshCfgBleKbdModal();
 static void onCfgBleKbdRowPressed(lv_event_t *e);
+static void openBleKbdRepairPrompt();
+static void closeBleKbdRepairPrompt();
+static void bleKbdRepairAccept();
+static void bleKbdRepairIgnore();
+static void bleKbdRepairMoveSelection();
 #endif
 static void openCfgWifiScanModal();
 static void closeCfgWifiScanModal();
@@ -2916,6 +2939,8 @@ static void openMessageActionMenu(uint32_t packetId, uint32_t senderNodeId);
 //
 // A packet we could not decrypt has no Data to check and is not judged here;
 // it is relayed opaquely, as upstream does.
+static void noteKeyConflictRaised(uint32_t nodeId);
+
 static SigPolicyResult checkPacketSignature(const MeshPacket &pkt) {
     if (!pkt.decrypted) return {true, false};
 
@@ -2951,6 +2976,20 @@ static SigPolicyResult checkPacketSignature(const MeshPacket &pkt) {
         // itself: a failure drops the packet, so every one has to be judged.
         in.check = xeddsaVerify(n->pubKey, f, pkt.payload, pkt.payloadLen, pkt.env.signature)
                        ? SIG_CHECK_VERIFIED : SIG_CHECK_FAILED;
+        // A node that was reset or reflashed signs its NodeInfo with its new
+        // key, which fails against the pinned one. The packet is still dropped
+        // below; the key is only parked as a conflict for the user to judge,
+        // noting that it came signed by itself (proof of holding it, not of
+        // being who it says).
+        if (in.check == SIG_CHECK_FAILED && pkt.portnum == NODEINFO_APP) {
+            UserInfo u = {};
+            if (decodeUser(pkt.payload, pkt.payloadLen, u) && u.hasPubKey
+                && memcmp(u.pubKey, n->pubKey, 32) != 0
+                && xeddsaVerify(u.pubKey, f, pkt.payload, pkt.payloadLen, pkt.env.signature)
+                && Nodes.offerKey(pkt.hdr.from, u.pubKey, true)) {
+                noteKeyConflictRaised(pkt.hdr.from);
+            }
+        }
     } else {
         in.check = SIG_CHECK_NO_KEY;
         // First contact. A signed NodeInfo carries the key to check it with,
@@ -5402,7 +5441,9 @@ static const char *cfgActionLabel(int actionId, char *buf, size_t bufLen) {
             }
         } break;
         case CFG_ACTION_BLE_KBD_PAIR:
-            if (s_cfg.bleKbdName[0]) {
+            if (bleKeyboardRepairNeeded()) {
+                snprintf(buf, bufLen, "%s", TR("Pairing lost - tap to re-pair"));
+            } else if (s_cfg.bleKbdName[0]) {
                 snprintf(buf, bufLen, TR("Pair BT Keyboard: %s"), s_cfg.bleKbdName);
             } else {
                 snprintf(buf, bufLen, "%s", TR("Pair BT Keyboard: (none)"));
@@ -5441,14 +5482,16 @@ static const char *cfgActionLabel(int actionId, char *buf, size_t bufLen) {
             } else if (!vncNetworkConnected()) {
                 snprintf(buf, bufLen, "%s", TR("VNC Host: On (network disconnected)"));
             } else if (vncHostClientConnected()) {
-                snprintf(buf, bufLen, "%s", TR("VNC Host: On (browser connected)"));
-            } else if (vncHostIP()[0]) {
-                snprintf(buf, bufLen, TR("VNC Host: http://%s:%u/"),
-                         vncHostIP(), (unsigned)vncHostPort());
+                snprintf(buf, bufLen, TR("VNC Host: PIN %s (browser connected)"),
+                         vncHostPin());
+            } else if (!webCfgRunning()) {
+                snprintf(buf, bufLen, TR("VNC Host: PIN %s (turn on Web Config)"),
+                         vncHostPin());
             } else {
-                const String ip = WiFi.localIP().toString();
-                snprintf(buf, bufLen, TR("VNC Host: http://%s:%u/"),
-                         ip.c_str(), (unsigned)vncHostPort());
+                // The PIN is entered in the web config's Remote tab, so that
+                // is the address to give, not the mirror's own port.
+                snprintf(buf, bufLen, TR("VNC Host: PIN %s - http://%s/"),
+                         vncHostPin(), webCfgIP());
             }
         } break;
 #endif
@@ -5991,6 +6034,11 @@ static const char *const kWebBleKbdExclusiveNotice = TR_NOOP(
 #endif
 
 #if HAS_VNC_HOST
+// The PIN last put in front of the user, so serviceVncPinNotice() shows each
+// new one once: on a web-side enable, or after wrong guesses redraw it.
+static uint32_t s_vncPinNoticeSerial = 0;
+static uint32_t s_vncPinNoticeSession = 0;
+
 static void persistVncEnabled() {
     Preferences p;
     if (!p.begin("camillia", false)) return;
@@ -10743,6 +10791,12 @@ static bool pollUserButton(uint32_t nowMs) {
             // what "activate" means anywhere.
             if (s_emojiPickerModal) {
                 emojiPickerActivate(s_emojiPickerSelection);
+                return true;
+            }
+            // The key review stacks over the Node Actions menu: a press must not
+            // fire an action hidden behind it, nor pick Accept/Reject blind.
+            // Answered by tap only here.
+            if (s_dmDelModal && s_destructiveConfirmAction == DESTRUCTIVE_CONFIRM_KEY_CHANGE) {
                 return true;
             }
             if (s_nodesActionModal) {
@@ -21750,7 +21804,7 @@ static void onCfgBleKbdForgetPressed(lv_event_t *e) {
     cfgBleKbdForget();
 }
 
-static void openCfgBleKbdModal() {
+static void openCfgBleKbdModal(bool autoScan) {
     if (!s_rootScreen || s_cfgBleKbdModal || s_cfgBleKbdBackdrop) return;
 
     const int w = lv_disp_get_hor_res(NULL);
@@ -21859,8 +21913,205 @@ static void openCfgBleKbdModal() {
 
     refreshCfgBleKbdModal();
     // Opening the dialog is the moment someone is looking for a keyboard, so
-    // start looking without making them press Scan first.
-    s_cfgBleKbdAutoScanned = bleKeyboardStartScan();
+    // start looking without making them press Scan first -- except when it
+    // opens to show a re-pair's passkey, where a scan would only get in the way.
+    s_cfgBleKbdAutoScanned = autoScan ? bleKeyboardStartScan() : true;
+}
+
+// ── Lost pairing prompt ─────────────────────────────────────────────────────
+// The module never re-pairs a bonded keyboard on its own (see ble_keyboard.cpp,
+// refuseBondedPeer()): a keyboard that comes back without its bond is either
+// one the user reset, or something else using its address, and only the user
+// can tell which. So the question is put here, with the safe answer selected.
+static void closeBleKbdRepairPrompt() {
+    if (lvObjValid(s_bleKbdRepairBackdrop)) {
+        lv_obj_del(s_bleKbdRepairBackdrop);
+    } else if (lvObjValid(s_bleKbdRepairModal)) {
+        lv_obj_del(s_bleKbdRepairModal);
+    }
+    s_bleKbdRepairBackdrop = nullptr;
+    s_bleKbdRepairModal = nullptr;
+    s_bleKbdRepairBtns[0] = nullptr;
+    s_bleKbdRepairBtns[1] = nullptr;
+}
+
+static void bleKbdRepairPaintSelection() {
+    for (int i = 0; i < 2; i++) {
+        if (!lvObjValid(s_bleKbdRepairBtns[i])) continue;
+        const bool sel = (i == s_bleKbdRepairSel);
+        lv_obj_set_style_border_width(s_bleKbdRepairBtns[i], sel ? 2 : 0, 0);
+        lv_obj_set_style_border_color(s_bleKbdRepairBtns[i], lv_color_hex(0xFFFFFF), 0);
+    }
+}
+
+static void bleKbdRepairMoveSelection() {
+    s_bleKbdRepairSel = s_bleKbdRepairSel ? 0 : 1;
+    bleKbdRepairPaintSelection();
+}
+
+static void bleKbdRepairAccept() {
+    closeBleKbdRepairPrompt();
+    if (!bleKeyboardRepair()) {
+        refreshCfgModal();
+        return;
+    }
+    Serial.println("[blekbd] re-pair confirmed on device");
+    // The pairing dialog is where the passkey is shown; a re-pair needs it as
+    // much as a first pairing does.
+    openCfgBleKbdModal(false);
+    refreshCfgModal();
+}
+
+static void bleKbdRepairIgnore() {
+    Serial.println("[blekbd] re-pair declined; keyboard stays unpaired, retries stopped");
+    closeBleKbdRepairPrompt();
+    refreshCfgModal();
+}
+
+static void onBleKbdRepairAcceptPressed(lv_event_t *e) {
+    LV_UNUSED(e);
+    bleKbdRepairAccept();
+}
+
+static void onBleKbdRepairIgnorePressed(lv_event_t *e) {
+    LV_UNUSED(e);
+    bleKbdRepairIgnore();
+}
+
+static void openBleKbdRepairPrompt() {
+    if (!s_rootScreen || s_bleKbdRepairModal || s_bleKbdRepairBackdrop) return;
+    if (!bleKeyboardRepairNeeded()) return;
+
+    const int screenW = lv_disp_get_hor_res(nullptr);
+    const int screenH = lv_disp_get_ver_res(nullptr);
+    int modalW = screenW - 32;
+    if (modalW < 180) modalW = screenW - 8;
+    if (modalW > 300) modalW = 300;
+
+    const bool lightUi = (s_cfg.uiMode == UI_MODE_LIGHT);
+    const lv_color_t modalBg = lightUi ? lv_color_hex(0xEAF1FB) : lv_color_hex(0x0E285B);
+    const lv_color_t modalBorder = lightUi ? lv_color_hex(0x6E8FB8) : lv_color_hex(0x5C86C6);
+    const lv_color_t textColor = lightUi ? lv_color_hex(0x16233A) : lv_color_hex(0xE8F1FF);
+    const lv_color_t mutedColor = lightUi ? lv_color_hex(0x334E75) : lv_color_hex(0xA7C7FF);
+
+    s_bleKbdRepairSel = 1;
+
+    s_bleKbdRepairBackdrop = lv_obj_create(s_rootScreen);
+    lv_obj_set_size(s_bleKbdRepairBackdrop, screenW, screenH);
+    lv_obj_align(s_bleKbdRepairBackdrop, LV_ALIGN_CENTER, 0, 0);
+    lv_obj_clear_flag(s_bleKbdRepairBackdrop, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_add_flag(s_bleKbdRepairBackdrop, LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_set_style_bg_color(s_bleKbdRepairBackdrop, lv_color_hex(0x000000), 0);
+    lv_obj_set_style_bg_opa(s_bleKbdRepairBackdrop, LV_OPA_40, 0);
+    lv_obj_set_style_border_width(s_bleKbdRepairBackdrop, 0, 0);
+    lv_obj_set_style_pad_all(s_bleKbdRepairBackdrop, 0, 0);
+
+    s_bleKbdRepairModal = lv_obj_create(s_bleKbdRepairBackdrop);
+    lv_obj_set_size(s_bleKbdRepairModal, modalW, LV_SIZE_CONTENT);
+    lv_obj_set_style_max_height(s_bleKbdRepairModal,
+                                (screenH > 40) ? (screenH - 12) : LV_SIZE_CONTENT, 0);
+    lv_obj_align(s_bleKbdRepairModal, LV_ALIGN_CENTER, 0, 0);
+    lv_obj_clear_flag(s_bleKbdRepairModal, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_add_flag(s_bleKbdRepairModal, LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_set_style_bg_color(s_bleKbdRepairModal, modalBg, 0);
+    lv_obj_set_style_bg_opa(s_bleKbdRepairModal, LV_OPA_COVER, 0);
+    lv_obj_set_style_border_width(s_bleKbdRepairModal, 1, 0);
+    lv_obj_set_style_border_color(s_bleKbdRepairModal, modalBorder, 0);
+    lv_obj_set_style_pad_all(s_bleKbdRepairModal, 8, 0);
+    lv_obj_set_style_pad_row(s_bleKbdRepairModal, 7, 0);
+    lv_obj_set_flex_flow(s_bleKbdRepairModal, LV_FLEX_FLOW_COLUMN);
+    lv_obj_set_flex_align(s_bleKbdRepairModal, LV_FLEX_ALIGN_CENTER,
+                          LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+    lv_obj_move_foreground(s_bleKbdRepairBackdrop);
+
+    lv_obj_t *title = lv_label_create(s_bleKbdRepairModal);
+    lv_obj_set_width(title, lv_pct(100));
+    lv_obj_set_style_text_font(title, &lv_font_montserrat_16, 0);
+    lv_obj_set_style_text_color(title, textColor, 0);
+    lv_obj_set_style_text_align(title, LV_TEXT_ALIGN_CENTER, 0);
+    lv_label_set_text(title, TR("Bluetooth Keyboard"));
+
+    const char *name = bleKeyboardPairedName();
+    lv_obj_t *body = lv_label_create(s_bleKbdRepairModal);
+    lv_obj_set_width(body, lv_pct(100));
+    lv_obj_set_style_text_font(body, &lv_font_montserrat_12, 0);
+    lv_obj_set_style_text_color(body, textColor, 0);
+    lv_obj_set_style_text_align(body, LV_TEXT_ALIGN_CENTER, 0);
+    lv_label_set_long_mode(body, LV_LABEL_LONG_WRAP);
+    lv_label_set_text_fmt(body,
+                          TR("Keyboard \"%s\" lost its pairing. Re-pair only if you reset "
+                             "the keyboard yourself."),
+                          (name && name[0]) ? name : TR("keyboard"));
+
+    char reason[48];
+    bleKeyboardRepairReason(reason, sizeof(reason));
+    if (reason[0]) {
+        lv_obj_t *why = lv_label_create(s_bleKbdRepairModal);
+        lv_obj_set_width(why, lv_pct(100));
+        lv_obj_set_style_text_font(why, &lv_font_montserrat_10, 0);
+        lv_obj_set_style_text_color(why, mutedColor, 0);
+        lv_obj_set_style_text_align(why, LV_TEXT_ALIGN_CENTER, 0);
+        lv_label_set_long_mode(why, LV_LABEL_LONG_WRAP);
+        lv_label_set_text_fmt(why, TR("Reason: %s"), reason);
+    }
+
+    lv_obj_t *buttonRow = lv_obj_create(s_bleKbdRepairModal);
+    lv_obj_set_width(buttonRow, lv_pct(100));
+    lv_obj_set_height(buttonRow, LV_SIZE_CONTENT);
+    lv_obj_clear_flag(buttonRow, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_set_style_bg_opa(buttonRow, LV_OPA_TRANSP, 0);
+    lv_obj_set_style_border_width(buttonRow, 0, 0);
+    lv_obj_set_style_pad_all(buttonRow, 2, 0);
+    lv_obj_set_style_pad_column(buttonRow, 10, 0);
+    lv_obj_set_flex_flow(buttonRow, LV_FLEX_FLOW_ROW);
+    lv_obj_set_flex_align(buttonRow, LV_FLEX_ALIGN_CENTER,
+                          LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+
+    auto makeButton = [](lv_obj_t *parent, const char *text, uint32_t color,
+                         lv_event_cb_t callback) {
+        lv_obj_t *button = lv_btn_create(parent);
+        lv_obj_set_height(button, 32);
+        lv_obj_set_style_min_width(button, 86, 0);
+        lv_obj_set_style_radius(button, 4, 0);
+        lv_obj_set_style_bg_color(button, lv_color_hex(color), 0);
+        lv_obj_set_style_shadow_width(button, 0, 0);
+        lv_obj_add_event_cb(button, callback, LV_EVENT_CLICKED, nullptr);
+        lv_obj_t *label = lv_label_create(button);
+        lv_obj_set_style_text_font(label, &lv_font_montserrat_12, 0);
+        lv_obj_set_style_text_color(label, lv_color_hex(0xFFFFFF), 0);
+        lv_label_set_text(label, TR(text));
+        lv_obj_center(label);
+        return button;
+    };
+    // Re-pair gets the cautionary colour: it is the answer that hands a
+    // keyboard input to whatever completes the next pairing.
+#if UI_TOUCH_ONLY_PROFILE
+    s_bleKbdRepairBtns[0] = makeButton(buttonRow, TR_NOOP("Re-pair"),
+                                       lightUi ? 0xB07028 : 0x7A4A12, onBleKbdRepairAcceptPressed);
+    s_bleKbdRepairBtns[1] = makeButton(buttonRow, TR_NOOP("Ignore"),
+                                       lightUi ? 0x5B7BA8 : 0x2C4A7A, onBleKbdRepairIgnorePressed);
+#else
+    s_bleKbdRepairBtns[0] = makeButton(buttonRow, TR_NOOP("(R)e-pair"),
+                                       lightUi ? 0xB07028 : 0x7A4A12, onBleKbdRepairAcceptPressed);
+    s_bleKbdRepairBtns[1] = makeButton(buttonRow, TR_NOOP("(I)gnore"),
+                                       lightUi ? 0x5B7BA8 : 0x2C4A7A, onBleKbdRepairIgnorePressed);
+#endif
+    bleKbdRepairPaintSelection();
+}
+
+// Loop hook: raises the prompt once per refusal, waiting out the dialogs that
+// must not be covered, and drops it if the question went away underneath it
+// (feature switched off, keyboard forgotten).
+static void serviceBleKbdRepairPrompt() {
+    if (s_bleKbdRepairModal) {
+        if (!bleKeyboardRepairNeeded()) closeBleKbdRepairPrompt();
+        return;
+    }
+    if (!s_rootScreen || s_onboardingModal || s_otaPromptModal || s_cfgConfirmModal) return;
+#if HAS_STATE_MAPS
+    if (s_legacyMapPromptModal) return;
+#endif
+    if (bleKeyboardTakeRepairPrompt()) openBleKbdRepairPrompt();
 }
 #endif  // HAS_BLE_KEYBOARD
 
@@ -29823,7 +30074,10 @@ static void refreshNodesListRows() {
         // '~' for archived, '*' for favorite. Distinct glyphs on purpose: they
         // mark opposite things (a node pinned into the table, and one that has
         // already fallen out of it) and must not be mistaken for each other.
-        snprintf(rowText, sizeof(rowText), "%s%s",
+        // '!' leads both: the node's key changed and waits for review.
+        const bool keyConflict = n && Nodes.hasKeyConflict(n->nodeId);
+        snprintf(rowText, sizeof(rowText), "%s%s%s",
+                 keyConflict ? "! " : "",
                  arch ? "~ " : ((n && n->favorite) ? "* " : ""), rowName);
         setLabelTextEmojiSafe(lbl, rowText);
 #if NODES_LAYOUT_WIDE
@@ -30113,7 +30367,11 @@ static void refreshNodesDetails() {
         }
 
         char buf[512];
-        snprintf(buf, sizeof(buf),
+        const bool keyConflict = Nodes.hasKeyConflict(n.nodeId);
+        snprintf(buf, sizeof(buf), "%s", keyConflict
+                 ? TR("! KEY CHANGED - open Node Actions to review\n\n") : "");
+        const size_t used = strlen(buf);
+        snprintf(buf + used, sizeof(buf) - used,
                  TR("Name: %s\n"
                  "Short: %s\n"
                  "ID: !%08X\n"
@@ -30151,7 +30409,8 @@ static void refreshNodesDetails() {
     // mesh is almost entirely unsigned traffic today, so an unsigned node is
     // the ordinary case and should not read as a failed check.
     const char *signedStr;
-    if (n.xeddsaVerified)   signedStr = "yes";
+    if (Nodes.hasKeyConflict(n.nodeId)) signedStr = TR("! KEY CHANGED");
+    else if (n.xeddsaVerified) signedStr = "yes";
     else if (n.hasPubKey)   signedStr = TR("not seen");
     else                    signedStr = TR("no key");
     snprintf(vals, sizeof(vals), "%s\n%s\n%s\n%s\n%s", heard, snr, hops, chan, signedStr);
@@ -31461,6 +31720,13 @@ static void openNodesActionMenuFor(uint32_t nodeId, bool msgMode, uint32_t packe
 #endif
 
     refreshNodesActionMenuSelection();
+
+    // A pending key change is answered here, before anything else is done to
+    // the node: the review stacks over the menu, and closing it (or answering)
+    // leaves the menu as it was.
+    if (!s_nodesActionMsgMode && Nodes.hasKeyConflict(nodeId)) {
+        openDestructiveConfirm(DESTRUCTIVE_CONFIRM_KEY_CHANGE, nodeId);
+    }
 }
 
 // Nodes-screen entry point: unchanged behavior, sourcing the node from the
@@ -38850,14 +39116,142 @@ static void closeDmDeleteConfirm() {
     s_dmDelModal = nullptr;
     s_dmDeleteTargetNodeId = 0;
     s_destructiveConfirmAction = DESTRUCTIVE_CONFIRM_NONE;
+    s_keyReviewBtns[0] = s_keyReviewBtns[1] = nullptr;
+    s_keyReviewSel = 0;
+    memset(s_keyReviewKey, 0, sizeof(s_keyReviewKey));
+}
+
+static void showKeyChangeToast(const char *text);
+
+// Every view that marks a key conflict: the Nodes list glyph and detail, and
+// the DM banner. Called when one is raised and when the user settles it.
+static void refreshKeyConflictViews() {
+    if (s_nodesModal) {
+        refreshNodesListRows();
+        refreshNodesListSelection();
+        refreshNodesDetails();
+    }
+    if (s_dmModal) refreshDmModal(true);
+}
+
+// Reject is its own outcome, distinct from closing the dialog: closing leaves
+// the conflict pending to decide later, Reject drops the offered key and stops
+// it being raised again until reboot.
+static void keyReviewReject() {
+    const uint32_t nodeId = s_dmDeleteTargetNodeId;
+    uint8_t shown[32];
+    memcpy(shown, s_keyReviewKey, sizeof(shown));
+    closeDmDeleteConfirm();
+    if (nodeId && !Nodes.rejectKeyChange(nodeId, shown)) {
+        showKeyChangeToast(TR("Key changed again - review"));
+    }
+    refreshKeyConflictViews();
+}
+
+static void onKeyReviewRejectPressed(lv_event_t *e) {
+    LV_UNUSED(e);
+    keyReviewReject();
+}
+
+static void keyReviewApplySelection() {
+    for (int i = 0; i < 2; i++) {
+        if (!lvObjValid(s_keyReviewBtns[i])) continue;
+        const bool sel = (i == s_keyReviewSel);
+        lv_obj_set_style_border_width(s_keyReviewBtns[i], sel ? 3 : 1, 0);
+    #if !defined(DEVICE_TDECK_PRO)
+        lv_obj_set_style_border_color(s_keyReviewBtns[i],
+                                      sel ? lv_color_hex(0xFFFFFF) : lv_color_hex(0x000000), 0);
+    #endif
+    }
+}
+
+static void showKeyChangeToast(const char *text) {
+    if (!text || !text[0]) return;
+    lv_obj_t *toast = lv_obj_create(lv_layer_top());
+    if (!toast) return;
+    lv_obj_remove_style_all(toast);
+    lv_obj_clear_flag(toast, LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_clear_flag(toast, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_set_size(toast, LV_SIZE_CONTENT, LV_SIZE_CONTENT);
+    lv_obj_set_style_max_width(toast, lv_disp_get_hor_res(NULL) - 16, 0);
+    lv_obj_align(toast, LV_ALIGN_TOP_MID, 0, 24);
+    lv_obj_set_style_radius(toast, 6, 0);
+    lv_obj_set_style_pad_hor(toast, 8, 0);
+    lv_obj_set_style_pad_ver(toast, 4, 0);
+#if defined(DEVICE_TDECK_PRO)
+    lv_obj_set_style_bg_color(toast, lv_color_hex(0xFFFFFF), 0);
+    lv_obj_set_style_border_color(toast, lv_color_hex(0x000000), 0);
+#else
+    lv_obj_set_style_bg_color(toast, lv_color_hex(0x6B3030), 0);
+    lv_obj_set_style_border_color(toast, lv_color_hex(0xFFB060), 0);
+#endif
+    lv_obj_set_style_bg_opa(toast, LV_OPA_COVER, 0);
+    lv_obj_set_style_border_width(toast, 1, 0);
+    lv_obj_t *lbl = lv_label_create(toast);
+    if (lbl) {
+        lv_obj_set_style_text_font(lbl, &lv_font_montserrat_12, 0);
+    #if defined(DEVICE_TDECK_PRO)
+        lv_obj_set_style_text_color(lbl, lv_color_hex(0x000000), 0);
+    #else
+        lv_obj_set_style_text_color(lbl, lv_color_hex(0xFFFFFF), 0);
+    #endif
+        setLabelTextEmojiSafe(lbl, text);
+    }
+    lv_obj_delete_delayed(toast, 4000);
+}
+
+// A node just offered a key that differs from the pinned one. Log it, put a
+// line in Live, and float a short toast -- throttled, because whoever can spoof
+// one NodeInfo can spoof a stream of them with a fresh key each time.
+static void noteKeyConflictRaised(uint32_t nodeId) {
+    char who[48];
+    nodesActionTitleLabel(nodeId, who, sizeof(who));
+    Serial.printf("[keypin] key change offered for !%08lx (%s); pinned key kept\n",
+                  (unsigned long)nodeId, who);
+    char line[96];
+    snprintf(line, sizeof(line), "[key] %s: %s", who, TR("key changed - review in Nodes"));
+    liveFeedAddLine(line, TFT_ORANGE);
+
+    // The open review is about a key that has just been replaced. Close it
+    // rather than leave a stale fingerprint up; the user reopens it from Node
+    // Actions and sees the key now pending. Always told, whatever the throttle.
+    if (s_dmDelModal && s_destructiveConfirmAction == DESTRUCTIVE_CONFIRM_KEY_CHANGE
+        && s_dmDeleteTargetNodeId == nodeId) {
+        closeDmDeleteConfirm();
+        showKeyChangeToast(TR("Key changed again - review"));
+        refreshKeyConflictViews();
+        return;
+    }
+
+    static uint32_t s_lastToastMs = 0;
+    const uint32_t now = millis();
+    if (s_lastToastMs == 0 || (uint32_t)(now - s_lastToastMs) >= 30000) {
+        s_lastToastMs = now ? now : 1;
+        char buf[112];
+        snprintf(buf, sizeof(buf), "! %s: %s", who, TR("key changed - review in Nodes"));
+        showKeyChangeToast(buf);
+    }
+    refreshKeyConflictViews();
 }
 
 static void dmDeleteConfirmAccept() {
     // Read before the close, which clears the action and target.
     const DestructiveConfirmAction action = s_destructiveConfirmAction;
     uint32_t nodeId = s_dmDeleteTargetNodeId;
+    uint8_t shownKey[32];
+    memcpy(shownKey, s_keyReviewKey, sizeof(shownKey));
     closeDmDeleteConfirm();
 
+    if (action == DESTRUCTIVE_CONFIRM_KEY_CHANGE) {
+        if (nodeId == 0) return;
+        // Only the key the dialog showed; a later offer that replaced it is
+        // not accepted on the strength of a click about another one.
+        if (!Nodes.acceptKeyChange(nodeId, shownKey)) {
+            showKeyChangeToast(TR("Key changed again - review"));
+        }
+        refreshKeyConflictViews();
+        return;
+    }
     if (action == DESTRUCTIVE_CONFIRM_LIVE_CLEAR) {
         Channels.clearChannel(CHAN_LIVE);
         s_lastRenderedLiveCount = -1;
@@ -38981,6 +39375,7 @@ static void openDestructiveConfirm(DestructiveConfirmAction action, uint32_t nod
     if (action == DESTRUCTIVE_CONFIRM_DM_DELETE && nodeId == 0) return;
     if (action == DESTRUCTIVE_CONFIRM_NODE_DELETE && nodeId == 0) return;
     if (action == DESTRUCTIVE_CONFIRM_NODE_RESTORE && nodeId == 0) return;
+    if (action == DESTRUCTIVE_CONFIRM_KEY_CHANGE && !Nodes.hasKeyConflict(nodeId)) return;
     if (action == DESTRUCTIVE_CONFIRM_LIVE_CLEAR
         && (!s_liveModal || Channels.get(CHAN_LIVE).count <= 0)) return;
     if (s_dmDelModal || s_dmDelBackdrop) return;
@@ -38989,8 +39384,25 @@ static void openDestructiveConfirm(DestructiveConfirmAction action, uint32_t nod
     s_dmDeleteTargetNodeId = nodeId;
 
     char titleText[40];
-    char bodyText[112];
-    if (action == DESTRUCTIVE_CONFIRM_LIVE_CLEAR) {
+    char bodyText[288];
+    if (action == DESTRUCTIVE_CONFIRM_KEY_CHANGE) {
+        char who[48];
+        nodesActionTitleLabel(nodeId, who, sizeof(who));
+        bool signedByNew = false;
+        uint32_t atMs = 0;
+        uint8_t offered[32];
+        Nodes.pendingKey(nodeId, offered, &signedByNew, &atMs);
+        // The exact key on screen is the one Accept/Reject may act on.
+        memcpy(s_keyReviewKey, offered, sizeof(s_keyReviewKey));
+        // ASCII "!" rather than a warning glyph: not every board's font has one.
+        snprintf(titleText, sizeof(titleText), "! %s", TR("Key changed"));
+        snprintf(bodyText, sizeof(bodyText), "%s\n%s\n%s %02X%02X%02X%02X%s",
+                 who,
+                 TR("This node is advertising a new encryption key. Accept only if "
+                    "you know they reset or reflashed their device."),
+                 TR("New key:"), offered[0], offered[1], offered[2], offered[3],
+                 signedByNew ? TR(" (signed by new key)") : "");
+    } else if (action == DESTRUCTIVE_CONFIRM_LIVE_CLEAR) {
         snprintf(titleText, sizeof(titleText), TR("Clear entire live feed?"));
         if (s_liveFilter == LIVE_FILTER_ALL) {
             snprintf(bodyText, sizeof(bodyText), TR("All live traffic will be erased"));
@@ -39129,6 +39541,21 @@ static void openDestructiveConfirm(DestructiveConfirmAction action, uint32_t nod
         lv_obj_center(lbl);
         return btn;
     };
+    if (action == DESTRUCTIVE_CONFIRM_KEY_CHANGE) {
+        // Reject first and selected: it is the safe answer to an unexpected
+        // key. Closing (backdrop, close key) answers neither and leaves it
+        // pending.
+    #if UI_TOUCH_ONLY_PROFILE
+        s_keyReviewBtns[0] = makeDmDelBtn(btnRow, TR_NOOP("Reject"), noBtnBg, onKeyReviewRejectPressed);
+        s_keyReviewBtns[1] = makeDmDelBtn(btnRow, TR_NOOP("Accept new key"), yesBtnBg, onDmDelYesPressed);
+    #else
+        s_keyReviewBtns[0] = makeDmDelBtn(btnRow, TR_NOOP("(R)eject"), noBtnBg, onKeyReviewRejectPressed);
+        s_keyReviewBtns[1] = makeDmDelBtn(btnRow, TR_NOOP("(A)ccept new key"), yesBtnBg, onDmDelYesPressed);
+    #endif
+        s_keyReviewSel = 0;
+        keyReviewApplySelection();
+        return;
+    }
 #if UI_TOUCH_ONLY_PROFILE
     makeDmDelBtn(btnRow, "No", noBtnBg, onDmDelNoPressed);
     makeDmDelBtn(btnRow, TR_NOOP("Yes"), yesBtnBg, onDmDelYesPressed);
@@ -40409,6 +40836,23 @@ static void refreshDmModal(bool force) {
                 setLabelTextEmojiSafe(msg, dl->text);
             }
 #endif
+        }
+
+        // Last in the thread so it sits under the newest message, where the
+        // eye lands, and the autoscroll below brings it into view.
+        if (Nodes.hasKeyConflict(selected->nodeId)) {
+            lv_obj_t *warn = lv_label_create(s_dmMsgList);
+            lv_obj_set_width(warn, lv_pct(100));
+            lv_label_set_long_mode(warn, LV_LABEL_LONG_WRAP);
+            lv_obj_set_style_text_font(warn, dmMsgFont, 0);
+#if defined(DEVICE_TDECK_PRO)
+            lv_obj_set_style_text_color(warn, tftColorToLv(TFT_BLACK), 0);
+#else
+            lv_obj_set_style_text_color(warn, tftColorToLv(TFT_ORANGE), 0);
+#endif
+            lv_label_set_text(warn, TR("! Key changed - review in Nodes. "
+                                       "Messages still use the old key."));
+            lastMsgObj = warn;
         }
 
         if (autoScrollToLatest && lastMsgObj) {
@@ -42395,13 +42839,15 @@ static void performCfgAction(int actionId) {
                 }
                 if (webCfgRunning() && !webCfgIsLite()) {
                     snprintf(s_cfgStatus, sizeof(s_cfgStatus),
-                             TR("VNC Host on\nOpen http://%s/ and select the Remote tab"),
-                             vncIp);
+                             TR("VNC Host on - PIN %s\nOpen http://%s/, select Remote and enter the PIN"),
+                             vncHostPin(), vncIp);
                 } else {
                     snprintf(s_cfgStatus, sizeof(s_cfgStatus),
-                             TR("VNC Host on\nhttp://%s:%u/"),
-                             vncIp, (unsigned)vncHostPort());
+                             TR("VNC Host on - PIN %s\nTurn on Web Config, open its Remote tab and enter the PIN"),
+                             vncHostPin());
                 }
+                s_vncPinNoticeSerial = vncHostPinSerial();
+                s_vncPinNoticeSession = vncHostSession();
                 openCfgActionMessageModal(s_cfgStatus);
             }
         } break;
@@ -42458,7 +42904,11 @@ static void performCfgAction(int actionId) {
 
         case CFG_ACTION_BLE_KBD_PAIR:
             showActionPopup = false;
-            openCfgBleKbdModal();
+            if (bleKeyboardRepairNeeded()) {
+                openBleKbdRepairPrompt();
+            } else {
+                openCfgBleKbdModal();
+            }
             break;
 #endif
 
@@ -44984,6 +45434,10 @@ static bool prepareGlobalNavigation() {
 #endif
 
     if (s_otaPromptModal) otaPromptDecline();
+#if HAS_BLE_KEYBOARD
+    // Same rule as the map prompt: leaving is not consent, so it reads as Ignore.
+    if (s_bleKbdRepairModal) bleKbdRepairIgnore();
+#endif
 #if HAS_HOME_DASHBOARD
     // Closed here rather than in each shortcut: every one of them is going
     // somewhere else, and a dashboard left behind would sit under the screen
@@ -45122,6 +45576,9 @@ static bool homeShouldOpenChannelList() {
         || s_chUtilChartModal || s_snrChartModal) {
         return false;
     }
+#if HAS_BLE_KEYBOARD
+    if (s_bleKbdRepairModal) return false;
+#endif
 #if FEATURE_DISCOVERY
     if (s_discoveryModal) return false;
 #endif
@@ -45903,6 +46360,26 @@ static void pumpKeyboardInput() {
             } else if (rawKey == 'k' || rawKey == 'K' || rawKey == 'n' || rawKey == 'N'
                        || k == KEY_ENTER || isModalCloseKey(k)) {
                 keepLegacyMapFiles();
+            }
+            continue;
+        }
+#endif
+
+#if HAS_BLE_KEYBOARD
+        // Lost keyboard pairing. Ignore is preselected and is what Enter
+        // answers unless the user moved to Re-pair first; arrows/d-pad move.
+        if (s_bleKbdRepairModal) {
+            if (rawKey == 'r' || rawKey == 'R') {
+                bleKbdRepairAccept();
+            } else if (rawKey == 'i' || rawKey == 'I' || rawKey == 'n' || rawKey == 'N'
+                       || isModalCloseKey(k)) {
+                bleKbdRepairIgnore();
+            } else if (k == KEY_ENTER || k == KEY_ROLLER) {
+                if (s_bleKbdRepairSel == 0) bleKbdRepairAccept();
+                else bleKbdRepairIgnore();
+            } else if (k == KEY_PREV_CHAN || k == KEY_NEXT_CHAN || k == KEY_SCROLL_UP
+                       || k == KEY_SCROLL_DN || k == KEY_TAB) {
+                bleKbdRepairMoveSelection();
             }
             continue;
         }
@@ -47420,6 +47897,25 @@ static void pumpKeyboardInput() {
 #endif
 
         if (s_dmDelModal) {
+            if (s_destructiveConfirmAction == DESTRUCTIVE_CONFIRM_KEY_CHANGE) {
+                // A cursor over Reject/Accept rather than Y/N, so D-pad and
+                // roller boards can answer too. Closing decides nothing.
+                if (k == KEY_SCROLL_UP || k == KEY_SCROLL_DN || k == KEY_PREV_CHAN
+                    || k == KEY_NEXT_CHAN || k == KEY_TAB) {
+                    s_keyReviewSel ^= 1;
+                    keyReviewApplySelection();
+                } else if (k == KEY_ENTER || k == KEY_ROLLER) {
+                    if (s_keyReviewSel == 1) dmDeleteConfirmAccept();
+                    else keyReviewReject();
+                } else if (k == 'a' || k == 'A') {
+                    dmDeleteConfirmAccept();
+                } else if (k == 'r' || k == 'R') {
+                    keyReviewReject();
+                } else if (isBackspaceKey(k) || isModalCloseKey(k)) {
+                    dmDeleteConfirmReject();
+                }
+                continue;
+            }
             if (k == 'y' || k == 'Y' || k == KEY_ENTER) {
                 dmDeleteConfirmAccept();
             } else if (k == 'n' || k == 'N' || isBackspaceKey(k) || isModalCloseKey(k)) {
@@ -54822,7 +55318,9 @@ static bool processMeshPacket(const MeshPacket &rxPkt) {
         case NODEINFO_APP: {
             UserInfo u = {};
             if (decodeUser(pkt.payload, pkt.payloadLen, u)) {
-                Nodes.updateUser(pkt.hdr.from, u);
+                // Key pinned on first use; a different one only raises a
+                // conflict for the user (NodeDB::updateUser).
+                if (Nodes.updateUser(pkt.hdr.from, u)) noteKeyConflictRaised(pkt.hdr.from);
             }
             // Answer a discovery ping. Discovery is symmetric: we sweep the mesh
             // with want_response, so we owe other nodes the same answer.
@@ -54998,14 +55496,34 @@ static void serviceWebManualTime() {
 }
 
 #if HAS_VNC_HOST
+static void serviceVncPinNotice() {
+    if (!vncHostEnabled() || !vncHostPin()[0] || s_onboardingModal) return;
+    const uint32_t serial = vncHostPinSerial();
+    if (serial == s_vncPinNoticeSerial) return;
+    const bool redrawn = vncHostSession() == s_vncPinNoticeSession;
+    s_vncPinNoticeSerial = serial;
+    s_vncPinNoticeSession = vncHostSession();
+    if (redrawn) {
+        snprintf(s_cfgStatus, sizeof(s_cfgStatus),
+                 TR("Too many wrong VNC PINs\nNew PIN: %s"), vncHostPin());
+    } else {
+        snprintf(s_cfgStatus, sizeof(s_cfgStatus),
+                 TR("VNC Host on - PIN %s\nEnter it in the web config's Remote tab"),
+                 vncHostPin());
+    }
+    openCfgActionMessageModal(s_cfgStatus);
+}
+
 static void serviceWebVncToggle() {
     bool enabled = false;
-    if (!webCfgTakeVncToggle(enabled)) return;
-    if (applyVncEnabled(enabled)) {
-        Serial.printf("[vnc] web checkbox: %s\n", enabled ? "enabled" : "disabled");
-    } else {
-        Serial.println("[vnc] web checkbox: enable rejected");
+    if (webCfgTakeVncToggle(enabled)) {
+        if (applyVncEnabled(enabled)) {
+            Serial.printf("[vnc] web checkbox: %s\n", enabled ? "enabled" : "disabled");
+        } else {
+            Serial.println("[vnc] web checkbox: enable rejected");
+        }
     }
+    serviceVncPinNotice();
 }
 #endif
 
@@ -58505,6 +59023,9 @@ static void closeAllModalsForRebuild() {
     closeLegacyMapPrompt();
 #endif
     closeOtaUpdatePrompt();
+#if HAS_BLE_KEYBOARD
+    closeBleKbdRepairPrompt();
+#endif
 #if HAS_SD_MALWARE_SCAN
     closeSdScanProgressModal();
 #endif
@@ -60454,6 +60975,7 @@ void loop() {
         if (!s_cfgBleKbdAutoScanned) s_cfgBleKbdAutoScanned = bleKeyboardStartScan();
         refreshCfgBleKbdModal();
     }
+    LOOP_PHASE("ble:repair", serviceBleKbdRepairPrompt());
 #endif
     LOOP_PHASE("keys", pumpKeyboardInput());
 

@@ -15,6 +15,26 @@ void vncHostInit(uint16_t width, uint16_t height);
 bool vncHostSetEnabled(bool enabled);
 bool vncHostEnabled();
 bool vncHostRunning();
+
+// Access control. Each time the host is enabled a fresh random 6-digit PIN is
+// drawn and shown on the device; turning it off (or rebooting) clears the PIN
+// and every token. The web config's Remote tab trades the PIN for a 128-bit
+// session token, and the viewer's WebSocket upgrade must carry a valid one
+// (GET /mirror?t=<token>). Up to four tokens are live at once, oldest evicted.
+// Five wrong PINs in a row draw a new PIN (tokens already issued stay valid),
+// and after a wrong PIN further attempts are refused for a second.
+//
+// vncHostPin() is "" while the host is off. vncHostPinSerial() moves whenever
+// a new PIN is drawn, so the UI can tell it has a new one to show;
+// vncHostSession() moves once per enable, so a browser can tell its stored
+// token belongs to an earlier session.
+const char *vncHostPin();
+uint32_t vncHostPinSerial();
+uint32_t vncHostSession();
+// Milliseconds until another PIN attempt is accepted (0 = now).
+uint32_t vncHostUnlockRetryMs();
+// On a correct PIN writes a NUL-terminated hex token (tokenLen >= 33).
+bool vncHostRedeemPin(const char *pin, char *tokenOut, size_t tokenLen);
 bool vncHostClientConnected();
 const char *vncHostIP();
 uint16_t vncHostPort();

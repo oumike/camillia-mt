@@ -35,6 +35,8 @@ enum BleKbdState : uint8_t {
     BLE_KBD_CONNECTED,    // link up, reports arriving
     BLE_KBD_RETRYING,     // remembered keyboard out of range; backing off
     BLE_KBD_FAILED,       // last attempt failed for a reason worth showing
+    BLE_KBD_REPAIR_NEEDED,// bonded keyboard came back without its bond; link
+                          // refused, auto-retry stopped until the user decides
 };
 
 // Brings the module up with the persisted settings. Safe to call once, from
@@ -93,6 +95,22 @@ bool bleKeyboardScanEntry(int idx, char *name, size_t nameLen,
 bool bleKeyboardPairWith(int idx);
 // Drops the bond and the remembered address.
 void bleKeyboardForget();
+
+// ── Lost pairing ────────────────────────────────────────────────────────────
+// A bonded keyboard that reconnects without its bond (it was reset -- or
+// something else is using its address) is never re-paired silently: the link
+// is refused, retries stop, and the state becomes BLE_KBD_REPAIR_NEEDED.
+//
+// True while that is unresolved.
+bool bleKeyboardRepairNeeded();
+// True once per refusal, when the UI should put up the re-pair prompt.
+bool bleKeyboardTakeRepairPrompt();
+// Short English reason for the log/UI, e.g. "keyboard lost the key".
+void bleKeyboardRepairReason(char *out, size_t outLen);
+// The user confirmed on the device: delete the old bond and pair afresh
+// (bleKeyboardPasskey() then carries the code to type). False if nothing is
+// waiting for a re-pair or the stack is down.
+bool bleKeyboardRepair();
 
 bool        bleKeyboardHasPaired();
 const char *bleKeyboardPairedName();
