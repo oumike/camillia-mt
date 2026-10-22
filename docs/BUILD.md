@@ -52,8 +52,9 @@ out of the box. Symptom: you plug the board in and nothing new appears in
 
 Install WCH's driver:
 
-1. Get **CH34xVCPDriver** — free on the [Mac App Store](https://apps.apple.com/app/ch34xvcpdriver/id1335343771),
-   or from [wch.cn](https://www.wch.cn/downloads/CH34XSER_MAC_ZIP.html).
+1. Get **CH34xVCPDriver** from WCH's download page:
+   [wch-ic.com](https://www.wch-ic.com/downloads/CH34XSER_MAC_ZIP.html)
+   (English) or [wch.cn](https://www.wch.cn/downloads/CH34XSER_MAC_ZIP.html).
 2. Open the app once. It asks you to enable the driver extension.
 3. Approve it in **System Settings → General → Login Items & Extensions →
    Driver Extensions**.
