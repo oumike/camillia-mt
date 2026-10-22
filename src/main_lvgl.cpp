@@ -3271,32 +3271,30 @@ static inline const char *msgTransportIcon(bool viaMqtt) {
 // off the right end of their header bar instead of the modal's own corner.
 static constexpr int kHeltecCloseXSize = 26;
 
+enum UiBtnKind : uint8_t { UI_BTN_PRIMARY, UI_BTN_SECONDARY, UI_BTN_DANGER };
+static constexpr int kUiBtnRadius = 6;
+static constexpr int kUiDialogRadius = 8;
+static void uiStyleButton(lv_obj_t *btn, UiBtnKind kind);
+static void uiStyleDialog(lv_obj_t *dlg);
+
 static lv_obj_t *appendHeltecCloseX(lv_obj_t *parent, lv_event_cb_t onClose,
                                     int size = kHeltecCloseXSize) {
     if (!parent) return nullptr;
     lv_obj_t *btn = lv_btn_create(parent);
     if (!btn) return nullptr;
-    const bool light = (s_cfg.uiMode == UI_MODE_LIGHT);
     lv_obj_add_flag(btn, LV_OBJ_FLAG_FLOATING);
     lv_obj_set_size(btn, size, size);
     lv_obj_align(btn, LV_ALIGN_TOP_RIGHT, 0, 0);
-    lv_obj_set_style_radius(btn, 4, 0);
     lv_obj_set_style_pad_all(btn, 0, 0);
-    lv_obj_set_style_shadow_width(btn, 0, 0);
-    lv_obj_set_style_bg_color(btn, light ? lv_color_hex(0xE6ECF5) : lv_color_hex(0x16386F), 0);
-    lv_obj_set_style_bg_opa(btn, light ? LV_OPA_COVER : LV_OPA_80, 0);
-    lv_obj_set_style_border_width(btn, 1, 0);
-    lv_obj_set_style_border_color(btn, light ? lv_color_hex(0x6E8FB8) : lv_color_hex(0x8FB5E6), 0);
     lv_obj_add_event_cb(btn, onClose, LV_EVENT_CLICKED, nullptr);
 
     lv_obj_t *lbl = lv_label_create(btn);
     if (lbl) {
         lv_obj_set_style_text_font(lbl, &lv_font_montserrat_12, 0);
-        lv_obj_set_style_text_color(lbl, light ? lv_color_hex(0x13233D)
-                                               : lv_color_hex(0xE8F1FF), 0);
         lv_label_set_text(lbl, LV_SYMBOL_CLOSE);
         lv_obj_center(lbl);
     }
+    uiStyleButton(btn, UI_BTN_SECONDARY);
     // Above whatever the modal draws under it: a title that runs the full width
     // of the panel, a chart, a list row.
     lv_obj_move_foreground(btn);
@@ -5099,6 +5097,71 @@ static lv_color_t themedColorHex(uint32_t rgb) {
 }
 
 #define lv_color_hex(rgb) themedColorHex((uint32_t)(rgb))
+
+// One look for every action button and floating dialog. Primary actions are
+// filled in the theme accent, secondary ones (Cancel, Back, No, Close) are a
+// raised surface with an edge, and destructive ones (delete, clear, reset,
+// remove) are red. Paper has no red, so there they fall back to the black
+// primary face and the label carries the meaning.
+static void uiRecolorLabels(lv_obj_t *obj, lv_color_t color) {
+    const uint32_t n = lv_obj_get_child_cnt(obj);
+    for (uint32_t i = 0; i < n; ++i) {
+        lv_obj_t *child = lv_obj_get_child(obj, i);
+        if (lv_obj_check_type(child, &lv_label_class)) {
+            lv_obj_set_style_text_color(child, color, 0);
+        }
+    }
+}
+
+static void uiStyleButton(lv_obj_t *btn, UiBtnKind kind) {
+    if (!btn) return;
+    uint16_t face = s_ui.accent;
+    uint16_t text = s_ui.textOnAccent;
+    uint8_t border = 0;
+    if (kind == UI_BTN_SECONDARY) {
+        face = s_ui.panelStrong;
+        text = s_ui.textMain;
+        border = 1;
+    } else if (kind == UI_BTN_DANGER) {
+#if HAS_UI_THEMES
+        face = rgb565(0xC6, 0x28, 0x28);
+        text = rgb565(0xFF, 0xFF, 0xFF);
+#endif
+    }
+    lv_obj_set_style_bg_color(btn, lvColorFrom565(face), 0);
+    lv_obj_set_style_bg_opa(btn, LV_OPA_COVER, 0);
+    lv_obj_set_style_bg_color(btn, lvColorFrom565(blend565(face, s_ui.panelBg, 90)),
+                              LV_STATE_PRESSED);
+    lv_obj_set_style_radius(btn, kUiBtnRadius, 0);
+    lv_obj_set_style_border_width(btn, border, 0);
+    lv_obj_set_style_border_color(btn, lvColorFrom565(s_ui.dividerHi), 0);
+    lv_obj_set_style_shadow_width(btn, 0, 0);
+    lv_obj_set_style_text_color(btn, lvColorFrom565(text), 0);
+    uiRecolorLabels(btn, lvColorFrom565(text));
+}
+
+// Square when the dialog runs edge to edge in either direction: a rounded
+// corner against the panel's own edge only shows the screen behind it.
+static void uiStyleDialog(lv_obj_t *dlg) {
+    if (!dlg) return;
+    lv_obj_update_layout(dlg);
+    const bool fullW = lv_obj_get_width(dlg) >= (lv_coord_t)lv_disp_get_hor_res(NULL);
+    const bool fullH = lv_obj_get_height(dlg) >= (lv_coord_t)lv_disp_get_ver_res(NULL);
+    const bool full = fullW || fullH;
+    lv_obj_set_style_radius(dlg, full ? 0 : kUiDialogRadius, 0);
+    lv_obj_set_style_border_width(dlg, 1, 0);
+    lv_obj_set_style_border_color(dlg, lvColorFrom565(s_ui.dividerHi), 0);
+#if HAS_UI_THEMES
+    if (!full) {
+        lv_obj_set_style_shadow_color(dlg, lvColorFrom565(s_ui.accent), 0);
+        lv_obj_set_style_shadow_width(dlg, 16, 0);
+        lv_obj_set_style_shadow_spread(dlg, 0, 0);
+        lv_obj_set_style_shadow_opa(dlg, LV_OPA_40, 0);
+        return;
+    }
+#endif
+    lv_obj_set_style_shadow_width(dlg, 0, 0);
+}
 
 static void populateKnownWifiEntries() {
     s_cfgKnownWifiCount = 0;
@@ -12791,7 +12854,7 @@ static void accentBoxShow(lv_obj_t *ta, const AccentSet *set, char base) {
     for (int i = 0; i < n; i++) {
         lv_obj_t *cell = lv_btn_create(s_accentBox);
         lv_obj_set_size(cell, cellW, cellH);
-        lv_obj_set_style_radius(cell, 4, 0);
+        lv_obj_set_style_radius(cell, kUiBtnRadius, 0);
         lv_obj_set_style_pad_all(cell, 0, 0);
         lv_obj_set_style_shadow_width(cell, 0, 0);
         lv_obj_set_style_border_color(cell, lv_color_hex(0xE8F1FF), 0);
@@ -13014,7 +13077,7 @@ static void spellBoxShow(lv_obj_t *ta) {
     for (int i = 0; i < s_spellCount; i++) {
         lv_obj_t *cell = lv_btn_create(s_spellBox);
         lv_obj_set_size(cell, LV_SIZE_CONTENT, cellH);
-        lv_obj_set_style_radius(cell, 4, 0);
+        lv_obj_set_style_radius(cell, kUiBtnRadius, 0);
         lv_obj_set_style_pad_hor(cell, 6, 0);
         lv_obj_set_style_pad_ver(cell, 0, 0);
         lv_obj_set_style_shadow_width(cell, 0, 0);
@@ -13538,6 +13601,7 @@ static void openEmojiPicker(bool sendMode, bool symbolTray) {
     lv_obj_set_flex_align(s_emojiPickerModal, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER,
                           LV_FLEX_ALIGN_CENTER);
     lv_obj_move_foreground(s_emojiPickerBackdrop);
+    uiStyleDialog(s_emojiPickerModal);
 
     lv_obj_t *hint = lv_label_create(s_emojiPickerModal);
     lv_obj_set_width(hint, lv_pct(100));
@@ -13872,7 +13936,7 @@ static void composeStyleModal(lv_obj_t *modal, int modalW, int modalH) {
     lv_obj_set_style_border_color(modal, lvColorFrom565(s_ui.dividerHi), 0);
     // Square when it runs edge to edge: rounding a corner against the panel's
     // own edge just shows the screen underneath in four slivers.
-    lv_obj_set_style_radius(modal, fullW ? 0 : 6, 0);
+    lv_obj_set_style_radius(modal, fullW ? 0 : kUiDialogRadius, 0);
 #if HAS_UI_THEMES
     if (!fullW && !fullH) {
         lv_obj_set_style_shadow_color(modal, lvColorFrom565(s_ui.accent), 0);
@@ -13938,17 +14002,7 @@ static void composeStyleMeta(lv_obj_t *lbl) {
 // opener are quiet raised surfaces, so the eye lands on the thing you came to
 // press. Pressed darkens toward the card rather than LVGL's stock recolour.
 static void composeStyleButton(lv_obj_t *btn, bool primary) {
-    if (!btn) return;
-    const uint16_t face = primary ? s_ui.accent : s_ui.panelStrong;
-    lv_obj_set_style_bg_color(btn, lvColorFrom565(face), 0);
-    lv_obj_set_style_bg_opa(btn, LV_OPA_COVER, 0);
-    lv_obj_set_style_bg_color(btn, lvColorFrom565(blend565(face, s_ui.panelBg, 90)),
-                              LV_STATE_PRESSED);
-    lv_obj_set_style_radius(btn, 6, 0);
-    lv_obj_set_style_border_width(btn, primary ? 0 : 1, 0);
-    lv_obj_set_style_border_color(btn, lvColorFrom565(s_ui.dividerHi), 0);
-    lv_obj_set_style_shadow_width(btn, 0, 0);
-    lv_obj_set_style_text_color(btn, lvColorFrom565(primary ? s_ui.textOnAccent : s_ui.textMain), 0);
+    uiStyleButton(btn, primary ? UI_BTN_PRIMARY : UI_BTN_SECONDARY);
 }
 #endif
 
@@ -14444,7 +14498,7 @@ static void openComposePrompt(uint32_t replyPacketId,
     if (s_composeEmojiBtn) {
         lv_obj_set_width(s_composeEmojiBtn, 30);
         lv_obj_set_height(s_composeEmojiBtn, lv_pct(100));
-        lv_obj_set_style_radius(s_composeEmojiBtn, 5, 0);
+        lv_obj_set_style_radius(s_composeEmojiBtn, kUiBtnRadius, 0);
         lv_obj_set_style_pad_all(s_composeEmojiBtn, 0, 0);
         lv_obj_set_style_shadow_width(s_composeEmojiBtn, 0, 0);
         // Clickable as well as wheel-reachable. This board has no touch panel,
@@ -15856,8 +15910,6 @@ static void openCfgWifiDeleteConfirm() {
     const lv_color_t modalBorder = lightUi ? lv_color_hex(0x6E8FB8) : lv_color_hex(0x5C86C6);
     const lv_color_t titleTextColor = lightUi ? lv_color_hex(0x16233A) : lv_color_hex(0xD9E8FF);
     const lv_color_t bodyTextColor = lightUi ? lv_color_hex(0x13243D) : lv_color_hex(0xFFFFFF);
-    const uint32_t noBtnBg = lightUi ? 0xC76565 : 0x6B3030;
-    const uint32_t yesBtnBg = lightUi ? 0x429A56 : 0x2F6B30;
 
     s_cfgWifiDelBackdrop = lv_obj_create(s_rootScreen);
     lv_obj_set_size(s_cfgWifiDelBackdrop, w, h);
@@ -15885,6 +15937,7 @@ static void openCfgWifiDeleteConfirm() {
     lv_obj_set_flex_align(s_cfgWifiDelModal, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER,
                           LV_FLEX_ALIGN_CENTER);
     lv_obj_move_foreground(s_cfgWifiDelBackdrop);
+    uiStyleDialog(s_cfgWifiDelModal);
 
     lv_obj_t *title = lv_label_create(s_cfgWifiDelModal);
     lv_obj_set_width(title, lv_pct(100));
@@ -15927,23 +15980,21 @@ static void openCfgWifiDeleteConfirm() {
     lv_obj_set_flex_align(btnRow, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER,
                           LV_FLEX_ALIGN_CENTER);
 
-    auto makeDelBtn = [](lv_obj_t *parent, const char *text, uint32_t bgColor,
+    auto makeDelBtn = [](lv_obj_t *parent, const char *text, UiBtnKind kind,
                          lv_event_cb_t cb) {
         lv_obj_t *btn = lv_btn_create(parent);
     #if defined(DEVICE_TDECK_PRO)
-        LV_UNUSED(bgColor);
+        LV_UNUSED(kind);
         lv_obj_remove_style_all(btn);
         lv_obj_add_flag(btn, LV_OBJ_FLAG_CLICKABLE);
     #endif
         lv_obj_set_height(btn, 32);
         lv_obj_set_style_min_width(btn, 78, 0);
-        lv_obj_set_style_radius(btn, 4, 0);
+        lv_obj_set_style_radius(btn, kUiBtnRadius, 0);
     #if defined(DEVICE_TDECK_PRO)
         lv_obj_set_style_bg_opa(btn, LV_OPA_TRANSP, 0);
         lv_obj_set_style_border_width(btn, 1, 0);
         lv_obj_set_style_border_color(btn, lv_color_make(0, 0, 0), 0);
-    #else
-        lv_obj_set_style_bg_color(btn, lv_color_hex(bgColor), 0);
     #endif
         lv_obj_set_style_shadow_width(btn, 0, 0);
         lv_obj_add_event_cb(btn, cb, LV_EVENT_CLICKED, nullptr);
@@ -15951,19 +16002,20 @@ static void openCfgWifiDeleteConfirm() {
         lv_obj_set_style_text_font(lbl, &lv_font_montserrat_12, 0);
     #if defined(DEVICE_TDECK_PRO)
         lv_obj_set_style_text_color(lbl, lv_color_make(0, 0, 0), 0);
-    #else
-        lv_obj_set_style_text_color(lbl, lv_color_hex(0xFFFFFF), 0);
     #endif
         lv_label_set_text(lbl, TR(text));
         lv_obj_center(lbl);
+#if !defined(DEVICE_TDECK_PRO)
+        uiStyleButton(btn, kind);
+#endif
         return btn;
     };
 #if UI_TOUCH_ONLY_PROFILE
-    makeDelBtn(btnRow, "No", noBtnBg, onCfgWifiDelNoPressed);
-    makeDelBtn(btnRow, TR("Yes"), yesBtnBg, onCfgWifiDelYesPressed);
+    makeDelBtn(btnRow, "No", UI_BTN_SECONDARY, onCfgWifiDelNoPressed);
+    makeDelBtn(btnRow, TR("Yes"), UI_BTN_DANGER, onCfgWifiDelYesPressed);
 #else
-    makeDelBtn(btnRow, "(N)o", noBtnBg, onCfgWifiDelNoPressed);
-    makeDelBtn(btnRow, "(Y)es", yesBtnBg, onCfgWifiDelYesPressed);
+    makeDelBtn(btnRow, "(N)o", UI_BTN_SECONDARY, onCfgWifiDelNoPressed);
+    makeDelBtn(btnRow, "(Y)es", UI_BTN_DANGER, onCfgWifiDelYesPressed);
 #endif
 }
 
@@ -16266,26 +16318,21 @@ static void appendHeltecCancelSaveRow(lv_obj_t *parent, lv_event_cb_t cancelCb,
                           LV_FLEX_ALIGN_CENTER);
 
     struct Local {
-        static void make(lv_obj_t *parent, const char *text, lv_event_cb_t cb) {
+        static void make(lv_obj_t *parent, const char *text, lv_event_cb_t cb,
+                         UiBtnKind kind) {
             lv_obj_t *btn = lv_btn_create(parent);
             lv_obj_set_size(btn, 78, 26);
-            lv_obj_set_style_radius(btn, 4, 0);
             lv_obj_set_style_pad_all(btn, 0, 0);
-            lv_obj_set_style_shadow_width(btn, 0, 0);
-            lv_obj_set_style_bg_color(btn, lv_color_hex(0x16386F), 0);
-            lv_obj_set_style_bg_opa(btn, LV_OPA_80, 0);
-            lv_obj_set_style_border_width(btn, 1, 0);
-            lv_obj_set_style_border_color(btn, lv_color_hex(0x8FB5E6), 0);
             lv_obj_add_event_cb(btn, cb, LV_EVENT_CLICKED, nullptr);
             lv_obj_t *lbl = lv_label_create(btn);
             lv_obj_set_style_text_font(lbl, &lv_font_montserrat_12, 0);
-            lv_obj_set_style_text_color(lbl, lv_color_hex(0xE8F1FF), 0);
             lv_label_set_text(lbl, TR(text));
             lv_obj_center(lbl);
+            uiStyleButton(btn, kind);
         }
     };
-    Local::make(row, TR("Cancel"), cancelCb);
-    Local::make(row, commitText, commitCb);
+    Local::make(row, TR("Cancel"), cancelCb, UI_BTN_SECONDARY);
+    Local::make(row, commitText, commitCb, UI_BTN_PRIMARY);
 }
 #endif  // HAS_TOUCH
 
@@ -16432,6 +16479,7 @@ static void openCfgBrightnessModal() {
     lv_obj_set_flex_align(s_cfgBrightModal, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER,
                           LV_FLEX_ALIGN_CENTER);
     lv_obj_move_foreground(s_cfgBrightBackdrop);
+    uiStyleDialog(s_cfgBrightModal);
 
     lv_obj_t *title = lv_label_create(s_cfgBrightModal);
     lv_obj_set_width(title, lv_pct(100));
@@ -16672,6 +16720,7 @@ static void openCfgVolumeModal() {
     lv_obj_set_flex_align(s_cfgVolModal, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER,
                           LV_FLEX_ALIGN_CENTER);
     lv_obj_move_foreground(s_cfgVolBackdrop);
+    uiStyleDialog(s_cfgVolModal);
 
     lv_obj_t *title = lv_label_create(s_cfgVolModal);
     lv_obj_set_width(title, lv_pct(100));
@@ -16899,6 +16948,7 @@ static void openCfgSliderModal(const CfgSliderPicker *spec, int startIdx) {
     lv_obj_set_flex_align(s_cfgSliderModal, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER,
                           LV_FLEX_ALIGN_CENTER);
     lv_obj_move_foreground(s_cfgSliderBackdrop);
+    uiStyleDialog(s_cfgSliderModal);
 
     lv_obj_t *title = lv_label_create(s_cfgSliderModal);
     lv_obj_set_width(title, lv_pct(100));
@@ -17602,6 +17652,7 @@ static void openCfgBattCalModal() {
     lv_obj_set_flex_align(s_cfgBattCalModal, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER,
                           LV_FLEX_ALIGN_CENTER);
     lv_obj_move_foreground(s_cfgBattCalBackdrop);
+    uiStyleDialog(s_cfgBattCalModal);
 
     lv_obj_t *title = lv_label_create(s_cfgBattCalModal);
     lv_obj_set_width(title, lv_pct(100));
@@ -17824,6 +17875,7 @@ static void openChatStyleModal() {
     lv_obj_set_flex_align(s_chatStyleModal, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER,
                           LV_FLEX_ALIGN_CENTER);
     lv_obj_move_foreground(s_chatStyleBackdrop);
+    uiStyleDialog(s_chatStyleModal);
 
     lv_obj_t *title = lv_label_create(s_chatStyleModal);
     lv_obj_set_width(title, lv_pct(100));
@@ -17887,7 +17939,7 @@ static void openChatStyleModal() {
         s_chatStyleRows[i] = row;
         lv_obj_set_width(row, lv_pct(100));
         lv_obj_set_height(row, LV_SIZE_CONTENT);
-        lv_obj_set_style_radius(row, 4, 0);
+        lv_obj_set_style_radius(row, kUiBtnRadius, 0);
         lv_obj_set_style_pad_all(row, 5, 0);
         lv_obj_set_style_pad_row(row, 1, 0);
         lv_obj_set_style_shadow_width(row, 0, 0);
@@ -18023,7 +18075,7 @@ static void rebuildThemeRows() {
         s_themeRows[vis] = row;
         lv_obj_set_width(row, lv_pct(100));
         lv_obj_set_height(row, LV_SIZE_CONTENT);
-        lv_obj_set_style_radius(row, 4, 0);
+        lv_obj_set_style_radius(row, kUiBtnRadius, 0);
         lv_obj_set_style_pad_all(row, 5, 0);
         lv_obj_set_style_pad_column(row, 6, 0);
         lv_obj_set_style_shadow_width(row, 0, 0);
@@ -18206,6 +18258,7 @@ static void openThemeModal() {
     lv_obj_set_flex_align(s_themeModal, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_CENTER,
                           LV_FLEX_ALIGN_CENTER);
     lv_obj_move_foreground(s_themeBackdrop);
+    uiStyleDialog(s_themeModal);
 
     lv_obj_t *title = lv_label_create(s_themeModal);
     lv_obj_set_width(title, lv_pct(100));
@@ -18344,6 +18397,7 @@ static void openChatNameModal() {
     lv_obj_set_flex_align(s_chatNameModal, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER,
                           LV_FLEX_ALIGN_CENTER);
     lv_obj_move_foreground(s_chatNameBackdrop);
+    uiStyleDialog(s_chatNameModal);
 
     lv_obj_t *title = lv_label_create(s_chatNameModal);
     lv_obj_set_width(title, lv_pct(100));
@@ -18382,7 +18436,7 @@ static void openChatNameModal() {
         s_chatNameRows[i] = row;
         lv_obj_set_width(row, lv_pct(100));
         lv_obj_set_height(row, LV_SIZE_CONTENT);
-        lv_obj_set_style_radius(row, 4, 0);
+        lv_obj_set_style_radius(row, kUiBtnRadius, 0);
         lv_obj_set_style_pad_all(row, 5, 0);
         lv_obj_set_style_pad_row(row, 1, 0);
         lv_obj_set_style_shadow_width(row, 0, 0);
@@ -18511,6 +18565,7 @@ static void openFontSizeModal() {
     lv_obj_set_flex_align(s_fontSizeModal, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER,
                           LV_FLEX_ALIGN_CENTER);
     lv_obj_move_foreground(s_fontSizeBackdrop);
+    uiStyleDialog(s_fontSizeModal);
 
     lv_obj_t *title = lv_label_create(s_fontSizeModal);
     lv_obj_set_width(title, lv_pct(100));
@@ -18573,7 +18628,7 @@ static void openFontSizeModal() {
         s_fontSizeRows[i] = row;
         lv_obj_set_width(row, lv_pct(46));
         lv_obj_set_height(row, LV_SIZE_CONTENT);
-        lv_obj_set_style_radius(row, 4, 0);
+        lv_obj_set_style_radius(row, kUiBtnRadius, 0);
         lv_obj_set_style_pad_all(row, 6, 0);
         lv_obj_set_style_shadow_width(row, 0, 0);
         lv_obj_add_event_cb(row, onFontSizeRowPressed, LV_EVENT_CLICKED, (void *)(intptr_t)i);
@@ -18678,6 +18733,7 @@ static void openSigPolicyModal() {
     lv_obj_set_flex_align(s_sigPolicyModal, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER,
                           LV_FLEX_ALIGN_CENTER);
     lv_obj_move_foreground(s_sigPolicyBackdrop);
+    uiStyleDialog(s_sigPolicyModal);
 
     lv_obj_t *title = lv_label_create(s_sigPolicyModal);
     lv_obj_set_width(title, lv_pct(100));
@@ -18721,7 +18777,7 @@ static void openSigPolicyModal() {
         s_sigPolicyRows[i] = row;
         lv_obj_set_width(row, lv_pct(100));
         lv_obj_set_height(row, LV_SIZE_CONTENT);
-        lv_obj_set_style_radius(row, 4, 0);
+        lv_obj_set_style_radius(row, kUiBtnRadius, 0);
         lv_obj_set_style_pad_all(row, 5, 0);
         lv_obj_set_style_pad_row(row, 1, 0);
         lv_obj_set_style_shadow_width(row, 0, 0);
@@ -19688,6 +19744,7 @@ static void openChanCfgModal() {
     lv_obj_set_flex_align(s_chanCfgModal, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER,
                           LV_FLEX_ALIGN_CENTER);
     lv_obj_move_foreground(s_chanCfgBackdrop);
+    uiStyleDialog(s_chanCfgModal);
 
     lv_obj_t *title = lv_label_create(s_chanCfgModal);
     lv_obj_set_width(title, lv_pct(100));
@@ -19744,7 +19801,7 @@ static void openChanCfgModal() {
         s_chanCfgRows[i] = row;
         lv_obj_set_width(row, lv_pct(kChanModalCellPct));
         lv_obj_set_height(row, kChanModalRowH);
-        lv_obj_set_style_radius(row, 4, 0);
+        lv_obj_set_style_radius(row, kUiBtnRadius, 0);
         lv_obj_set_style_pad_left(row, 5, 0);
         lv_obj_set_style_pad_right(row, 5, 0);
         lv_obj_set_style_pad_top(row, 1, 0);
@@ -19954,6 +20011,7 @@ static void openChanEditModal(int slot) {
 
     char titleText[32];
     chanCfgRowLabel(slot, titleText, sizeof(titleText));
+    uiStyleDialog(s_chanEditModal);
     lv_obj_t *title = lv_label_create(s_chanEditModal);
     lv_obj_set_width(title, lv_pct(100));
     lv_obj_set_style_text_font(title, kChanModalTitleFont, 0);
@@ -20009,7 +20067,7 @@ static void openChanEditModal(int slot) {
         // Label and value share one line: stacked, the rows plus the header ran
         // past the bottom of both small panels.
         lv_obj_set_height(row, kChanModalRowH);
-        lv_obj_set_style_radius(row, 4, 0);
+        lv_obj_set_style_radius(row, kUiBtnRadius, 0);
         lv_obj_set_style_pad_left(row, 5, 0);
         lv_obj_set_style_pad_right(row, 5, 0);
         lv_obj_set_style_pad_top(row, 1, 0);
@@ -20196,6 +20254,7 @@ static void openChanTextModal(int field) {
     lv_obj_move_foreground(s_chanTextBackdrop);
 
     const bool editingName = (field == CHAN_EDIT_NAME);
+    uiStyleDialog(s_chanTextModal);
 
     lv_obj_t *title = lv_label_create(s_chanTextModal);
     lv_obj_set_width(title, lv_pct(100));
@@ -20267,18 +20326,14 @@ static void openChanTextModal(int field) {
 
         lv_obj_t *eqBtn = lv_btn_create(eqRow);
         lv_obj_set_size(eqBtn, 46, 30);
-        lv_obj_set_style_radius(eqBtn, 4, 0);
         lv_obj_set_style_pad_all(eqBtn, 2, 0);
-        lv_obj_set_style_shadow_width(eqBtn, 0, 0);
-        lv_obj_set_style_bg_color(eqBtn, lv_color_hex(0x2A4E8F), 0);
-        lv_obj_set_style_bg_opa(eqBtn, LV_OPA_COVER, 0);
         lv_obj_add_event_cb(eqBtn, onChanTextEqualsPressed, LV_EVENT_CLICKED, nullptr);
 
         lv_obj_t *eqLbl = lv_label_create(eqBtn);
         lv_obj_set_style_text_font(eqLbl, &lv_font_montserrat_14, 0);
-        lv_obj_set_style_text_color(eqLbl, lv_color_hex(0xE8F1FF), 0);
         lv_label_set_text(eqLbl, "=");
         lv_obj_center(eqLbl);
+        uiStyleButton(eqBtn, UI_BTN_SECONDARY);
     }
 #endif
 
@@ -20303,6 +20358,7 @@ static void openChanTextModal(int field) {
     lv_obj_set_style_text_font(cancelLbl, &lv_font_montserrat_10, 0);
     lv_label_set_text(cancelLbl, TR("Cancel"));
     lv_obj_center(cancelLbl);
+    uiStyleButton(cancelBtn, UI_BTN_SECONDARY);
 
     lv_obj_t *okBtn = lv_btn_create(btnRow);
     lv_obj_set_flex_grow(okBtn, 1);
@@ -20312,6 +20368,7 @@ static void openChanTextModal(int field) {
     lv_obj_set_style_text_font(okLbl, &lv_font_montserrat_10, 0);
     lv_label_set_text(okLbl, TR("OK"));
     lv_obj_center(okLbl);
+    uiStyleButton(okBtn, UI_BTN_PRIMARY);
 
     // Not with a physical keyboard attached (the T-Display P4's expansion):
     // keys typed on it reach this field through pumpKeyboardInput(), and an
@@ -20592,6 +20649,7 @@ static void openTimeCfgModal() {
     lv_obj_set_flex_align(s_timeCfgModal, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER,
                           LV_FLEX_ALIGN_CENTER);
     lv_obj_move_foreground(s_timeCfgBackdrop);
+    uiStyleDialog(s_timeCfgModal);
 
     lv_obj_t *title = lv_label_create(s_timeCfgModal);
     lv_obj_set_width(title, lv_pct(100));
@@ -20625,7 +20683,7 @@ static void openTimeCfgModal() {
         s_timeCfgRows[i] = cell;
         lv_obj_set_width(cell, lv_pct(widthPct));
         lv_obj_set_height(cell, kChanModalRowH);
-        lv_obj_set_style_radius(cell, 4, 0);
+        lv_obj_set_style_radius(cell, kUiBtnRadius, 0);
         lv_obj_set_style_pad_left(cell, 5, 0);
         lv_obj_set_style_pad_right(cell, 5, 0);
         lv_obj_set_style_pad_top(cell, 1, 0);
@@ -20811,6 +20869,7 @@ static void openAlertSoundModal() {
     lv_obj_set_flex_align(s_alertSoundModal, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER,
                           LV_FLEX_ALIGN_CENTER);
     lv_obj_move_foreground(s_alertSoundBackdrop);
+    uiStyleDialog(s_alertSoundModal);
 
     lv_obj_t *title = lv_label_create(s_alertSoundModal);
     lv_obj_set_width(title, lv_pct(100));
@@ -20857,7 +20916,7 @@ static void openAlertSoundModal() {
         s_alertSoundRows[i] = row;
         lv_obj_set_width(row, lv_pct(46));
         lv_obj_set_height(row, LV_SIZE_CONTENT);
-        lv_obj_set_style_radius(row, 4, 0);
+        lv_obj_set_style_radius(row, kUiBtnRadius, 0);
         lv_obj_set_style_pad_all(row, 6, 0);
         lv_obj_set_style_shadow_width(row, 0, 0);
         lv_obj_add_event_cb(row, onAlertSoundRowPressed, LV_EVENT_CLICKED, (void *)(intptr_t)i);
@@ -21002,6 +21061,7 @@ static void openNotifyLedColorModal(bool forDm) {
     lv_obj_set_flex_align(s_notifyLedColorModal, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER,
                           LV_FLEX_ALIGN_CENTER);
     lv_obj_move_foreground(s_notifyLedColorBackdrop);
+    uiStyleDialog(s_notifyLedColorModal);
 
     lv_obj_t *title = lv_label_create(s_notifyLedColorModal);
     lv_obj_set_width(title, lv_pct(100));
@@ -21045,7 +21105,7 @@ static void openNotifyLedColorModal(bool forDm) {
         lv_obj_t *row = lv_btn_create(grid);
         s_notifyLedColorRows[color] = row;
         lv_obj_set_size(row, kNotifyLedColorCellW, kNotifyLedColorCellH);
-        lv_obj_set_style_radius(row, 4, 0);
+        lv_obj_set_style_radius(row, kUiBtnRadius, 0);
         lv_obj_set_style_pad_all(row, 0, 0);
         lv_obj_set_style_shadow_width(row, 0, 0);
         lv_obj_set_style_bg_opa(row, LV_OPA_COVER, 0);
@@ -21109,6 +21169,7 @@ static void openCfgColorPickerModal() {
     lv_obj_set_flex_align(s_cfgColorModal, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER,
                           LV_FLEX_ALIGN_CENTER);
     lv_obj_move_foreground(s_cfgColorBackdrop);
+    uiStyleDialog(s_cfgColorModal);
 
     lv_obj_t *title = lv_label_create(s_cfgColorModal);
     lv_obj_set_width(title, lv_pct(100));
@@ -21560,6 +21621,7 @@ static void openCfgWifiPassModal(int scanIdx) {
     lv_obj_set_flex_align(s_cfgWifiPassModal, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_START,
                           LV_FLEX_ALIGN_START);
     lv_obj_move_foreground(s_cfgWifiPassBackdrop);
+    uiStyleDialog(s_cfgWifiPassModal);
 
     lv_obj_t *title = lv_label_create(s_cfgWifiPassModal);
     lv_obj_set_width(title, lv_pct(100));
@@ -21619,6 +21681,7 @@ static void openCfgWifiPassModal(int scanIdx) {
     lv_obj_set_style_text_font(cancelLbl, &lv_font_montserrat_10, 0);
     lv_label_set_text(cancelLbl, TR("Cancel"));
     lv_obj_center(cancelLbl);
+    uiStyleButton(cancelBtn, UI_BTN_SECONDARY);
 
     lv_obj_t *connectBtn = lv_btn_create(btnRow);
     lv_obj_set_flex_grow(connectBtn, 1);
@@ -21628,6 +21691,7 @@ static void openCfgWifiPassModal(int scanIdx) {
     lv_obj_set_style_text_font(connectLbl, &lv_font_montserrat_10, 0);
     lv_label_set_text(connectLbl, TR("Connect"));
     lv_obj_center(connectLbl);
+    uiStyleButton(connectBtn, UI_BTN_PRIMARY);
 
     // Not with a physical keyboard attached (the T-Display P4's expansion):
     // keys typed on it reach this field through pumpKeyboardInput(), and an
@@ -21841,6 +21905,7 @@ static void openCfgBleKbdModal(bool autoScan) {
     lv_obj_set_flex_align(s_cfgBleKbdModal, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_START,
                           LV_FLEX_ALIGN_START);
     lv_obj_move_foreground(s_cfgBleKbdBackdrop);
+    uiStyleDialog(s_cfgBleKbdModal);
 
     lv_obj_t *title = lv_label_create(s_cfgBleKbdModal);
     lv_obj_set_width(title, lv_pct(100));
@@ -21909,6 +21974,7 @@ static void openCfgBleKbdModal(bool autoScan) {
         lv_obj_set_style_text_font(lbl, &lv_font_montserrat_10, 0);
         lv_label_set_text(lbl, TR(b.label));
         lv_obj_center(lbl);
+        uiStyleButton(btn, b.cb == onCfgBleKbdForgetPressed ? UI_BTN_DANGER : UI_BTN_PRIMARY);
     }
 
     refreshCfgBleKbdModal();
@@ -21939,8 +22005,9 @@ static void bleKbdRepairPaintSelection() {
     for (int i = 0; i < 2; i++) {
         if (!lvObjValid(s_bleKbdRepairBtns[i])) continue;
         const bool sel = (i == s_bleKbdRepairSel);
-        lv_obj_set_style_border_width(s_bleKbdRepairBtns[i], sel ? 2 : 0, 0);
-        lv_obj_set_style_border_color(s_bleKbdRepairBtns[i], lv_color_hex(0xFFFFFF), 0);
+        lv_obj_set_style_border_width(s_bleKbdRepairBtns[i], sel ? 2 : 1, 0);
+        lv_obj_set_style_border_color(s_bleKbdRepairBtns[i],
+                                      lvColorFrom565(sel ? s_ui.textMain : s_ui.dividerHi), 0);
     }
 }
 
@@ -22023,6 +22090,7 @@ static void openBleKbdRepairPrompt() {
     lv_obj_set_flex_align(s_bleKbdRepairModal, LV_FLEX_ALIGN_CENTER,
                           LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
     lv_obj_move_foreground(s_bleKbdRepairBackdrop);
+    uiStyleDialog(s_bleKbdRepairModal);
 
     lv_obj_t *title = lv_label_create(s_bleKbdRepairModal);
     lv_obj_set_width(title, lv_pct(100));
@@ -22067,34 +22135,33 @@ static void openBleKbdRepairPrompt() {
     lv_obj_set_flex_align(buttonRow, LV_FLEX_ALIGN_CENTER,
                           LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
 
-    auto makeButton = [](lv_obj_t *parent, const char *text, uint32_t color,
+    auto makeButton = [](lv_obj_t *parent, const char *text, UiBtnKind kind,
                          lv_event_cb_t callback) {
         lv_obj_t *button = lv_btn_create(parent);
         lv_obj_set_height(button, 32);
         lv_obj_set_style_min_width(button, 86, 0);
-        lv_obj_set_style_radius(button, 4, 0);
-        lv_obj_set_style_bg_color(button, lv_color_hex(color), 0);
+        lv_obj_set_style_radius(button, kUiBtnRadius, 0);
         lv_obj_set_style_shadow_width(button, 0, 0);
         lv_obj_add_event_cb(button, callback, LV_EVENT_CLICKED, nullptr);
         lv_obj_t *label = lv_label_create(button);
         lv_obj_set_style_text_font(label, &lv_font_montserrat_12, 0);
-        lv_obj_set_style_text_color(label, lv_color_hex(0xFFFFFF), 0);
         lv_label_set_text(label, TR(text));
         lv_obj_center(label);
+        uiStyleButton(button, kind);
         return button;
     };
     // Re-pair gets the cautionary colour: it is the answer that hands a
     // keyboard input to whatever completes the next pairing.
 #if UI_TOUCH_ONLY_PROFILE
     s_bleKbdRepairBtns[0] = makeButton(buttonRow, TR_NOOP("Re-pair"),
-                                       lightUi ? 0xB07028 : 0x7A4A12, onBleKbdRepairAcceptPressed);
+                                       UI_BTN_DANGER, onBleKbdRepairAcceptPressed);
     s_bleKbdRepairBtns[1] = makeButton(buttonRow, TR_NOOP("Ignore"),
-                                       lightUi ? 0x5B7BA8 : 0x2C4A7A, onBleKbdRepairIgnorePressed);
+                                       UI_BTN_SECONDARY, onBleKbdRepairIgnorePressed);
 #else
     s_bleKbdRepairBtns[0] = makeButton(buttonRow, TR_NOOP("(R)e-pair"),
-                                       lightUi ? 0xB07028 : 0x7A4A12, onBleKbdRepairAcceptPressed);
+                                       UI_BTN_DANGER, onBleKbdRepairAcceptPressed);
     s_bleKbdRepairBtns[1] = makeButton(buttonRow, TR_NOOP("(I)gnore"),
-                                       lightUi ? 0x5B7BA8 : 0x2C4A7A, onBleKbdRepairIgnorePressed);
+                                       UI_BTN_SECONDARY, onBleKbdRepairIgnorePressed);
 #endif
     bleKbdRepairPaintSelection();
 }
@@ -22150,6 +22217,7 @@ static void openCfgWifiScanModal() {
     lv_obj_set_flex_align(s_cfgWifiScanModal, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_START,
                           LV_FLEX_ALIGN_START);
     lv_obj_move_foreground(s_cfgWifiScanBackdrop);
+    uiStyleDialog(s_cfgWifiScanModal);
 
     lv_obj_t *title = lv_label_create(s_cfgWifiScanModal);
     lv_obj_set_width(title, lv_pct(100));
@@ -22207,6 +22275,7 @@ static void openCfgWifiScanModal() {
     lv_obj_set_style_text_font(cancelLbl, &lv_font_montserrat_10, 0);
     lv_label_set_text(cancelLbl, TR("Cancel"));
     lv_obj_center(cancelLbl);
+    uiStyleButton(cancelBtn, UI_BTN_SECONDARY);
 
     lv_obj_t *rescanBtn = lv_btn_create(btnRow);
     lv_obj_set_flex_grow(rescanBtn, 1);
@@ -22216,6 +22285,7 @@ static void openCfgWifiScanModal() {
     lv_obj_set_style_text_font(rescanLbl, &lv_font_montserrat_10, 0);
     lv_label_set_text(rescanLbl, TR("Rescan"));
     lv_obj_center(rescanLbl);
+    uiStyleButton(rescanBtn, UI_BTN_SECONDARY);
 
     lv_obj_t *connectBtn = lv_btn_create(btnRow);
     lv_obj_set_flex_grow(connectBtn, 1);
@@ -22225,6 +22295,7 @@ static void openCfgWifiScanModal() {
     lv_obj_set_style_text_font(connectLbl, &lv_font_montserrat_10, 0);
     lv_label_set_text(connectLbl, TR("Connect"));
     lv_obj_center(connectLbl);
+    uiStyleButton(connectBtn, UI_BTN_PRIMARY);
 #endif
 
     refreshCfgWifiScanModal(true);
@@ -22267,6 +22338,7 @@ static void openCfgWifiPickerModal(bool forOnboarding) {
     lv_obj_set_flex_align(s_cfgWifiModal, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_START,
                           LV_FLEX_ALIGN_START);
     lv_obj_move_foreground(s_cfgWifiBackdrop);
+    uiStyleDialog(s_cfgWifiModal);
 
     lv_obj_t *title = lv_label_create(s_cfgWifiModal);
     lv_obj_set_width(title, lv_pct(100));
@@ -22324,6 +22396,7 @@ static void openCfgWifiPickerModal(bool forOnboarding) {
     lv_obj_set_style_text_font(cancelLbl, &lv_font_montserrat_10, 0);
     lv_label_set_text(cancelLbl, TR("Cancel"));
     lv_obj_center(cancelLbl);
+    uiStyleButton(cancelBtn, UI_BTN_SECONDARY);
 
     lv_obj_t *newBtn = lv_btn_create(btnRow);
     lv_obj_set_flex_grow(newBtn, 1);
@@ -22333,6 +22406,7 @@ static void openCfgWifiPickerModal(bool forOnboarding) {
     lv_obj_set_style_text_font(newLbl, &lv_font_montserrat_10, 0);
     lv_label_set_text(newLbl, TR("New"));
     lv_obj_center(newLbl);
+    uiStyleButton(newBtn, UI_BTN_PRIMARY);
 #endif
 
     refreshCfgWifiPickerModal();
@@ -22524,6 +22598,7 @@ static void openCfgPresetModal() {
     const lv_color_t rowColor   = (s_cfg.uiMode == UI_MODE_LIGHT)
                                       ? lv_color_hex(0x13233D) : lv_color_hex(0xD9E8FF);
 #endif
+    uiStyleDialog(s_cfgPresetModal);
 
     lv_obj_t *title = lv_label_create(s_cfgPresetModal);
     lv_obj_set_width(title, lv_pct(100));
@@ -22582,7 +22657,7 @@ static void openCfgPresetModal() {
         s_cfgPresetRows[i] = row;
         lv_obj_set_width(row, lv_pct(100));
         lv_obj_set_height(row, LV_SIZE_CONTENT);
-        lv_obj_set_style_radius(row, 4, 0);
+        lv_obj_set_style_radius(row, kUiBtnRadius, 0);
         lv_obj_set_style_pad_all(row, 5, 0);
         lv_obj_set_style_pad_row(row, 1, 0);
         lv_obj_set_style_shadow_width(row, 0, 0);
@@ -22804,8 +22879,6 @@ static void openKbLandscapePrompt() {
     const lv_color_t modalBg = lightUi ? lv_color_hex(0xEAF1FB) : lv_color_hex(0x0E285B);
     const lv_color_t modalBorder = lightUi ? lv_color_hex(0x6E8FB8) : lv_color_hex(0x5C86C6);
     const lv_color_t textColor = lightUi ? lv_color_hex(0x16233A) : lv_color_hex(0xD9E8FF);
-    const uint32_t cancelBg = lightUi ? 0xC76565 : 0x6B3030;
-    const uint32_t rebootBg = lightUi ? 0x429A56 : 0x2F6B30;
 
     s_kbLandscapeBackdrop = lv_obj_create(s_rootScreen);
     lv_obj_set_size(s_kbLandscapeBackdrop, w, h);
@@ -22830,6 +22903,7 @@ static void openKbLandscapePrompt() {
     lv_obj_set_flex_flow(modal, LV_FLEX_FLOW_COLUMN);
     lv_obj_set_flex_align(modal, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER,
                           LV_FLEX_ALIGN_CENTER);
+    uiStyleDialog(modal);
 
     s_kbLandscapeText = lv_label_create(modal);
     lv_obj_set_width(s_kbLandscapeText, lv_pct(100));
@@ -22850,23 +22924,22 @@ static void openKbLandscapePrompt() {
     lv_obj_set_flex_align(row, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER,
                           LV_FLEX_ALIGN_CENTER);
 
-    auto makeBtn = [](lv_obj_t *parent, const char *text, uint32_t bg, lv_event_cb_t cb) {
+    auto makeBtn = [](lv_obj_t *parent, const char *text, UiBtnKind kind, lv_event_cb_t cb) {
         lv_obj_t *btn = lv_btn_create(parent);
         lv_obj_set_height(btn, 40);
         lv_obj_set_flex_grow(btn, 1);
-        lv_obj_set_style_radius(btn, 4, 0);
+        lv_obj_set_style_radius(btn, kUiBtnRadius, 0);
         lv_obj_set_style_shadow_width(btn, 0, 0);
-        lv_obj_set_style_bg_color(btn, lv_color_hex(bg), 0);
         lv_obj_add_event_cb(btn, cb, LV_EVENT_CLICKED, nullptr);
         lv_obj_t *lbl = lv_label_create(btn);
         lv_obj_set_style_text_font(lbl, &lv_font_montserrat_14, 0);
-        lv_obj_set_style_text_color(lbl, lv_color_hex(0xFFFFFF), 0);
         lv_label_set_text(lbl, text);
         lv_obj_center(lbl);
+        uiStyleButton(btn, kind);
     };
-    makeBtn(row, TR("Cancel"), cancelBg,
+    makeBtn(row, TR("Cancel"), UI_BTN_SECONDARY,
             [](lv_event_t *e) { LV_UNUSED(e); kbLandscapeCancel(); });
-    makeBtn(row, TR("Reboot now"), rebootBg,
+    makeBtn(row, TR("Reboot now"), UI_BTN_PRIMARY,
             [](lv_event_t *e) { LV_UNUSED(e); kbLandscapeRebootNow(); });
 
     lv_obj_move_foreground(s_kbLandscapeBackdrop);
@@ -22987,6 +23060,7 @@ static void openCfgOrientModal() {
     const lv_color_t rowColor   = (s_cfg.uiMode == UI_MODE_LIGHT)
                                       ? lv_color_hex(0x13233D) : lv_color_hex(0xD9E8FF);
 #endif
+    uiStyleDialog(s_cfgOrientModal);
 
     lv_obj_t *title = lv_label_create(s_cfgOrientModal);
     lv_obj_set_width(title, lv_pct(100));
@@ -23039,7 +23113,7 @@ static void openCfgOrientModal() {
         s_cfgOrientRows[i] = row;
         lv_obj_set_width(row, lv_pct(100));
         lv_obj_set_height(row, LV_SIZE_CONTENT);
-        lv_obj_set_style_radius(row, 4, 0);
+        lv_obj_set_style_radius(row, kUiBtnRadius, 0);
         lv_obj_set_style_pad_all(row, 5, 0);
         lv_obj_set_style_pad_row(row, 1, 0);
         lv_obj_set_style_shadow_width(row, 0, 0);
@@ -23206,6 +23280,7 @@ static void openCfgNavAlignModal() {
     const lv_color_t rowColor   = (s_cfg.uiMode == UI_MODE_LIGHT)
                                       ? lv_color_hex(0x13233D) : lv_color_hex(0xD9E8FF);
 #endif
+    uiStyleDialog(s_cfgNavAlignModal);
 
     lv_obj_t *title = lv_label_create(s_cfgNavAlignModal);
     lv_obj_set_width(title, lv_pct(100));
@@ -23245,7 +23320,7 @@ static void openCfgNavAlignModal() {
         s_cfgNavAlignRows[i] = row;
         lv_obj_set_width(row, lv_pct(100));
         lv_obj_set_height(row, LV_SIZE_CONTENT);
-        lv_obj_set_style_radius(row, 4, 0);
+        lv_obj_set_style_radius(row, kUiBtnRadius, 0);
         lv_obj_set_style_pad_all(row, 5, 0);
         lv_obj_set_style_pad_row(row, 1, 0);
         lv_obj_set_style_shadow_width(row, 0, 0);
@@ -23417,6 +23492,7 @@ static void openCfgLangModal() {
     lv_obj_set_flex_align(s_cfgLangModal, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_CENTER,
                           LV_FLEX_ALIGN_CENTER);
     lv_obj_move_foreground(s_cfgLangBackdrop);
+    uiStyleDialog(s_cfgLangModal);
 
     lv_obj_t *title = lv_label_create(s_cfgLangModal);
     lv_obj_set_width(title, lv_pct(100));
@@ -23647,6 +23723,7 @@ static void openCfgNodeNameModal() {
     lv_obj_set_flex_align(s_cfgNodeNameModal, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_START,
                           LV_FLEX_ALIGN_START);
     lv_obj_move_foreground(s_cfgNodeNameBackdrop);
+    uiStyleDialog(s_cfgNodeNameModal);
 
     lv_obj_t *title = lv_label_create(s_cfgNodeNameModal);
     lv_obj_set_width(title, lv_pct(100));
@@ -23754,6 +23831,7 @@ static void openCfgNodeNameModal() {
     lv_obj_set_style_text_font(closeLbl, &lv_font_montserrat_10, 0);
     lv_label_set_text(closeLbl, TR("Close"));
     lv_obj_center(closeLbl);
+    uiStyleButton(closeBtn, UI_BTN_SECONDARY);
 
     lv_obj_t *saveBtn = lv_btn_create(btnRow);
     lv_obj_set_flex_grow(saveBtn, 1);
@@ -23763,6 +23841,7 @@ static void openCfgNodeNameModal() {
     lv_obj_set_style_text_font(saveLbl, &lv_font_montserrat_10, 0);
     lv_label_set_text(saveLbl, TR("Save"));
     lv_obj_center(saveLbl);
+    uiStyleButton(saveBtn, UI_BTN_PRIMARY);
 
     // Not with a physical keyboard attached (the T-Display P4's expansion):
     // keys typed on it reach this field through pumpKeyboardInput(), and an
@@ -23920,6 +23999,7 @@ static void openCfgActionMessageModal(const char *msg, const char *titleText) {
                           LV_FLEX_ALIGN_START,
                           LV_FLEX_ALIGN_START,
                           LV_FLEX_ALIGN_START);
+    uiStyleDialog(s_cfgActionMsgModal);
 
     lv_obj_t *title = lv_label_create(s_cfgActionMsgModal);
     lv_obj_set_width(title, contentW);
@@ -24935,7 +25015,7 @@ static void populateHeltecBottomNav(lv_obj_t *bar, int activeTarget) {
         } else {
             lv_obj_set_height(btn, lv_pct(100));
         }
-        lv_obj_set_style_radius(btn, 4, 0);
+        lv_obj_set_style_radius(btn, kUiBtnRadius, 0);
         lv_obj_set_style_pad_all(btn, sideColumn ? 0 : btnPad, 0);
         lv_obj_set_style_shadow_width(btn, 0, 0);
 
@@ -25292,22 +25372,16 @@ static lv_obj_t *toolActionBtn(lv_obj_t *row, const char *text, lv_event_cb_t cb
     lv_obj_t *btn = lv_btn_create(row);
     lv_obj_set_height(btn, big ? kStackBtnH : 22);
     lv_obj_set_flex_grow(btn, 1);
-    lv_obj_set_style_radius(btn, 4, 0);
     lv_obj_set_style_pad_hor(btn, 4, 0);
     lv_obj_set_style_pad_ver(btn, 0, 0);
-    lv_obj_set_style_shadow_width(btn, 0, 0);
-    lv_obj_set_style_bg_color(btn, lv_color_hex(0x16386F), 0);
-    lv_obj_set_style_bg_opa(btn, LV_OPA_80, 0);
-    lv_obj_set_style_border_width(btn, 1, 0);
-    lv_obj_set_style_border_color(btn, lv_color_hex(0x8FB5E6), 0);
     lv_obj_add_event_cb(btn, cb, LV_EVENT_CLICKED, nullptr);
     lv_obj_t *lbl = lv_label_create(btn);
     lv_obj_set_style_text_font(lbl, big ? STACK_BTN_FONT : &lv_font_montserrat_10, 0);
-    lv_obj_set_style_text_color(lbl, lv_color_hex(0xE8F1FF), 0);
     lv_label_set_long_mode(lbl, LV_LABEL_LONG_DOT);
     lv_obj_set_style_max_width(lbl, lv_pct(100), 0);
     lv_label_set_text(lbl, text);
     lv_obj_center(lbl);
+    uiStyleButton(btn, UI_BTN_PRIMARY);
     return lbl;
 }
 #endif
@@ -26372,21 +26446,15 @@ static lv_obj_t *nodesFilterDialogBtn(lv_obj_t *row, const char *text, lv_event_
     lv_obj_t *btn = lv_btn_create(row);
     lv_obj_set_flex_grow(btn, 1);
     lv_obj_set_height(btn, UI_TOUCH_ONLY_PROFILE ? max(28, kStackBtnH) : 22);
-    lv_obj_set_style_radius(btn, 4, 0);
-    lv_obj_set_style_shadow_width(btn, 0, 0);
     lv_obj_set_style_pad_ver(btn, 1, 0);
-    lv_obj_set_style_bg_color(btn, lv_color_hex(primary ? 0x2A4E8F : 0x16386F), 0);
-    lv_obj_set_style_bg_opa(btn, primary ? LV_OPA_COVER : LV_OPA_70, 0);
-    lv_obj_set_style_border_width(btn, 1, 0);
-    lv_obj_set_style_border_color(btn, lv_color_hex(primary ? 0x90B4FF : 0x335D9D), 0);
     lv_obj_add_event_cb(btn, cb, LV_EVENT_CLICKED, nullptr);
 
     lv_obj_t *lbl = lv_label_create(btn);
     lv_obj_set_style_text_font(lbl, UI_TOUCH_ONLY_PROFILE ? STACK_BTN_FONT
                                                           : &lv_font_montserrat_12, 0);
-    lv_obj_set_style_text_color(lbl, lv_color_hex(0xE8F1FF), 0);
     lv_label_set_text(lbl, text);
     lv_obj_center(lbl);
+    uiStyleButton(btn, primary ? UI_BTN_PRIMARY : UI_BTN_SECONDARY);
     return btn;
 }
 
@@ -26572,9 +26640,11 @@ static void styleNodesTopButton(lv_obj_t *btn, bool focused) {
 #if defined(DEVICE_TDECK_PRO)
     lv_obj_set_style_border_width(btn, focused ? 3 : 1, 0);
 #else
-    lv_obj_set_style_bg_color(btn, lv_color_hex(focused ? 0x2A4E8F : 0x16386F), 0);
-    lv_obj_set_style_border_width(btn, focused ? 2 : 1, 0);
-    lv_obj_set_style_border_color(btn, lv_color_hex(focused ? 0x90B4FF : 0x5C86C6), 0);
+    // Accent like every other action button; the keyboard cursor is a ring
+    // outside it, drawn against the panel rather than the accent face.
+    lv_obj_set_style_outline_width(btn, focused ? 2 : 0, 0);
+    lv_obj_set_style_outline_pad(btn, 1, 0);
+    lv_obj_set_style_outline_color(btn, lvColorFrom565(s_ui.textMain), 0);
 #endif
 }
 
@@ -26635,26 +26705,24 @@ static lv_obj_t *buildNodesTopButton(lv_obj_t *listPanel, lv_obj_t **btnOut, int
     if (!btn) return nullptr;
     lv_obj_set_width(btn, lv_pct(96));
     lv_obj_set_height(btn, btnH);
-    lv_obj_set_style_radius(btn, 4, 0);
+    lv_obj_set_style_radius(btn, kUiBtnRadius, 0);
     lv_obj_set_style_pad_hor(btn, 3, 0);
     lv_obj_set_style_pad_ver(btn, 1, 0);
     lv_obj_set_style_shadow_width(btn, 0, 0);
     lv_obj_set_style_border_width(btn, 1, 0);
 #if defined(DEVICE_TDECK_PRO)
-    const lv_color_t textColor = lv_color_make(0, 0, 0);
     lv_obj_set_style_bg_opa(btn, LV_OPA_TRANSP, 0);
     lv_obj_set_style_border_color(btn, lv_color_make(0, 0, 0), 0);
-#else
-    const lv_color_t textColor = lv_color_hex(0xE8F1FF);
-    lv_obj_set_style_bg_color(btn, lv_color_hex(0x16386F), 0);
-    lv_obj_set_style_bg_opa(btn, LV_OPA_COVER, 0);
-    lv_obj_set_style_border_color(btn, lv_color_hex(0x5C86C6), 0);
 #endif
     lv_obj_add_event_cb(btn, cb, LV_EVENT_CLICKED, nullptr);
 
     lv_obj_t *lbl = lv_label_create(btn);
     lv_obj_set_style_text_font(lbl, btnFont, 0);
-    lv_obj_set_style_text_color(lbl, textColor, 0);
+#if defined(DEVICE_TDECK_PRO)
+    lv_obj_set_style_text_color(lbl, lv_color_make(0, 0, 0), 0);
+#else
+    uiStyleButton(btn, UI_BTN_PRIMARY);
+#endif
     lv_label_set_long_mode(lbl, LV_LABEL_LONG_CLIP);
     lv_obj_center(lbl);
     return lbl;
@@ -29061,7 +29129,7 @@ static bool nodeLocateBuildModal(const char *titleText, bool allNodes) {
                 // arrives as one filled rectangle. The larger face and the 12 px
                 // font are what keep the glyph legible once it is ink on white.
                 lv_obj_set_size(b, 56, 44);
-                lv_obj_set_style_radius(b, 3, 0);
+                lv_obj_set_style_radius(b, kUiBtnRadius, 0);
                 lv_obj_set_style_bg_color(b, lv_color_hex(0xFFFFFF), 0);
                 lv_obj_set_style_bg_opa(b, LV_OPA_COVER, 0);
                 lv_obj_set_style_border_color(b, lv_color_hex(0x000000), 0);
@@ -29069,12 +29137,8 @@ static bool nodeLocateBuildModal(const char *titleText, bool allNodes) {
                 lv_obj_set_style_text_color(l, lv_color_hex(0x000000), 0);
 #else
                 lv_obj_set_size(b, 48, 36);
-                lv_obj_set_style_radius(b, 5, 0);
-                lv_obj_set_style_bg_color(b, lv_color_hex(0x16386F), 0);
-                lv_obj_set_style_bg_opa(b, LV_OPA_80, 0);
-                lv_obj_set_style_border_color(b, lv_color_hex(0x335D9D), 0);
                 lv_obj_set_style_text_font(l, &lv_font_montserrat_18, 0);
-                lv_obj_set_style_text_color(l, lv_color_hex(0xE8F1FF), 0);
+                uiStyleButton(b, UI_BTN_SECONDARY);
 #endif
                 lv_obj_add_event_cb(b, cb, LV_EVENT_CLICKED, nullptr);
                 lv_label_set_text(l, text);
@@ -29708,6 +29772,7 @@ static void openNodeLosModal(uint32_t nodeId) {
 
     char who[40];
     nodesActionTitleLabel(nodeId, who, sizeof(who));
+    uiStyleDialog(s_nodeLosModal);
     lv_obj_t *title = lv_label_create(s_nodeLosModal);
     lv_obj_set_width(title, lv_pct(100));
     lv_obj_set_style_text_font(title, &lv_font_montserrat_12, 0);
@@ -30016,7 +30081,7 @@ static void refreshNodesListRows() {
     #endif
         lv_obj_set_width(row, lv_pct(96));
         lv_obj_set_height(row, nodesListRowH);
-        lv_obj_set_style_radius(row, 4, 0);
+        lv_obj_set_style_radius(row, kUiBtnRadius, 0);
         lv_obj_set_style_pad_left(row, 3, 0);
         lv_obj_set_style_pad_right(row, 3, 0);
         lv_obj_set_style_pad_top(row, 1, 0);
@@ -30846,6 +30911,7 @@ static void openTracerouteProgressModal(uint32_t nodeId, uint32_t packetId) {
     lv_obj_set_flex_flow(s_tracerouteModal, LV_FLEX_FLOW_COLUMN);
     lv_obj_set_flex_align(s_tracerouteModal, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_START);
     lv_obj_move_foreground(s_tracerouteBackdrop);
+    uiStyleDialog(s_tracerouteModal);
 
     lv_obj_t *title = lv_label_create(s_tracerouteModal);
     lv_obj_set_width(title, lv_pct(100));
@@ -31611,7 +31677,7 @@ static void openNodesActionMenuFor(uint32_t nodeId, bool msgMode, uint32_t packe
             s_nodesActionRows[i] = cell;
             lv_obj_set_flex_grow(cell, 1);
             lv_obj_set_height(cell, 28);
-            lv_obj_set_style_radius(cell, 4, 0);
+            lv_obj_set_style_radius(cell, kUiBtnRadius, 0);
             lv_obj_set_style_pad_all(cell, 0, 0);
             lv_obj_set_style_shadow_width(cell, 0, 0);
             lv_obj_add_event_cb(cell, onNodesActionRowPressed, LV_EVENT_CLICKED,
@@ -31679,7 +31745,7 @@ static void openNodesActionMenuFor(uint32_t nodeId, bool msgMode, uint32_t packe
         // pct(49) leaves a small gutter for pad_column between the two columns.
         lv_obj_set_width(row, lv_pct(49));
         lv_obj_set_height(row, 26);
-        lv_obj_set_style_radius(row, 4, 0);
+        lv_obj_set_style_radius(row, kUiBtnRadius, 0);
         lv_obj_set_style_pad_left(row, 4, 0);
         lv_obj_set_style_pad_right(row, 4, 0);
         lv_obj_set_style_pad_top(row, 1, 0);
@@ -31919,7 +31985,7 @@ static void openChannelActionsModal() {
     s_channelActionsMuteBtn = btn;
     lv_obj_set_width(btn, lv_pct(100));
     lv_obj_set_height(btn, btnH);
-    lv_obj_set_style_radius(btn, 4, 0);
+    lv_obj_set_style_radius(btn, kUiBtnRadius, 0);
     lv_obj_set_style_pad_all(btn, 2, 0);
     lv_obj_set_style_shadow_width(btn, 0, 0);
     lv_obj_add_event_cb(btn, onChannelActionMutePressed, LV_EVENT_CLICKED, nullptr);
@@ -31939,7 +32005,7 @@ static void openChannelActionsModal() {
     s_channelActionsShareBtn = shareBtn;
     lv_obj_set_width(shareBtn, lv_pct(100));
     lv_obj_set_height(shareBtn, btnH);
-    lv_obj_set_style_radius(shareBtn, 4, 0);
+    lv_obj_set_style_radius(shareBtn, kUiBtnRadius, 0);
     lv_obj_set_style_pad_all(shareBtn, 2, 0);
     lv_obj_set_style_shadow_width(shareBtn, 0, 0);
     lv_obj_add_event_cb(shareBtn, onChannelActionSharePressed, LV_EVENT_CLICKED, nullptr);
@@ -32679,7 +32745,7 @@ static void openLiveToolsModal() {
         s_liveToolsRows[i] = row;
         lv_obj_set_width(row, lv_pct(toolsStacked ? 100 : kChanModalCellPct));
         lv_obj_set_height(row, toolsRowH);
-        lv_obj_set_style_radius(row, 4, 0);
+        lv_obj_set_style_radius(row, kUiBtnRadius, 0);
         lv_obj_set_style_pad_left(row, 5, 0);
         lv_obj_set_style_pad_right(row, 5, 0);
         lv_obj_set_style_pad_top(row, 1, 0);
@@ -32834,6 +32900,7 @@ static void openLiveFilterModal() {
     lv_obj_set_flex_align(s_liveFilterModal, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER,
                           LV_FLEX_ALIGN_CENTER);
     lv_obj_move_foreground(s_liveFilterBackdrop);
+    uiStyleDialog(s_liveFilterModal);
 
     lv_obj_t *title = lv_label_create(s_liveFilterModal);
     lv_obj_set_width(title, lv_pct(100));
@@ -32902,7 +32969,7 @@ static void openLiveFilterModal() {
         s_liveFilterRows[i] = row;
         lv_obj_set_width(row, lv_pct(kChanModalCellPct));
         lv_obj_set_height(row, kChanModalRowH);
-        lv_obj_set_style_radius(row, 4, 0);
+        lv_obj_set_style_radius(row, kUiBtnRadius, 0);
         lv_obj_set_style_pad_left(row, 5, 0);
         lv_obj_set_style_pad_right(row, 5, 0);
         lv_obj_set_style_pad_top(row, 1, 0);
@@ -36989,6 +37056,7 @@ static void openMqttConfirmModal(int chan) {
     lv_obj_set_flex_align(s_mqttConfirmModal, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER,
                           LV_FLEX_ALIGN_CENTER);
     lv_obj_move_foreground(s_mqttConfirmBackdrop);
+    uiStyleDialog(s_mqttConfirmModal);
 
     lv_obj_t *title = lv_label_create(s_mqttConfirmModal);
     lv_obj_set_width(title, lv_pct(100));
@@ -37036,27 +37104,21 @@ static void openMqttConfirmModal(int chan) {
     lv_obj_set_flex_align(btnRow, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER,
                           LV_FLEX_ALIGN_CENTER);
 
-    auto makeConfirmBtn = [](lv_obj_t *parent, const char *text, uint32_t border,
+    auto makeConfirmBtn = [](lv_obj_t *parent, const char *text, UiBtnKind kind,
                              lv_event_cb_t cb) {
         lv_obj_t *btn = lv_btn_create(parent);
         lv_obj_set_size(btn, 84, 26);
-        lv_obj_set_style_radius(btn, 4, 0);
         lv_obj_set_style_pad_all(btn, 0, 0);
-        lv_obj_set_style_shadow_width(btn, 0, 0);
-        lv_obj_set_style_bg_color(btn, lv_color_hex(0x16386F), 0);
-        lv_obj_set_style_bg_opa(btn, LV_OPA_80, 0);
-        lv_obj_set_style_border_width(btn, 1, 0);
-        lv_obj_set_style_border_color(btn, lv_color_hex(border), 0);
         lv_obj_add_event_cb(btn, cb, LV_EVENT_CLICKED, nullptr);
         lv_obj_t *lbl = lv_label_create(btn);
         lv_obj_set_style_text_font(lbl, &lv_font_montserrat_12, 0);
-        lv_obj_set_style_text_color(lbl, lv_color_hex(0xE8F1FF), 0);
         lv_label_set_text(lbl, TR(text));
         lv_obj_center(lbl);
+        uiStyleButton(btn, kind);
     };
-    makeConfirmBtn(btnRow, TR_NOOP("Cancel"), 0x8FB5E6,
+    makeConfirmBtn(btnRow, TR_NOOP("Cancel"), UI_BTN_SECONDARY,
                    [](lv_event_t *e) { LV_UNUSED(e); closeMqttConfirmModal(); });
-    makeConfirmBtn(btnRow, TR_NOOP("Send"), 0xFFC98A,
+    makeConfirmBtn(btnRow, TR_NOOP("Send"), UI_BTN_PRIMARY,
                    [](lv_event_t *e) { LV_UNUSED(e); mqttSendConfirmed(); });
 #else
     lv_obj_t *hint = lv_label_create(s_mqttConfirmModal);
@@ -37140,6 +37202,7 @@ static void openMqttSendModal() {
     lv_obj_set_flex_align(s_mqttSendModal, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER,
                           LV_FLEX_ALIGN_CENTER);
     lv_obj_move_foreground(s_mqttSendBackdrop);
+    uiStyleDialog(s_mqttSendModal);
 
     lv_obj_t *title = lv_label_create(s_mqttSendModal);
     lv_obj_set_width(title, lv_pct(100));
@@ -37189,7 +37252,7 @@ static void openMqttSendModal() {
         s_mqttSendRows[i] = row;
         lv_obj_set_width(row, lv_pct(kChanModalCellPct));
         lv_obj_set_height(row, kChanModalRowH);
-        lv_obj_set_style_radius(row, 4, 0);
+        lv_obj_set_style_radius(row, kUiBtnRadius, 0);
         lv_obj_set_style_pad_left(row, 5, 0);
         lv_obj_set_style_pad_right(row, 5, 0);
         lv_obj_set_style_pad_top(row, 1, 0);
@@ -38673,6 +38736,7 @@ static void openDiscoveryPresetModal() {
     const lv_color_t rowColor   = (s_cfg.uiMode == UI_MODE_LIGHT)
                                       ? lv_color_hex(0x13233D) : lv_color_hex(0xD9E8FF);
 #endif
+    uiStyleDialog(s_presetPickModal);
 
     lv_obj_t *title = lv_label_create(s_presetPickModal);
     lv_obj_set_width(title, lv_pct(100));
@@ -38720,7 +38784,7 @@ static void openDiscoveryPresetModal() {
         s_presetPickRows[i] = row;
         lv_obj_set_width(row, lv_pct(100));
         lv_obj_set_height(row, LV_SIZE_CONTENT);
-        lv_obj_set_style_radius(row, 4, 0);
+        lv_obj_set_style_radius(row, kUiBtnRadius, 0);
         lv_obj_set_style_pad_all(row, 5, 0);
         lv_obj_set_style_pad_row(row, 1, 0);
         lv_obj_set_style_shadow_width(row, 0, 0);
@@ -38761,35 +38825,34 @@ static void openDiscoveryPresetModal() {
     lv_obj_set_flex_align(btnRow, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER,
                           LV_FLEX_ALIGN_CENTER);
 
-    auto makePickBtn = [](lv_obj_t *parent, const char *text, uint32_t color,
+    auto makePickBtn = [](lv_obj_t *parent, const char *text, UiBtnKind kind,
                           lv_event_cb_t cb) {
         lv_obj_t *btn = lv_btn_create(parent);
         lv_obj_set_height(btn, 26);
         lv_obj_set_style_min_width(btn, 76, 0);
-        lv_obj_set_style_radius(btn, 4, 0);
+        lv_obj_set_style_radius(btn, kUiBtnRadius, 0);
         lv_obj_set_style_shadow_width(btn, 0, 0);
 #if defined(DEVICE_TDECK_PRO)
-        LV_UNUSED(color);
+        LV_UNUSED(kind);
         lv_obj_set_style_bg_opa(btn, LV_OPA_TRANSP, 0);
         lv_obj_set_style_border_width(btn, 1, 0);
         lv_obj_set_style_border_color(btn, lv_color_make(0, 0, 0), 0);
-#else
-        lv_obj_set_style_bg_color(btn, lv_color_hex(color), 0);
 #endif
         lv_obj_add_event_cb(btn, cb, LV_EVENT_CLICKED, nullptr);
         lv_obj_t *lbl = lv_label_create(btn);
         lv_obj_set_style_text_font(lbl, &lv_font_montserrat_12, 0);
 #if defined(DEVICE_TDECK_PRO)
         lv_obj_set_style_text_color(lbl, lv_color_make(0, 0, 0), 0);
-#else
-        lv_obj_set_style_text_color(lbl, lv_color_hex(0xFFFFFF), 0);
 #endif
         lv_label_set_text(lbl, TR(text));
         lv_obj_center(lbl);
+#if !defined(DEVICE_TDECK_PRO)
+        uiStyleButton(btn, kind);
+#endif
     };
-    makePickBtn(btnRow, TR_NOOP("Cancel"), 0x6B3030,
+    makePickBtn(btnRow, TR_NOOP("Cancel"), UI_BTN_SECONDARY,
                 [](lv_event_t *e) { LV_UNUSED(e); closeDiscoveryPresetModal(); });
-    makePickBtn(btnRow, TR_NOOP("Scan"), 0x2F6B30,
+    makePickBtn(btnRow, TR_NOOP("Scan"), UI_BTN_PRIMARY,
                 [](lv_event_t *e) { LV_UNUSED(e); discoveryPresetPickCommit(); });
 
     lv_obj_t *hint = lv_label_create(s_presetPickModal);
@@ -39160,7 +39223,7 @@ static void keyReviewApplySelection() {
         lv_obj_set_style_border_width(s_keyReviewBtns[i], sel ? 3 : 1, 0);
     #if !defined(DEVICE_TDECK_PRO)
         lv_obj_set_style_border_color(s_keyReviewBtns[i],
-                                      sel ? lv_color_hex(0xFFFFFF) : lv_color_hex(0x000000), 0);
+                                      lvColorFrom565(sel ? s_ui.textMain : s_ui.dividerHi), 0);
     #endif
     }
 }
@@ -39453,8 +39516,6 @@ static void openDestructiveConfirm(DestructiveConfirmAction action, uint32_t nod
     const lv_color_t modalBorder = lightUi ? lv_color_hex(0x6E8FB8) : lv_color_hex(0x5C86C6);
     const lv_color_t titleTextColor = lightUi ? lv_color_hex(0x16233A) : lv_color_hex(0xD9E8FF);
     const lv_color_t bodyTextColor = lightUi ? lv_color_hex(0x13243D) : lv_color_hex(0xFFFFFF);
-    const uint32_t noBtnBg = lightUi ? 0xC76565 : 0x6B3030;
-    const uint32_t yesBtnBg = lightUi ? 0x429A56 : 0x2F6B30;
 
     s_dmDelBackdrop = lv_obj_create(s_rootScreen);
     lv_obj_set_size(s_dmDelBackdrop, w, h);
@@ -39482,6 +39543,7 @@ static void openDestructiveConfirm(DestructiveConfirmAction action, uint32_t nod
     lv_obj_set_flex_align(s_dmDelModal, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER,
                           LV_FLEX_ALIGN_CENTER);
     lv_obj_move_foreground(s_dmDelBackdrop);
+    uiStyleDialog(s_dmDelModal);
 
     lv_obj_t *title = lv_label_create(s_dmDelModal);
     lv_obj_set_width(title, lv_pct(100));
@@ -39510,23 +39572,21 @@ static void openDestructiveConfirm(DestructiveConfirmAction action, uint32_t nod
     lv_obj_set_flex_align(btnRow, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER,
                           LV_FLEX_ALIGN_CENTER);
 
-    auto makeDmDelBtn = [](lv_obj_t *parent, const char *text, uint32_t bgColor,
+    auto makeDmDelBtn = [](lv_obj_t *parent, const char *text, UiBtnKind kind,
                            lv_event_cb_t cb) {
         lv_obj_t *btn = lv_btn_create(parent);
     #if defined(DEVICE_TDECK_PRO)
-        LV_UNUSED(bgColor);
+        LV_UNUSED(kind);
         lv_obj_remove_style_all(btn);
         lv_obj_add_flag(btn, LV_OBJ_FLAG_CLICKABLE);
     #endif
         lv_obj_set_height(btn, 32);
         lv_obj_set_style_min_width(btn, 78, 0);
-        lv_obj_set_style_radius(btn, 4, 0);
+        lv_obj_set_style_radius(btn, kUiBtnRadius, 0);
     #if defined(DEVICE_TDECK_PRO)
         lv_obj_set_style_bg_opa(btn, LV_OPA_TRANSP, 0);
         lv_obj_set_style_border_width(btn, 1, 0);
         lv_obj_set_style_border_color(btn, lv_color_make(0, 0, 0), 0);
-    #else
-        lv_obj_set_style_bg_color(btn, lv_color_hex(bgColor), 0);
     #endif
         lv_obj_set_style_shadow_width(btn, 0, 0);
         lv_obj_add_event_cb(btn, cb, LV_EVENT_CLICKED, nullptr);
@@ -39534,11 +39594,12 @@ static void openDestructiveConfirm(DestructiveConfirmAction action, uint32_t nod
         lv_obj_set_style_text_font(lbl, &lv_font_montserrat_12, 0);
     #if defined(DEVICE_TDECK_PRO)
         lv_obj_set_style_text_color(lbl, lv_color_make(0, 0, 0), 0);
-    #else
-        lv_obj_set_style_text_color(lbl, lv_color_hex(0xFFFFFF), 0);
     #endif
         lv_label_set_text(lbl, TR(text));
         lv_obj_center(lbl);
+#if !defined(DEVICE_TDECK_PRO)
+        uiStyleButton(btn, kind);
+#endif
         return btn;
     };
     if (action == DESTRUCTIVE_CONFIRM_KEY_CHANGE) {
@@ -39546,22 +39607,22 @@ static void openDestructiveConfirm(DestructiveConfirmAction action, uint32_t nod
         // key. Closing (backdrop, close key) answers neither and leaves it
         // pending.
     #if UI_TOUCH_ONLY_PROFILE
-        s_keyReviewBtns[0] = makeDmDelBtn(btnRow, TR_NOOP("Reject"), noBtnBg, onKeyReviewRejectPressed);
-        s_keyReviewBtns[1] = makeDmDelBtn(btnRow, TR_NOOP("Accept new key"), yesBtnBg, onDmDelYesPressed);
+        s_keyReviewBtns[0] = makeDmDelBtn(btnRow, TR_NOOP("Reject"), UI_BTN_SECONDARY, onKeyReviewRejectPressed);
+        s_keyReviewBtns[1] = makeDmDelBtn(btnRow, TR_NOOP("Accept new key"), UI_BTN_DANGER, onDmDelYesPressed);
     #else
-        s_keyReviewBtns[0] = makeDmDelBtn(btnRow, TR_NOOP("(R)eject"), noBtnBg, onKeyReviewRejectPressed);
-        s_keyReviewBtns[1] = makeDmDelBtn(btnRow, TR_NOOP("(A)ccept new key"), yesBtnBg, onDmDelYesPressed);
+        s_keyReviewBtns[0] = makeDmDelBtn(btnRow, TR_NOOP("(R)eject"), UI_BTN_SECONDARY, onKeyReviewRejectPressed);
+        s_keyReviewBtns[1] = makeDmDelBtn(btnRow, TR_NOOP("(A)ccept new key"), UI_BTN_DANGER, onDmDelYesPressed);
     #endif
         s_keyReviewSel = 0;
         keyReviewApplySelection();
         return;
     }
 #if UI_TOUCH_ONLY_PROFILE
-    makeDmDelBtn(btnRow, "No", noBtnBg, onDmDelNoPressed);
-    makeDmDelBtn(btnRow, TR_NOOP("Yes"), yesBtnBg, onDmDelYesPressed);
+    makeDmDelBtn(btnRow, "No", UI_BTN_SECONDARY, onDmDelNoPressed);
+    makeDmDelBtn(btnRow, TR_NOOP("Yes"), UI_BTN_DANGER, onDmDelYesPressed);
 #else
-    makeDmDelBtn(btnRow, "(N)o", noBtnBg, onDmDelNoPressed);
-    makeDmDelBtn(btnRow, "(Y)es", yesBtnBg, onDmDelYesPressed);
+    makeDmDelBtn(btnRow, "(N)o", UI_BTN_SECONDARY, onDmDelNoPressed);
+    makeDmDelBtn(btnRow, "(Y)es", UI_BTN_DANGER, onDmDelYesPressed);
 #endif
 }
 
@@ -40231,7 +40292,7 @@ static void refreshDmNodePicker(bool force) {
         #endif
         lv_obj_set_width(row, lv_pct(97));
         lv_obj_set_height(row, 22);
-        lv_obj_set_style_radius(row, 4, 0);
+        lv_obj_set_style_radius(row, kUiBtnRadius, 0);
         lv_obj_set_style_pad_left(row, 3, 0);
         lv_obj_set_style_pad_right(row, 3, 0);
         lv_obj_set_style_pad_top(row, 1, 0);
@@ -40555,7 +40616,7 @@ static void refreshDmModal(bool force) {
     #endif
         lv_obj_set_width(row, lv_pct(97));
         lv_obj_set_height(row, dmListRowH);
-        lv_obj_set_style_radius(row, 4, 0);
+        lv_obj_set_style_radius(row, kUiBtnRadius, 0);
         lv_obj_set_style_pad_left(row, 3, 0);
         lv_obj_set_style_pad_right(row, 3, 0);
         lv_obj_set_style_pad_top(row, 1, 0);
@@ -40618,7 +40679,7 @@ static void refreshDmModal(bool force) {
             s_dmConvRows[i] = row;
             lv_obj_set_width(row, lv_pct(97));
             lv_obj_set_height(row, dmListRowH);
-            lv_obj_set_style_radius(row, 4, 0);
+            lv_obj_set_style_radius(row, kUiBtnRadius, 0);
             lv_obj_set_style_pad_left(row, 3, 0);
             lv_obj_set_style_pad_right(row, 3, 0);
             lv_obj_set_style_pad_top(row, 1, 0);
@@ -41180,13 +41241,7 @@ static void openDmModal() {
 #else
     lv_obj_set_height(dmNewMsgBtn, 24);
 #endif
-    lv_obj_set_style_radius(dmNewMsgBtn, 4, 0);
     lv_obj_set_style_pad_all(dmNewMsgBtn, 0, 0);
-    lv_obj_set_style_shadow_width(dmNewMsgBtn, 0, 0);
-    lv_obj_set_style_bg_color(dmNewMsgBtn, lv_color_hex(0x16386F), 0);
-    lv_obj_set_style_bg_opa(dmNewMsgBtn, LV_OPA_80, 0);
-    lv_obj_set_style_border_width(dmNewMsgBtn, 1, 0);
-    lv_obj_set_style_border_color(dmNewMsgBtn, lv_color_hex(0x8FB5E6), 0);
     lv_obj_add_event_cb(dmNewMsgBtn, onDmNewMessagePressed, LV_EVENT_CLICKED, nullptr);
 
     lv_obj_t *dmNewMsgLbl = lv_label_create(dmNewMsgBtn);
@@ -41195,9 +41250,9 @@ static void openDmModal() {
 #else
     lv_obj_set_style_text_font(dmNewMsgLbl, &lv_font_montserrat_10, 0);
 #endif
-    lv_obj_set_style_text_color(dmNewMsgLbl, lv_color_hex(0xE8F1FF), 0);
     lv_label_set_text(dmNewMsgLbl, TR("New Message"));
     lv_obj_center(dmNewMsgLbl);
+    uiStyleButton(dmNewMsgBtn, UI_BTN_PRIMARY);
 #endif
 
     lv_obj_t *hint = lv_label_create(s_dmModal);
@@ -41754,6 +41809,7 @@ static void openReleaseNotesModal() {
     lv_obj_set_flex_align(s_releaseNotesModal, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_START,
                           LV_FLEX_ALIGN_START);
     lv_obj_move_foreground(s_releaseNotesBackdrop);
+    uiStyleDialog(s_releaseNotesModal);
 
     lv_obj_t *title = lv_label_create(s_releaseNotesModal);
     lv_obj_set_width(title, lv_pct(100));
@@ -42463,6 +42519,7 @@ static void openSdScanProgressModal(const char *title) {
     lv_obj_set_flex_flow(s_sdScanModal, LV_FLEX_FLOW_COLUMN);
     lv_obj_set_flex_align(s_sdScanModal, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_START,
                           LV_FLEX_ALIGN_START);
+    uiStyleDialog(s_sdScanModal);
 
     lv_obj_t *head = lv_label_create(s_sdScanModal);
     lv_obj_set_width(head, contentW);
@@ -43840,12 +43897,18 @@ static void openCfgConfirmModal(int actionId, const char *text,
     const lv_color_t titleTextColor = lightUi ? lv_color_hex(0x16233A) : lv_color_hex(0xD9E8FF);
     const lv_color_t actionBg = lightUi ? lv_color_hex(0xF5F9FF) : lv_color_hex(0x123266);
     const lv_color_t actionTextColor = lightUi ? lv_color_hex(0x13243D) : lv_color_hex(0xFFFFFF);
-    const uint32_t noBtnBg = lightUi ? 0xC76565 : 0x6B3030;
-    const uint32_t yesBtnBg = lightUi ? 0x429A56 : 0x2F6B30;
-    // Neither the safe answer nor the one the dialog is named after, and the
-    // most destructive thing on the screen: its own colour, not a second green.
-    const uint32_t altBtnBg = lightUi ? 0xB07028 : 0x7A4A12;
-    const lv_color_t btnTextColor = lv_color_hex(0xFFFFFF);
+    // Red for the answers that erase something; the alt answer, where there is
+    // one, is the most destructive thing on the screen.
+    const bool yesErases = actionId == CFG_ACTION_CLEAR_MSGS
+        || actionId == CFG_ACTION_CLEAR_NODES_KEEP_FAVS
+        || actionId == CFG_ACTION_CLEAR_NODES
+        || actionId == CFG_ACTION_FACTORY_RESET
+#if HAS_SD_MALWARE_SCAN
+        || fn == cfgSdFormatCommit
+        || fn == cfgSdRepairCommit
+#endif
+        ;
+    const UiBtnKind yesKind = yesErases ? UI_BTN_DANGER : UI_BTN_PRIMARY;
 
     // Full-screen backdrop makes the dialog truly modal for touch builds.
     s_cfgConfirmBackdrop = lv_obj_create(s_rootScreen);
@@ -43877,6 +43940,7 @@ static void openCfgConfirmModal(int actionId, const char *text,
     lv_obj_set_flex_align(s_cfgConfirmModal, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER,
                           LV_FLEX_ALIGN_CENTER);
     lv_obj_move_foreground(s_cfgConfirmBackdrop);
+    uiStyleDialog(s_cfgConfirmModal);
 
     lv_obj_t *title = lv_label_create(s_cfgConfirmModal);
     lv_obj_set_width(title, lv_pct(100));
@@ -43958,14 +44022,12 @@ static void openCfgConfirmModal(int actionId, const char *text,
 
     auto makeConfirmBtn = [](lv_obj_t *parent,
                              const char *text,
-                             uint32_t bgColor,
-                             lv_color_t txtColor,
+                             UiBtnKind kind,
                              lv_event_cb_t cb,
                              int minW) {
         lv_obj_t *btn = lv_btn_create(parent);
     #if defined(DEVICE_TDECK_PRO)
-        LV_UNUSED(bgColor);
-        LV_UNUSED(txtColor);
+        LV_UNUSED(kind);
         lv_obj_remove_style_all(btn);
         lv_obj_add_flag(btn, LV_OBJ_FLAG_CLICKABLE);
     #endif
@@ -43974,13 +44036,11 @@ static void openCfgConfirmModal(int actionId, const char *text,
         // Grows to the share it was measured for rather than to its text, so
         // the row lands on the arithmetic above instead of near it.
         lv_obj_set_flex_grow(btn, 1);
-        lv_obj_set_style_radius(btn, 4, 0);
+        lv_obj_set_style_radius(btn, kUiBtnRadius, 0);
     #if defined(DEVICE_TDECK_PRO)
         lv_obj_set_style_bg_opa(btn, LV_OPA_TRANSP, 0);
         lv_obj_set_style_border_width(btn, 1, 0);
         lv_obj_set_style_border_color(btn, lv_color_make(0, 0, 0), 0);
-    #else
-        lv_obj_set_style_bg_color(btn, lv_color_hex(bgColor), 0);
     #endif
         lv_obj_set_style_shadow_width(btn, 0, 0);
         lv_obj_add_event_cb(btn, cb, LV_EVENT_CLICKED, nullptr);
@@ -43988,8 +44048,6 @@ static void openCfgConfirmModal(int actionId, const char *text,
         lv_obj_set_style_text_font(lbl, &lv_font_montserrat_12, 0);
     #if defined(DEVICE_TDECK_PRO)
         lv_obj_set_style_text_color(lbl, lv_color_make(0, 0, 0), 0);
-    #else
-        lv_obj_set_style_text_color(lbl, txtColor, 0);
     #endif
         // Bounded by the button so a caller's own alt label -- "(F)ormat and
         // erase" is a real one -- shortens instead of pushing its button wide
@@ -43999,17 +44057,20 @@ static void openCfgConfirmModal(int actionId, const char *text,
         lv_label_set_long_mode(lbl, LV_LABEL_LONG_DOT);
         lv_label_set_text(lbl, TR(text));
         lv_obj_center(lbl);
+#if !defined(DEVICE_TDECK_PRO)
+        uiStyleButton(btn, kind);
+#endif
         return btn;
     };
 #if UI_TOUCH_ONLY_PROFILE
-    makeConfirmBtn(btnRow, TR_NOOP("No"), noBtnBg, btnTextColor, onCfgConfirmNoPressed, btnMinW);
-    makeConfirmBtn(btnRow, TR_NOOP("Yes"), yesBtnBg, btnTextColor, onCfgConfirmYesPressed, btnMinW);
+    makeConfirmBtn(btnRow, TR_NOOP("No"), UI_BTN_SECONDARY, onCfgConfirmNoPressed, btnMinW);
+    makeConfirmBtn(btnRow, TR_NOOP("Yes"), yesKind, onCfgConfirmYesPressed, btnMinW);
 #else
-    makeConfirmBtn(btnRow, TR_NOOP("(N)o"), noBtnBg, btnTextColor, onCfgConfirmNoPressed, btnMinW);
-    makeConfirmBtn(btnRow, TR_NOOP("(Y)es"), yesBtnBg, btnTextColor, onCfgConfirmYesPressed, btnMinW);
+    makeConfirmBtn(btnRow, TR_NOOP("(N)o"), UI_BTN_SECONDARY, onCfgConfirmNoPressed, btnMinW);
+    makeConfirmBtn(btnRow, TR_NOOP("(Y)es"), yesKind, onCfgConfirmYesPressed, btnMinW);
 #endif
     if (s_cfgConfirmAltFn) {
-        makeConfirmBtn(btnRow, s_cfgConfirmAltLabel, altBtnBg, btnTextColor,
+        makeConfirmBtn(btnRow, s_cfgConfirmAltLabel, UI_BTN_DANGER,
                        onCfgConfirmAltPressed, btnMinW);
     }
 }
@@ -44096,6 +44157,7 @@ static void openOtaUpdatePrompt() {
     lv_obj_set_flex_align(s_otaPromptModal, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER,
                           LV_FLEX_ALIGN_CENTER);
     lv_obj_move_foreground(s_otaPromptBackdrop);
+    uiStyleDialog(s_otaPromptModal);
 
     lv_obj_t *title = lv_label_create(s_otaPromptModal);
     lv_obj_set_width(title, lv_pct(100));
@@ -44146,23 +44208,21 @@ static void openOtaUpdatePrompt() {
     lv_obj_set_flex_align(btnRow, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER,
                           LV_FLEX_ALIGN_CENTER);
 
-    auto makeOtaBtn = [](lv_obj_t *parent, const char *text, uint32_t bgColor,
+    auto makeOtaBtn = [](lv_obj_t *parent, const char *text, UiBtnKind kind,
                          lv_event_cb_t cb) {
         lv_obj_t *btn = lv_btn_create(parent);
     #if defined(DEVICE_TDECK_PRO)
-        LV_UNUSED(bgColor);
+        LV_UNUSED(kind);
         lv_obj_remove_style_all(btn);
         lv_obj_add_flag(btn, LV_OBJ_FLAG_CLICKABLE);
     #endif
         lv_obj_set_height(btn, 32);
         lv_obj_set_style_min_width(btn, 80, 0);
-        lv_obj_set_style_radius(btn, 4, 0);
+        lv_obj_set_style_radius(btn, kUiBtnRadius, 0);
     #if defined(DEVICE_TDECK_PRO)
         lv_obj_set_style_bg_opa(btn, LV_OPA_TRANSP, 0);
         lv_obj_set_style_border_width(btn, 1, 0);
         lv_obj_set_style_border_color(btn, lv_color_make(0, 0, 0), 0);
-    #else
-        lv_obj_set_style_bg_color(btn, lv_color_hex(bgColor), 0);
     #endif
         lv_obj_set_style_shadow_width(btn, 0, 0);
         lv_obj_add_event_cb(btn, cb, LV_EVENT_CLICKED, nullptr);
@@ -44170,19 +44230,20 @@ static void openOtaUpdatePrompt() {
         lv_obj_set_style_text_font(lbl, &lv_font_montserrat_12, 0);
     #if defined(DEVICE_TDECK_PRO)
         lv_obj_set_style_text_color(lbl, lv_color_make(0, 0, 0), 0);
-    #else
-        lv_obj_set_style_text_color(lbl, lv_color_hex(0xFFFFFF), 0);
     #endif
         lv_label_set_text(lbl, TR(text));
         lv_obj_center(lbl);
+#if !defined(DEVICE_TDECK_PRO)
+        uiStyleButton(btn, kind);
+#endif
         return btn;
     };
 #if UI_TOUCH_ONLY_PROFILE
-    makeOtaBtn(btnRow, "No", lightUi ? 0xC76565 : 0x6B3030, onOtaPromptNoPressed);
-    makeOtaBtn(btnRow, TR_NOOP("Yes"), lightUi ? 0x429A56 : 0x2F6B30, onOtaPromptYesPressed);
+    makeOtaBtn(btnRow, "No", UI_BTN_SECONDARY, onOtaPromptNoPressed);
+    makeOtaBtn(btnRow, TR_NOOP("Yes"), UI_BTN_PRIMARY, onOtaPromptYesPressed);
 #else
-    makeOtaBtn(btnRow, "(N)o", lightUi ? 0xC76565 : 0x6B3030, onOtaPromptNoPressed);
-    makeOtaBtn(btnRow, "(Y)es", lightUi ? 0x429A56 : 0x2F6B30, onOtaPromptYesPressed);
+    makeOtaBtn(btnRow, "(N)o", UI_BTN_SECONDARY, onOtaPromptNoPressed);
+    makeOtaBtn(btnRow, "(Y)es", UI_BTN_PRIMARY, onOtaPromptYesPressed);
 #endif
 }
 
@@ -44418,6 +44479,7 @@ static void openLegacyMapPrompt() {
     lv_obj_set_flex_align(s_legacyMapPromptModal, LV_FLEX_ALIGN_CENTER,
                           LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
     lv_obj_move_foreground(s_legacyMapPromptBackdrop);
+    uiStyleDialog(s_legacyMapPromptModal);
 
     lv_obj_t *title = lv_label_create(s_legacyMapPromptModal);
     lv_obj_set_width(title, lv_pct(100));
@@ -44455,23 +44517,21 @@ static void openLegacyMapPrompt() {
     lv_obj_set_flex_align(buttonRow, LV_FLEX_ALIGN_CENTER,
                           LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
 
-    auto makeButton = [](lv_obj_t *parent, const char *text, uint32_t color,
+    auto makeButton = [](lv_obj_t *parent, const char *text, UiBtnKind kind,
                          lv_event_cb_t callback) {
         lv_obj_t *button = lv_btn_create(parent);
     #if defined(DEVICE_TDECK_PRO)
-        LV_UNUSED(color);
+        LV_UNUSED(kind);
         lv_obj_remove_style_all(button);
         lv_obj_add_flag(button, LV_OBJ_FLAG_CLICKABLE);
     #endif
         lv_obj_set_height(button, 32);
         lv_obj_set_style_min_width(button, 86, 0);
-        lv_obj_set_style_radius(button, 4, 0);
+        lv_obj_set_style_radius(button, kUiBtnRadius, 0);
     #if defined(DEVICE_TDECK_PRO)
         lv_obj_set_style_bg_opa(button, LV_OPA_TRANSP, 0);
         lv_obj_set_style_border_width(button, 1, 0);
         lv_obj_set_style_border_color(button, lv_color_make(0, 0, 0), 0);
-    #else
-        lv_obj_set_style_bg_color(button, lv_color_hex(color), 0);
     #endif
         lv_obj_set_style_shadow_width(button, 0, 0);
         lv_obj_add_event_cb(button, callback, LV_EVENT_CLICKED, nullptr);
@@ -44479,21 +44539,22 @@ static void openLegacyMapPrompt() {
         lv_obj_set_style_text_font(label, &lv_font_montserrat_12, 0);
     #if defined(DEVICE_TDECK_PRO)
         lv_obj_set_style_text_color(label, lv_color_make(0, 0, 0), 0);
-    #else
-        lv_obj_set_style_text_color(label, lv_color_hex(0xFFFFFF), 0);
     #endif
         lv_label_set_text(label, TR(text));
         lv_obj_center(label);
+#if !defined(DEVICE_TDECK_PRO)
+        uiStyleButton(button, kind);
+#endif
     };
 
 #if UI_TOUCH_ONLY_PROFILE
-    makeButton(buttonRow, "Keep", lightUi ? 0x55759D : 0x31527C, onLegacyMapKeepPressed);
-    makeButton(buttonRow, TR_NOOP("Remove"), lightUi ? 0xC76565 : 0x6B3030, onLegacyMapRemovePressed);
+    makeButton(buttonRow, "Keep", UI_BTN_SECONDARY, onLegacyMapKeepPressed);
+    makeButton(buttonRow, TR_NOOP("Remove"), UI_BTN_DANGER, onLegacyMapRemovePressed);
     reserveHeltecCloseXRow(title);
     appendHeltecCloseX(s_legacyMapPromptModal, onLegacyMapKeepPressed);
 #else
-    makeButton(buttonRow, "(K)eep", lightUi ? 0x55759D : 0x31527C, onLegacyMapKeepPressed);
-    makeButton(buttonRow, "(R)emove", lightUi ? 0xC76565 : 0x6B3030,
+    makeButton(buttonRow, "(K)eep", UI_BTN_SECONDARY, onLegacyMapKeepPressed);
+    makeButton(buttonRow, "(R)emove", UI_BTN_DANGER,
                onLegacyMapRemovePressed);
 #endif
 }
@@ -44814,7 +44875,7 @@ static void renderOnboardingStage() {
         const int importBtnMinW = compactImportStage ? 72 : (compactOnboarding ? 80 : 84);
         const lv_font_t *importBtnFont = onboardingButtonFont;
 
-        auto makeBtn = [](lv_obj_t *parent, const char *text, uint32_t color,
+        auto makeBtn = [](lv_obj_t *parent, const char *text, UiBtnKind kind,
                   lv_event_cb_t cb,
                   int height,
                   int minWidth,
@@ -44822,29 +44883,27 @@ static void renderOnboardingStage() {
             lv_obj_t *btn = lv_btn_create(parent);
             lv_obj_set_height(btn, height);
             lv_obj_set_style_min_width(btn, minWidth, 0);
-            lv_obj_set_style_radius(btn, 4, 0);
-            lv_obj_set_style_bg_color(btn, lv_color_hex(color), 0);
             lv_obj_set_style_shadow_width(btn, 0, 0);
             lv_obj_add_event_cb(btn, cb, LV_EVENT_CLICKED, nullptr);
             lv_obj_t *lbl = lv_label_create(btn);
             lv_obj_set_style_text_font(lbl, font, 0);
-            lv_obj_set_style_text_color(lbl, lv_color_hex(0xFFFFFF), 0);
             lv_label_set_text(lbl, TR(text));
             lv_obj_center(lbl);
+            uiStyleButton(btn, kind);
             return btn;
         };
 #if UI_TOUCH_ONLY_PROFILE
-        makeBtn(btnRow, "No",  0x6B3030,
+        makeBtn(btnRow, "No",  UI_BTN_SECONDARY,
             [](lv_event_t *) { onboardingDeclineImport(); },
             importBtnH, importBtnMinW, importBtnFont);
-        makeBtn(btnRow, TR_NOOP("Yes"), 0x2F6B30,
+        makeBtn(btnRow, TR_NOOP("Yes"), UI_BTN_PRIMARY,
             [](lv_event_t *) { onboardingAcceptImport(); },
             importBtnH, importBtnMinW, importBtnFont);
 #else
-        makeBtn(btnRow, "(N)o",  0x6B3030,
+        makeBtn(btnRow, "(N)o",  UI_BTN_SECONDARY,
             [](lv_event_t *) { onboardingDeclineImport(); },
             importBtnH, importBtnMinW, importBtnFont);
-        makeBtn(btnRow, "(Y)es", 0x2F6B30,
+        makeBtn(btnRow, "(Y)es", UI_BTN_PRIMARY,
             [](lv_event_t *) { onboardingAcceptImport(); },
             importBtnH, importBtnMinW, importBtnFont);
 #endif
@@ -44875,15 +44934,12 @@ static void renderOnboardingStage() {
         auto makeStepBtn = [=](lv_obj_t *parent, const char *text, lv_event_cb_t cb) {
             lv_obj_t *btn = lv_btn_create(parent);
             lv_obj_set_size(btn, onboardingStepBtnW, onboardingStepBtnH);
-            lv_obj_set_style_radius(btn, 4, 0);
-            lv_obj_set_style_bg_color(btn, lv_color_hex(0x3C4A66), 0);
-            lv_obj_set_style_shadow_width(btn, 0, 0);
             lv_obj_add_event_cb(btn, cb, LV_EVENT_CLICKED, nullptr);
             lv_obj_t *lbl = lv_label_create(btn);
             lv_obj_set_style_text_font(lbl, onboardingPickerFont, 0);
-            lv_obj_set_style_text_color(lbl, lv_color_hex(0xFFFFFF), 0);
             lv_label_set_text(lbl, text);
             lv_obj_center(lbl);
+            uiStyleButton(btn, UI_BTN_SECONDARY);
             return btn;
         };
         makeStepBtn(pickRow, LV_SYMBOL_LEFT,
@@ -44931,25 +44987,23 @@ static void renderOnboardingStage() {
         lv_obj_set_flex_align(btnRow, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER,
                               LV_FLEX_ALIGN_CENTER);
 
-        auto makeBtn = [=](lv_obj_t *parent, const char *text, uint32_t color,
+        auto makeBtn = [=](lv_obj_t *parent, const char *text, UiBtnKind kind,
                           lv_event_cb_t cb) {
             lv_obj_t *btn = lv_btn_create(parent);
             lv_obj_set_height(btn, onboardingButtonH);
             lv_obj_set_style_min_width(btn, onboardingButtonMinW, 0);
-            lv_obj_set_style_radius(btn, 4, 0);
-            lv_obj_set_style_bg_color(btn, lv_color_hex(color), 0);
             lv_obj_set_style_shadow_width(btn, 0, 0);
             lv_obj_add_event_cb(btn, cb, LV_EVENT_CLICKED, nullptr);
             lv_obj_t *lbl = lv_label_create(btn);
             lv_obj_set_style_text_font(lbl, onboardingButtonFont, 0);
-            lv_obj_set_style_text_color(lbl, lv_color_hex(0xFFFFFF), 0);
             lv_label_set_text(lbl, TR(text));
             lv_obj_center(lbl);
+            uiStyleButton(btn, kind);
             return btn;
         };
-        makeBtn(btnRow, TR_NOOP("Back"), 0x3C4A66,
+        makeBtn(btnRow, TR_NOOP("Back"), UI_BTN_SECONDARY,
                 [](lv_event_t *) { onboardingPickerBack(); });
-        makeBtn(btnRow, TR_NOOP("Next"), 0x2F6B30,
+        makeBtn(btnRow, TR_NOOP("Next"), UI_BTN_PRIMARY,
                 [](lv_event_t *) { onboardingPickerAdvance(); });
     #endif
     } else if (s_onboardingStage == ONBOARD_STAGE_CHOOSE_WIFI) {
@@ -44990,32 +45044,30 @@ static void renderOnboardingStage() {
         lv_obj_set_flex_align(btnRow, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER,
                               LV_FLEX_ALIGN_CENTER);
 
-        auto makeBtn = [=](lv_obj_t *parent, const char *text, uint32_t color,
+        auto makeBtn = [=](lv_obj_t *parent, const char *text, UiBtnKind kind,
                           lv_event_cb_t cb) {
             lv_obj_t *btn = lv_btn_create(parent);
             lv_obj_set_height(btn, onboardingButtonH);
             lv_obj_set_style_min_width(btn, onboardingButtonMinW, 0);
-            lv_obj_set_style_radius(btn, 4, 0);
-            lv_obj_set_style_bg_color(btn, lv_color_hex(color), 0);
             lv_obj_set_style_shadow_width(btn, 0, 0);
             lv_obj_add_event_cb(btn, cb, LV_EVENT_CLICKED, nullptr);
             lv_obj_t *lbl = lv_label_create(btn);
             lv_obj_set_style_text_font(lbl, onboardingButtonFont, 0);
-            lv_obj_set_style_text_color(lbl, lv_color_hex(0xFFFFFF), 0);
             lv_label_set_text(lbl, TR(text));
             lv_obj_center(lbl);
+            uiStyleButton(btn, kind);
             return btn;
         };
 
-        makeBtn(btnRow, TR_NOOP("Back"), 0x3C4A66,
+        makeBtn(btnRow, TR_NOOP("Back"), UI_BTN_SECONDARY,
                 [](lv_event_t *) {
                     s_onboardingStage = ONBOARD_STAGE_SELECT_ROLE;
                     s_onboardingPickIndex = onboardingRoleIndex(s_onboardingRoleScratch);
                     renderOnboardingStage();
                 });
-        makeBtn(btnRow, TR_NOOP("Choose WiFi"), 0x3C4A66,
+        makeBtn(btnRow, TR_NOOP("Choose WiFi"), UI_BTN_SECONDARY,
                 [](lv_event_t *) { openCfgWifiPickerModal(true); });
-        makeBtn(btnRow, TR_NOOP("Finish"), 0x2F6B30,
+        makeBtn(btnRow, TR_NOOP("Finish"), UI_BTN_PRIMARY,
                 [](lv_event_t *) { onboardingFinalize(); });
 #endif
     } else {
@@ -45100,32 +45152,30 @@ static void renderOnboardingStage() {
         lv_obj_set_flex_align(btnRow, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER,
                               LV_FLEX_ALIGN_CENTER);
 
-        auto makeBtn = [=](lv_obj_t *parent, const char *text, uint32_t color,
+        auto makeBtn = [=](lv_obj_t *parent, const char *text, UiBtnKind kind,
                           lv_event_cb_t cb) {
             lv_obj_t *btn = lv_btn_create(parent);
             lv_obj_set_height(btn, onboardingButtonH);
             lv_obj_set_style_min_width(btn, onboardingButtonMinW, 0);
-            lv_obj_set_style_radius(btn, 4, 0);
-            lv_obj_set_style_bg_color(btn, lv_color_hex(color), 0);
             lv_obj_set_style_shadow_width(btn, 0, 0);
             lv_obj_add_event_cb(btn, cb, LV_EVENT_CLICKED, nullptr);
             lv_obj_t *lbl = lv_label_create(btn);
             lv_obj_set_style_text_font(lbl, onboardingButtonFont, 0);
-            lv_obj_set_style_text_color(lbl, lv_color_hex(0xFFFFFF), 0);
             lv_label_set_text(lbl, TR(text));
             lv_obj_center(lbl);
+            uiStyleButton(btn, kind);
             return btn;
         };
 
         if (isShortStage) {
-            makeBtn(btnRow, TR_NOOP("Back"), 0x3C4A66,
+            makeBtn(btnRow, TR_NOOP("Back"), UI_BTN_SECONDARY,
                     [](lv_event_t *) {
                         s_onboardingStage = ONBOARD_STAGE_ENTER_LONG;
                         renderOnboardingStage();
                     });
         }
         const char *nextLabel = TR_NOOP("Next");
-        makeBtn(btnRow, nextLabel, 0x2F6B30,
+        makeBtn(btnRow, nextLabel, UI_BTN_PRIMARY,
                 [](lv_event_t *) { onboardingCommitName(); });
     #endif
 
@@ -45232,6 +45282,7 @@ static void openOnboardingModal() {
     lv_obj_move_foreground(s_onboardingBackdrop);
 
     renderOnboardingStage();
+    uiStyleDialog(s_onboardingModal);
 }
 
 static void closeOnboardingModal() {
@@ -52702,14 +52753,8 @@ static lv_obj_t *secondaryHeaderBtn(lv_obj_t *row, const char *text, lv_event_cb
     lv_obj_t *btn = lv_btn_create(row);
     lv_obj_set_height(btn, big ? kStackBtnH : 22);
     lv_obj_set_style_min_width(btn, big ? 72 : 58, 0);
-    lv_obj_set_style_radius(btn, 4, 0);
     lv_obj_set_style_pad_hor(btn, big ? 10 : 6, 0);
     lv_obj_set_style_pad_ver(btn, 1, 0);
-    lv_obj_set_style_shadow_width(btn, 0, 0);
-    lv_obj_set_style_bg_color(btn, lv_color_hex(0x16386F), 0);
-    lv_obj_set_style_bg_opa(btn, LV_OPA_70, 0);
-    lv_obj_set_style_border_width(btn, 1, 0);
-    lv_obj_set_style_border_color(btn, lv_color_hex(0x335D9D), 0);
     lv_obj_add_event_cb(btn, cb, LV_EVENT_CLICKED, nullptr);
 
     lv_obj_t *lbl = lv_label_create(btn);
@@ -52718,9 +52763,9 @@ static lv_obj_t *secondaryHeaderBtn(lv_obj_t *row, const char *text, lv_event_cb
 #else
     lv_obj_set_style_text_font(lbl, big ? STACK_BTN_FONT : &lv_font_montserrat_10, 0);
 #endif
-    lv_obj_set_style_text_color(lbl, lv_color_hex(0xD9E8FF), 0);
     lv_label_set_text(lbl, text);
     lv_obj_center(lbl);
+    uiStyleButton(btn, UI_BTN_PRIMARY);
     return btn;
 }
 #endif
@@ -53835,6 +53880,7 @@ static void openAdminTerminalModal(uint32_t nodeId) {
     lv_obj_set_flex_flow(s_adminModal, LV_FLEX_FLOW_COLUMN);
     lv_obj_set_flex_align(s_adminModal, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_START,
                           LV_FLEX_ALIGN_START);
+    uiStyleDialog(s_adminModal);
 
     s_adminTitle = lv_label_create(s_adminModal);
     lv_obj_set_width(s_adminTitle, lv_pct(100));
@@ -58631,13 +58677,7 @@ static void buildUi() {
     s_chatActBtn = lv_btn_create(chatBtnRow);
     lv_obj_set_flex_grow(s_chatActBtn, 1);
     lv_obj_set_height(s_chatActBtn, lv_pct(100));
-    lv_obj_set_style_radius(s_chatActBtn, 5, 0);
     lv_obj_set_style_pad_all(s_chatActBtn, 2, 0);
-    lv_obj_set_style_shadow_width(s_chatActBtn, 0, 0);
-    lv_obj_set_style_bg_color(s_chatActBtn, lv_color_hex(0x16386F), 0);
-    lv_obj_set_style_bg_opa(s_chatActBtn, LV_OPA_70, 0);
-    lv_obj_set_style_border_width(s_chatActBtn, 1, 0);
-    lv_obj_set_style_border_color(s_chatActBtn, lv_color_hex(0x335D9D), 0);
     // The nav button's own handler, so this opens and closes the same modal the
     // same way. On CLICKED rather than the nav bar's PRESSED, to match the
     // button it now sits beside.
@@ -58648,28 +58688,22 @@ static void buildUi() {
 
     lv_obj_t *chatActLabel = lv_label_create(s_chatActBtn);
     lv_obj_set_style_text_font(chatActLabel, chatActionFont, 0);
-    lv_obj_set_style_text_color(chatActLabel, lv_color_hex(0xE8F1FF), 0);
     // "Actions" does not fit the button at portrait width.
     lv_label_set_text(chatActLabel, uiPortrait() ? TR("Act") : TR("Actions"));
     lv_obj_center(chatActLabel);
+    uiStyleButton(s_chatActBtn, UI_BTN_PRIMARY);
 
     s_chatNewMsgBtn = lv_btn_create(chatBtnRow);
     lv_obj_set_flex_grow(s_chatNewMsgBtn, 2);
     lv_obj_set_height(s_chatNewMsgBtn, lv_pct(100));
-    lv_obj_set_style_radius(s_chatNewMsgBtn, 5, 0);
     lv_obj_set_style_pad_all(s_chatNewMsgBtn, 2, 0);
-    lv_obj_set_style_shadow_width(s_chatNewMsgBtn, 0, 0);
-    lv_obj_set_style_bg_color(s_chatNewMsgBtn, lv_color_hex(0x16386F), 0);
-    lv_obj_set_style_bg_opa(s_chatNewMsgBtn, LV_OPA_70, 0);
-    lv_obj_set_style_border_width(s_chatNewMsgBtn, 1, 0);
-    lv_obj_set_style_border_color(s_chatNewMsgBtn, lv_color_hex(0x335D9D), 0);
     lv_obj_add_event_cb(s_chatNewMsgBtn, onChatNewMessagePressed, LV_EVENT_CLICKED, nullptr);
 
     s_chatNewMsgLabel = lv_label_create(s_chatNewMsgBtn);
     lv_obj_set_style_text_font(s_chatNewMsgLabel, chatActionFont, 0);
-    lv_obj_set_style_text_color(s_chatNewMsgLabel, lv_color_hex(0xE8F1FF), 0);
     lv_label_set_text(s_chatNewMsgLabel, TR("New Message"));
     lv_obj_center(s_chatNewMsgLabel);
+    uiStyleButton(s_chatNewMsgBtn, UI_BTN_PRIMARY);
     s_chatBtnRow = chatBtnRow;
     chatBtnRowApplyKeyboard();
 #else

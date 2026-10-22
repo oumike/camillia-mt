@@ -652,17 +652,20 @@ static const char kHead[] =
         "h3{color:var(--text-dim);margin:1.2em 0 .4em;border-bottom:1px solid var(--line);padding-bottom:.2em}"
         "label{display:block;margin:.6em 0 .1em;font-size:.9em;color:var(--text)}"
     "input[type=text],input[type=number],input[type=password],select"
-            "{width:100%;padding:.45em;box-sizing:border-box;border:1px solid var(--line);border-radius:5px;"
+            "{width:100%;padding:.45em;box-sizing:border-box;border:1px solid var(--line);border-radius:6px;"
             "background:var(--panel-2);color:var(--text)}"
         "option{background:var(--panel-2);color:var(--text)}"
         "input[readonly]{background:var(--panel);color:var(--text-dim)}"
         "button{margin-top:1.2em;padding:.55em 1.8em;background:var(--accent);color:var(--accent-ink);"
-                     "border:none;border-radius:5px;cursor:pointer;font-size:1em;font-weight:600}"
+                     "border:none;border-radius:6px;cursor:pointer;font-size:1em;font-weight:600}"
+        "button.btn-danger,.ch-clear{background:#c0392b;color:#fff}"
+        ".btn-link{display:inline-block;padding:.4em 1.2em;background:var(--accent);color:var(--accent-ink);"
+             "border-radius:6px;text-decoration:none;font-size:.95em;font-weight:600}"
         ".msg{color:var(--accent);margin:.5em 0}"
         ".err{color:#ff8d8d;margin:.5em 0}"
         // Chooser modal (font size). Reused via the .chooser-* classes.
         ".chooser-btn{width:100%;margin-top:.1em;padding:.45em;text-align:left;background:var(--panel-2);"
-             "color:var(--text);border:1px solid var(--line);border-radius:5px;cursor:pointer;font-size:.95em;"
+             "color:var(--text);border:1px solid var(--line);border-radius:6px;cursor:pointer;font-size:.95em;"
              "font-weight:600}"
         ".modal-back{display:none;position:fixed;inset:0;background:rgba(0,0,0,.55);z-index:50;"
              "align-items:center;justify-content:center}"
@@ -802,7 +805,7 @@ static const char kHead[] =
     ".ch-btn{margin:0;padding:.3em .6em;font-size:.8em;line-height:1.15;cursor:pointer;"
          "background:var(--panel-2);color:var(--text);border:1px solid var(--line);border-radius:6px}"
     ".ch-btn[disabled]{opacity:.35;cursor:default}"
-    ".ch-clear{margin:0;padding:.3em .6em;font-size:.8em;line-height:1.15;background:#c0392b;color:#fff}"
+    ".ch-clear{margin:0;padding:.3em .6em;font-size:.8em;line-height:1.15}"
         "@media (max-width:560px){.row2,.ch-fields{grid-template-columns:1fr}}"
     "</style></head><body>";
 
@@ -3340,7 +3343,7 @@ static void appendSavedNetworks(String &html) {
         html += "<input type='hidden' name='ssid' form='"; html += id; html += "' value='";
         appendAttr(html, nSsid);
         html += "'><button type='submit' form='"; html += id;
-        html += "' style='padding:.15em .7em;background:#c0392b'>Forget</button></td></tr>";
+        html += "' class='btn-danger' style='padding:.15em .7em'>Forget</button></td></tr>";
     }
     html += "</table>";
 
@@ -5277,8 +5280,7 @@ static void sendConfigPage(const char *msg = "", bool lite = false) {
                 "position for both your node and theirs.</p>";
 
         html += "<p style='margin:.2em 0 1em'><a href='/nodes.csv'"
-                " style='display:inline-block;padding:.4em 1.2em;background:#3b82f6;"
-                "color:#fff;border-radius:3px;text-decoration:none;font-size:.95em'>"
+                " class='btn-link'>"
                 "&#11015; Export Node List (CSV)</a></p>"
                 "<p style='font-size:.82em;color:#888;margin:-.6em 0 1em'>"
                 "Downloads every node currently known to the device, plus any "
@@ -5331,8 +5333,7 @@ static void sendConfigPage(const char *msg = "", bool lite = false) {
             html += "</p>";
             if (wdOk) {
                 html += "<p style='margin:.2em 0 .4em'><a href='/wardrive.csv'"
-                        " style='display:inline-block;padding:.4em 1.2em;background:#3b82f6;"
-                        "color:#fff;border-radius:3px;text-decoration:none;font-size:.95em'>"
+                        " class='btn-link'>"
                         "&#11015; Download Wardrive Log (CSV)</a></p>"
                         // This is inside the Save form, and forms cannot nest:
                         // a <form> here was ignored by the browser and its
@@ -5340,7 +5341,7 @@ static void sendConfigPage(const char *msg = "", bool lite = false) {
                         // outside any form, where it did nothing. So the button
                         // names its own form, which is emitted after Save's.
                         "<p style='margin:0 0 1em'>"
-                        "<button type='submit' form='wdclear' style='background:#c0392b'>"
+                        "<button type='submit' form='wdclear' class='btn-danger'>"
                         "Clear Wardrive Log</button></p>";
             }
         }
@@ -5442,7 +5443,7 @@ static void sendConfigPage(const char *msg = "", bool lite = false) {
     section(html, false, "Diagnostics", false);
     html +=
         "<form method='POST' action='/announce'>"
-        "<button type='submit' style='background:#e07b00'>"
+        "<button type='submit'>"
         "&#128225; Send NODEINFO Broadcast</button>"
         "</form>"
         "<p style='font-size:.82em;color:#888;margin:.3em 0 1em'>"
@@ -5450,7 +5451,7 @@ static void sendConfigPage(const char *msg = "", bool lite = false) {
 
     html +=
         "<form method='POST' action='/telemetry'>"
-        "<button type='submit' style='background:#0f766e'>"
+        "<button type='submit'>"
         "&#128202; Send Telemetry Now</button>"
         "</form>"
         "<p style='font-size:.82em;color:#888;margin:.3em 0 1em'>"
@@ -5458,7 +5459,7 @@ static void sendConfigPage(const char *msg = "", bool lite = false) {
 
     html +=
         "<form method='POST' action='/cs-check'>"
-        "<button type='submit' style='background:#6b4fa0'>"
+        "<button type='submit'>"
         "&#128260; Check for Messages Now</button>"
         "</form>"
         "<p style='font-size:.82em;color:#888;margin:.3em 0 1em'>"
@@ -5477,7 +5478,7 @@ static void sendConfigPage(const char *msg = "", bool lite = false) {
     // below it does, and only appears once there is something to delete.
     html +=
         "<form method='POST' action='/sd-scan'>"
-        "<button type='submit' style='background:#2563a8'>"
+        "<button type='submit'>"
         "&#128269; Scan SD Card for Malware</button>"
         "</form>"
         "<p style='font-size:.82em;color:#888;margin:.3em 0 1em'>"
@@ -5500,7 +5501,7 @@ static void sendConfigPage(const char *msg = "", bool lite = false) {
         html +=
             " file(s) the scan matched? Nothing else on the card is touched, and "
             "this cannot be undone.')\">"
-            "<button type='submit' style='background:#b03030'>"
+            "<button type='submit' class='btn-danger'>"
             "&#128465; Delete Matched Files</button>"
             "</form>"
             "<p style='font-size:.82em;color:#888;margin:.3em 0 1em'>"
@@ -5667,7 +5668,7 @@ static void sendConfigPage(const char *msg = "", bool lite = false) {
             "<div id='mapdl-progress-bar' style='height:100%;width:0%;background:linear-gradient(90deg,#2a6f97,#4ea3d1);transition:width .2s ease'></div>"
             "</div>"
             "<button type='button' id='mapdl-stop' title='Stop current download' aria-label='Stop current download' disabled "
-            "style='min-width:30px;height:24px;line-height:1;padding:0 .45em;background:#c0392b;color:#fff;border:0;border-radius:4px;font-weight:700;opacity:.6;cursor:default'>X</button>"
+            "style='min-width:30px;height:24px;line-height:1;padding:0 .45em;background:#c0392b;color:#fff;border:0;border-radius:6px;font-weight:700;opacity:.6;cursor:default'>X</button>"
             "</div>"
             "<div id='mapdl-progress-text' style='font-size:.78em;color:#68788a;margin:0 0 .5em'>0%</div>";
         html +=
@@ -5679,7 +5680,7 @@ static void sendConfigPage(const char *msg = "", bool lite = false) {
             "<option value='16' selected>Streets (zooms 13-16)</option>"
             "<option value='19'>Buildings (zooms 13-19)</option>"
             "</select></label>"
-            "<button type='button' id='mapdl-btn' style='background:#2a6f97' disabled>"
+            "<button type='button' id='mapdl-btn' disabled>"
             "&#128506; Download offline tiles for known nodes</button></div>"
             "<div id='mapdl-warn' style='font-size:.8em;color:#9a4f00;margin:.45em 0 .15em;font-weight:600'>"
             "Detailed plans can take a very long time. Buildings may require up to 42 tile "
@@ -5693,8 +5694,8 @@ static void sendConfigPage(const char *msg = "", bool lite = false) {
             "style='box-sizing:border-box;width:100%;height:170px;margin:.45em 0 .35em;"
             "font:11px/1.35 monospace;white-space:pre;resize:vertical'></textarea>"
             "<div style='display:flex;align-items:center;gap:.4em;flex-wrap:wrap'>"
-            "<button type='button' id='mapdl-debug-copy' style='margin:0;background:#355f9b'>Copy report</button>"
-            "<button type='button' id='mapdl-debug-clear' style='margin:0;background:#68788a'>Clear</button>"
+            "<button type='button' id='mapdl-debug-copy' style='margin:0'>Copy report</button>"
+            "<button type='button' id='mapdl-debug-clear' style='margin:0;background:var(--panel-2);color:var(--text);border:1px solid var(--line)'>Clear</button>"
             "<span id='mapdl-debug-copy-status' style='font-size:.78em;color:#68788a'></span>"
             "</div></details>";
         html +=
@@ -5715,7 +5716,7 @@ static void sendConfigPage(const char *msg = "", bool lite = false) {
     if (monitorDebugEnabled()) html += " checked";
     html +=
         "> Enable serial debug output in pio device monitor</label>"
-        "<button type='submit' style='margin-top:.45em;background:#355f9b'>Apply Debug Flag</button>"
+        "<button type='submit' style='margin-top:.45em'>Apply Debug Flag</button>"
         "</form>"
         "<p style='font-size:.82em;color:#888;margin:.3em 0 1em'>"
         "When disabled, debug logs are suppressed from serial monitor output.</p>";
@@ -5758,8 +5759,7 @@ static void sendConfigPage(const char *msg = "", bool lite = false) {
         section(html, false, "Display Capture", false);
         html +=
             "<p><a href='/screenshot'"
-            " style='display:inline-block;padding:.4em 1.2em;background:#3b82f6;"
-            "color:#fff;border-radius:3px;text-decoration:none;font-size:.95em'>"
+            " class='btn-link'>"
             "&#128247; Capture &amp; Download PNG</a></p>"
             "<p style='font-size:.82em;color:#888;margin:.3em 0 1em'>"
             "Captures the current on-device screen and downloads it as a PNG file.</p>";
@@ -5787,8 +5787,7 @@ static void sendConfigPage(const char *msg = "", bool lite = false) {
     // someone reading that button is exactly the person who wants this first.
     section(html, false, "Messages", false);
     html += "<p style='margin:.2em 0 1em'><a href='/messages.csv'"
-            " style='display:inline-block;padding:.4em 1.2em;background:#3b82f6;"
-            "color:#fff;border-radius:3px;text-decoration:none;font-size:.95em'>"
+            " class='btn-link'>"
             "&#11015; Export Messages (CSV)</a></p>"
             "<p style='font-size:.82em;color:#888;margin:-.6em 0 1em'>"
             "Downloads every channel message and direct message the device still "
@@ -5808,7 +5807,7 @@ static void sendConfigPage(const char *msg = "", bool lite = false) {
         "<details><summary style='color:#c0392b'>Danger Zone</summary>"
         "<form method='POST' action='/reboot'"
         " onsubmit=\"return confirm('This will restart the device. Continue?')\">"
-        "<button type='submit' style='background:#c0392b'>"
+        "<button type='submit' class='btn-danger'>"
         "Reboot Device</button>"
         "</form>"
         "<p style='font-size:.82em;color:#888;margin:.3em 0 .6em'>"
@@ -5817,7 +5816,7 @@ static void sendConfigPage(const char *msg = "", bool lite = false) {
         "unreachable for a few seconds while it comes back.</p>"
         "<form method='POST' action='/clear-messages'"
         " onsubmit=\"return confirm('This will clear all stored channel and DM messages. Continue?')\">"
-        "<button type='submit' style='background:#c0392b'>"
+        "<button type='submit' class='btn-danger'>"
         "Clear Messages</button>"
         "</form>"
         "<p style='font-size:.82em;color:#888;margin:.3em 0 .6em'>"
@@ -5825,7 +5824,7 @@ static void sendConfigPage(const char *msg = "", bool lite = false) {
         "<form method='POST' action='/clear-nodes'"
         " onsubmit=\"return confirm('This will clear all discovered nodes EXCEPT favorites, "
         "then reboot. Continue?')\">"
-        "<button type='submit' style='background:#c0392b'>"
+        "<button type='submit' class='btn-danger'>"
         "Clear Nodes (Keep Favorites)</button>"
         "</form>"
         "<p style='font-size:.82em;color:#888;margin:.3em 0 .6em'>"
@@ -5835,7 +5834,7 @@ static void sendConfigPage(const char *msg = "", bool lite = false) {
         " onsubmit=\"return confirm('This will clear all discovered nodes INCLUDING favorites, "
         "then reboot. Continue?')\">"
         "<input type='hidden' name='all' value='1'>"
-        "<button type='submit' style='background:#c0392b'>"
+        "<button type='submit' class='btn-danger'>"
         "Clear Nodes (All)</button>"
         "</form>"
         "<p style='font-size:.82em;color:#888;margin:.3em 0 .6em'>"
@@ -5851,7 +5850,7 @@ static void sendConfigPage(const char *msg = "", bool lite = false) {
             "<form method='POST' action='/clear-maps'"
             " onsubmit=\"return confirm('This will delete every offline map tile and any legacy map files. "
             "Maps Download can rebuild node-centered coverage, and Locate will refill online gaps. Continue?')\">"
-            "<button type='submit' style='background:#c0392b'>"
+            "<button type='submit' class='btn-danger'>"
             "Clear Maps</button>"
             "</form>"
             "<p style='font-size:.82em;color:#888;margin:.3em 0 .6em'>"
@@ -5864,7 +5863,7 @@ static void sendConfigPage(const char *msg = "", bool lite = false) {
     html +=
         "<form method='POST' action='/factory-reset'"
         " onsubmit=\"return confirm('This will erase ALL settings and reboot the device. Continue?')\">"
-        "<button type='submit' style='background:#c0392b'>"
+        "<button type='submit' class='btn-danger'>"
         "Factory Reset</button>"
         "</form>"
         "<p style='font-size:.82em;color:#888;margin:.3em 0 1em'>"
