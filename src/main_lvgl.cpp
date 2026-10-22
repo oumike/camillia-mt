@@ -1731,8 +1731,10 @@ static uint8_t s_deviceTelemetryTxFails = 0;
 static uint8_t s_envTelemetryTxFails = 0;
 static uint8_t s_neighborInfoTxFails = 0;
 static uint8_t s_mapReportFails = 0;
-static char s_serialCmdBuf[96] = {};
+// Sized for the flasher's `cfg logo data` lines (see handleCfgCommand()).
+static char s_serialCmdBuf[256] = {};
 static size_t s_serialCmdLen = 0;
+static bool s_serialCmdOverflow = false;
 
 enum ComposeTarget : uint8_t {
     COMPOSE_TARGET_CHANNEL = 0,
@@ -3032,7 +3034,7 @@ static bool captureWebScreenshotPng(const char *outPath);
 static bool pollMeshRx();
 static void serviceSerialCommands();
 static void handleSerialCommandLine(char *line);
-static void normalizeSerialCommand(char *line);
+static void normalizeSerialCommand(char *line, bool lower = true);
 static void serviceNodeInfoAnnounce(uint32_t nowMs);
 static void serviceTelemetryAnnounce(uint32_t nowMs);
 static void serviceNeighborInfoAnnounce(uint32_t nowMs);
@@ -11064,6 +11066,49 @@ static void loadProvisionedConfig() {
     }
 }
 
+// Boot logo, also from the flasher: a PNG drawn on the splash card in place of
+// the title. NVS rather than the filesystem because the splash is drawn before
+// either filesystem is mounted. kLogoMaxBytes keeps it to ~260 of the
+// partition's ~2000 entries.
+static constexpr const char *kLogoNs = "cm_logo";
+static constexpr const char *kLogoKey = "png";
+static constexpr size_t kLogoMaxBytes = 8192;
+
+// Allocates; the caller frees. nullptr when no logo is stored.
+static uint8_t *loadStoredLogo(size_t &len) {
+    len = 0;
+    nvs_iterator_t it = nvsEntryFindCompat("nvs", kLogoNs);
+    if (!it) return nullptr;
+    nvs_release_iterator(it);
+    Preferences p;
+    if (!p.begin(kLogoNs, true)) return nullptr;
+    const size_t n = p.getBytesLength(kLogoKey);
+    uint8_t *buf = (n > 0 && n <= kLogoMaxBytes) ? (uint8_t *)malloc(n) : nullptr;
+    if (buf && p.getBytes(kLogoKey, buf, n) == n) {
+        len = n;
+    } else {
+        free(buf);
+        buf = nullptr;
+    }
+    p.end();
+    return buf;
+}
+
+// Width and height from a PNG's IHDR; false when it is not one.
+static bool pngDimensions(const uint8_t *data, size_t len, int &w, int &h) {
+    static const uint8_t kSig[8] = { 0x89, 'P', 'N', 'G', '\r', '\n', 0x1A, '\n' };
+    if (!data || len < 24 || memcmp(data, kSig, 8) != 0 || memcmp(data + 12, "IHDR", 4) != 0) {
+        return false;
+    }
+    auto be32 = [&](size_t o) {
+        return (uint32_t)data[o] << 24 | (uint32_t)data[o + 1] << 16
+             | (uint32_t)data[o + 2] << 8 | (uint32_t)data[o + 3];
+    };
+    w = (int)be32(16);
+    h = (int)be32(20);
+    return w > 0 && h > 0;
+}
+
 static void persistConfigToPrefs() {
     // s_cfg is the single source of truth for credentials; nothing is folded in
     // from web config here.
@@ -11210,7 +11255,7 @@ static_assert(sizeof(ChanBlobRecord) == 52, "ChanBlobRecord stride changed - see
 // Shared by save and load for the same reasons as s_cfgBlobBuf.
 static ChanBlob s_chanBlob;
 
-static void persistChannelsToPrefs() {
+static bool persistChannelsToPrefs() {
     ChanBlob &blob = s_chanBlob;
     memset(&blob, 0, sizeof(blob));
     blob.version = kChanBlobVersion;
@@ -11238,7 +11283,7 @@ static void persistChannelsToPrefs() {
     Preferences cp;
     if (!cp.begin("mesh_ch", false)) {
         Serial.println("[cfg] channel save FAILED: cannot open NVS namespace 'mesh_ch'");
-        return;
+        return false;
     }
     // Preferences returns 0 on failure and never throws, so a full partition
     // would otherwise lose the channel plan silently: it survives in RAM until
@@ -11248,7 +11293,9 @@ static void persistChannelsToPrefs() {
     if (wrote != sizeof(blob)) {
         Serial.printf("[cfg] channel save FAILED: wrote %u of %u bytes (NVS full?)\n",
                       (unsigned)wrote, (unsigned)sizeof(blob));
+        return false;
     }
+    return true;
 }
 
 // Drops the per-channel keys written before the blob existed. Same collect-then-
@@ -50336,6 +50383,11 @@ static void bootSplashStatusEnd() {
     splashCanvasRelease();
 }
 
+// Where drawBootSplash() put (or would put) a stored logo, for `cfg caps`.
+static int s_splashLogoW = 0;
+static int s_splashLogoH = 0;
+static uint16_t s_splashLogoBg = 0;
+
 static void drawBootSplash() {
     const int screenW = splashDev().width();
     const int screenH = splashDev().height();
@@ -50593,6 +50645,28 @@ static void drawBootSplash() {
     const char *nodeShort = s_cfg.nodeShort[0] ? s_cfg.nodeShort : "----";
     snprintf(nodeLine, sizeof(nodeLine), "%s (%s)", nodeLong, nodeShort);
 
+    // A logo from the flasher's Customize dialog takes the title's place. The
+    // box is recorded whether or not one is stored: `cfg caps` reports it so
+    // the page can size the image for this device.
+    s_splashLogoBg = cardBg;
+    auto drawStoredLogo = [&](int x, int y, int w, int h) -> bool {
+        s_splashLogoW = max(0, w);
+        s_splashLogoH = max(0, h);
+        size_t len = 0;
+        uint8_t *png = loadStoredLogo(len);
+        if (!png) return false;
+        int pw = 0, ph = 0;
+        bool drawn = false;
+        if (pngDimensions(png, len, pw, ph)) {
+            const int dx = x + max(0, (w - pw) / 2);
+            const int dy = y + max(0, (h - ph) / 2);
+            drawn = splashDev().drawPng(png, len, dx, dy, min(pw, w), min(ph, h));
+        }
+        free(png);
+        if (!drawn) Serial.println("[splash] stored logo could not be drawn");
+        return drawn;
+    };
+
 #if !defined(DEVICE_TLORA_PAGER_TFT) && !defined(DEVICE_CARDPUTER_LORA_HAT)
     // Native-size Roboto GFX fonts (crisp at this size, no bitmap upscaling).
     int splashContentBottom = cardY + 40;
@@ -50603,19 +50677,27 @@ static void drawBootSplash() {
         splashDev().drawString(text, cardX + max(0, (cardW - w) / 2), y);
     };
 
-    // Large brand name on top (Roboto Bold 26pt).
+    // Measured first: a stored logo fills the same block the title would.
     splashDev().setFont(&Roboto_Bold26pt7b);
     splashDev().setTextSize(MY_SPLASH_TITLE_SCALE);
     const int brandY = cardY + 12 + MY_SPLASH_TITLE_Y_OFFSET;
-    drawCentered("Camillia", brandY);
     const int brandCap = max(8, (int)splashDev().fontHeight() - MY_SPLASH_SUBTITLE_GAP_TRIM);
-
-    // "for Meshtastic" underneath (Roboto Medium 14pt).
+    const int subY = brandY + brandCap;
     splashDev().setFont(&Roboto_Medium14pt7b);
     splashDev().setTextSize(MY_SPLASH_SUBTITLE_SCALE);
-    const int subY = brandY + brandCap;
-    drawCentered("for Meshtastic", subY);
     splashContentBottom = subY + splashDev().fontHeight();
+
+    if (!drawStoredLogo(cardX + 12, brandY, cardW - 24, splashContentBottom - brandY)) {
+        // Large brand name on top (Roboto Bold 26pt).
+        splashDev().setFont(&Roboto_Bold26pt7b);
+        splashDev().setTextSize(MY_SPLASH_TITLE_SCALE);
+        drawCentered("Camillia", brandY);
+
+        // "for Meshtastic" underneath (Roboto Medium 14pt).
+        splashDev().setFont(&Roboto_Medium14pt7b);
+        splashDev().setTextSize(MY_SPLASH_SUBTITLE_SCALE);
+        drawCentered("for Meshtastic", subY);
+    }
 
     // Version tucked under the subtitle in a small face. It moved here from the
     // footer so the footer line can carry the boot progress instead — the
@@ -50640,7 +50722,12 @@ static void drawBootSplash() {
     const int flowerCx = cardX + (cardW / 2);
     const int flowerCy = cardY + (cardH / 2) - 10;
     const float cardputerFlowerScale = 0.90f;
-    drawCamelliaMark(flowerCx, flowerCy, cardputerFlowerScale);
+    const int flowerBottom = flowerCy + (int)lroundf(36.0f * cardputerFlowerScale);
+    // No title on this card, so a logo stands in for the flower.
+    const int logoTop = flowerCy - (int)lroundf(32.0f * cardputerFlowerScale);
+    if (!drawStoredLogo(cardX + 8, logoTop, cardW - 16, flowerBottom - logoTop)) {
+        drawCamelliaMark(flowerCx, flowerCy, cardputerFlowerScale);
+    }
 
     char verLine[72];
     snprintf(verLine, sizeof(verLine), "Version: %s", version);
@@ -50648,7 +50735,6 @@ static void drawBootSplash() {
     splashDev().setTextSize(1.0f);
     splashDev().setTextColor(dimCol, cardBg);
     // Center version text between the flower and bottom of the display.
-    const int flowerBottom = flowerCy + (int)lroundf(36.0f * cardputerFlowerScale);
     const int versionBandCenterY = (flowerBottom + screenH) / 2;
     const int versionTopY = versionBandCenterY - (splashDev().fontHeight() / 2);
     int verW = splashDev().textWidth(verLine);
@@ -50708,18 +50794,21 @@ static void drawBootSplash() {
     const int lineW = camilliaW + titleGap + meshW;
     const int lineX = leftX + max(0, (leftW - lineW) / 2);
     const int meshY = titleY + 3;
-
-    splashDev().setFont(&Roboto_Bold26pt7b);
-    splashDev().setTextSize(MY_SPLASH_TITLE_SCALE);
-    splashDev().setTextColor(titleCol, cardBg);
-    splashDev().drawString("Camillia", lineX, titleY);
-
-    splashDev().setFont(&Roboto_Medium14pt7b);
-    splashDev().setTextSize(MY_SPLASH_SUBTITLE_SCALE);
-    splashDev().setTextColor(subCol, cardBg);
-    splashDev().drawString("for Meshtastic", lineX + camilliaW + titleGap, meshY);
-
     const int titleBlockBottom = max(titleY + camilliaH, meshY + meshH);
+
+    // The title row sits above both panes, so a logo may use the full width.
+    if (!drawStoredLogo(leftX, titleY, cardW - contentInset * 2, titleBlockBottom - titleY)) {
+        splashDev().setFont(&Roboto_Bold26pt7b);
+        splashDev().setTextSize(MY_SPLASH_TITLE_SCALE);
+        splashDev().setTextColor(titleCol, cardBg);
+        splashDev().drawString("Camillia", lineX, titleY);
+
+        splashDev().setFont(&Roboto_Medium14pt7b);
+        splashDev().setTextSize(MY_SPLASH_SUBTITLE_SCALE);
+        splashDev().setTextColor(subCol, cardBg);
+        splashDev().drawString("for Meshtastic", lineX + camilliaW + titleGap, meshY);
+    }
+
     const int flowerAreaTop = titleBlockBottom + 8;
     const int flowerAreaBottom = cardY + cardH - 14;
     float pagerFlowerScale = min((float)(flowerAreaBottom - flowerAreaTop) / 76.0f,
@@ -58716,7 +58805,7 @@ static void processPendingUiRebuild() {
 
 // In-place normalise a serial CLI line: trim whitespace, collapse runs of
 // spaces, and lowercase the command so dispatch can use plain strcmp().
-static void normalizeSerialCommand(char *line) {
+static void normalizeSerialCommand(char *line, bool lower) {
     if (!line) return;
 
     size_t len = strlen(line);
@@ -58747,7 +58836,7 @@ static void normalizeSerialCommand(char *line) {
             continue;
         }
         lastWasSpace = false;
-        line[out++] = (char)tolower(c);
+        line[out++] = lower ? (char)tolower(c) : (char)c;
     }
     line[out] = '\0';
 
@@ -58885,10 +58974,22 @@ static void seedChatForRepro(int requestedCount) {
 // Every reply is one line starting "[cfg] ", so the page can pick it out of
 // boot logs; "[cfg] err" lines are the failures. Bump kCfgProtoVersion when a
 // command changes meaning, not when a key is added -- `caps` lists the keys.
+//
+//   cfg caps
+//   cfg abort                          drop everything staged
+//   cfg get preset
+//   cfg set preset <name>
+//   cfg channels clear                 stage a whole new channel plan, all slots unused
+//   cfg set channel <i> role=primary|secondary|disabled name=<%-encoded>
+//                       psk=default|none|<base64> pos=0|1 up=0|1 down=0|1
+//   cfg logo begin <bytes>             then `logo data <hex>` lines, then
+//   cfg logo end <crc32 hex>           a PNG no larger than caps' logo=WxH
+//   cfg logo clear
+//   cfg commit
 static constexpr int kCfgProtoVersion = 1;
 
-// The line arrives lowercased, so this matches either the channel name
-// ("longmod") or the label with the spaces dropped ("longmoderate").
+// Arguments keep their case, so names match case-insensitively: the channel
+// name ("LongMod") or the label with the spaces dropped ("LongModerate").
 static int presetFromCliName(const char *value) {
     for (uint8_t i = 0; i < PRESET_COUNT; i++) {
         if (!strcasecmp(value, kPresets[i].channelName)) return i;
@@ -58903,10 +59004,309 @@ static int presetFromCliName(const char *value) {
     return -1;
 }
 
+// A whole channel plan, staged by `cfg channels clear` + `cfg set channel`.
+// Slots never set stay unused: unnamed SECONDARY on the default key, which is
+// how the firmware ships its empty slots.
+struct CfgStagedChannel {
+    char    name[12];   // Meshtastic's limit is 11 bytes
+    uint8_t key[32];
+    uint8_t keyLen;
+    uint8_t role;
+    bool    shareLocation;
+    bool    uplink;
+    bool    downlink;
+};
+static CfgStagedChannel s_cfgStagedChans[MESH_CHANNELS];
+static bool s_cfgChansStaged = false;
+
+enum CfgLogoState : uint8_t { CFG_LOGO_NONE, CFG_LOGO_RECEIVING, CFG_LOGO_READY, CFG_LOGO_CLEAR };
+static CfgLogoState s_cfgLogoState = CFG_LOGO_NONE;
+static uint8_t *s_cfgLogoBuf = nullptr;
+static size_t s_cfgLogoSize = 0;
+static size_t s_cfgLogoRecv = 0;
+
+static void cfgLogoReset() {
+    free(s_cfgLogoBuf);
+    s_cfgLogoBuf = nullptr;
+    s_cfgLogoSize = s_cfgLogoRecv = 0;
+    s_cfgLogoState = CFG_LOGO_NONE;
+}
+
+static void cfgStagedChannelsReset() {
+    for (int i = 0; i < MESH_CHANNELS; i++) {
+        CfgStagedChannel &c = s_cfgStagedChans[i];
+        memset(&c, 0, sizeof(c));
+        c.key[0] = 0x01;
+        c.keyLen = 1;
+        c.role = 1;
+    }
+}
+
+static int hexNibble(char c) {
+    if (c >= '0' && c <= '9') return c - '0';
+    if (c >= 'a' && c <= 'f') return c - 'a' + 10;
+    if (c >= 'A' && c <= 'F') return c - 'A' + 10;
+    return -1;
+}
+
+// %XX-decodes src into dst; false on a bad escape or overflow.
+static bool cfgPercentDecode(const char *src, char *dst, size_t dstLen) {
+    size_t o = 0;
+    for (const char *s = src; *s; s++) {
+        char c = *s;
+        if (c == '%') {
+            const int hi = hexNibble(s[1]);
+            const int lo = (hi >= 0) ? hexNibble(s[2]) : -1;
+            if (lo < 0) return false;
+            c = (char)(hi << 4 | lo);
+            s += 2;
+        }
+        if (o + 1 >= dstLen) return false;
+        dst[o++] = c;
+    }
+    dst[o] = '\0';
+    return true;
+}
+
+static void cfgSetChannel(const char *args) {
+    char *end = nullptr;
+    const long idx = strtol(args, &end, 10);
+    if (end == args || idx < 0 || idx >= MESH_CHANNELS) {
+        Serial.printf("[cfg] err channel: slot must be 0-%d\n", MESH_CHANNELS - 1);
+        return;
+    }
+    if (!s_cfgChansStaged) {
+        Serial.println("[cfg] err channel: send `cfg channels clear` first");
+        return;
+    }
+
+    CfgStagedChannel c = {};
+    c.key[0] = 0x01;
+    c.keyLen = 1;
+    c.role = (idx == 0) ? 0 : 1;
+    char tok[128];
+    const char *p = end;
+    while (*p) {
+        while (*p == ' ') p++;
+        size_t n = 0;
+        while (p[n] && p[n] != ' ') n++;
+        if (!n) break;
+        if (n >= sizeof(tok)) {
+            Serial.printf("[cfg] err channel %ld: argument too long\n", idx);
+            return;
+        }
+        memcpy(tok, p, n);
+        tok[n] = '\0';
+        p += n;
+
+        char *eq = strchr(tok, '=');
+        if (!eq) {
+            Serial.printf("[cfg] err channel %ld: expected key=value, got \"%s\"\n", idx, tok);
+            return;
+        }
+        *eq = '\0';
+        const char *k = tok;
+        const char *v = eq + 1;
+        const bool flag = !strcmp(v, "1");
+        if (!strcasecmp(k, "role")) {
+            if (!strcasecmp(v, "primary")) c.role = 0;
+            else if (!strcasecmp(v, "secondary")) c.role = 1;
+            else if (!strcasecmp(v, "disabled")) c.role = 2;
+            else { Serial.printf("[cfg] err channel %ld: bad role \"%s\"\n", idx, v); return; }
+        } else if (!strcasecmp(k, "name")) {
+            if (!cfgPercentDecode(v, c.name, sizeof(c.name))) {
+                Serial.printf("[cfg] err channel %ld: name must be 11 bytes or fewer\n", idx);
+                return;
+            }
+        } else if (!strcasecmp(k, "psk")) {
+            if (!strcasecmp(v, "default")) {
+                c.key[0] = 0x01;
+                c.keyLen = 1;
+            } else if (!strcasecmp(v, "none")) {
+                c.key[0] = 0x00;   // Meshtastic's "no encryption"
+                c.keyLen = 1;
+            } else {
+                uint8_t kb[33];
+                const int kl = base64Decode(v, kb, sizeof(kb));
+                if (kl != 1 && kl != 16 && kl != 32) {
+                    Serial.printf("[cfg] err channel %ld: psk must decode to 1, 16 or 32 bytes\n", idx);
+                    return;
+                }
+                memcpy(c.key, kb, kl);
+                c.keyLen = (uint8_t)kl;
+            }
+        } else if (!strcasecmp(k, "pos")) {
+            c.shareLocation = flag;
+        } else if (!strcasecmp(k, "up")) {
+            c.uplink = flag;
+        } else if (!strcasecmp(k, "down")) {
+            c.downlink = flag;
+        } else {
+            Serial.printf("[cfg] err channel %ld: unknown key \"%s\"\n", idx, k);
+            return;
+        }
+    }
+
+    if ((idx == 0) != (c.role == 0)) {
+        Serial.printf("[cfg] err channel %ld: slot 0 is the primary channel and only slot 0\n", idx);
+        return;
+    }
+    if (c.role == 1 && !c.name[0]) {
+        Serial.printf("[cfg] err channel %ld: a secondary channel needs a name\n", idx);
+        return;
+    }
+    s_cfgStagedChans[idx] = c;
+    Serial.printf("[cfg] ok channel %ld staged\n", idx);
+}
+
+static void cfgLogoCommand(const char *args) {
+    if (!strncasecmp(args, "data ", 5)) {
+        if (s_cfgLogoState != CFG_LOGO_RECEIVING) {
+            Serial.println("[cfg] err logo: no transfer in progress");
+            return;
+        }
+        const char *hex = args + 5;
+        const size_t n = strlen(hex);
+        if (n % 2 || s_cfgLogoRecv + n / 2 > s_cfgLogoSize) {
+            cfgLogoReset();
+            Serial.println("[cfg] err logo: bad chunk - transfer abandoned");
+            return;
+        }
+        for (size_t i = 0; i < n; i += 2) {
+            const int hi = hexNibble(hex[i]);
+            const int lo = hexNibble(hex[i + 1]);
+            if (hi < 0 || lo < 0) {
+                cfgLogoReset();
+                Serial.println("[cfg] err logo: bad hex - transfer abandoned");
+                return;
+            }
+            s_cfgLogoBuf[s_cfgLogoRecv++] = (uint8_t)(hi << 4 | lo);
+        }
+        Serial.printf("[cfg] ok logo %u\n", (unsigned)s_cfgLogoRecv);
+        return;
+    }
+
+    if (!strncasecmp(args, "begin ", 6)) {
+        cfgLogoReset();
+        const long size = strtol(args + 6, nullptr, 10);
+        if (size <= 0 || (size_t)size > kLogoMaxBytes) {
+            Serial.printf("[cfg] err logo: size must be 1-%u bytes\n", (unsigned)kLogoMaxBytes);
+            return;
+        }
+        s_cfgLogoBuf = (uint8_t *)malloc((size_t)size);
+        if (!s_cfgLogoBuf) {
+            Serial.println("[cfg] err logo: out of memory");
+            return;
+        }
+        s_cfgLogoSize = (size_t)size;
+        s_cfgLogoState = CFG_LOGO_RECEIVING;
+        Serial.printf("[cfg] ok logo begin %u\n", (unsigned)s_cfgLogoSize);
+        return;
+    }
+
+    if (!strncasecmp(args, "end ", 4)) {
+        if (s_cfgLogoState != CFG_LOGO_RECEIVING || s_cfgLogoRecv != s_cfgLogoSize) {
+            cfgLogoReset();
+            Serial.println("[cfg] err logo: incomplete transfer");
+            return;
+        }
+        const uint32_t want = (uint32_t)strtoul(args + 4, nullptr, 16);
+        const uint32_t got = meshCrc32(s_cfgLogoBuf, s_cfgLogoSize);
+        int w = 0, h = 0;
+        if (got != want) {
+            cfgLogoReset();
+            Serial.printf("[cfg] err logo: checksum %08x, expected %08x\n", (unsigned)got, (unsigned)want);
+            return;
+        }
+        if (!pngDimensions(s_cfgLogoBuf, s_cfgLogoSize, w, h)) {
+            cfgLogoReset();
+            Serial.println("[cfg] err logo: not a PNG");
+            return;
+        }
+        if (w > s_splashLogoW || h > s_splashLogoH) {
+            cfgLogoReset();
+            Serial.printf("[cfg] err logo: %dx%d is larger than %dx%d\n", w, h, s_splashLogoW, s_splashLogoH);
+            return;
+        }
+        s_cfgLogoState = CFG_LOGO_READY;
+        Serial.printf("[cfg] ok logo staged %dx%d\n", w, h);
+        return;
+    }
+
+    if (!strcasecmp(args, "clear")) {
+        cfgLogoReset();
+        s_cfgLogoState = CFG_LOGO_CLEAR;
+        Serial.println("[cfg] ok logo clear staged");
+        return;
+    }
+
+    Serial.printf("[cfg] err unknown: logo %s\n", args);
+}
+
+// Writes or removes the stored logo. NVS holds a page back for compaction and
+// fails writes once into it, so a logo that would leave too little is refused
+// here rather than starving the settings that are saved after it.
+static bool cfgCommitLogo() {
+    Preferences p;
+    if (!p.begin(kLogoNs, false)) return false;
+    p.remove(kLogoKey);
+    if (s_cfgLogoState == CFG_LOGO_CLEAR) {
+        p.end();
+        return true;
+    }
+    nvs_stats_t st = {};
+    const size_t need = s_cfgLogoSize / 32 + 8 + 160;
+    if (nvs_get_stats(nullptr, &st) == ESP_OK && st.free_entries < need) {
+        p.end();
+        Serial.printf("[cfg] logo needs %u NVS entries, %u free\n",
+                      (unsigned)need, (unsigned)st.free_entries);
+        return false;
+    }
+    const bool ok = p.putBytes(kLogoKey, s_cfgLogoBuf, s_cfgLogoSize) == s_cfgLogoSize;
+    if (!ok) p.remove(kLogoKey);
+    p.end();
+    return ok;
+}
+
+// Copies the staged plan over CHANNEL_KEYS. An unnamed primary takes the
+// preset's name, as a freshly installed device's does.
+static void cfgApplyStagedChannels() {
+    for (int i = 0; i < MESH_CHANNELS; i++) {
+        const CfgStagedChannel &c = s_cfgStagedChans[i];
+        ChannelKey &ck = CHANNEL_KEYS[i];
+        memset(ck.name_buf, 0, sizeof(ck.name_buf));
+        strncpy(ck.name_buf, c.name, sizeof(ck.name_buf) - 1);
+        ck.name = ck.name_buf;
+        memset(ck.key, 0, sizeof(ck.key));
+        memcpy(ck.key, c.key, c.keyLen);
+        ck.keyLen = c.keyLen;
+        ck.role = c.role;
+        ck.uplinkEnabled = c.uplink;
+        ck.downlinkEnabled = c.downlink;
+        ck.shareLocation = c.shareLocation;
+        ck.muted = false;
+        ck.hopLimitPlus1 = 0;
+        ck.useAead = false;
+    }
+    syncPrimaryChannelName();
+    recomputeChannelHashes();
+    for (int i = 0; i < MESH_CHANNELS; i++) Channels.get(i).name = CHANNEL_KEYS[i].name;
+}
+
 static void handleCfgCommand(const char *args) {
-    if (!strcmp(args, "caps")) {
-        Serial.printf("[cfg] caps v=%d firstboot=%d keys=preset presets=",
-                      kCfgProtoVersion, s_firstBoot ? 1 : 0);
+    if (!strcasecmp(args, "caps")) {
+        Serial.printf("[cfg] caps v=%d firstboot=%d keys=preset,channels%s channels=%d",
+                      kCfgProtoVersion, s_firstBoot ? 1 : 0,
+                      (s_splashLogoW > 0 && s_splashLogoH > 0) ? ",logo" : "", MESH_CHANNELS);
+        if (s_splashLogoW > 0 && s_splashLogoH > 0) {
+            const uint16_t c = s_splashLogoBg;
+            const unsigned r = ((c >> 11) & 0x1F) * 255 / 31;
+            const unsigned g = ((c >> 5) & 0x3F) * 255 / 63;
+            const unsigned b = (c & 0x1F) * 255 / 31;
+            Serial.printf(" logo=%dx%d logobg=%02X%02X%02X logomax=%u",
+                          s_splashLogoW, s_splashLogoH, r, g, b, (unsigned)kLogoMaxBytes);
+        }
+        Serial.print(" presets=");
         bool first = true;
         for (uint8_t i = 0; i < PRESET_COUNT; i++) {
             if (!presetUsableOnThisRadio(i)) continue;
@@ -58917,14 +59317,22 @@ static void handleCfgCommand(const char *args) {
         return;
     }
 
-    if (!strcmp(args, "get preset")) {
+    if (!strcasecmp(args, "abort")) {
+        s_cfgStagedPreset = -1;
+        s_cfgChansStaged = false;
+        cfgLogoReset();
+        Serial.println("[cfg] ok aborted");
+        return;
+    }
+
+    if (!strcasecmp(args, "get preset")) {
         Serial.printf("[cfg] preset=%s custom=%d\n",
                       kPresets[s_cfg.modemPreset < PRESET_COUNT ? s_cfg.modemPreset : 0].channelName,
                       s_cfg.loraUsePreset ? 0 : 1);
         return;
     }
 
-    if (!strncmp(args, "set preset ", 11)) {
+    if (!strncasecmp(args, "set preset ", 11)) {
         const int preset = presetFromCliName(args + 11);
         if (preset < 0) {
             Serial.printf("[cfg] err preset: unknown \"%s\"\n", args + 11);
@@ -58941,35 +59349,101 @@ static void handleCfgCommand(const char *args) {
         return;
     }
 
-    if (!strcmp(args, "commit")) {
-        if (s_cfgStagedPreset < 0) {
+    if (!strcasecmp(args, "channels clear")) {
+        cfgStagedChannelsReset();
+        s_cfgChansStaged = true;
+        Serial.printf("[cfg] ok channels cleared slots=%d\n", MESH_CHANNELS);
+        return;
+    }
+
+    if (!strncasecmp(args, "set channel ", 12)) {
+        cfgSetChannel(args + 12);
+        return;
+    }
+
+    if (!strncasecmp(args, "logo ", 5)) {
+        cfgLogoCommand(args + 5);
+        return;
+    }
+
+    if (!strcasecmp(args, "commit")) {
+        if (s_cfgLogoState == CFG_LOGO_RECEIVING) {
+            cfgLogoReset();
+            Serial.println("[cfg] err commit: logo transfer was not finished");
+            return;
+        }
+        const bool havePreset = s_cfgStagedPreset >= 0;
+        const bool haveChans = s_cfgChansStaged;
+        const bool haveLogo = s_cfgLogoState == CFG_LOGO_READY || s_cfgLogoState == CFG_LOGO_CLEAR;
+        if (!havePreset && !haveChans && !haveLogo) {
             Serial.println("[cfg] ok nothing staged");
             return;
         }
-        const uint8_t preset = (uint8_t)s_cfgStagedPreset;
-        s_cfgStagedPreset = -1;
+        if (haveChans && s_cfgStagedChans[0].role != 0) {
+            Serial.println("[cfg] err commit: slot 0 must be the primary channel");
+            return;
+        }
+        const uint8_t preset = havePreset ? (uint8_t)s_cfgStagedPreset : 0;
+        const bool presetChanges = havePreset
+            && !(s_cfg.loraUsePreset && s_cfg.modemPreset == preset && !s_firstBoot);
 
-        if (s_firstBoot) {
-            Preferences p;
-            if (!p.begin(kProvNs, false) || !p.putUChar("preset", preset)) {
+        // Logo first: it is the one most likely not to fit, and failing before
+        // anything else is written leaves the device as it was.
+        if (haveLogo && !cfgCommitLogo()) {
+            Serial.println("[cfg] err commit: no room for the logo (NVS full)");
+            return;
+        }
+
+        // Before the channels, so an unnamed primary takes the new preset's name.
+        if (presetChanges) {
+            if (s_firstBoot) {
+                Preferences p;
+                const bool ok = p.begin(kProvNs, false) && p.putUChar("preset", preset);
                 p.end();
-                Serial.println("[cfg] err commit: could not write NVS");
+                if (!ok) {
+                    Serial.println("[cfg] err commit: could not write NVS");
+                    return;
+                }
+            }
+            applyProvisionedPreset(preset);
+        }
+
+        // The channel plan lives in its own namespace, which first-boot
+        // detection never looks at, so it is saved directly even mid-setup.
+        if (haveChans) {
+            cfgApplyStagedChannels();
+            if (!persistChannelsToPrefs()) {
+                Serial.println("[cfg] err commit: could not save channels (NVS full?)");
                 return;
             }
-            p.end();
-            applyProvisionedPreset(preset);
-            Serial.printf("[cfg] ok committed preset=%s applies-after=setup\n",
-                          kPresets[preset].channelName);
-            return;
         }
 
-        if (s_cfg.loraUsePreset && s_cfg.modemPreset == preset) {
-            Serial.printf("[cfg] ok committed preset=%s unchanged\n", kPresets[preset].channelName);
+        char chans[8] = "-";
+        if (haveChans) {
+            int n = 0;
+            for (int i = 0; i < MESH_CHANNELS; i++) {
+                if (s_cfgStagedChans[i].role != 2 && (i == 0 || s_cfgStagedChans[i].name[0])) n++;
+            }
+            snprintf(chans, sizeof(chans), "%d", n);
+        }
+        char summary[96];
+        snprintf(summary, sizeof(summary), "preset=%s channels=%s logo=%s",
+                 havePreset ? kPresets[preset].channelName : "-", chans,
+                 !haveLogo ? "-" : (s_cfgLogoState == CFG_LOGO_CLEAR ? "cleared" : "set"));
+        s_cfgStagedPreset = -1;
+        s_cfgChansStaged = false;
+        cfgLogoReset();
+
+        if (s_firstBoot) {
+            Serial.printf("[cfg] ok committed %s applies-after=setup\n", summary);
             return;
         }
-        applyProvisionedPreset(preset);
-        persistConfigToPrefs();
-        Serial.printf("[cfg] ok committed preset=%s rebooting\n", kPresets[preset].channelName);
+        if (!presetChanges && !haveChans && !haveLogo) {
+            Serial.printf("[cfg] ok committed %s unchanged\n", summary);
+            return;
+        }
+        if (presetChanges) persistConfigToPrefs();
+        Serial.printf("[cfg] ok committed %s rebooting\n", summary);
         Serial.flush();
         delay(300);
         flushPersistentState();   // settings and transcripts must land before we go
@@ -58984,16 +59458,18 @@ static void handleCfgCommand(const char *args) {
 // common shorthand a developer might type (`scan`, `i2c`) maps to the same
 // action as the canonical command.
 static void handleSerialCommandLine(char *line) {
-    normalizeSerialCommand(line);
-    if (!line || !line[0]) return;
-
-    if (strcmp(line, "help") == 0 || strcmp(line, "?") == 0) {
-        Serial.println("[cli] commands: help | nvs | batt | chatdump | keys | gps | env | env scan | env scan all | telemetry now | announce now | nodes stats | nodes seed [count] | chat seed [count] | cfg caps | cfg get preset | cfg set preset <name> | cfg commit");
+    if (!line) return;
+    // `cfg` arguments keep their case: channel names, PSKs.
+    normalizeSerialCommand(line, false);
+    if (strncasecmp(line, "cfg ", 4) == 0) {
+        handleCfgCommand(line + 4);
         return;
     }
+    normalizeSerialCommand(line);
+    if (!line[0]) return;
 
-    if (strncmp(line, "cfg ", 4) == 0) {
-        handleCfgCommand(line + 4);
+    if (strcmp(line, "help") == 0 || strcmp(line, "?") == 0) {
+        Serial.println("[cli] commands: help | nvs | batt | chatdump | keys | gps | env | env scan | env scan all | telemetry now | announce now | nodes stats | nodes seed [count] | chat seed [count] | cfg caps | cfg abort | cfg get preset | cfg set preset <name> | cfg channels clear | cfg set channel <i> k=v.. | cfg logo begin|data|end|clear | cfg commit");
         return;
     }
 
@@ -59165,17 +59641,24 @@ static void serviceSerialCommands() {
         if (c == '\r') continue;
 
         if (c == '\n') {
-            if (s_serialCmdLen > 0) {
+            // A cut-off line is dropped, not run: half a `cfg` argument is worse
+            // than none.
+            if (s_serialCmdOverflow) {
+                Serial.println("[cli] line too long - ignored");
+            } else if (s_serialCmdLen > 0) {
                 s_serialCmdBuf[s_serialCmdLen] = '\0';
                 handleSerialCommandLine(s_serialCmdBuf);
-                s_serialCmdLen = 0;
-                s_serialCmdBuf[0] = '\0';
             }
+            s_serialCmdLen = 0;
+            s_serialCmdBuf[0] = '\0';
+            s_serialCmdOverflow = false;
             continue;
         }
 
         if (s_serialCmdLen + 1 < sizeof(s_serialCmdBuf)) {
             s_serialCmdBuf[s_serialCmdLen++] = c;
+        } else {
+            s_serialCmdOverflow = true;
         }
     }
 }
