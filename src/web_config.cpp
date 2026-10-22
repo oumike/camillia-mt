@@ -707,6 +707,8 @@ static const char kHead[] =
                 ".remote-status{font-size:.82em;color:var(--text-dim);margin:.35em 0 .6em}"
                 ".remote-frame{display:block;width:100%;height:min(72vh,520px);border:1px solid var(--line);"
                          "border-radius:6px;background:#000}"
+                ".remote-lock{display:flex;flex-wrap:wrap;align-items:center;gap:.5em;margin:.4em 0}"
+                ".remote-lock input{width:7.5em;font-size:1.2em;letter-spacing:.2em;text-align:center}"
         ".map-wrap{margin-top:.6em;border:1px solid var(--line);border-radius:8px;background:var(--panel);padding:.5em}"
         ".map-canvas{display:block;width:100%;height:320px;border-radius:6px;overflow:hidden;background:#08141f}"
         ".map-controls{display:flex;gap:.45em;flex-wrap:wrap;margin:.15em 0 .45em}"
@@ -6618,8 +6620,14 @@ static void sendConfigPage(const char *msg = "", bool lite = false) {
         if (vncHostEnabled()) html += " checked";
         html += "><span>Enable VNC host</span></label>"
             "<p id='remote-status' class='remote-status'>Checking remote host...</p>"
+            "<form id='remote-lock' class='remote-lock' style='display:none' onsubmit='remoteUnlock();return false'>"
+            "<label for='remote-pin'>PIN shown on the device</label>"
+            "<input id='remote-pin' name='pin' type='text' inputmode='numeric' pattern='[0-9]{6}'"
+            " maxlength='6' autocomplete='off' placeholder='000000'>"
+            "<button type='submit' id='remote-unlock'>Unlock</button>"
+            "<p id='remote-lock-msg' class='remote-status' style='flex-basis:100%;margin:0'></p></form>"
             "<iframe id='remote-frame' class='remote-frame' title='Remote control' data-src='http://";
-        html += vncIp;
+        appendAttr(html, vncIp.c_str());
         html += ":";
         html += String(vncHostPort());
         html += "/' style='display:none'></iframe></div></div>";
@@ -7389,26 +7397,65 @@ static void sendConfigPage(const char *msg = "", bool lite = false) {
                         "function stopChatPolling(){chatStopTimers();}"
 #endif
 #if HAS_VNC_HOST
-                        "var remotePollTimer=null;"
+                        "var remotePollTimer=null,remoteSession=null,remoteTok=null,remoteSrc='';"
+                        // The VNC token lives for this browser session only
+                        // (sessionStorage), tagged with the device's VNC
+                        // session so a token from before the host was last
+                        // re-enabled is dropped rather than tried.
+                        "function remoteTokGet(){"
+                            "if(!remoteTok){try{remoteTok=JSON.parse(sessionStorage.getItem('vncTok')||'null');}catch(e){remoteTok=null;}}"
+                            "if(remoteTok&&(remoteSession===null||remoteTok.s!==remoteSession||!/^[0-9a-f]{32,64}$/.test(remoteTok.t||'')))remoteTokDrop();"
+                            "return remoteTok?remoteTok.t:null;"
+                        "}"
+                        "function remoteTokDrop(){remoteTok=null;try{sessionStorage.removeItem('vncTok');}catch(e){}}"
                         "function remoteFrameSync(on){"
                             "var frame=document.getElementById('remote-frame');"
+                            "var lock=document.getElementById('remote-lock');"
                             "var panel=document.getElementById('tab-remote');"
                             "if(!frame)return;"
                             "var active=!!(panel&&panel.classList.contains('active'));"
-                            "frame.style.display=(on&&active)?'block':'none';"
-                            "if(on&&active){if(!frame.getAttribute('src'))frame.setAttribute('src',frame.getAttribute('data-src'));}"
-                            "else if(frame.getAttribute('src'))frame.removeAttribute('src');"
+                            "var tok=on?remoteTokGet():null;"
+                            "if(lock)lock.style.display=(on&&active&&!tok)?'':'none';"
+                            "frame.style.display=(on&&active&&tok)?'block':'none';"
+                            "var want=(on&&active&&tok)?frame.getAttribute('data-src')+'#t='+tok:'';"
+                            "if(want!==remoteSrc){remoteSrc=want;frame.setAttribute('src',want||'about:blank');}"
                         "}"
+                        "function remoteUnlock(){"
+                            "var input=document.getElementById('remote-pin'),msg=document.getElementById('remote-lock-msg'),btn=document.getElementById('remote-unlock');"
+                            "if(!input)return;"
+                            "var pin=(input.value||'').replace(/\\D/g,'');"
+                            "if(pin.length!==6){if(msg)msg.textContent='Enter the 6-digit PIN shown on the device.';return;}"
+                            "if(btn)btn.disabled=true;"
+                            "fetch('/vnc-unlock',{method:'POST',headers:{'Content-Type':'application/x-www-form-urlencoded'},body:'pin='+pin})"
+                                ".then(function(r){return r.json().catch(function(){return {ok:false,error:'Unlock failed ('+r.status+').'};});})"
+                                ".then(function(d){"
+                                    "if(btn)btn.disabled=false;"
+                                    "if(d&&d.ok&&d.token){"
+                                        "remoteSession=d.session;remoteTok={t:d.token,s:d.session};"
+                                        "try{sessionStorage.setItem('vncTok',JSON.stringify(remoteTok));}catch(e){}"
+                                        "input.value='';if(msg)msg.textContent='';pollRemote();"
+                                    "}else if(msg){msg.textContent=(d&&d.error)||'Unlock failed.';}"
+                                "})"
+                                ".catch(function(){if(btn)btn.disabled=false;if(msg)msg.textContent='Unlock failed.';});"
+                        "}"
+                        // The viewer reports a refused socket (token no longer
+                        // valid) so the PIN prompt comes back on its own.
+                        "window.addEventListener('message',function(e){"
+                            "var frame=document.getElementById('remote-frame');"
+                            "if(!frame||e.source!==frame.contentWindow||!e.data||e.data.vnc!=='locked')return;"
+                            "remoteTokDrop();pollRemote();"
+                        "});"
                         "function remoteRender(d){"
                             "var box=document.getElementById('remote-enabled');"
                             "var status=document.getElementById('remote-status');"
                             "if(!box)return;"
+                            "if(typeof d.session==='number')remoteSession=d.session;"
                             "box.disabled=!!d.pending;box.checked=!!d.enabled;"
                             "if(status){"
                                 "if(d.pending)status.textContent='Applying...';"
                                 "else if(!d.enabled)status.textContent='Remote host is off.';"
                                 "else if(d.client)status.textContent='Browser connected.';"
-                                "else if(d.running)status.textContent='Ready at http://'+d.ip+':'+d.port+'/';"
+                                "else if(d.running)status.textContent=remoteTokGet()?'Ready.':'Locked. Enter the PIN shown on the device.';"
                                 "else status.textContent='Starting remote host...';"
                             "}"
                             "remoteFrameSync(!!d.enabled);"
@@ -8496,16 +8543,49 @@ static void handleGetVncStatus() {
         return;
     }
 
-    char response[192];
+    // Never the PIN: it is only ever shown on the device.
+    char response[224];
     const String ip = WiFi.localIP().toString();
     snprintf(response, sizeof(response),
              "{\"enabled\":%s,\"running\":%s,\"client\":%s,"
-             "\"pending\":%s,\"ip\":\"%s\",\"port\":%u}",
+             "\"pending\":%s,\"ip\":\"%s\",\"port\":%u,\"session\":%lu}",
              vncHostEnabled() ? "true" : "false",
              vncHostRunning() ? "true" : "false",
              vncHostClientConnected() ? "true" : "false",
              gVncToggleReq ? "true" : "false",
-             ip.c_str(), (unsigned)vncHostPort());
+             ip.c_str(), (unsigned)vncHostPort(),
+             (unsigned long)vncHostSession());
+    server.send(200, "application/json", response);
+}
+
+// Trades the PIN shown on the device for a VNC session token. Runs on the main
+// loop like every handler, which is also where the PIN is redrawn.
+static void handlePostVncUnlock() {
+    if (!isLoggedIn()) {
+        server.send(403, "application/json", "{\"ok\":false,\"error\":\"Not logged in.\"}");
+        return;
+    }
+    if (!vncHostEnabled()) {
+        server.send(409, "application/json", "{\"ok\":false,\"error\":\"The VNC host is off.\"}");
+        return;
+    }
+    if (vncHostUnlockRetryMs() > 0) {
+        server.send(429, "application/json",
+                    "{\"ok\":false,\"error\":\"Too many attempts. Wait a moment and try again.\"}");
+        return;
+    }
+    char token[65];
+    const String pin = server.arg("pin");
+    if (!vncHostRedeemPin(pin.c_str(), token, sizeof(token))) {
+        server.send(403, "application/json",
+                    "{\"ok\":false,\"error\":\"Wrong PIN. Check the PIN shown on the device.\"}");
+        return;
+    }
+    char response[128];
+    snprintf(response, sizeof(response), "{\"ok\":true,\"token\":\"%s\",\"session\":%lu}",
+             token, (unsigned long)vncHostSession());
+    memset(token, 0, sizeof(token));
+    server.sendHeader("Cache-Control", "no-store");
     server.send(200, "application/json", response);
 }
 
@@ -10531,6 +10611,7 @@ static void registerCommonRoutes() {
 #if HAS_VNC_HOST
     onRoute("/vnc-status",        HTTP_GET,  handleGetVncStatus);
     onRoute("/vnc-toggle",        HTTP_POST, handlePostVncToggle);
+    onRoute("/vnc-unlock",        HTTP_POST, handlePostVncUnlock);
 #endif
 #if !defined(DEVICE_CARDPUTER_LORA_HAT)
     onRoute("/chat-targets",      HTTP_GET,  handleGetChatTargets);

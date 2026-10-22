@@ -307,6 +307,7 @@ void NodeDB::clearPersisted() {
 #if FEATURE_DISCOVERY
     memset(_neighbors, 0, sizeof(_neighbors));
 #endif
+    _keyPins.clear();
     _count = 0;
     _sortDirty = true;
 }
@@ -337,6 +338,9 @@ int NodeDB::clearNonFavorites() {
                 char key[12]; nodeKey(key, _nodes[i].nodeId);
                 p.remove(key);
             }
+            _keyPins.drop(_nodes[i].nodeId);
+            // Removed by the user, not pushed out: nothing stays pinned.
+            _keyPins.takeEvicted(_nodes[i].nodeId, nullptr);
             removed++;
         }
     }
@@ -389,6 +393,8 @@ bool NodeDB::remove(uint32_t nodeId) {
     memset(&_nodes[_count - 1], 0, sizeof(_nodes[0]));
     _count--;
     _sortDirty = true;
+    _keyPins.drop(nodeId);
+    _keyPins.takeEvicted(nodeId, nullptr);
 
     // The surviving blobs were not touched, so only the index needs rewriting —
     // and if persistence is currently refusing writes, a stale index listing an
@@ -1066,6 +1072,9 @@ NodeEntry *NodeDB::upsert(uint32_t nodeId) {
         // Preserve the least-recently-heard node before its slot is reused.
         // Queue only — the SD write happens off the packet path.
         archiveQueue(_nodes[victim]);
+        // Keep its pinned key in RAM too: flooding fake IDs to push a node out
+        // must not let its next NodeInfo be trusted as a first key.
+        if (_nodes[victim].hasPubKey) _keyPins.rememberEvicted(evictedId, _nodes[victim].pubKey);
         // Delete the evicted node's blob from NVS
         char evKey[12]; nodeKey(evKey, evictedId);
         Preferences p; p.begin("nodes", false); p.remove(evKey); p.end();
@@ -1075,6 +1084,11 @@ NodeEntry *NodeDB::upsert(uint32_t nodeId) {
     }
     memset(e, 0, sizeof(*e));
     e->nodeId = nodeId;
+    // A pending key conflict belongs to the record it was raised against. The
+    // evicted node's goes with it, and a fresh record starts with no key, so
+    // its first one is trusted on first use again.
+    _keyPins.drop(evictedId);
+    _keyPins.drop(nodeId);
     snprintf(e->shortName, sizeof(e->shortName), "%04X", nodeId & 0xFFFF);
     snprintf(e->longName,  sizeof(e->longName),  "!%08x", nodeId);
     // A new node landed in the table (appended, or written over an evicted
@@ -1273,10 +1287,11 @@ int NodeDB::clearNeighbors() {
 
 #endif  // FEATURE_DISCOVERY
 
-void NodeDB::updateUser(uint32_t nodeId, const UserInfo &u) {
+bool NodeDB::updateUser(uint32_t nodeId, const UserInfo &u) {
     NodeEntry *e = upsert(nodeId);
-    if (!e) return;   // table full of favorites
+    if (!e) return false;   // table full of favorites
     bool changed = false;
+    bool raised = false;
     if (u.longName[0] && strncmp(e->longName, u.longName, sizeof(e->longName) - 1) != 0) {
         utf8util::copyTruncate(e->longName, sizeof(e->longName), u.longName);
         e->hasName = true;
@@ -1289,21 +1304,101 @@ void NodeDB::updateUser(uint32_t nodeId, const UserInfo &u) {
         _sortDirty = true;
         changed = true;
     }
-    if (u.hasPubKey && memcmp(e->pubKey, u.pubKey, 32) != 0) {
-        // A signature proved the old key, not this one. Only a replaced key
-        // clears it: a first key arriving in a verified signed NodeInfo was
-        // marked a moment ago, on this same packet.
-        if (e->hasPubKey) e->xeddsaVerified = false;
-        memcpy(e->pubKey, u.pubKey, 32);
-        e->hasPubKey = true;
-        e->pkiNoChannel = false;
-        e->legacyDmNoChannel = false;
-        changed = true;
+    if (u.hasPubKey) {
+        // Pinned: only the first key is taken from the air. A different one is
+        // parked for the user (acceptKeyChange()), never written here. An
+        // unsigned NodeInfo spoofing `from` would otherwise redirect our DMs.
+        // The signature on this packet, if any, was checked against the key we
+        // hold before it got here, so it says nothing for the offered key.
+        if (!e->hasPubKey) {
+            // A node evicted from a full table comes back with no key. The key
+            // it had is still pinned: restore it, so a different one below is
+            // a conflict rather than a first key.
+            uint8_t pinned[32];
+            if (_keyPins.takeEvicted(nodeId, pinned)) {
+                memcpy(e->pubKey, pinned, 32);
+                e->hasPubKey = true;
+                e->pkiNoChannel = false;
+                e->legacyDmNoChannel = false;
+                changed = true;
+            }
+        }
+        const KeyOffer o = _keyPins.offer(nodeId, e->hasPubKey ? e->pubKey : nullptr,
+                                          u.pubKey, false, millis());
+        if (o == KEY_OFFER_FIRST) {
+            // A first key arriving in a verified signed NodeInfo was marked a
+            // signer a moment ago, on this same packet: leave that alone.
+            memcpy(e->pubKey, u.pubKey, 32);
+            e->hasPubKey = true;
+            e->pkiNoChannel = false;
+            e->legacyDmNoChannel = false;
+            changed = true;
+        } else if (o == KEY_OFFER_NEW_CONFLICT) {
+            Serial.printf("[nodedb] !%08X offered a different public key; keeping the "
+                          "pinned one until the user accepts it\n", (unsigned)nodeId);
+            raised = true;
+        }
     }
     if (changed) {
         _save(nodeId);
         e->lastPersistMs = millis();
     }
+    return raised;
+}
+
+bool NodeDB::offerKey(uint32_t nodeId, const uint8_t key[32], bool signedByNewKey) {
+    NodeEntry *e = find(nodeId);
+    // Only ever a conflict against a key we hold. With no record, or no key, a
+    // bare key offer is not how a node is introduced; NodeInfo is.
+    if (!e || !e->hasPubKey || !key) return false;
+    const KeyOffer o = _keyPins.offer(nodeId, e->pubKey, key, signedByNewKey, millis());
+    if (o != KEY_OFFER_NEW_CONFLICT) return false;
+    Serial.printf("[nodedb] !%08X offered a different public key%s; keeping the "
+                  "pinned one until the user accepts it\n", (unsigned)nodeId,
+                  signedByNewKey ? " (signed by it)" : "");
+    return true;
+}
+
+bool NodeDB::hasKeyConflict(uint32_t nodeId) const {
+    if (!_keyPins.find(nodeId)) return false;
+    for (int i = 0; i < _count; i++) {
+        if (_nodes[i].nodeId == nodeId) return _nodes[i].hasPubKey;
+    }
+    return false;
+}
+
+bool NodeDB::pendingKey(uint32_t nodeId, uint8_t out[32], bool *signedByNewKey,
+                        uint32_t *atMs) const {
+    if (!hasKeyConflict(nodeId)) return false;
+    const KeyConflict *c = _keyPins.find(nodeId);
+    if (out) memcpy(out, c->key, 32);
+    if (signedByNewKey) *signedByNewKey = c->signedByNewKey;
+    if (atMs) *atMs = c->atMs;
+    return true;
+}
+
+bool NodeDB::acceptKeyChange(uint32_t nodeId, const uint8_t expected[32]) {
+    NodeEntry *e = find(nodeId);
+    KeyConflict c;
+    if (!e || !expected || !_keyPins.take(nodeId, c, expected)) return false;
+    // What the replace path always did: a signature proved the old key, not
+    // this one, and PKI fallbacks learned against the old key start over.
+    e->xeddsaVerified = false;
+    memcpy(e->pubKey, c.key, 32);
+    e->hasPubKey = true;
+    e->pkiNoChannel = false;
+    e->legacyDmNoChannel = false;
+    _save(nodeId);
+    e->lastPersistMs = millis();
+    Serial.printf("[nodedb] !%08X new public key accepted by user\n", (unsigned)nodeId);
+    return true;
+}
+
+bool NodeDB::rejectKeyChange(uint32_t nodeId, const uint8_t expected[32]) {
+    if (!expected || !_keyPins.reject(nodeId, expected)) return false;
+    Serial.printf("[nodedb] !%08X new public key rejected by user; pinned key kept\n",
+                  (unsigned)nodeId);
+    return true;
 }
 
 void NodeDB::updatePosition(uint32_t nodeId, const PositionInfo &pos) {

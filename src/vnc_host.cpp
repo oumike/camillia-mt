@@ -5,6 +5,7 @@
 #include <Arduino.h>
 #include <WiFi.h>
 #include <esp_heap_caps.h>
+#include <esp_random.h>
 #include "web_icon.h"   // the site icon, embedded in the viewer page below
 #include <freertos/FreeRTOS.h>
 #include <freertos/semphr.h>
@@ -64,6 +65,27 @@ static uint16_t s_keyTail = 0;
 // redraw pacer needs to know is when the operator last typed, and consumption
 // is the thing being delayed.
 static volatile uint32_t s_lastKeyMs = 0;
+
+// Access control. A PIN is drawn each time the host is enabled and shown on the
+// device; the web config trades it for a session token, which the viewer must
+// present on the WebSocket upgrade. Redeeming runs on the main loop (a web
+// handler) while validation runs on the VNC task, so all of it sits behind
+// s_authMux.
+static constexpr int kPinDigits = 6;
+static constexpr int kTokenSlots = 4;
+static constexpr size_t kTokenBytes = 16;   // 128 bits
+static constexpr size_t kTokenHexLen = kTokenBytes * 2;
+static constexpr uint8_t kMaxPinFailures = 5;
+static constexpr uint32_t kPinRetryDelayMs = 1000;
+static portMUX_TYPE s_authMux = portMUX_INITIALIZER_UNLOCKED;
+static char s_pin[kPinDigits + 1] = {};
+static char s_tokens[kTokenSlots][kTokenHexLen + 1] = {};
+static uint8_t s_tokenNext = 0;
+static uint8_t s_pinFailures = 0;
+static uint32_t s_lastPinFailMs = 0;
+static bool s_pinFailedRecently = false;
+static uint32_t s_session = 0;
+static uint32_t s_pinSerial = 0;
 
 static char s_handshake[kHandshakeBytes] = {};
 static size_t s_handshakeLen = 0;
@@ -128,8 +150,14 @@ button{height:25px;border:1px solid var(--ink);background:transparent;color:var(
 <script>
 const canvas=document.getElementById('screen'),ctx=canvas.getContext('2d'),viewer=document.getElementById('viewer');
 const statusEl=document.getElementById('status'),keys=document.getElementById('keys');
-let width=320,height=240,socket=null,pointerDown=false,lastMove=0,retryTimer=0;
-const setStatus=(text,kind='')=>{statusEl.textContent=text;statusEl.className=kind};
+let width=320,height=240,socket=null,pointerDown=false,lastMove=0,retryTimer=0,token='',failures=0,locked=false;
+const setStatus=(text,kind='')=>{statusEl.textContent=text;statusEl.className=kind;statusEl.title=text};
+const readToken=()=>{const m=/(?:^#|&)t=([0-9a-f]{32,64})(?:&|$)/.exec(location.hash);return m?m[1]:''};
+function lock(){
+  locked=true;clearTimeout(retryTimer);
+  setStatus('Locked \u2014 open Remote in the web config and enter the PIN shown on the device','bad');
+  try{if(parent!==window)parent.postMessage({vnc:'locked'},'*')}catch(_){ }
+}
 function fitScreen(){
     const box=viewer.getBoundingClientRect();if(!box.width||!box.height||!width||!height)return;
     const scale=Math.min(1,Math.max(1,box.width-4)/width,Math.max(1,box.height-4)/height);
@@ -138,11 +166,19 @@ function fitScreen(){
 }
 function connect(){
   clearTimeout(retryTimer);
-  socket=new WebSocket(`ws://${location.host}/mirror`);socket.binaryType='arraybuffer';
-  socket.onopen=()=>setStatus('Connected','live');
-  socket.onerror=()=>setStatus('Connection error','bad');
-  socket.onclose=()=>{setStatus('Reconnecting','bad');retryTimer=setTimeout(connect,1500)};
-  socket.onmessage=event=>{
+  if(!token){lock();return}
+  locked=false;let opened=false;
+  const ws=new WebSocket(`ws://${location.host}/mirror?t=${token}`);ws.binaryType='arraybuffer';socket=ws;
+  ws.onopen=()=>{opened=true;failures=0;setStatus('Connected','live')};
+  ws.onerror=()=>{if(!locked)setStatus('Connection error','bad')};
+  ws.onclose=()=>{
+    if(socket!==ws||locked)return;
+    // A refused upgrade (bad token) and a stopped host look the same from
+    // here; two in a row without ever opening means stop and ask for a PIN.
+    if(!opened&&++failures>=2){lock();return}
+    setStatus('Reconnecting','bad');retryTimer=setTimeout(connect,1500);
+  };
+  ws.onmessage=event=>{
     const bytes=new Uint8Array(event.data);if(!bytes.length)return;
     if(bytes[0]===2){width=bytes[1]|(bytes[2]<<8);height=bytes[3]|(bytes[4]<<8);canvas.width=width;canvas.height=height;fitScreen();return}
     if(bytes[0]!==1||bytes.length<10)return;
@@ -166,6 +202,8 @@ keys.addEventListener('beforeinput',event=>{if(event.inputType==='insertText'&&e
 window.addEventListener('keydown',event=>{if(document.activeElement===keys||event.ctrlKey||event.metaKey||event.altKey)return;let code=0;if(event.key==='Backspace')code=8;else if(event.key==='Enter')code=13;else if(event.key==='Escape')code=27;else if(event.key.length===1)code=event.key.codePointAt(0);if(code){sendKey(code);event.preventDefault()}});
 if('ResizeObserver' in window)new ResizeObserver(fitScreen).observe(viewer);
 window.addEventListener('resize',fitScreen);requestAnimationFrame(fitScreen);
+window.addEventListener('hashchange',()=>{token=readToken();failures=0;if(socket){const old=socket;socket=null;try{old.close()}catch(_){ }}connect()});
+token=readToken();
 connect();
 </script>
 </body>
@@ -373,10 +411,153 @@ static void serviceWsInput() {
     }
 }
 
+static bool constantTimeEqual(const char *a, const char *b, size_t length) {
+    uint8_t diff = 0;
+    for (size_t i = 0; i < length; ++i) diff |= (uint8_t)(a[i] ^ b[i]);
+    return diff == 0;
+}
+
+static void randomHex(char *out, size_t bytes) {
+    static constexpr char kHex[] = "0123456789abcdef";
+    for (size_t i = 0; i < bytes; i += 4) {
+        const uint32_t value = esp_random();
+        for (size_t j = 0; j < 4 && i + j < bytes; ++j) {
+            const uint8_t byte = (uint8_t)(value >> (8 * j));
+            out[2 * (i + j)] = kHex[byte >> 4];
+            out[2 * (i + j) + 1] = kHex[byte & 0x0F];
+        }
+    }
+    out[2 * bytes] = '\0';
+}
+
+// Call with s_authMux held. Uniform over 000000-999999: values past the last
+// whole multiple of a million are drawn again rather than folded in.
+static void generatePinLocked() {
+    static constexpr uint32_t kLimit = 4294000000u;   // 4294 * 10^6
+    uint32_t value = esp_random();
+    while (value >= kLimit) value = esp_random();
+    value %= 1000000u;
+    for (int i = kPinDigits - 1; i >= 0; --i) {
+        s_pin[i] = (char)('0' + value % 10u);
+        value /= 10u;
+    }
+    s_pin[kPinDigits] = '\0';
+    s_pinFailures = 0;
+    s_pinFailedRecently = false;
+    ++s_pinSerial;
+}
+
+static void clearAuthLocked() {
+    memset(s_pin, 0, sizeof(s_pin));
+    memset(s_tokens, 0, sizeof(s_tokens));
+    s_tokenNext = 0;
+    s_pinFailures = 0;
+    s_pinFailedRecently = false;
+}
+
+static bool tokenValid(const char *token, size_t length) {
+    if (length != kTokenHexLen) return false;
+    bool match = false;
+    portENTER_CRITICAL(&s_authMux);
+    for (int i = 0; i < kTokenSlots; ++i) {
+        const bool slotMatch = s_tokens[i][0] != '\0'
+            && constantTimeEqual(s_tokens[i], token, kTokenHexLen);
+        match = match || slotMatch;
+    }
+    portEXIT_CRITICAL(&s_authMux);
+    return match;
+}
+
+// The value of a request header, matched case-insensitively at a line start.
+// Returns its length, or -1 when absent; *value points into s_handshake.
+static int findHeader(const char *name, const char **value) {
+    const size_t nameLength = strlen(name);
+    const char *line = strstr(s_handshake, "\r\n");
+    while (line) {
+        line += 2;
+        if (*line == '\r' || *line == '\0') break;
+        if (strncasecmp(line, name, nameLength) == 0 && line[nameLength] == ':') {
+            const char *start = line + nameLength + 1;
+            while (*start == ' ' || *start == '\t') ++start;
+            const char *end = start;
+            while (*end && *end != '\r' && *end != '\n') ++end;
+            while (end > start && (end[-1] == ' ' || end[-1] == '\t')) --end;
+            *value = start;
+            return (int)(end - start);
+        }
+        line = strstr(line, "\r\n");
+    }
+    return -1;
+}
+
+// The host part of "host[:port]", ignoring the port: the web config on :80
+// embeds the viewer from :8765, and the two must still count as one device.
+static size_t hostPartLength(const char *authority, size_t length) {
+    size_t n = 0;
+    while (n < length && authority[n] != ':' && authority[n] != '/') ++n;
+    return n;
+}
+
+static bool originMatchesHost() {
+    const char *origin = nullptr;
+    const int originLength = findHeader("Origin", &origin);
+    if (originLength < 0) return true;   // not a browser page; the token decides
+    const char *host = nullptr;
+    const int hostLength = findHeader("Host", &host);
+    if (hostLength <= 0) return false;
+    const char *scheme = strstr(origin, "://");
+    if (!scheme || scheme >= origin + originLength) return false;
+    const char *originHost = scheme + 3;
+    const size_t originRest = (size_t)(origin + originLength - originHost);
+    const size_t a = hostPartLength(originHost, originRest);
+    const size_t b = hostPartLength(host, (size_t)hostLength);
+    return a > 0 && a == b && strncasecmp(originHost, host, a) == 0;
+}
+
+// "GET /mirror?t=<token> HTTP/1.1" with a currently valid token.
+static bool requestAuthorized() {
+    static constexpr char kPrefix[] = "GET /mirror?";
+    if (strncmp(s_handshake, kPrefix, sizeof(kPrefix) - 1) != 0) return false;
+    const char *query = s_handshake + sizeof(kPrefix) - 1;
+    const char *queryEnd = query;
+    while (*queryEnd && *queryEnd != ' ' && *queryEnd != '\r') ++queryEnd;
+    const char *param = query;
+    while (param < queryEnd) {
+        const char *paramEnd = param;
+        while (paramEnd < queryEnd && *paramEnd != '&') ++paramEnd;
+        if (paramEnd - param > 2 && param[0] == 't' && param[1] == '=') {
+            return tokenValid(param + 2, (size_t)(paramEnd - param - 2));
+        }
+        param = paramEnd < queryEnd ? paramEnd + 1 : queryEnd;
+    }
+    return false;
+}
+
+static void refuseHandshake(const char *why) {
+    static const char kForbidden[] =
+        "HTTP/1.1 403 Forbidden\r\n"
+        "Content-Type: text/plain\r\n"
+        "Content-Length: 10\r\n"
+        "Cache-Control: no-store\r\n"
+        "Connection: close\r\n"
+        "\r\n"
+        "Forbidden\n";
+    Serial.printf("[vnc] refused browser: %s\n", why);
+    (void)writeAll(s_client, (const uint8_t *)kForbidden, sizeof(kForbidden) - 1, 500);
+}
+
 static bool completeWebSocketHandshake() {
     static constexpr char kKeyHeader[] = "Sec-WebSocket-Key:";
     char *key = strstr(s_handshake, kKeyHeader);
     if (!key || strncmp(s_handshake, "GET /mirror", 11) != 0) return false;
+    if (!originMatchesHost()) {
+        refuseHandshake("cross-origin");
+        return false;
+    }
+    if (!requestAuthorized()) {
+        refuseHandshake("missing or invalid token");
+        return false;
+    }
     key += sizeof(kKeyHeader) - 1;
     while (*key == ' ' || *key == '\t') ++key;
     char *end = key;
@@ -689,9 +870,19 @@ bool vncHostSetEnabled(bool enabled) {
             }
         }
         __atomic_store_n(&s_fullRepaintRequested, true, __ATOMIC_RELEASE);
+        if (!s_enabled) {
+            portENTER_CRITICAL(&s_authMux);
+            clearAuthLocked();
+            generatePinLocked();
+            ++s_session;
+            portEXIT_CRITICAL(&s_authMux);
+        }
     }
     s_enabled = enabled;
     if (!enabled) {
+        portENTER_CRITICAL(&s_authMux);
+        clearAuthLocked();
+        portEXIT_CRITICAL(&s_authMux);
         portENTER_CRITICAL(&s_dirtyMux);
         s_dirty = false;
         portEXIT_CRITICAL(&s_dirtyMux);
@@ -708,6 +899,71 @@ bool vncHostSetEnabled(bool enabled) {
 }
 
 bool vncHostEnabled() { return s_enabled; }
+
+const char *vncHostPin() { return s_enabled ? s_pin : ""; }
+uint32_t vncHostPinSerial() { return s_pinSerial; }
+uint32_t vncHostSession() { return s_session; }
+
+uint32_t vncHostUnlockRetryMs() {
+    portENTER_CRITICAL(&s_authMux);
+    const uint32_t elapsed = (uint32_t)(millis() - s_lastPinFailMs);
+    const uint32_t wait = (s_pinFailedRecently && elapsed < kPinRetryDelayMs)
+        ? kPinRetryDelayMs - elapsed : 0;
+    portEXIT_CRITICAL(&s_authMux);
+    return wait;
+}
+
+bool vncHostRedeemPin(const char *pin, char *tokenOut, size_t tokenLen) {
+    if (tokenOut && tokenLen) tokenOut[0] = '\0';
+    if (!s_enabled || !pin || !tokenOut || tokenLen < kTokenHexLen + 1) return false;
+    bool wellFormed = strlen(pin) == (size_t)kPinDigits;
+    for (int i = 0; wellFormed && i < kPinDigits; ++i) {
+        wellFormed = pin[i] >= '0' && pin[i] <= '9';
+    }
+    // Drawn outside the critical section: esp_random() is cheap, but there is
+    // no reason to hold a spinlock across sixteen bytes of hex formatting.
+    char token[kTokenHexLen + 1];
+    randomHex(token, kTokenBytes);
+
+    bool ok = false;
+    bool regenerated = false;
+    portENTER_CRITICAL(&s_authMux);
+    const uint32_t now = millis();
+    const bool throttled = s_pinFailedRecently
+        && (uint32_t)(now - s_lastPinFailMs) < kPinRetryDelayMs;
+    if (s_pin[0] && !throttled) {
+        ok = wellFormed && constantTimeEqual(pin, s_pin, kPinDigits);
+        if (ok) {
+            memcpy(s_tokens[s_tokenNext], token, sizeof(token));
+            s_tokenNext = (uint8_t)((s_tokenNext + 1) % kTokenSlots);
+            s_pinFailures = 0;
+            s_pinFailedRecently = false;
+        } else {
+            s_lastPinFailMs = now;
+            s_pinFailedRecently = true;
+            if (++s_pinFailures >= kMaxPinFailures) {
+                // Only the PIN changes: tokens already issued stay valid.
+                generatePinLocked();
+                s_lastPinFailMs = now;
+                s_pinFailedRecently = true;
+                regenerated = true;
+            }
+        }
+    }
+    portEXIT_CRITICAL(&s_authMux);
+
+    if (ok) {
+        memcpy(tokenOut, token, sizeof(token));
+        Serial.println("[vnc] PIN accepted, session token issued");
+    } else if (regenerated) {
+        Serial.println("[vnc] too many wrong PINs, new PIN generated");
+    } else if (!throttled) {
+        Serial.println("[vnc] wrong PIN");
+    }
+    memset(token, 0, sizeof(token));
+    return ok;
+}
+
 bool vncHostRunning() { return s_running; }
 bool vncHostClientConnected() { return s_clientConnected; }
 const char *vncHostIP() { return s_ip; }
@@ -802,6 +1058,14 @@ bool vncHostPopKey(uint16_t *codepoint) {
 void vncHostInit(uint16_t, uint16_t) {}
 bool vncHostSetEnabled(bool enabled) { return !enabled; }
 bool vncHostEnabled() { return false; }
+const char *vncHostPin() { return ""; }
+uint32_t vncHostPinSerial() { return 0; }
+uint32_t vncHostSession() { return 0; }
+uint32_t vncHostUnlockRetryMs() { return 0; }
+bool vncHostRedeemPin(const char *, char *tokenOut, size_t tokenLen) {
+    if (tokenOut && tokenLen) tokenOut[0] = '\0';
+    return false;
+}
 bool vncHostRunning() { return false; }
 bool vncHostClientConnected() { return false; }
 const char *vncHostIP() { return ""; }

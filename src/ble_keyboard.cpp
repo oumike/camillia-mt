@@ -37,6 +37,11 @@
 
 #include <Arduino.h>
 #include <NimBLEDevice.h>
+#if defined(CONFIG_NIMBLE_CPP_IDF)
+#  include "host/ble_hs.h"
+#else
+#  include "nimble/nimble/host/include/host/ble_hs.h"
+#endif
 #include <WiFi.h>          // coexistence needs Wi-Fi modem sleep; see startStack()
 #include <esp_heap_caps.h>
 #include <string.h>
@@ -130,6 +135,23 @@ uint32_t s_passkey    = 0;
 uint32_t s_nextRetryMs = 0;
 uint32_t s_retryDelay  = kRetryMinMs;
 
+// Bond protection. A keyboard that was bonded must come back on that same bond
+// or not at all: NimBLE's own answer to "PIN or Key Missing" is to delete the
+// bond and pair again, which with MITM off completes as Just Works -- so
+// anyone spoofing the keyboard's address would get a fresh bond and a live
+// keystroke channel without a thing appearing on screen. Instead the link is
+// refused, auto-retry stops, and the UI asks whether to re-pair.
+//
+// The three flags below are written on the NimBLE host task during a connect
+// attempt and read by the worker once secureConnection() returns.
+volatile bool s_reconnecting = false;   // attempt is to an already-bonded peer
+volatile bool s_keyMissing   = false;   // peer answered our LTK with Key Missing
+volatile bool s_authInsecure = false;   // auth completed unencrypted or unbonded
+bool     s_repairNeeded = false;        // stop retrying until the user decides
+bool     s_repairPrompt = false;        // UI has not been told yet
+char     s_repairReason[48] = {0};      // kept apart from s_detail, which scans reuse
+ble_gap_event_listener s_gapListener;
+
 // Report state. Touched only on the NimBLE host task (notifications) and the
 // main loop (auto-repeat); both write s_held* so they take the mutex.
 uint8_t  s_prevKeys[6] = {0};
@@ -139,7 +161,7 @@ char     s_heldChar    = KEY_NONE;
 uint32_t s_heldSinceMs = 0;
 uint32_t s_repeatNextMs = 0;
 
-enum : uint8_t { CMD_START, CMD_STOP, CMD_SCAN, CMD_PAIR, CMD_FORGET };
+enum : uint8_t { CMD_START, CMD_STOP, CMD_SCAN, CMD_PAIR, CMD_FORGET, CMD_REPAIR };
 
 struct Cmd {
     uint8_t op;
@@ -345,7 +367,15 @@ class ClientCallbacks : public NimBLEClientCallbacks {
             s_batteryChar = nullptr;
             s_batteryPct  = 0xFF;
         }
-        if (s_enabled && s_pairedAddr[0]) {
+        bool repairNeeded;
+        {
+            Lock lock;
+            repairNeeded = s_repairNeeded;
+        }
+        if (repairNeeded) {
+            // The refusal already set the state and its reason; a retry here
+            // would undo exactly the stop it asked for.
+        } else if (s_enabled && s_pairedAddr[0]) {
             setState(BLE_KBD_RETRYING, "link lost");
             s_retryDelay  = kRetryMinMs;
             s_nextRetryMs = millis() + s_retryDelay;
@@ -362,7 +392,15 @@ class ClientCallbacks : public NimBLEClientCallbacks {
     }
 
     bool onConfirmPIN(uint32_t pin) override {
-        Serial.printf("[blekbd] numeric comparison %06u - accepting\n", (unsigned)pin);
+        // A bonded keyboard has no business asking to pair again; that is the
+        // shape of an impostor. Only a pairing the user started is answered.
+        if (s_reconnecting) {
+            Serial.printf("[blekbd] numeric comparison %06u during reconnect - rejecting\n",
+                          (unsigned)pin);
+            return false;
+        }
+        Serial.printf("[blekbd] numeric comparison %06u during user-started pairing - accepting\n",
+                      (unsigned)pin);
         return true;
     }
 
@@ -371,12 +409,31 @@ class ClientCallbacks : public NimBLEClientCallbacks {
                       (int)desc->sec_state.encrypted,
                       (int)desc->sec_state.authenticated,
                       (int)desc->sec_state.bonded);
+        if (!desc->sec_state.encrypted || !desc->sec_state.bonded) s_authInsecure = true;
         Lock lock;
         s_passkey = 0;   // nothing left to display either way
     }
 };
 
 ClientCallbacks s_clientCallbacks;
+
+// Runs on the NimBLE host task for every GAP event, *before* the client's own
+// handler sees it, and the two are handed the same event struct (ble_gap.c,
+// ble_gap_enc_event()). NimBLEClient answers an encryption failure of
+// "PIN or Key Missing" by deleting the bond (NimBLEClient.cpp, ENC_CHANGE) and
+// secureConnection() then pairs again from scratch. Relabelling the status as
+// an ordinary authentication failure here makes the client skip both: the
+// bond survives and secureConnection() returns false, which attemptConnect()
+// turns into a refusal. The flag is what tells it why.
+int gapListener(struct ble_gap_event *event, void *) {
+    if (event->type != BLE_GAP_EVENT_ENC_CHANGE) return 0;
+    if (event->enc_change.status != BLE_HS_ERR_HCI_BASE + BLE_ERR_PINKEY_MISSING) return 0;
+    NimBLEClient *client = s_client;
+    if (!client || client->getConnId() != event->enc_change.conn_handle) return 0;
+    s_keyMissing = true;
+    event->enc_change.status = BLE_HS_ERR_HCI_BASE + BLE_ERR_AUTH_FAIL;
+    return 0;
+}
 
 class ScanCallbacks : public NimBLEAdvertisedDeviceCallbacks {
     void onResult(NimBLEAdvertisedDevice *dev) override {
@@ -446,6 +503,18 @@ void onScanEnded(NimBLEScanResults results) {
     }
     char detail[32];
     snprintf(detail, sizeof(detail), "%d found", found);
+    bool repairNeeded;
+    char reason[sizeof(s_repairReason)];
+    {
+        Lock lock;
+        repairNeeded = s_repairNeeded;
+        snprintf(reason, sizeof(reason), "%s", s_repairReason);
+    }
+    if (repairNeeded) {
+        // A scan does not answer the re-pair question; put it back.
+        setState(BLE_KBD_REPAIR_NEEDED, reason);
+        return;
+    }
     setState(s_pairedAddr[0] ? BLE_KBD_RETRYING : BLE_KBD_IDLE, detail);
     // A scan that turned nothing up should not stall a remembered keyboard's
     // reconnect until the backoff would have expired on its own.
@@ -492,6 +561,17 @@ bool startStack() {
     // We have a screen and the keyboard has keys, which is exactly the pairing
     // the Passkey Entry method is for: we display, the user types it there.
     NimBLEDevice::setSecurityIOCap(BLE_HS_IO_DISPLAY_ONLY);
+    // Registered on every start: deinit/init re-runs ble_gap_init(), which
+    // empties the listener list.
+    const int lrc = ble_gap_event_listener_register(&s_gapListener, gapListener, nullptr);
+    if (lrc != 0 && lrc != BLE_HS_EALREADY) {
+        // Without it a missing key would silently re-pair, so the stack does
+        // not run at all rather than run unprotected.
+        Serial.printf("[blekbd] GAP listener registration failed (%d)\n", lrc);
+        NimBLEDevice::deinit(false);
+        setState(BLE_KBD_FAILED, "radio init failed");
+        return false;
+    }
     s_stackUp = true;
     logInternalHeap("after init");
     Serial.printf("[blekbd] stack up, %d bond(s) stored\n", NimBLEDevice::getNumBonds());
@@ -513,6 +593,7 @@ void stopStack() {
     }
     clearKeys();
     clearHeld();
+    ble_gap_event_listener_unregister(&s_gapListener);
     // deinit(false) keeps the bond table, which is the whole point of pairing
     // once. Turning the feature off must not mean pairing again.
     NimBLEDevice::deinit(false);
@@ -587,8 +668,85 @@ void readBatteryLevel() {
     s_batteryPct = (pct <= 100) ? pct : 0xFF;
 }
 
-void attemptConnect() {
+// The stored keys for a peer, used to tell "the same bond came back" from "a
+// different bond took its place" across one connect attempt.
+bool readPeerSec(const NimBLEAddress &addr, ble_store_value_sec *out) {
+    ble_store_key_sec key;
+    memset(&key, 0, sizeof(key));
+    memcpy(key.peer_addr.val, addr.getNative(), 6);
+    key.peer_addr.type = addr.getType();
+    memset(out, 0, sizeof(*out));
+    return ble_store_read_peer_sec(&key, out) == 0;
+}
+
+bool samePeerSec(const ble_store_value_sec &a, const ble_store_value_sec &b) {
+    return a.ltk_present == b.ltk_present && a.ediv == b.ediv && a.rand_num == b.rand_num
+        && !memcmp(a.ltk, b.ltk, sizeof(a.ltk));
+}
+
+void scheduleRetry(uint8_t state, const char *detail, uint32_t delayMs) {
+    { Lock lock; s_passkey = 0; }
+    setState(state, detail);
+    s_retryDelay  = delayMs;
+    s_nextRetryMs = millis() + s_retryDelay;
+}
+
+// A bonded keyboard did not come back on its bond. Nothing from this link is
+// accepted, and nothing is retried until the user answers the prompt -- a
+// silent retry is precisely what an impostor would be waiting for.
+void refuseBondedPeer(const NimBLEAddress &addr, bool bondReplaced, const char *why) {
+    Serial.printf("[blekbd] SECURITY: keyboard %s has no valid bond (%s); "
+                  "refusing link, re-pair needs confirmation on the device\n",
+                  s_pairedAddr, why);
+    {
+        Lock lock;
+        s_repairNeeded = true;
+        s_repairPrompt = true;
+        s_passkey      = 0;
+        snprintf(s_repairReason, sizeof(s_repairReason), "%s", why);
+    }
+    if (s_client && s_client->isConnected()) s_client->disconnect();
+    if (bondReplaced && NimBLEDevice::isBonded(addr)) {
+        // Whatever bond exists now was not made with the user's consent.
+        Serial.println("[blekbd] deleting the bond created during the failed reconnect");
+        NimBLEDevice::deleteBond(addr);
+    }
+    clearKeys();
+    clearHeld();
+    setState(BLE_KBD_REPAIR_NEEDED, why);
+}
+
+// A pairing the user started did not finish. Nothing is retried on its own:
+// with no bond stored, a later attempt would be an unattended fresh pairing,
+// which is the very thing an impostor needs. The Pair row offers to try again.
+void pairingIncomplete(const char *detail) {
+    Serial.printf("[blekbd] pairing with %s did not complete (%s)\n", s_pairedAddr, detail);
+    {
+        Lock lock;
+        s_repairNeeded = true;
+        s_repairPrompt = false;
+        s_passkey      = 0;
+        snprintf(s_repairReason, sizeof(s_repairReason), "%s", "pairing did not complete");
+    }
+    setState(BLE_KBD_FAILED, detail);
+}
+
+// userPairing is true only for doPair()/doRepair(), i.e. a pairing the user
+// started or confirmed on the device. It is a parameter rather than a flag so
+// it cannot outlive the attempt it was meant for.
+void attemptConnect(bool userPairing) {
     if (!s_stackUp || !s_pairedAddr[0]) return;
+
+    const NimBLEAddress addr(std::string(s_pairedAddr), s_pairedAddrType);
+    const bool alreadyBonded = NimBLEDevice::isBonded(addr);
+    if (!alreadyBonded && !userPairing) {
+        // A remembered keyboard with no bond -- one refused earlier, deleted,
+        // or never completed. Connecting would pair it afresh, unattended and
+        // without MITM; ask instead. The missing bond is what persists this
+        // across reboots, so the question comes back rather than a pairing.
+        refuseBondedPeer(addr, false, "no pairing stored");
+        return;
+    }
 
     setState(BLE_KBD_CONNECTING, s_pairedName);
     Serial.printf("[blekbd] connecting to %s (%s)\n", s_pairedName, s_pairedAddr);
@@ -604,8 +762,11 @@ void attemptConnect() {
     s_client->setConnectionParams(12, 24, 0, 400);
     s_client->setConnectTimeout(8);
 
-    const NimBLEAddress addr(std::string(s_pairedAddr), s_pairedAddrType);
-    const bool alreadyBonded = NimBLEDevice::isBonded(addr);
+    ble_store_value_sec bondBefore;
+    const bool haveBondBefore = alreadyBonded && readPeerSec(addr, &bondBefore);
+    s_keyMissing   = false;
+    s_authInsecure = false;
+    s_reconnecting = alreadyBonded;
     if (!alreadyBonded) {
         // Fresh pairing: pick the code the keyboard's user will be asked to
         // type. Random per attempt rather than a fixed 123456, so a bystander
@@ -616,7 +777,12 @@ void attemptConnect() {
     }
 
     if (!s_client->connect(addr, true)) {
+        s_reconnecting = false;
         Serial.printf("[blekbd] connect failed (err %d)\n", s_client->getLastError());
+        if (!alreadyBonded) {
+            pairingIncomplete("not in range");
+            return;
+        }
         { Lock lock; s_passkey = 0; }
         setState(BLE_KBD_RETRYING, "not in range");
         s_retryDelay  = (s_retryDelay * 2 > kRetryMaxMs) ? kRetryMaxMs : s_retryDelay * 2;
@@ -626,13 +792,47 @@ void attemptConnect() {
 
     // HID characteristics are readable only on an encrypted link, so security
     // has to come before discovery, not after it.
-    if (!s_client->secureConnection()) {
-        Serial.println("[blekbd] pairing/encryption failed");
-        s_client->disconnect();
-        { Lock lock; s_passkey = 0; }
-        setState(BLE_KBD_FAILED, "pairing rejected");
-        s_retryDelay  = kRetryMaxMs;
-        s_nextRetryMs = millis() + s_retryDelay;
+    const bool secured = s_client->secureConnection();
+    s_reconnecting = false;
+    const bool linkUp = s_client->isConnected();
+    NimBLEConnInfo info = s_client->getConnInfo();
+    // Keys are taken only over a link that is both encrypted and bonded, on a
+    // fresh pairing and a reconnect alike.
+    const bool linkSecure = secured && linkUp && info.isEncrypted() && info.isBonded()
+                            && !s_authInsecure;
+
+    if (alreadyBonded) {
+        const bool stillBonded = NimBLEDevice::isBonded(addr);
+        ble_store_value_sec bondAfter;
+        const bool haveBondAfter = stillBonded && readPeerSec(addr, &bondAfter);
+        const bool bondReplaced = haveBondBefore && haveBondAfter
+                                  && !samePeerSec(bondBefore, bondAfter);
+        const char *why = nullptr;
+        if (s_keyMissing)       why = "keyboard lost the key";
+        else if (!stillBonded)  why = "pairing was removed";
+        else if (bondReplaced)  why = "pairing was replaced";
+        else if (secured && !linkSecure) why = "link not encrypted";
+        else if (!secured && linkUp)     why = "encryption failed";
+        if (why) {
+            refuseBondedPeer(addr, bondReplaced, why);
+            return;
+        }
+        if (!secured) {
+            // The link went down mid-handshake with the bond untouched: the
+            // keyboard walked out of range, not a different one walking in.
+            Serial.println("[blekbd] link dropped during encryption; will retry");
+            s_retryDelay = (s_retryDelay * 2 > kRetryMaxMs) ? kRetryMaxMs : s_retryDelay * 2;
+            scheduleRetry(BLE_KBD_RETRYING, "not in range", s_retryDelay);
+            return;
+        }
+    } else if (!linkSecure) {
+        Serial.printf("[blekbd] pairing/encryption failed (secured=%d encrypted=%d bonded=%d)\n",
+                      (int)secured, (int)info.isEncrypted(), (int)info.isBonded());
+        // Flagged before the disconnect, so onDisconnect() does not queue a retry.
+        pairingIncomplete(secured ? "link not secure" : "pairing rejected");
+        if (linkUp) s_client->disconnect();
+        // A half-made pairing (encrypted but not bonded) is not one to keep.
+        if (NimBLEDevice::isBonded(addr)) NimBLEDevice::deleteBond(addr);
         return;
     }
 
@@ -710,9 +910,11 @@ void doPair(int index) {
     {
         Lock lock;
         s_pairingDirty = true;
+        s_repairNeeded = false;
+        s_repairPrompt = false;
     }
     s_retryDelay = kRetryMinMs;
-    attemptConnect();
+    attemptConnect(true);
 }
 
 void doForget() {
@@ -727,10 +929,35 @@ void doForget() {
         Lock lock;
         s_pairingDirty = true;
         s_batteryPct   = 0xFF;
+        s_repairNeeded = false;
+        s_repairPrompt = false;
     }
     clearKeys();
     clearHeld();
     setState(s_stackUp ? BLE_KBD_IDLE : BLE_KBD_OFF);
+}
+
+// The user confirmed on the device that the keyboard was reset: drop the old
+// bond and pair from scratch, through the same passkey flow as a first pairing.
+void doRepair() {
+    if (!s_stackUp || !s_pairedAddr[0]) return;
+    NimBLEScan *scan = NimBLEDevice::getScan();
+    if (scan && scan->isScanning()) scan->stop();
+    if (s_client && s_client->isConnected()) {
+        s_client->disconnect();
+        // connect() refuses a client that is still tearing down.
+        for (int i = 0; i < 40 && s_client->isConnected(); i++) vTaskDelay(pdMS_TO_TICKS(50));
+    }
+    const NimBLEAddress addr(std::string(s_pairedAddr), s_pairedAddrType);
+    if (NimBLEDevice::isBonded(addr)) NimBLEDevice::deleteBond(addr);
+    Serial.printf("[blekbd] re-pair confirmed for %s; old bond deleted\n", s_pairedAddr);
+    {
+        Lock lock;
+        s_repairNeeded = false;
+        s_repairPrompt = false;
+    }
+    s_retryDelay = kRetryMinMs;
+    attemptConnect(true);
 }
 
 void workerTask(void *) {
@@ -740,6 +967,11 @@ void workerTask(void *) {
         if (xQueueReceive(s_cmdQ, &cmd, pdMS_TO_TICKS(250)) == pdTRUE) {
             switch (cmd.op) {
                 case CMD_START:
+                    // Switching the feature back on is the user asking for one
+                    // more try on the stored bond; a bond that still fails is
+                    // refused again, and a missing one goes straight back to
+                    // the prompt without connecting (attemptConnect(false)).
+                    { Lock lock; s_repairNeeded = false; s_repairPrompt = false; }
                     if (startStack()) {
                         if (s_pairedAddr[0]) {
                             s_retryDelay  = kRetryMinMs;
@@ -759,6 +991,7 @@ void workerTask(void *) {
                 case CMD_SCAN:   doScan();          break;
                 case CMD_PAIR:   doPair(cmd.arg);   break;
                 case CMD_FORGET: doForget();        break;
+                case CMD_REPAIR: doRepair();        break;
                 default: break;
             }
             continue;
@@ -771,9 +1004,14 @@ void workerTask(void *) {
         NimBLEScan *scan = NimBLEDevice::getScan();
         const bool scanning = scan && scan->isScanning();
 
-        if (!connected && !scanning && s_pairedAddr[0]
+        bool repairNeeded;
+        {
+            Lock lock;
+            repairNeeded = s_repairNeeded;
+        }
+        if (!connected && !scanning && s_pairedAddr[0] && !repairNeeded
             && (int32_t)(now - s_nextRetryMs) >= 0) {
-            attemptConnect();
+            attemptConnect(false);
             continue;
         }
         if (connected && (uint32_t)(now - lastBatteryMs) >= 300000UL) {
@@ -783,10 +1021,10 @@ void workerTask(void *) {
     }
 }
 
-void post(uint8_t op, int arg = 0) {
-    if (!s_cmdQ) return;
+bool post(uint8_t op, int arg = 0) {
+    if (!s_cmdQ) return false;
     Cmd cmd = { op, arg };
-    xQueueSend(s_cmdQ, &cmd, 0);
+    return xQueueSend(s_cmdQ, &cmd, 0) == pdTRUE;
 }
 
 bool ensureWorker() {
@@ -925,6 +1163,10 @@ void bleKeyboardStatusText(char *out, size_t outLen) {
         case BLE_KBD_FAILED:
             snprintf(out, outLen, "Failed%s%s", detail[0] ? ": " : "", detail);
             break;
+        case BLE_KBD_REPAIR_NEEDED:
+            snprintf(out, outLen, "Pairing lost: %s",
+                     s_pairedName[0] ? s_pairedName : "keyboard");
+            break;
         case BLE_KBD_IDLE:
             snprintf(out, outLen, "On - no keyboard paired%s%s",
                      detail[0] ? " (" : "", detail[0] ? detail : "");
@@ -998,6 +1240,39 @@ void bleKeyboardForget() {
         return;
     }
     post(CMD_FORGET);
+}
+
+bool bleKeyboardRepairNeeded() {
+    Lock lock;
+    // CONNECTING here means a confirmed re-pair is queued for the worker.
+    return s_repairNeeded && s_state != BLE_KBD_CONNECTING;
+}
+
+bool bleKeyboardTakeRepairPrompt() {
+    Lock lock;
+    // Held back while a scan has the state, not dropped.
+    if (!s_repairPrompt || s_state != BLE_KBD_REPAIR_NEEDED) return false;
+    s_repairPrompt = false;
+    return true;
+}
+
+void bleKeyboardRepairReason(char *out, size_t outLen) {
+    if (!out || outLen == 0) return;
+    Lock lock;
+    snprintf(out, outLen, "%s", s_repairNeeded ? s_repairReason : "");
+}
+
+bool bleKeyboardRepair() {
+    if (!s_enabled || !s_stackUp || !s_pairedAddr[0]) return false;
+    {
+        Lock lock;
+        if (!s_repairNeeded) return false;
+    }
+    if (!post(CMD_REPAIR)) return false;
+    // Shown at once rather than when the worker gets to it, so the dialog that
+    // opens next does not flash the old "Pairing lost" line.
+    setState(BLE_KBD_CONNECTING, s_pairedName);
+    return true;
 }
 
 bool        bleKeyboardHasPaired()      { return s_pairedAddr[0] != '\0'; }
