@@ -232,6 +232,16 @@ DEVICE_TDISPLAY_P4, DEVICE_CROWPANEL_35, DEVICE_CROWPANEL_50"
 #  define UI_TOUCH_ONLY_PROFILE 0
 #endif
 
+// A tap on a list row or Config row runs it, as on the touch-only boards,
+// rather than only moving the highlight for Enter to act on. The T-Deck has
+// both a keyboard and a touch panel, and a tap there should do what it does
+// everywhere else.
+#if UI_TOUCH_ONLY_PROFILE || defined(DEVICE_TDECK)
+#  define UI_TAP_ACTIVATES 1
+#else
+#  define UI_TAP_ACTIVATES 0
+#endif
+
 // ── Edge-to-edge text entry ─────────────────────────────────────────────────
 // Text-entry modals (composer, channel/WiFi/node-name editors, nodes filter,
 // onboarding) span the full screen width with 2 px side padding, and the

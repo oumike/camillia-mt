@@ -1204,7 +1204,7 @@ static uint32_t s_dmDeleteFlashUntilMs = 0;
 static uint32_t s_dmTouchPressStartMs = 0;
 static int s_dmTouchPressRowIdx = -1;
 static bool s_dmTouchLongPressTriggered = false;
-#if UI_TOUCH_ONLY_PROFILE
+#if UI_TAP_ACTIVATES
 // A finger is down on a conversation-list row. While it is, the list must not be
 // rebuilt: refreshDmModal() rebuilds it with lv_obj_clean(), and deleting the
 // row the gesture belongs to makes LVGL abandon the rest of that gesture. The
@@ -2913,7 +2913,7 @@ static void refreshNodesListSelection();
 static void refreshNodesDetails();
 static void refreshNodesPanelFocusStyles();
 static void onNodeSnapshotPressed(lv_event_t *e);
-#if UI_TOUCH_ONLY_PROFILE
+#if UI_TAP_ACTIVATES
 static void onNodeSnapshotClicked(lv_event_t *e);
 #endif
 static void onNodesActionRowPressed(lv_event_t *e);
@@ -3248,6 +3248,12 @@ static inline const char *msgTransportIcon(bool viaMqtt) {
     return viaMqtt ? LV_SYMBOL_GLOBE_TINY : LV_SYMBOL_RADIO_TINY;
 }
 
+enum UiBtnKind : uint8_t { UI_BTN_PRIMARY, UI_BTN_SECONDARY, UI_BTN_DANGER };
+static constexpr int kUiBtnRadius = 6;
+static constexpr int kUiDialogRadius = 8;
+static void uiStyleButton(lv_obj_t *btn, UiBtnKind kind);
+static void uiStyleDialog(lv_obj_t *dlg);
+
 #if UI_TOUCH_ONLY_PROFILE
 // One X, in the top-right corner, for every screen and modal on the touch-only
 // build that a keyboard build closes with Backspace.
@@ -3270,12 +3276,6 @@ static inline const char *msgTransportIcon(bool viaMqtt) {
 // Returns the button so a caller can re-align it: the full-screen tools hang it
 // off the right end of their header bar instead of the modal's own corner.
 static constexpr int kHeltecCloseXSize = 26;
-
-enum UiBtnKind : uint8_t { UI_BTN_PRIMARY, UI_BTN_SECONDARY, UI_BTN_DANGER };
-static constexpr int kUiBtnRadius = 6;
-static constexpr int kUiDialogRadius = 8;
-static void uiStyleButton(lv_obj_t *btn, UiBtnKind kind);
-static void uiStyleDialog(lv_obj_t *dlg);
 
 static lv_obj_t *appendHeltecCloseX(lv_obj_t *parent, lv_event_cb_t onClose,
                                     int size = kHeltecCloseXSize) {
@@ -15453,7 +15453,7 @@ static void onCfgActionRowPressed(lv_event_t *e) {
     s_cfgSelection = idx;
     s_cfgConfirmAction = -1;
     s_cfgConfirmMs = 0;
-#if UI_TOUCH_ONLY_PROFILE
+#if UI_TAP_ACTIVATES
     // Touch-only build: a tap is the whole gesture, so it selects the row and
     // runs it. Every other build has an Enter key for the second half, and
     // leaves the tap as a way to move the highlight without committing.
@@ -25991,7 +25991,7 @@ static void closeDmModal() {
     s_dmTouchPressStartMs = 0;
     s_dmTouchPressRowIdx = -1;
     s_dmTouchLongPressTriggered = false;
-#if UI_TOUCH_ONLY_PROFILE
+#if UI_TAP_ACTIVATES
     // The rows that would have reported the release are gone with the modal.
     // Left set, these would suppress every future refresh of a reopened screen.
     s_dmRowPressActive = false;
@@ -30091,7 +30091,7 @@ static void refreshNodesListRows() {
         lv_obj_set_style_shadow_width(row, 0, 0);
         lv_obj_set_style_shadow_width(row, 0, LV_PART_MAIN | LV_STATE_PRESSED);
         lv_obj_add_event_cb(row, onNodeSnapshotPressed, LV_EVENT_PRESSED, (void *)(intptr_t)rowIdx);
-#if UI_TOUCH_ONLY_PROFILE
+#if UI_TAP_ACTIVATES
         lv_obj_add_event_cb(row, onNodeSnapshotClicked, LV_EVENT_CLICKED, (void *)(intptr_t)rowIdx);
 #endif
 
@@ -30555,7 +30555,7 @@ static void onNodeSnapshotPressed(lv_event_t *e) {
     }
 }
 
-#if UI_TOUCH_ONLY_PROFILE
+#if UI_TAP_ACTIVATES
 // Tap a row to act on it. Selecting is what the LV_EVENT_PRESSED handler above
 // does; this is the second half of the gesture, which on the keyboard builds is
 // Enter on the highlighted row.
@@ -39661,7 +39661,9 @@ static void onDmNewMessagePressed(lv_event_t *e) {
     }
     openDmNodePicker();
 }
+#endif
 
+#if UI_TAP_ACTIVATES
 // Consumes a refresh that was held back while a row was under a finger.
 // Returns false while the finger is still down, so the caller waits for the
 // gesture to finish rather than pulling the rug out from under it.
@@ -39928,7 +39930,7 @@ static void onDmConversationPressed(lv_event_t *e) {
     if (s_dmDelModal) return;
     s_dmSelection = idx;
     s_dmMsgPanelFocused = (idx > 0);
-#if UI_TOUCH_ONLY_PROFILE
+#if UI_TAP_ACTIVATES
     // Asked for, not performed. This handler runs on LV_EVENT_PRESSED — finger
     // still down — and refreshDmModal() rebuilds the list with lv_obj_clean(),
     // which would delete this very row and take the LV_EVENT_CLICKED that
@@ -39942,7 +39944,7 @@ static void onDmConversationPressed(lv_event_t *e) {
 }
 
 static void onDmConversationPressState(lv_event_t *e) {
-#if UI_TOUCH_ONLY_PROFILE
+#if UI_TAP_ACTIVATES
     int idx = (int)(intptr_t)lv_event_get_user_data(e);
 
     // Press tracking covers every row, New DM (index 0) included, so the list
@@ -40313,7 +40315,7 @@ static void refreshDmNodePicker(bool force) {
 #endif
         lv_obj_set_style_shadow_width(row, 0, 0);
         lv_obj_add_event_cb(row, onDmNodePressed, LV_EVENT_PRESSED, (void *)(intptr_t)i);
-#if UI_TOUCH_ONLY_PROFILE
+#if UI_TAP_ACTIVATES
         // Second half of the gesture, matching the USER button on this screen —
         // without it the picker's own "Tap a node to start a DM" was a promise
         // the row could not keep.
@@ -40479,7 +40481,7 @@ static DisplayLine::AckState dmAckToDisplayAck(DmLine::AckState a) {
 }
 
 static void refreshDmModal(bool force) {
-#if UI_TOUCH_ONLY_PROFILE
+#if UI_TAP_ACTIVATES
     // A DM arriving mid-gesture used to rebuild the list under the finger,
     // which cancelled whatever the finger was doing — a tap, or a hold that was
     // three seconds into a delete. Hold the redraw until the gesture ends.
@@ -40637,7 +40639,7 @@ static void refreshDmModal(bool force) {
 #endif
         lv_obj_set_style_shadow_width(row, 0, 0);
         lv_obj_add_event_cb(row, onDmConversationPressed, LV_EVENT_PRESSED, (void *)(intptr_t)0);
-#if UI_TOUCH_ONLY_PROFILE
+#if UI_TAP_ACTIVATES
         // Tap runs it, the same as the USER button does on this row. On CLICKED,
         // so dragging the conversation list past it only scrolls.
         //
@@ -45213,6 +45215,21 @@ static void renderOnboardingStage() {
 #endif
     }
 
+#if !defined(DEVICE_CARDPUTER_LORA_HAT)
+    // Fit the panel to its content, capped at the stage size, so short stages
+    // are not a small block of text in a mostly empty frame. Stages with the
+    // on-screen keyboard keep the full height it needs.
+    if (!s_onboardingKeyboard) {
+        lv_obj_set_style_max_height(s_onboardingModal, modalH, 0);
+        lv_obj_set_height(s_onboardingModal, LV_SIZE_CONTENT);
+    } else {
+        lv_obj_set_style_max_height(s_onboardingModal, LV_COORD_MAX, 0);
+        lv_obj_set_height(s_onboardingModal, modalH);
+    }
+    lv_obj_align(s_onboardingModal, LV_ALIGN_CENTER, 0, 0);
+#endif
+    uiStyleDialog(s_onboardingModal);
+
 #if defined(DEVICE_TDECK_PRO)
     styleOnboardingPaperTree(s_onboardingModal);
 #endif
@@ -45282,7 +45299,6 @@ static void openOnboardingModal() {
     lv_obj_move_foreground(s_onboardingBackdrop);
 
     renderOnboardingStage();
-    uiStyleDialog(s_onboardingModal);
 }
 
 static void closeOnboardingModal() {
@@ -61287,7 +61303,7 @@ void loop() {
         // Cheap no-op unless the monitor is open; it throttles its own retally.
         refreshMqttMonitorModal();
 #endif
-#if UI_TOUCH_ONLY_PROFILE
+#if UI_TAP_ACTIVATES
         // Evaluated first, not folded into the argument: || would short-circuit
         // past it whenever meshDirty is already true and leave the flag set.
         const bool dmDeferred = dmTakeDeferredRefresh();
