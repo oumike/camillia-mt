@@ -1732,9 +1732,22 @@ static uint8_t s_envTelemetryTxFails = 0;
 static uint8_t s_neighborInfoTxFails = 0;
 static uint8_t s_mapReportFails = 0;
 // Sized for the flasher's `cfg logo data` lines (see handleCfgCommand()).
-static char s_serialCmdBuf[256] = {};
-static size_t s_serialCmdLen = 0;
-static bool s_serialCmdOverflow = false;
+struct SerialCmdInput {
+    char buf[256];
+    size_t len;
+    bool overflow;
+};
+static SerialCmdInput s_serialCmdUart = {};
+// The CrowPanel 3.5" console is UART0 (USB_CDC_ON_BOOT=0), but its USB-C can
+// reach the S3's own USB serial instead, which is where the web flasher then
+// talks. The CLI listens on both. Not on the 5": its native USB pins are the
+// radio's.
+#if defined(DEVICE_CROWPANEL_35) && ARDUINO_USB_MODE && !ARDUINO_USB_CDC_ON_BOOT
+#define CLI_ON_NATIVE_USB 1
+static SerialCmdInput s_serialCmdUsb = {};
+#endif
+// Where CLI replies go: the console the current command line came in on.
+static Stream *s_cliOut = &Serial;
 
 enum ComposeTarget : uint8_t {
     COMPOSE_TARGET_CHANNEL = 0,
@@ -59072,11 +59085,11 @@ static void cfgSetChannel(const char *args) {
     char *end = nullptr;
     const long idx = strtol(args, &end, 10);
     if (end == args || idx < 0 || idx >= MESH_CHANNELS) {
-        Serial.printf("[cfg] err channel: slot must be 0-%d\n", MESH_CHANNELS - 1);
+        s_cliOut->printf("[cfg] err channel: slot must be 0-%d\n", MESH_CHANNELS - 1);
         return;
     }
     if (!s_cfgChansStaged) {
-        Serial.println("[cfg] err channel: send `cfg channels clear` first");
+        s_cliOut->println("[cfg] err channel: send `cfg channels clear` first");
         return;
     }
 
@@ -59092,7 +59105,7 @@ static void cfgSetChannel(const char *args) {
         while (p[n] && p[n] != ' ') n++;
         if (!n) break;
         if (n >= sizeof(tok)) {
-            Serial.printf("[cfg] err channel %ld: argument too long\n", idx);
+            s_cliOut->printf("[cfg] err channel %ld: argument too long\n", idx);
             return;
         }
         memcpy(tok, p, n);
@@ -59101,7 +59114,7 @@ static void cfgSetChannel(const char *args) {
 
         char *eq = strchr(tok, '=');
         if (!eq) {
-            Serial.printf("[cfg] err channel %ld: expected key=value, got \"%s\"\n", idx, tok);
+            s_cliOut->printf("[cfg] err channel %ld: expected key=value, got \"%s\"\n", idx, tok);
             return;
         }
         *eq = '\0';
@@ -59112,10 +59125,10 @@ static void cfgSetChannel(const char *args) {
             if (!strcasecmp(v, "primary")) c.role = 0;
             else if (!strcasecmp(v, "secondary")) c.role = 1;
             else if (!strcasecmp(v, "disabled")) c.role = 2;
-            else { Serial.printf("[cfg] err channel %ld: bad role \"%s\"\n", idx, v); return; }
+            else { s_cliOut->printf("[cfg] err channel %ld: bad role \"%s\"\n", idx, v); return; }
         } else if (!strcasecmp(k, "name")) {
             if (!cfgPercentDecode(v, c.name, sizeof(c.name))) {
-                Serial.printf("[cfg] err channel %ld: name must be 11 bytes or fewer\n", idx);
+                s_cliOut->printf("[cfg] err channel %ld: name must be 11 bytes or fewer\n", idx);
                 return;
             }
         } else if (!strcasecmp(k, "psk")) {
@@ -59129,7 +59142,7 @@ static void cfgSetChannel(const char *args) {
                 uint8_t kb[33];
                 const int kl = base64Decode(v, kb, sizeof(kb));
                 if (kl != 1 && kl != 16 && kl != 32) {
-                    Serial.printf("[cfg] err channel %ld: psk must decode to 1, 16 or 32 bytes\n", idx);
+                    s_cliOut->printf("[cfg] err channel %ld: psk must decode to 1, 16 or 32 bytes\n", idx);
                     return;
                 }
                 memcpy(c.key, kb, kl);
@@ -59142,34 +59155,34 @@ static void cfgSetChannel(const char *args) {
         } else if (!strcasecmp(k, "down")) {
             c.downlink = flag;
         } else {
-            Serial.printf("[cfg] err channel %ld: unknown key \"%s\"\n", idx, k);
+            s_cliOut->printf("[cfg] err channel %ld: unknown key \"%s\"\n", idx, k);
             return;
         }
     }
 
     if ((idx == 0) != (c.role == 0)) {
-        Serial.printf("[cfg] err channel %ld: slot 0 is the primary channel and only slot 0\n", idx);
+        s_cliOut->printf("[cfg] err channel %ld: slot 0 is the primary channel and only slot 0\n", idx);
         return;
     }
     if (c.role == 1 && !c.name[0]) {
-        Serial.printf("[cfg] err channel %ld: a secondary channel needs a name\n", idx);
+        s_cliOut->printf("[cfg] err channel %ld: a secondary channel needs a name\n", idx);
         return;
     }
     s_cfgStagedChans[idx] = c;
-    Serial.printf("[cfg] ok channel %ld staged\n", idx);
+    s_cliOut->printf("[cfg] ok channel %ld staged\n", idx);
 }
 
 static void cfgLogoCommand(const char *args) {
     if (!strncasecmp(args, "data ", 5)) {
         if (s_cfgLogoState != CFG_LOGO_RECEIVING) {
-            Serial.println("[cfg] err logo: no transfer in progress");
+            s_cliOut->println("[cfg] err logo: no transfer in progress");
             return;
         }
         const char *hex = args + 5;
         const size_t n = strlen(hex);
         if (n % 2 || s_cfgLogoRecv + n / 2 > s_cfgLogoSize) {
             cfgLogoReset();
-            Serial.println("[cfg] err logo: bad chunk - transfer abandoned");
+            s_cliOut->println("[cfg] err logo: bad chunk - transfer abandoned");
             return;
         }
         for (size_t i = 0; i < n; i += 2) {
@@ -59177,12 +59190,12 @@ static void cfgLogoCommand(const char *args) {
             const int lo = hexNibble(hex[i + 1]);
             if (hi < 0 || lo < 0) {
                 cfgLogoReset();
-                Serial.println("[cfg] err logo: bad hex - transfer abandoned");
+                s_cliOut->println("[cfg] err logo: bad hex - transfer abandoned");
                 return;
             }
             s_cfgLogoBuf[s_cfgLogoRecv++] = (uint8_t)(hi << 4 | lo);
         }
-        Serial.printf("[cfg] ok logo %u\n", (unsigned)s_cfgLogoRecv);
+        s_cliOut->printf("[cfg] ok logo %u\n", (unsigned)s_cfgLogoRecv);
         return;
     }
 
@@ -59190,24 +59203,24 @@ static void cfgLogoCommand(const char *args) {
         cfgLogoReset();
         const long size = strtol(args + 6, nullptr, 10);
         if (size <= 0 || (size_t)size > kLogoMaxBytes) {
-            Serial.printf("[cfg] err logo: size must be 1-%u bytes\n", (unsigned)kLogoMaxBytes);
+            s_cliOut->printf("[cfg] err logo: size must be 1-%u bytes\n", (unsigned)kLogoMaxBytes);
             return;
         }
         s_cfgLogoBuf = (uint8_t *)malloc((size_t)size);
         if (!s_cfgLogoBuf) {
-            Serial.println("[cfg] err logo: out of memory");
+            s_cliOut->println("[cfg] err logo: out of memory");
             return;
         }
         s_cfgLogoSize = (size_t)size;
         s_cfgLogoState = CFG_LOGO_RECEIVING;
-        Serial.printf("[cfg] ok logo begin %u\n", (unsigned)s_cfgLogoSize);
+        s_cliOut->printf("[cfg] ok logo begin %u\n", (unsigned)s_cfgLogoSize);
         return;
     }
 
     if (!strncasecmp(args, "end ", 4)) {
         if (s_cfgLogoState != CFG_LOGO_RECEIVING || s_cfgLogoRecv != s_cfgLogoSize) {
             cfgLogoReset();
-            Serial.println("[cfg] err logo: incomplete transfer");
+            s_cliOut->println("[cfg] err logo: incomplete transfer");
             return;
         }
         const uint32_t want = (uint32_t)strtoul(args + 4, nullptr, 16);
@@ -59215,32 +59228,32 @@ static void cfgLogoCommand(const char *args) {
         int w = 0, h = 0;
         if (got != want) {
             cfgLogoReset();
-            Serial.printf("[cfg] err logo: checksum %08x, expected %08x\n", (unsigned)got, (unsigned)want);
+            s_cliOut->printf("[cfg] err logo: checksum %08x, expected %08x\n", (unsigned)got, (unsigned)want);
             return;
         }
         if (!pngDimensions(s_cfgLogoBuf, s_cfgLogoSize, w, h)) {
             cfgLogoReset();
-            Serial.println("[cfg] err logo: not a PNG");
+            s_cliOut->println("[cfg] err logo: not a PNG");
             return;
         }
         if (w > s_splashLogoW || h > s_splashLogoH) {
             cfgLogoReset();
-            Serial.printf("[cfg] err logo: %dx%d is larger than %dx%d\n", w, h, s_splashLogoW, s_splashLogoH);
+            s_cliOut->printf("[cfg] err logo: %dx%d is larger than %dx%d\n", w, h, s_splashLogoW, s_splashLogoH);
             return;
         }
         s_cfgLogoState = CFG_LOGO_READY;
-        Serial.printf("[cfg] ok logo staged %dx%d\n", w, h);
+        s_cliOut->printf("[cfg] ok logo staged %dx%d\n", w, h);
         return;
     }
 
     if (!strcasecmp(args, "clear")) {
         cfgLogoReset();
         s_cfgLogoState = CFG_LOGO_CLEAR;
-        Serial.println("[cfg] ok logo clear staged");
+        s_cliOut->println("[cfg] ok logo clear staged");
         return;
     }
 
-    Serial.printf("[cfg] err unknown: logo %s\n", args);
+    s_cliOut->printf("[cfg] err unknown: logo %s\n", args);
 }
 
 // Writes or removes the stored logo. NVS holds a page back for compaction and
@@ -59258,7 +59271,7 @@ static bool cfgCommitLogo() {
     const size_t need = s_cfgLogoSize / 32 + 8 + 160;
     if (nvs_get_stats(nullptr, &st) == ESP_OK && st.free_entries < need) {
         p.end();
-        Serial.printf("[cfg] logo needs %u NVS entries, %u free\n",
+        s_cliOut->printf("[cfg] logo needs %u NVS entries, %u free\n",
                       (unsigned)need, (unsigned)st.free_entries);
         return false;
     }
@@ -59295,7 +59308,7 @@ static void cfgApplyStagedChannels() {
 
 static void handleCfgCommand(const char *args) {
     if (!strcasecmp(args, "caps")) {
-        Serial.printf("[cfg] caps v=%d firstboot=%d keys=preset,channels%s channels=%d",
+        s_cliOut->printf("[cfg] caps v=%d firstboot=%d keys=preset,channels%s channels=%d",
                       kCfgProtoVersion, s_firstBoot ? 1 : 0,
                       (s_splashLogoW > 0 && s_splashLogoH > 0) ? ",logo" : "", MESH_CHANNELS);
         if (s_splashLogoW > 0 && s_splashLogoH > 0) {
@@ -59303,17 +59316,17 @@ static void handleCfgCommand(const char *args) {
             const unsigned r = ((c >> 11) & 0x1F) * 255 / 31;
             const unsigned g = ((c >> 5) & 0x3F) * 255 / 63;
             const unsigned b = (c & 0x1F) * 255 / 31;
-            Serial.printf(" logo=%dx%d logobg=%02X%02X%02X logomax=%u",
+            s_cliOut->printf(" logo=%dx%d logobg=%02X%02X%02X logomax=%u",
                           s_splashLogoW, s_splashLogoH, r, g, b, (unsigned)kLogoMaxBytes);
         }
-        Serial.print(" presets=");
+        s_cliOut->print(" presets=");
         bool first = true;
         for (uint8_t i = 0; i < PRESET_COUNT; i++) {
             if (!presetUsableOnThisRadio(i)) continue;
-            Serial.printf("%s%s", first ? "" : ",", kPresets[i].channelName);
+            s_cliOut->printf("%s%s", first ? "" : ",", kPresets[i].channelName);
             first = false;
         }
-        Serial.println();
+        s_cliOut->println();
         return;
     }
 
@@ -59321,12 +59334,12 @@ static void handleCfgCommand(const char *args) {
         s_cfgStagedPreset = -1;
         s_cfgChansStaged = false;
         cfgLogoReset();
-        Serial.println("[cfg] ok aborted");
+        s_cliOut->println("[cfg] ok aborted");
         return;
     }
 
     if (!strcasecmp(args, "get preset")) {
-        Serial.printf("[cfg] preset=%s custom=%d\n",
+        s_cliOut->printf("[cfg] preset=%s custom=%d\n",
                       kPresets[s_cfg.modemPreset < PRESET_COUNT ? s_cfg.modemPreset : 0].channelName,
                       s_cfg.loraUsePreset ? 0 : 1);
         return;
@@ -59335,24 +59348,24 @@ static void handleCfgCommand(const char *args) {
     if (!strncasecmp(args, "set preset ", 11)) {
         const int preset = presetFromCliName(args + 11);
         if (preset < 0) {
-            Serial.printf("[cfg] err preset: unknown \"%s\"\n", args + 11);
+            s_cliOut->printf("[cfg] err preset: unknown \"%s\"\n", args + 11);
             return;
         }
         // The picker on the device never offers these; neither may a cable.
         if (!presetUsableOnThisRadio((uint8_t)preset)) {
-            Serial.printf("[cfg] err preset: %s is not supported by this radio\n",
+            s_cliOut->printf("[cfg] err preset: %s is not supported by this radio\n",
                           kPresets[preset].channelName);
             return;
         }
         s_cfgStagedPreset = preset;
-        Serial.printf("[cfg] ok preset=%s staged\n", kPresets[preset].channelName);
+        s_cliOut->printf("[cfg] ok preset=%s staged\n", kPresets[preset].channelName);
         return;
     }
 
     if (!strcasecmp(args, "channels clear")) {
         cfgStagedChannelsReset();
         s_cfgChansStaged = true;
-        Serial.printf("[cfg] ok channels cleared slots=%d\n", MESH_CHANNELS);
+        s_cliOut->printf("[cfg] ok channels cleared slots=%d\n", MESH_CHANNELS);
         return;
     }
 
@@ -59369,18 +59382,18 @@ static void handleCfgCommand(const char *args) {
     if (!strcasecmp(args, "commit")) {
         if (s_cfgLogoState == CFG_LOGO_RECEIVING) {
             cfgLogoReset();
-            Serial.println("[cfg] err commit: logo transfer was not finished");
+            s_cliOut->println("[cfg] err commit: logo transfer was not finished");
             return;
         }
         const bool havePreset = s_cfgStagedPreset >= 0;
         const bool haveChans = s_cfgChansStaged;
         const bool haveLogo = s_cfgLogoState == CFG_LOGO_READY || s_cfgLogoState == CFG_LOGO_CLEAR;
         if (!havePreset && !haveChans && !haveLogo) {
-            Serial.println("[cfg] ok nothing staged");
+            s_cliOut->println("[cfg] ok nothing staged");
             return;
         }
         if (haveChans && s_cfgStagedChans[0].role != 0) {
-            Serial.println("[cfg] err commit: slot 0 must be the primary channel");
+            s_cliOut->println("[cfg] err commit: slot 0 must be the primary channel");
             return;
         }
         const uint8_t preset = havePreset ? (uint8_t)s_cfgStagedPreset : 0;
@@ -59390,7 +59403,7 @@ static void handleCfgCommand(const char *args) {
         // Logo first: it is the one most likely not to fit, and failing before
         // anything else is written leaves the device as it was.
         if (haveLogo && !cfgCommitLogo()) {
-            Serial.println("[cfg] err commit: no room for the logo (NVS full)");
+            s_cliOut->println("[cfg] err commit: no room for the logo (NVS full)");
             return;
         }
 
@@ -59401,7 +59414,7 @@ static void handleCfgCommand(const char *args) {
                 const bool ok = p.begin(kProvNs, false) && p.putUChar("preset", preset);
                 p.end();
                 if (!ok) {
-                    Serial.println("[cfg] err commit: could not write NVS");
+                    s_cliOut->println("[cfg] err commit: could not write NVS");
                     return;
                 }
             }
@@ -59413,7 +59426,7 @@ static void handleCfgCommand(const char *args) {
         if (haveChans) {
             cfgApplyStagedChannels();
             if (!persistChannelsToPrefs()) {
-                Serial.println("[cfg] err commit: could not save channels (NVS full?)");
+                s_cliOut->println("[cfg] err commit: could not save channels (NVS full?)");
                 return;
             }
         }
@@ -59435,23 +59448,23 @@ static void handleCfgCommand(const char *args) {
         cfgLogoReset();
 
         if (s_firstBoot) {
-            Serial.printf("[cfg] ok committed %s applies-after=setup\n", summary);
+            s_cliOut->printf("[cfg] ok committed %s applies-after=setup\n", summary);
             return;
         }
         if (!presetChanges && !haveChans && !haveLogo) {
-            Serial.printf("[cfg] ok committed %s unchanged\n", summary);
+            s_cliOut->printf("[cfg] ok committed %s unchanged\n", summary);
             return;
         }
         if (presetChanges) persistConfigToPrefs();
-        Serial.printf("[cfg] ok committed %s rebooting\n", summary);
-        Serial.flush();
+        s_cliOut->printf("[cfg] ok committed %s rebooting\n", summary);
+        s_cliOut->flush();
         delay(300);
         flushPersistentState();   // settings and transcripts must land before we go
         ESP.restart();
         return;
     }
 
-    Serial.printf("[cfg] err unknown: %s\n", args);
+    s_cliOut->printf("[cfg] err unknown: %s\n", args);
 }
 
 // Dispatch a single normalised CLI command. Aliases are intentional so the
@@ -59469,7 +59482,7 @@ static void handleSerialCommandLine(char *line) {
     if (!line[0]) return;
 
     if (strcmp(line, "help") == 0 || strcmp(line, "?") == 0) {
-        Serial.println("[cli] commands: help | nvs | batt | chatdump | keys | gps | env | env scan | env scan all | telemetry now | announce now | nodes stats | nodes seed [count] | chat seed [count] | cfg caps | cfg abort | cfg get preset | cfg set preset <name> | cfg channels clear | cfg set channel <i> k=v.. | cfg logo begin|data|end|clear | cfg commit");
+        s_cliOut->println("[cli] commands: help | nvs | batt | chatdump | keys | gps | env | env scan | env scan all | telemetry now | announce now | nodes stats | nodes seed [count] | chat seed [count] | cfg caps | cfg abort | cfg get preset | cfg set preset <name> | cfg channels clear | cfg set channel <i> k=v.. | cfg logo begin|data|end|clear | cfg commit");
         return;
     }
 
@@ -59489,19 +59502,19 @@ static void handleSerialCommandLine(char *line) {
         const DisplayLine *rows[MAX_MSG_LINES] = {};
         int rowCount = 0;
         collectChatRows(rows, rowCount);
-        Serial.printf("[chat] channel %d, %d row(s)\n", s_activeChannel, rowCount);
+        s_cliOut->printf("[chat] channel %d, %d row(s)\n", s_activeChannel, rowCount);
         const int show = (rowCount < 4) ? rowCount : 4;
         for (int r = 0; r < show; r++) {
             if (!rows[r]) continue;
             char icon[12], clock[LIVE_CLOCK_BUF];
             chatParsePrefix(rows[r]->text, icon, sizeof(icon), clock, sizeof(clock));
-            Serial.printf("[chat] row%d epoch=%lu text=\"%s\"\n",
+            s_cliOut->printf("[chat] row%d epoch=%lu text=\"%s\"\n",
                           r, (unsigned long)rows[r]->epoch, rows[r]->text);
-            Serial.print("[chat]      bytes:");
+            s_cliOut->print("[chat]      bytes:");
             for (int b = 0; b < 14 && rows[r]->text[b]; b++) {
-                Serial.printf(" %02X", (unsigned char)rows[r]->text[b]);
+                s_cliOut->printf(" %02X", (unsigned char)rows[r]->text[b]);
             }
-            Serial.printf("\n[chat]      parsed icon=\"%s\" clock=\"%s\"\n", icon, clock);
+            s_cliOut->printf("\n[chat]      parsed icon=\"%s\" clock=\"%s\"\n", icon, clock);
         }
         return;
     }
@@ -59509,7 +59522,7 @@ static void handleSerialCommandLine(char *line) {
     if (strcmp(line, "batt") == 0 || strcmp(line, "battery") == 0) {
         char snap[192];
         batteryDebugSnapshot(snap, sizeof(snap));
-        Serial.println(snap);
+        s_cliOut->println(snap);
         return;
     }
 
@@ -59519,7 +59532,7 @@ static void handleSerialCommandLine(char *line) {
             NodeEntry *e = Nodes.at(i);
             if (e && e->nodeId && e->favorite) favorites++;
         }
-        Serial.printf("[cli] nodes count=%d favorites=%d max=%d\n",
+        s_cliOut->printf("[cli] nodes count=%d favorites=%d max=%d\n",
                       Nodes.count(), favorites, MAX_NODES);
         return;
     }
@@ -59529,12 +59542,12 @@ static void handleSerialCommandLine(char *line) {
         if (line[10] == ' ') {
             int parsed = 0;
             if (!parseCliUnsignedInt(line + 11, parsed, MAX_NODES) || parsed < 1) {
-                Serial.printf("[cli] usage: nodes seed [1-%d]\n", MAX_NODES);
+                s_cliOut->printf("[cli] usage: nodes seed [1-%d]\n", MAX_NODES);
                 return;
             }
             target = parsed;
         }
-        Serial.printf("[cli] seeding %d synthetic nodes...\n", target);
+        s_cliOut->printf("[cli] seeding %d synthetic nodes...\n", target);
         seedNodesForRepro(target);
         return;
     }
@@ -59544,12 +59557,12 @@ static void handleSerialCommandLine(char *line) {
         if (line[9] == ' ') {
             int parsed = 0;
             if (!parseCliUnsignedInt(line + 10, parsed, MAX_MSG_LINES) || parsed < 1) {
-                Serial.printf("[cli] usage: chat seed [1-%d]\n", MAX_MSG_LINES);
+                s_cliOut->printf("[cli] usage: chat seed [1-%d]\n", MAX_MSG_LINES);
                 return;
             }
             target = parsed;
         }
-        Serial.printf("[cli] seeding %d synthetic chat messages...\n", target);
+        s_cliOut->printf("[cli] seeding %d synthetic chat messages...\n", target);
         seedChatForRepro(target);
         return;
     }
@@ -59557,7 +59570,7 @@ static void handleSerialCommandLine(char *line) {
     if (strcmp(line, "keys") == 0 || strcmp(line, "keys trace") == 0) {
         const bool on = !keyboardKeyTrace();
         keyboardSetKeyTrace(on);
-        Serial.printf("[cli] key trace %s\n", on ? "ON - press keys to see raw/mapped codes"
+        s_cliOut->printf("[cli] key trace %s\n", on ? "ON - press keys to see raw/mapped codes"
                                                  : "off");
         return;
     }
@@ -59582,11 +59595,11 @@ static void handleSerialCommandLine(char *line) {
 
     if (strcmp(line, "env") == 0 || strcmp(line, "env status") == 0) {
         bool hasSensor = envHasSensor() || envBegin();
-        Serial.printf("[cli] env status: %s\n", hasSensor ? envSensorName() : "none");
+        s_cliOut->printf("[cli] env status: %s\n", hasSensor ? envSensorName() : "none");
         if (hasSensor) {
             EnvReading env = {};
             if (envRead(env)) {
-                Serial.printf("[cli] env sample: T=%.2fC H=%.2f%% P=%.2fhPa\n",
+                s_cliOut->printf("[cli] env sample: T=%.2fC H=%.2f%% P=%.2fhPa\n",
                               (double)env.temperatureC,
                               (double)env.humidityPct,
                               (double)env.pressureHpa);
@@ -59599,68 +59612,78 @@ static void handleSerialCommandLine(char *line) {
         || strcmp(line, "scan") == 0
         || strcmp(line, "i2c") == 0
         || strcmp(line, "i2c scan") == 0) {
-        Serial.println("[cli] env scan requested");
+        s_cliOut->println("[cli] env scan requested");
         bool ok = envDebugScan(true);
-        Serial.printf("[cli] env scan result: %s\n", ok ? envSensorName() : "none");
+        s_cliOut->printf("[cli] env scan result: %s\n", ok ? envSensorName() : "none");
         return;
     }
 
     if (strcmp(line, "env scan all") == 0
         || strcmp(line, "scan all") == 0
         || strcmp(line, "i2c scan all") == 0) {
-        Serial.println("[cli] full i2c scan requested");
+        s_cliOut->println("[cli] full i2c scan requested");
         bool ok = envDebugFullScan(true);
-        Serial.printf("[cli] full i2c scan result: %s\n", ok ? envSensorName() : "none");
+        s_cliOut->printf("[cli] full i2c scan result: %s\n", ok ? envSensorName() : "none");
         return;
     }
 
     if (strcmp(line, "telemetry") == 0 || strcmp(line, "telemetry now") == 0) {
         webCfgQueueTelemetry();
-        Serial.println("[cli] telemetry queued");
+        s_cliOut->println("[cli] telemetry queued");
         return;
     }
 
     if (strcmp(line, "announce") == 0 || strcmp(line, "announce now") == 0) {
         webCfgQueueAnnounce();
-        Serial.println("[cli] announce queued");
+        s_cliOut->println("[cli] announce queued");
         return;
     }
 
-    Serial.printf("[cli] unknown command: %s\n", line);
-    Serial.println("[cli] try: help");
+    s_cliOut->printf("[cli] unknown command: %s\n", line);
+    s_cliOut->println("[cli] try: help");
 }
 
-// Drain pending bytes from the USB CDC serial port and dispatch any
-// complete newline-terminated command lines. Called once per loop().
-static void serviceSerialCommands() {
-    while (Serial.available() > 0) {
-        int raw = Serial.read();
+// Drain pending bytes from a console and dispatch any complete
+// newline-terminated command lines; replies go back to that console.
+static void serviceSerialInput(Stream &port, SerialCmdInput &in) {
+    while (port.available() > 0) {
+        int raw = port.read();
         if (raw < 0) break;
 
         char c = (char)raw;
         if (c == '\r') continue;
 
         if (c == '\n') {
+            s_cliOut = &port;
             // A cut-off line is dropped, not run: half a `cfg` argument is worse
             // than none.
-            if (s_serialCmdOverflow) {
-                Serial.println("[cli] line too long - ignored");
-            } else if (s_serialCmdLen > 0) {
-                s_serialCmdBuf[s_serialCmdLen] = '\0';
-                handleSerialCommandLine(s_serialCmdBuf);
+            if (in.overflow) {
+                port.println("[cli] line too long - ignored");
+            } else if (in.len > 0) {
+                in.buf[in.len] = '\0';
+                handleSerialCommandLine(in.buf);
             }
-            s_serialCmdLen = 0;
-            s_serialCmdBuf[0] = '\0';
-            s_serialCmdOverflow = false;
+            s_cliOut = &Serial;
+            in.len = 0;
+            in.buf[0] = '\0';
+            in.overflow = false;
             continue;
         }
 
-        if (s_serialCmdLen + 1 < sizeof(s_serialCmdBuf)) {
-            s_serialCmdBuf[s_serialCmdLen++] = c;
+        if (in.len + 1 < sizeof(in.buf)) {
+            in.buf[in.len++] = c;
         } else {
-            s_serialCmdOverflow = true;
+            in.overflow = true;
         }
     }
+}
+
+// Called once per loop().
+static void serviceSerialCommands() {
+    serviceSerialInput(Serial, s_serialCmdUart);
+#if CLI_ON_NATIVE_USB
+    serviceSerialInput(USBSerial, s_serialCmdUsb);
+#endif
 }
 
 void setup() {
@@ -59669,6 +59692,9 @@ void setup() {
     tdisplayP4InstallFullRestart();
 #endif
     Serial.begin(115200);
+#if CLI_ON_NATIVE_USB
+    USBSerial.begin();
+#endif
     delay(120);
     // First thing out of the door, before any peripheral is touched. If this
     // line is missing while the panel shows something, the hang is below the
