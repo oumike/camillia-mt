@@ -11015,6 +11015,55 @@ static int removeLegacyConfigKeys() {
     return n;
 }
 
+// ── Pre-configuration from the web flasher ──────────────────────────────────
+// The flasher's Customize dialog sends `cfg set` / `cfg commit` over serial
+// right after it writes the firmware, which on a fresh install is while the
+// onboarding modal is up. Committing then cannot touch the "camillia"
+// namespace: its absence is what marks first boot, and writing it would skip
+// onboarding on the next boot. So a first-boot commit goes to a namespace of
+// its own, is applied to s_cfg at every load until a boot is no longer the
+// first, and is reclaimed on the first boot that is not. onboardingFinalize()
+// then saves it with everything else.
+static constexpr const char *kProvNs = "cm_prov";
+static bool s_presetProvisioned = false;   // onboarding must not replace it
+static int  s_cfgStagedPreset = -1;        // `cfg set preset`, until `cfg commit`
+
+static bool provNamespacePresent() {
+    nvs_iterator_t it = nvsEntryFindCompat("nvs", kProvNs);
+    if (!it) return false;
+    nvs_release_iterator(it);
+    return true;
+}
+
+static void applyProvisionedPreset(uint8_t preset) {
+    s_cfg.modemPreset = preset;
+    s_cfg.loraUsePreset = true;
+    applyPresetParams(s_cfg);
+    s_presetProvisioned = true;
+}
+
+// Called once config is loaded. Probes with the iterator rather than a
+// read-only Preferences open, which logs NOT_FOUND on every boot without it.
+static void loadProvisionedConfig() {
+    if (!provNamespacePresent()) return;
+    Preferences p;
+    if (!s_firstBoot) {
+        if (p.begin(kProvNs, false)) {
+            p.clear();
+            p.end();
+        }
+        Serial.println("[cfg] provisioning consumed - cleared");
+        return;
+    }
+    if (!p.begin(kProvNs, true)) return;
+    const uint8_t preset = p.getUChar("preset", PRESET_COUNT);
+    p.end();
+    if (preset < PRESET_COUNT && presetUsableOnThisRadio(preset)) {
+        applyProvisionedPreset(preset);
+        Serial.printf("[cfg] provisioned preset=%s\n", kPresets[preset].channelName);
+    }
+}
+
 static void persistConfigToPrefs() {
     // s_cfg is the single source of truth for credentials; nothing is folded in
     // from web config here.
@@ -44939,8 +44988,9 @@ static void onboardingFinalize() {
     //
     // Only on first run, and only while the preset is still the install default:
     // a user who deliberately moved off Long Fast keeps their choice, and an
-    // existing configuration is never touched.
-    if (s_firstBoot && s_cfg.modemPreset == PRESET_LONG_FAST &&
+    // existing configuration is never touched. Nor is one picked in the web
+    // flasher's Customize dialog, which is as deliberate as any.
+    if (s_firstBoot && !s_presetProvisioned && s_cfg.modemPreset == PRESET_LONG_FAST &&
         strcmp(s_cfg.region, "US") == 0) {
         s_cfg.modemPreset = PRESET_LONG_TURBO;
         Serial.println("[onboarding] US region: preset defaulted to Long Turbo "
@@ -51739,6 +51789,7 @@ static void loadConfigFromSd() {
     }
 
     loadConfigFromPrefs();
+    loadProvisionedConfig();
 #if !HAS_ENV_SENSOR_TELEMETRY
     s_cfg.telEnvEnabled = false;
 #endif
@@ -58830,6 +58881,105 @@ static void seedChatForRepro(int requestedCount) {
                   Channels.get(activeChan).count);
 }
 
+// `cfg` is the web flasher's Customize protocol (see loadProvisionedConfig()).
+// Every reply is one line starting "[cfg] ", so the page can pick it out of
+// boot logs; "[cfg] err" lines are the failures. Bump kCfgProtoVersion when a
+// command changes meaning, not when a key is added -- `caps` lists the keys.
+static constexpr int kCfgProtoVersion = 1;
+
+// The line arrives lowercased, so this matches either the channel name
+// ("longmod") or the label with the spaces dropped ("longmoderate").
+static int presetFromCliName(const char *value) {
+    for (uint8_t i = 0; i < PRESET_COUNT; i++) {
+        if (!strcasecmp(value, kPresets[i].channelName)) return i;
+        char label[24];
+        size_t o = 0;
+        for (const char *s = kPresets[i].name; *s && o + 1 < sizeof(label); s++) {
+            if (*s != ' ') label[o++] = *s;
+        }
+        label[o] = '\0';
+        if (!strcasecmp(value, label)) return i;
+    }
+    return -1;
+}
+
+static void handleCfgCommand(const char *args) {
+    if (!strcmp(args, "caps")) {
+        Serial.printf("[cfg] caps v=%d firstboot=%d keys=preset presets=",
+                      kCfgProtoVersion, s_firstBoot ? 1 : 0);
+        bool first = true;
+        for (uint8_t i = 0; i < PRESET_COUNT; i++) {
+            if (!presetUsableOnThisRadio(i)) continue;
+            Serial.printf("%s%s", first ? "" : ",", kPresets[i].channelName);
+            first = false;
+        }
+        Serial.println();
+        return;
+    }
+
+    if (!strcmp(args, "get preset")) {
+        Serial.printf("[cfg] preset=%s custom=%d\n",
+                      kPresets[s_cfg.modemPreset < PRESET_COUNT ? s_cfg.modemPreset : 0].channelName,
+                      s_cfg.loraUsePreset ? 0 : 1);
+        return;
+    }
+
+    if (!strncmp(args, "set preset ", 11)) {
+        const int preset = presetFromCliName(args + 11);
+        if (preset < 0) {
+            Serial.printf("[cfg] err preset: unknown \"%s\"\n", args + 11);
+            return;
+        }
+        // The picker on the device never offers these; neither may a cable.
+        if (!presetUsableOnThisRadio((uint8_t)preset)) {
+            Serial.printf("[cfg] err preset: %s is not supported by this radio\n",
+                          kPresets[preset].channelName);
+            return;
+        }
+        s_cfgStagedPreset = preset;
+        Serial.printf("[cfg] ok preset=%s staged\n", kPresets[preset].channelName);
+        return;
+    }
+
+    if (!strcmp(args, "commit")) {
+        if (s_cfgStagedPreset < 0) {
+            Serial.println("[cfg] ok nothing staged");
+            return;
+        }
+        const uint8_t preset = (uint8_t)s_cfgStagedPreset;
+        s_cfgStagedPreset = -1;
+
+        if (s_firstBoot) {
+            Preferences p;
+            if (!p.begin(kProvNs, false) || !p.putUChar("preset", preset)) {
+                p.end();
+                Serial.println("[cfg] err commit: could not write NVS");
+                return;
+            }
+            p.end();
+            applyProvisionedPreset(preset);
+            Serial.printf("[cfg] ok committed preset=%s applies-after=setup\n",
+                          kPresets[preset].channelName);
+            return;
+        }
+
+        if (s_cfg.loraUsePreset && s_cfg.modemPreset == preset) {
+            Serial.printf("[cfg] ok committed preset=%s unchanged\n", kPresets[preset].channelName);
+            return;
+        }
+        applyProvisionedPreset(preset);
+        persistConfigToPrefs();
+        Serial.printf("[cfg] ok committed preset=%s rebooting\n", kPresets[preset].channelName);
+        Serial.flush();
+        delay(300);
+        flushPersistentState();   // settings and transcripts must land before we go
+        ESP.restart();
+        return;
+    }
+
+    Serial.printf("[cfg] err unknown: %s\n", args);
+}
+
 // Dispatch a single normalised CLI command. Aliases are intentional so the
 // common shorthand a developer might type (`scan`, `i2c`) maps to the same
 // action as the canonical command.
@@ -58838,7 +58988,12 @@ static void handleSerialCommandLine(char *line) {
     if (!line || !line[0]) return;
 
     if (strcmp(line, "help") == 0 || strcmp(line, "?") == 0) {
-        Serial.println("[cli] commands: help | nvs | batt | chatdump | keys | gps | env | env scan | env scan all | telemetry now | announce now | nodes stats | nodes seed [count] | chat seed [count]");
+        Serial.println("[cli] commands: help | nvs | batt | chatdump | keys | gps | env | env scan | env scan all | telemetry now | announce now | nodes stats | nodes seed [count] | chat seed [count] | cfg caps | cfg get preset | cfg set preset <name> | cfg commit");
+        return;
+    }
+
+    if (strncmp(line, "cfg ", 4) == 0) {
+        handleCfgCommand(line + 4);
         return;
     }
 
