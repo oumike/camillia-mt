@@ -11100,6 +11100,7 @@ static int removeLegacyConfigKeys() {
 static constexpr const char *kProvNs = "cm_prov";
 static bool s_presetProvisioned = false;   // onboarding must not replace it
 static int  s_cfgStagedPreset = -1;        // `cfg set preset`, until `cfg commit`
+static int  s_cfgStagedSlot = -1;          // `cfg set slot`; 0 = the preset's own
 
 static bool provNamespacePresent() {
     nvs_iterator_t it = nvsEntryFindCompat("nvs", kProvNs);
@@ -11108,9 +11109,17 @@ static bool provNamespacePresent() {
     return true;
 }
 
-static void applyProvisionedPreset(uint8_t preset) {
+// A pinned slot (1-based, as Meshtastic's channel_num) is the preset's modem
+// settings as custom ones: the preset path always hashes for its slot.
+static void applyProvisionedPreset(uint8_t preset, uint8_t slot = 0) {
     s_cfg.modemPreset = preset;
-    s_cfg.loraUsePreset = true;
+    s_cfg.loraUsePreset = slot == 0;
+    if (slot) {
+        s_cfg.loraCustomBwKhz = loraBwToCode(kPresets[preset].bw);
+        s_cfg.loraCustomSf = kPresets[preset].sf;
+        s_cfg.loraCustomCr = kPresets[preset].cr;
+        s_cfg.loraCustomSlot = slot;
+    }
     applyPresetParams(s_cfg);
     s_presetProvisioned = true;
 }
@@ -11130,10 +11139,11 @@ static void loadProvisionedConfig() {
     }
     if (!p.begin(kProvNs, true)) return;
     const uint8_t preset = p.getUChar("preset", PRESET_COUNT);
+    const uint8_t slot = p.getUChar("slot", 0);
     p.end();
     if (preset < PRESET_COUNT && presetUsableOnThisRadio(preset)) {
-        applyProvisionedPreset(preset);
-        Serial.printf("[cfg] provisioned preset=%s\n", kPresets[preset].channelName);
+        applyProvisionedPreset(preset, slot);
+        Serial.printf("[cfg] provisioned preset=%s slot=%u\n", kPresets[preset].channelName, slot);
     }
 }
 
@@ -59512,6 +59522,8 @@ static void seedChatForRepro(int requestedCount) {
 //   cfg abort                          drop everything staged
 //   cfg get preset
 //   cfg set preset <name>
+//   cfg set slot <n>                   pin the preset to frequency slot n (1-based,
+//                                      as Meshtastic's channel_num); 0 = its own
 //   cfg channels clear                 stage a whole new channel plan, all slots unused
 //   cfg set channel <i> role=primary|secondary|disabled name=<%-encoded>
 //                       psk=default|none|<base64> pos=0|1 up=0|1 down=0|1
@@ -59933,7 +59945,7 @@ static void cfgApplyStagedChannels() {
 
 static void handleCfgCommand(const char *args) {
     if (!strcasecmp(args, "caps")) {
-        s_cliOut->printf("[cfg] caps v=%d firstboot=%d keys=preset,channels,setup%s channels=%d",
+        s_cliOut->printf("[cfg] caps v=%d firstboot=%d keys=preset,slot,channels,setup%s channels=%d",
                       kCfgProtoVersion, s_firstBoot ? 1 : 0,
                       (s_splashLogoW > 0 && s_splashLogoH > 0) ? ",logo" : "", MESH_CHANNELS);
         if (s_splashLogoW > 0 && s_splashLogoH > 0) {
@@ -59957,6 +59969,7 @@ static void handleCfgCommand(const char *args) {
 
     if (!strcasecmp(args, "abort")) {
         s_cfgStagedPreset = -1;
+        s_cfgStagedSlot = -1;
         s_cfgChansStaged = false;
         cfgLogoReset();
         cfgSetupReset();
@@ -59985,6 +59998,18 @@ static void handleCfgCommand(const char *args) {
         }
         s_cfgStagedPreset = preset;
         s_cliOut->printf("[cfg] ok preset=%s staged\n", kPresets[preset].channelName);
+        return;
+    }
+
+    if (!strncasecmp(args, "set slot ", 9)) {
+        char *end = nullptr;
+        const long slot = strtol(args + 9, &end, 10);
+        if (end == args + 9 || *end || slot < 0 || slot > 255) {
+            s_cliOut->printf("[cfg] err slot: expected 0-255, got \"%s\"\n", args + 9);
+            return;
+        }
+        s_cfgStagedSlot = (int)slot;
+        s_cliOut->printf("[cfg] ok slot=%ld staged\n", slot);
         return;
     }
 
@@ -60032,9 +60057,29 @@ static void handleCfgCommand(const char *args) {
             s_cliOut->println("[cfg] err commit: setup needs a region");
             return;
         }
+        // A slot is only ever sent with the preset it pins.
+        if (s_cfgStagedSlot > 0 && !havePreset) {
+            s_cliOut->println("[cfg] err commit: a slot needs a preset");
+            return;
+        }
         const uint8_t preset = havePreset ? (uint8_t)s_cfgStagedPreset : 0;
+        const uint8_t slot = s_cfgStagedSlot > 0 ? (uint8_t)s_cfgStagedSlot : 0;
+        if (slot) {
+            const char *region = s_cfgSetup.region[0] ? s_cfgSetup.region : s_cfg.region;
+            const uint32_t slots = regionSlotCount(region, kPresets[preset].bw);
+            if (slots && slot > slots) {
+                s_cliOut->printf("[cfg] err commit: %s has %u slots for %s, not %u\n",
+                              region, (unsigned)slots, kPresets[preset].channelName, slot);
+                return;
+            }
+        }
+        const bool radioSame = slot == 0
+            ? s_cfg.loraUsePreset
+            : (!s_cfg.loraUsePreset && s_cfg.loraCustomSlot == slot
+               && s_cfg.loraCustomBwKhz == loraBwToCode(kPresets[preset].bw)
+               && s_cfg.loraCustomSf == kPresets[preset].sf && s_cfg.loraCustomCr == kPresets[preset].cr);
         const bool presetChanges = havePreset
-            && !(s_cfg.loraUsePreset && s_cfg.modemPreset == preset && !s_firstBoot);
+            && !(radioSame && s_cfg.modemPreset == preset && !s_firstBoot);
 
         // Logo first: it is the one most likely not to fit, and failing before
         // anything else is written leaves the device as it was.
@@ -60047,14 +60092,15 @@ static void handleCfgCommand(const char *args) {
         if (presetChanges) {
             if (s_firstBoot) {
                 Preferences p;
-                const bool ok = p.begin(kProvNs, false) && p.putUChar("preset", preset);
+                const bool ok = p.begin(kProvNs, false) && p.putUChar("preset", preset)
+                             && p.putUChar("slot", slot);
                 p.end();
                 if (!ok) {
                     s_cliOut->println("[cfg] err commit: could not write NVS");
                     return;
                 }
             }
-            applyProvisionedPreset(preset);
+            applyProvisionedPreset(preset, slot);
         }
 
         // The channel plan lives in its own namespace, which first-boot
@@ -60076,12 +60122,18 @@ static void handleCfgCommand(const char *args) {
             snprintf(chans, sizeof(chans), "%d", n);
         }
         char summary[128];
+        char presetSummary[24] = "-";
+        if (havePreset) {
+            snprintf(presetSummary, sizeof(presetSummary), slot ? "%s@%u" : "%s",
+                     kPresets[preset].channelName, slot);
+        }
         snprintf(summary, sizeof(summary), "preset=%s channels=%s logo=%s setup=%s",
-                 havePreset ? kPresets[preset].channelName : "-", chans,
+                 presetSummary, chans,
                  !haveLogo ? "-" : (s_cfgLogoState == CFG_LOGO_CLEAR ? "cleared" : "set"),
                  !haveSetup ? "-" : (s_cfgSetup.region[0] ? s_cfgSetup.region : "set"));
         const CfgStagedSetup setup = s_cfgSetup;
         s_cfgStagedPreset = -1;
+        s_cfgStagedSlot = -1;
         s_cfgChansStaged = false;
         cfgLogoReset();
         cfgSetupReset();
@@ -60154,7 +60206,7 @@ static void handleSerialCommandLine(char *line) {
     if (!line[0]) return;
 
     if (strcmp(line, "help") == 0 || strcmp(line, "?") == 0) {
-        s_cliOut->println("[cli] commands: help | nvs | batt | chatdump | keys | gps | env | env scan | env scan all | telemetry now | announce now | nodes stats | nodes seed [count] | chat seed [count] | cfg caps | cfg abort | cfg get preset | cfg set preset <name> | cfg channels clear | cfg set channel <i> k=v.. | cfg logo begin|data|end|clear | cfg set longname|shortname|region|role|ssid|wifipass <v> | cfg commit");
+        s_cliOut->println("[cli] commands: help | nvs | batt | chatdump | keys | gps | env | env scan | env scan all | telemetry now | announce now | nodes stats | nodes seed [count] | chat seed [count] | cfg caps | cfg abort | cfg get preset | cfg set preset <name> | cfg set slot <n> | cfg channels clear | cfg set channel <i> k=v.. | cfg logo begin|data|end|clear | cfg set longname|shortname|region|role|ssid|wifipass <v> | cfg commit");
         return;
     }
 
