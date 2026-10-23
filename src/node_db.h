@@ -2,6 +2,7 @@
 // In-memory + persisted database of known mesh nodes and telemetry/position state.
 #include <Arduino.h>
 #include "mesh_proto.h"
+#include "key_pin.h"
 
 struct NodeEntry {
     uint32_t nodeId;          // 0 = empty slot
@@ -200,7 +201,32 @@ public:
     int clearNeighbors();
 #endif
 
-    void updateUser(uint32_t nodeId, const UserInfo &u);
+    // Names update as they arrive. The public key is pinned (see key_pin.h):
+    // the first one is stored, and a different one later is held back as a
+    // pending conflict for the user to accept or reject. Returns true when this
+    // call recorded a new conflict, so the caller can warn once.
+    bool updateUser(uint32_t nodeId, const UserInfo &u);
+
+    // ── Key pinning ──────────────────────────────────────────────────────────
+    // Offer a key from a remote source (RF or MQTT) without the rest of a
+    // NodeInfo. signedByNewKey: the offering packet's signature verified under
+    // the offered key. Returns true when a new conflict was recorded.
+    bool offerKey(uint32_t nodeId, const uint8_t key[32], bool signedByNewKey);
+    bool hasKeyConflict(uint32_t nodeId) const;
+    // The offered key of a pending conflict. Optional extras: whether it came
+    // signed by that key, and millis() of the latest offer.
+    bool pendingKey(uint32_t nodeId, uint8_t out[32], bool *signedByNewKey = nullptr,
+                    uint32_t *atMs = nullptr) const;
+    int  keyConflictCount() const { return _keyPins.pendingCount(); }
+    // Replace the pinned key with the pending one, exactly as a key change
+    // always did (signer mark and PKI fallbacks reset), persist, and clear the
+    // conflict. `expected` is the full key the user was shown: if the pending
+    // key has changed since (a later offer replaced it), nothing changes and
+    // false is returned. Also false when nothing is pending.
+    bool acceptKeyChange(uint32_t nodeId, const uint8_t expected[32]);
+    // Keep the pinned key, drop the pending one, and stay quiet about that same
+    // key until reboot. Same `expected` rule and return as acceptKeyChange().
+    bool rejectKeyChange(uint32_t nodeId, const uint8_t expected[32]);
     void updatePosition(uint32_t nodeId, const PositionInfo &p);
     void updateTelemetry(uint32_t nodeId, const TelemetryInfo &t);
     bool setFavorite(uint32_t nodeId, bool favorite);
@@ -221,6 +247,7 @@ private:
     // Set by anything that changes ranking order; cleared by _sort(). Starts
     // true so the first getByRank() after boot sorts the loaded table.
     bool      _sortDirty = true;
+    KeyPinTable _keyPins;
 #if FEATURE_DISCOVERY
     NeighborReport _neighbors[MAX_NEIGHBOR_REPORTS] = {};
     // A report is dropped at 2x the reporter's own advertised interval, the

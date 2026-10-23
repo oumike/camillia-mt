@@ -145,6 +145,38 @@ but it is a guess rather than a declaration.
 The bond is stored by the Bluetooth stack itself and survives reboots and
 turning the feature off and on, so pairing is a once-per-keyboard job.
 
+### When a keyboard loses its pairing
+
+Keys are only accepted over a link that is both encrypted and bonded, whether
+the keyboard was just paired or is reconnecting. A paired keyboard is never
+silently paired again. If it comes back without its pairing — it says it lost
+the key, its stored pairing has gone or changed, or the link won't encrypt — the
+device refuses the connection. It then stops retrying that keyboard and asks:
+
+> Keyboard "<name>" lost its pairing. Re-pair only if you reset the keyboard
+> yourself.
+
+- **Re-pair** deletes the old pairing and starts a normal pairing. The pairing
+  dialog opens and shows the passkey; type it on the keyboard and press Enter
+  there. `R` also answers this way.
+- **Ignore** keeps the keyboard remembered but disconnected, and does not try it
+  again. The **Pair BT Keyboard** row reads `Pairing lost - tap to re-pair`, and
+  tapping it brings the question back. `I`, `N` or the close key also answer
+  this way, and Ignore is what Enter picks unless you move to Re-pair first.
+
+A keyboard you did not reset should never need this. Something else answering
+with your keyboard's address is the reason the device asks first instead of
+re-pairing on its own. Turning **BT Keyboard** off and on, or rebooting, tries
+the stored pairing once more. If it is still refused, the question comes back.
+If the stored pairing is gone, the question comes back straight away, without
+connecting at all.
+
+A remembered keyboard is only ever paired from scratch when you ask: by
+**Pair** in the pairing dialog, or by **Re-pair**. If that pairing does not
+finish (you missed the passkey, or the keyboard was not in pairing mode), it is
+not retried on its own. The row reads `Pairing lost - tap to re-pair`; tap it,
+or pick the keyboard in the pairing dialog again.
+
 Turning **BT Keyboard** on stops **Web Config** if it was running, with a dialog
 explaining why, and turning Web Config on stops the keyboard the same way. See
 the radio note under *Practical notes for a handheld* below. LoRa is unaffected

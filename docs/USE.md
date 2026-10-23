@@ -2338,7 +2338,10 @@ Toggle it from the Config screen; the row shows the address once it is running.
 On boards that can pair a Bluetooth keyboard, the row sits directly under
 **Choose WiFi** — it is what most people turn Wi-Fi on for — with the two BT
 keyboard rows after it. Elsewhere it stays at the head of the services group,
-under the GPS row.
+under the GPS row. A paired keyboard that comes back without its pairing is
+refused rather than silently re-paired. The device asks **Re-pair** or **Ignore**
+before pairing it again; see
+[Bluetooth Keyboards](BLUETOOTH_KEYBOARDS.md#when-a-keyboard-loses-its-pairing).
 
 There are two versions of the page:
 
@@ -2395,8 +2398,22 @@ physical controls. The viewer sizes itself to whichever panel it connects to.
   mirror design. It is not an RFB/noVNC endpoint and does not accept standard
   desktop VNC clients.
 - VNC and Web Config run together. The viewer connects only while **Remote** is
-  selected and the checkbox is on. Direct access at
-  `http://<device-ip>:8765/` remains available while enabled.
+  selected and the checkbox is on.
+- **A PIN protects the mirror.** Each time VNC is turned on, from the device or
+  from the web checkbox, the device draws a new random 6-digit PIN and shows it
+  in a popup and on the **VNC Host** row (`VNC Host: PIN 123456 -
+  http://<device-ip>/`). In the web config's **Remote** tab, enter that PIN and
+  press **Unlock**. It is asked for once per browser session: the browser keeps
+  the session token it receives until the tab or browser is closed.
+- Turning VNC off, or rebooting, discards the PIN and every unlocked session.
+  The next time it is turned on there is a new PIN, and the Remote tab asks for
+  it again. Up to four browser sessions can be unlocked at once.
+- Five wrong PINs in a row make the device draw a new one, which it shows in a
+  popup; sessions already unlocked keep working. After each wrong PIN the next
+  attempt is refused for a second.
+- The viewer at `http://<device-ip>:8765/` still loads, but on its own it only
+  shows *Locked*: the mirror connection needs the token the Remote tab gets for
+  the PIN. Open it from the Remote tab instead.
 - The **Remote** tab and its endpoints are compiled into every environment
   except `cardputer-cap`. That board is the one without them: the mirror needs a
   full-panel buffer in PSRAM, which it does not have. The other requirement is a
@@ -2414,9 +2431,10 @@ physical controls. The viewer sizes itself to whichever panel it connects to.
   panel has no MISO line, so it cannot be read back and the Web Config
   screenshot is unavailable there — but VNC copies the frames on their way to
   the panel rather than reading it, so the mirror is unaffected.
-- The current experiment is plain HTTP with no VNC-specific authentication.
-  Use it only on a trusted local network. One browser controls the device at a
-  time.
+- The PIN keeps other people on the network out, but the traffic is still
+  plain, unencrypted HTTP, so the screen and keystrokes can be read by anyone
+  who can see the network traffic. Use it only on a trusted local network. One
+  browser controls the device at a time.
 
 ### Web Files
 
@@ -2563,6 +2581,12 @@ as hearing the node. Each drop is logged on the serial console with the reason.
 Camillia remembers which nodes have passed a signature check (the **Signed:
 yes** row), across reboots, as Balanced needs it to. Replacing a node's key
 clears it.
+
+A node's key is never replaced silently: a different key is held as a pending
+key change for you to accept or reject (see [Key changes](#key-changes)). A
+signed node info that fails against the key we hold is still dropped, but if
+its signature verifies under the new key it carries, that key is held for
+review too, marked as signed by the new key.
 
 Camillia also signs its own packets, by the same rule as Meshtastic 2.8.1: every
 broadcast it sends — channel messages, position, node info, telemetry, neighbor
@@ -2910,6 +2934,64 @@ abreast.
 This section describes every build except the Cardputer, which keeps the older
 single-block detail text described above.
 
+### Key changes
+
+Camillia keeps the first public key it learns for each node (trust on first
+use), as upstream Meshtastic does. If node info later arrives — over the radio
+or MQTT — offering a **different** key for a node we already have a key for,
+the old key stays in place and the new one is held as a pending **key change**.
+The node's name and other details still update as usual. Without this, anyone
+who can send a node info pretending to be another node could swap in their own
+key, read your direct messages to that node, and send messages that appear to
+come from it.
+
+A pending key change shows up as:
+
+- a short toast and a `[key]` line on the Live screen when it is first seen;
+- a **!** in front of the node's name in the Nodes list;
+- **Signed: ! KEY CHANGED** in the node detail panel (on the Cardputer, a
+  warning line at the top of the detail text);
+- a line under the newest message in that node's DM thread: *Key changed -
+  review in Nodes. Messages still use the old key.*
+
+To decide, select the node on the Nodes screen and open **Node Actions** (Enter,
+or a tap). A **Key changed** dialog opens on top of the menu, naming the node,
+showing the first bytes of the new key and whether it came signed by that new
+key. A signature by the new key only proves the sender holds that key, not
+that it is the node it claims to be.
+
+- **Accept new key** (**A**) replaces the stored key. Do this only if you know
+  the owner reset or reflashed their device. The node's **Signed** state starts
+  over, as with any key change.
+- **Reject** (**R**) keeps the old key and drops the offered one. That same key
+  is not raised again until the device reboots.
+- The modal close key, Backspace, or a tap outside the dialog answers neither;
+  the change stays pending and the dialog comes back next time you open Node
+  Actions for that node.
+- Your answer applies only to the key the dialog showed. If the node offers yet
+  another key while the dialog is open, the dialog closes and a *Key changed
+  again - review* toast appears; open Node Actions again to see the key that is
+  now pending.
+
+Up/Down (or the wheel/trackball) moves between the two buttons and Enter (or a
+wheel/trackball click) presses the highlighted one; **Reject** is highlighted
+first. On the touch-only Heltec build, tap the button; the USER button does
+nothing while this dialog is up.
+
+Until you accept, direct messages to the node keep using the old key, so only
+the node you originally knew can read them. A node that has really been
+reflashed cannot decrypt them, nor can you decrypt its new messages, until you
+accept. Pending key changes are held in memory only (up to eight at a time,
+the oldest dropped first) and are forgotten on reboot; a node whose key really
+changed sends its node info again and raises it again.
+
+The pin also survives the node being pushed out of a full node list. The keys
+of the last 32 nodes evicted that way are kept in memory, so when such a node
+is heard again its old key is put back: the same key is accepted quietly, and a
+different one is raised as a key change rather than trusted as new. Deleting a
+node yourself, or clearing the node list, forgets its key. This memory does not
+survive a reboot, and the SD card node archive is not consulted.
+
 ### Locate
 
 The node actions menu has a **(L)ocate** row. With a healthy Wi-Fi connection,
@@ -2997,6 +3079,9 @@ Direct messaging:
 - Space opens compose for the focused DM (Space replaced Enter for new messages)
 - DM messages honor the Bubbles chat style: your messages are right-aligned in
   the accent/ack color, the other node's are left-aligned in their node color
+- If the node has a pending key change, the thread ends with *Key changed -
+  review in Nodes*. Messages keep using the old key until you accept the new
+  one — see [Key changes](#key-changes)
 
 ![Node actions](screenshots/RiCa_screen_20260730_194240.png)
 ![Message view](screenshots/RiCa_screen_20260730_194306.png)
