@@ -1,30 +1,15 @@
 ### New
-- Mesh Deck: the keyboard is now optional. It is detected at boot and when plugged in or removed while running. Without a keyboard, the device switches to touch input and the on-screen keyboards. The D-pad and screen buttons keep working either way.
-- `flash.sh` now accepts a board name, such as `./flash.sh tdeck-pro /dev/cu.usbmodem1101`, and picks the newest factory image for that board in the current folder.
+- **Flash and Customize** from the web flasher: right after flashing, the flasher can set the radio preset, the channel plan, a boot logo and your setup answers, so a fresh install starts straight in the app instead of on-device setup. This needs this release. With older firmware, the flasher reports that customization is unsupported. All boards.
+- Setup answers sent from the flasher (long name, short name, region, role, Wi-Fi network and password) finish first-boot setup for you. A region is required. Blank names are filled from the node ID, for example "Camillia 1a2b" / "1a2b", and the role defaults to Client Mute. On a device that is already set up, only the fields you send change. All boards.
+- A radio preset can be pinned to a specific frequency slot, for meshes that run a stock preset off its default slot (such as Medium Fast on slot 51, Taiwan on slot 1, or 433 MHz networks). A slot your region does not have is refused. All boards.
+- Custom boot logo: a PNG of up to 8 KB, uploaded from the flasher, replaces the flower on the startup screen. Supported on the standard startup screen and on the T-Lora Pager and Cardputer layouts.
+- CrowPanel Advance 3.5 now accepts serial commands over its native USB port as well as its UART port, so it works with Flash and Customize on either connection.
 
 ### Changed
-- The web config page now refuses changes, exports and file downloads when the request uses an address other than the device's IP, `localhost` or its hostname. Custom DNS aliases get a 403 error, so use the IP address instead.
-- Web config: once Wi-Fi is set up, the onboarding page and config file uploads now require a login.
-- Remote admin replies are now accepted only over PKI and only from the node being administered. The legacy admin channel is no longer supported.
-- Unencrypted packets are now accepted only on channels you have actually set up.
-- Packets that can't be decrypted no longer add new nodes to the node list.
-- Config exports now end with a format marker. A truncated export is refused on import instead of being partly applied.
-- Config exports are written safely: the previous file is kept until the new one is complete, so an interrupted save no longer loses your backup.
-- Importing a config file with a bad or mismatched identity key now keeps your current identity and shows a warning. Keys with the Meshtastic CLI `base64:` prefix are now read correctly.
-- Imported config files are capped at 32 KB, and out-of-range broadcast and GPS intervals are clamped to safe values.
-- MQTT no longer freezes the screen while looking up or connecting to a broker. The broker lookup runs in the background, and connection attempts give up after a few seconds.
-- T-Display P4: the ESP32-C6 coprocessor flasher now writes the firmware to the C6's app partition instead of overwriting its bootloader.
-- `flash.sh` now refuses OTA or app-only images, which would leave a board unbootable if written as a factory image.
+- Upgrading keeps your existing settings, with no reconfiguration needed.
+- Serial commands can now be up to 256 characters long. A command that is too long is rejected instead of being cut short and run. Replies go back to the port the command came in on. All boards.
 
 ### Fixed
-- Malformed radio packets can no longer crash the device.
-- Traceroute results are now checked against the request they answer, so stray or malformed replies are ignored.
-- Changing the theme while a dialog is open no longer crashes the device. The change waits until onboarding or the lock screen has closed.
-- Settings now survive a downgrade. Wi-Fi networks, config, channels and custom themes saved by a newer version are kept instead of being reset. Older versions that save themes will still drop theme slots they don't know about.
-- Cancelling the Wi-Fi password prompt while a connection attempt is running no longer causes errors.
-- Very long broadcast intervals no longer make announcements go out immediately.
-- Brownout and low-battery boot protection now works reliably on all boards and no longer triggers on a healthy device.
-- Names, channel names and server addresses containing special characters now display correctly on the web config page and can no longer inject content into it.
-- Heltec R8: the environment sensor scan no longer disables the touch screen or interferes with the SD card and buzzer pins.
+- Replies over USB serial no longer arrive 5–14 seconds late. Affects boards that use the chip's built-in USB serial as their console, plus CrowPanel Advance 3.5.
 
-Pull request: #120
+Pull request: #122
