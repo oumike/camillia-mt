@@ -821,14 +821,13 @@ Weather	Orai
 Weather - %s	Orai - %s
 Weather server error (HTTP %d).	Orų serverio klaida (HTTP %d).
 Web Config disabled	Žiniatinklio nustatymai išjungti
-Web Config locked while MQTT is on	Žiniatinklio nustatymai užrakinti, kol MQTT įjungtas
 Web Config start failed	Nepavyko paleisti žiniatinklio nustatymų
 Web Config stopped.\n\nThe Bluetooth keyboard and Web Config share one radio and cannot run at the same time.\n\nTurn the keyboard off to use Web Config again.	Žiniatinklio nustatymai sustabdyti.\n\nBluetooth klaviatūra ir žiniatinklio nustatymai naudoja tą patį radiją ir negali veikti vienu metu.\n\nIšjunkite klaviatūrą, kad vėl galėtumėte naudoti žiniatinklio nustatymus.
 Web Config: Disabled	Žiniatinklio nustatymai: Išjungti
 Web Config: Enabled	Žiniatinklio nustatymai: Įjungti
-Web Config: Off (MQTT on)	Žiniatinklio nustatymai: Išj. (MQTT įj.)
 Web Config: Off (WiFi off)	Žiniatinklio nustatymai: Išj. (WiFi išj.)
 Web Config: On	Žiniatinklio nustatymai: Įj.
+Web Config: On (waiting for WiFi)	Žiniatinklio nustatymai: Įj. (laukia WiFi)
 Web Config: On (Lite)	Žiniatinklio nustatymai: Įj. (Lite)
 Web Config: On (chat PAUSED)	Žiniatinklio nustatymai: Įj. (pokalbis PRISTABDYTAS)
 Web config: %s\n\nChat is PAUSED while web config runs - this device needs that memory for Wi-Fi. Messages sent to you now are not received or stored.\n\nTurn web config off to resume messaging.	Žiniatinklio nustatymai: %s\n\nPokalbis PRISTABDYTAS, kol veikia žiniatinklio nustatymai - įrenginiui ta atmintis reikalinga Wi-Fi. Dabar jums siunčiamos žinutės nebus gautos ir neįrašytos.\n\nIšjunkite žiniatinklio nustatymus, kad tęstumėte susirašinėjimą.

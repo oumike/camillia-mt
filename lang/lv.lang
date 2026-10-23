@@ -821,14 +821,13 @@ Weather	Laikapstākļi
 Weather - %s	Laikapstākļi - %s
 Weather server error (HTTP %d).	Laikapstākļu servera kļūda (HTTP %d).
 Web Config disabled	Tīmekļa iestatījumi atspējoti
-Web Config locked while MQTT is on	Tīmekļa iestatījumi bloķēti, kamēr MQTT ir ieslēgts
 Web Config start failed	Tīmekļa iestatījumus neizdevās palaist
 Web Config stopped.\n\nThe Bluetooth keyboard and Web Config share one radio and cannot run at the same time.\n\nTurn the keyboard off to use Web Config again.	Tīmekļa iestatījumi apturēti.\n\nBluetooth tastatūra un tīmekļa iestatījumi izmanto vienu radio un nevar darboties vienlaikus.\n\nIzslēdziet tastatūru, lai atkal lietotu tīmekļa iestatījumus.
 Web Config: Disabled	Tīmekļa iestatījumi: Atspējoti
 Web Config: Enabled	Tīmekļa iestatījumi: Iespējoti
-Web Config: Off (MQTT on)	Tīmekļa iestatījumi: Izsl. (MQTT iesl.)
 Web Config: Off (WiFi off)	Tīmekļa iestatījumi: Izsl. (WiFi izsl.)
 Web Config: On	Tīmekļa iestatījumi: Iesl.
+Web Config: On (waiting for WiFi)	Tīmekļa iestatījumi: Iesl. (gaida WiFi)
 Web Config: On (Lite)	Tīmekļa iestatījumi: Iesl. (Lite)
 Web Config: On (chat PAUSED)	Tīmekļa iestatījumi: Iesl. (tērzēšana APTURĒTA)
 Web config: %s\n\nChat is PAUSED while web config runs - this device needs that memory for Wi-Fi. Messages sent to you now are not received or stored.\n\nTurn web config off to resume messaging.	Tīmekļa iestatījumi: %s\n\nTērzēšana ir APTURĒTA, kamēr darbojas tīmekļa iestatījumi - ierīcei šī atmiņa vajadzīga Wi-Fi. Jums tagad sūtītās ziņas netiek saņemtas vai saglabātas.\n\nIzslēdziet tīmekļa iestatījumus, lai turpinātu sarakstīties.

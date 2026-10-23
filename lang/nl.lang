@@ -795,14 +795,13 @@ Weather	Weer
 Weather - %s	Weer - %s
 Weather server error (HTTP %d).	Fout van weerserver (HTTP %d).
 Web Config disabled	Webconfiguratie uitgeschakeld
-Web Config locked while MQTT is on	Webconfiguratie vergrendeld zolang MQTT aan staat
 Web Config start failed	Webconfiguratie starten mislukt
 Web Config stopped.\n\nThe Bluetooth keyboard and Web Config share one radio and cannot run at the same time.\n\nTurn the keyboard off to use Web Config again.	Webconfiguratie gestopt.\n\nHet Bluetooth-toetsenbord en de webconfiguratie delen één radio en kunnen niet tegelijk draaien.\n\nZet het toetsenbord uit om de webconfiguratie weer te gebruiken.
 Web Config: Disabled	Webconfiguratie: Uitgeschakeld
 Web Config: Enabled	Webconfiguratie: Ingeschakeld
-Web Config: Off (MQTT on)	Webconfiguratie: Uit (MQTT aan)
 Web Config: Off (WiFi off)	Webconfiguratie: Uit (wifi uit)
 Web Config: On	Webconfiguratie: Aan
+Web Config: On (waiting for WiFi)	Webconfiguratie: Aan (wacht op wifi)
 Web Config: On (Lite)	Webconfiguratie: Aan (Lite)
 Web Config: On (chat PAUSED)	Webconfiguratie: Aan (chat GEPAUZEERD)
 Web config: %s\n\nChat is PAUSED while web config runs - this device needs that memory for Wi-Fi. Messages sent to you now are not received or stored.\n\nTurn web config off to resume messaging.	Webconfiguratie: %s\n\nDe chat is GEPAUZEERD terwijl de webconfiguratie draait - dit apparaat heeft dat geheugen nodig voor wifi. Berichten die nu naar je worden gestuurd, worden niet ontvangen of opgeslagen.\n\nZet de webconfiguratie uit om weer te chatten.

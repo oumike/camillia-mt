@@ -821,14 +821,13 @@ Weather	Vrijeme
 Weather - %s	Vrijeme - %s
 Weather server error (HTTP %d).	Pogreška poslužitelja vremenske prognoze (HTTP %d).
 Web Config disabled	Web postavke onemogućene
-Web Config locked while MQTT is on	Web postavke zaključane dok je MQTT uključen
 Web Config start failed	Pokretanje web postavki nije uspjelo
 Web Config stopped.\n\nThe Bluetooth keyboard and Web Config share one radio and cannot run at the same time.\n\nTurn the keyboard off to use Web Config again.	Web postavke zaustavljene.\n\nBluetooth tipkovnica i web postavke dijele jedan radio i ne mogu raditi istodobno.\n\nIsključite tipkovnicu da biste ponovno koristili web postavke.
 Web Config: Disabled	Web postavke: Onemogućene
 Web Config: Enabled	Web postavke: Omogućene
-Web Config: Off (MQTT on)	Web postavke: Isklj. (MQTT uklj.)
 Web Config: Off (WiFi off)	Web postavke: Isklj. (WiFi isklj.)
 Web Config: On	Web postavke: Uklj.
+Web Config: On (waiting for WiFi)	Web postavke: Uklj. (čeka WiFi)
 Web Config: On (Lite)	Web postavke: Uklj. (Lite)
 Web Config: On (chat PAUSED)	Web postavke: Uklj. (chat PAUZIRAN)
 Web config: %s\n\nChat is PAUSED while web config runs - this device needs that memory for Wi-Fi. Messages sent to you now are not received or stored.\n\nTurn web config off to resume messaging.	Web postavke: %s\n\nChat je PAUZIRAN dok rade web postavke - uređaj treba tu memoriju za Wi-Fi. Poruke koje vam se sada pošalju neće biti primljene ni spremljene.\n\nIsključite web postavke za nastavak dopisivanja.

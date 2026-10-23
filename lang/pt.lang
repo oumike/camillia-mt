@@ -814,14 +814,13 @@ Weather	Tempo
 Weather - %s	Tempo - %s
 Weather server error (HTTP %d).	Erro do servidor do tempo (HTTP %d).
 Web Config disabled	Config web desativada
-Web Config locked while MQTT is on	Config web bloqueada com o MQTT ligado
 Web Config start failed	Falha ao iniciar a config web
 Web Config stopped.\n\nThe Bluetooth keyboard and Web Config share one radio and cannot run at the same time.\n\nTurn the keyboard off to use Web Config again.	Config web parada.\n\nO teclado Bluetooth e a config web usam o mesmo rádio e não podem funcionar ao mesmo tempo.\n\nDesligue o teclado para usar a config web de novo.
 Web Config: Disabled	Config web: Desativada
 Web Config: Enabled	Config web: Ativada
-Web Config: Off (MQTT on)	Config web: Desligada (MQTT ligado)
 Web Config: Off (WiFi off)	Config web: Desligada (WiFi desligado)
 Web Config: On	Config web: Ligada
+Web Config: On (waiting for WiFi)	Config web: Ligada (à espera do WiFi)
 Web Config: On (Lite)	Config web: Ligada (Lite)
 Web Config: On (chat PAUSED)	Config web: Ligada (chat PAUSADO)
 Web config: %s\n\nChat is PAUSED while web config runs - this device needs that memory for Wi-Fi. Messages sent to you now are not received or stored.\n\nTurn web config off to resume messaging.	Config web: %s\n\nO chat fica PAUSADO enquanto a config web roda - o dispositivo precisa dessa memória para o Wi-Fi. Mensagens enviadas a você agora não são recebidas nem salvas.\n\nDesligue a config web para voltar a trocar mensagens.

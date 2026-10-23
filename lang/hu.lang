@@ -822,14 +822,13 @@ Weather	Időjárás
 Weather - %s	Időjárás - %s
 Weather server error (HTTP %d).	Időjárás-szerver hiba (HTTP %d).
 Web Config disabled	Webes beállítások kikapcsolva
-Web Config locked while MQTT is on	Webes beállítások zárolva, amíg az MQTT be van kapcsolva
 Web Config start failed	A webes beállítások indítása sikertelen
 Web Config stopped.\n\nThe Bluetooth keyboard and Web Config share one radio and cannot run at the same time.\n\nTurn the keyboard off to use Web Config again.	Webes beállítások leállítva.\n\nA Bluetooth-billentyűzet és a webes beállítások egy rádión osztoznak, így nem futhatnak egyszerre.\n\nKapcsold ki a billentyűzetet, hogy újra használhasd a webes beállításokat.
 Web Config: Disabled	Webes beállítások: Kikapcsolva
 Web Config: Enabled	Webes beállítások: Engedélyezve
-Web Config: Off (MQTT on)	Webes beállítások: Ki (MQTT be)
 Web Config: Off (WiFi off)	Webes beállítások: Ki (WiFi ki)
 Web Config: On	Webes beállítások: Be
+Web Config: On (waiting for WiFi)	Webes beállítások: Be (WiFi-re vár)
 Web Config: On (Lite)	Webes beállítások: Be (Lite)
 Web Config: On (chat PAUSED)	Webes beállítások: Be (chat SZÜNETEL)
 Web config: %s\n\nChat is PAUSED while web config runs - this device needs that memory for Wi-Fi. Messages sent to you now are not received or stored.\n\nTurn web config off to resume messaging.	Webes beállítások: %s\n\nA chat SZÜNETEL, amíg a webes beállítások futnak - az eszköznek ez a memória a Wi-Fihez kell. A most neked küldött üzenetek nem érkeznek meg és nem mentődnek.\n\nKapcsold ki a webes beállításokat az üzenetküldés folytatásához.

@@ -817,14 +817,13 @@ Weather	Počasie
 Weather - %s	Počasie - %s
 Weather server error (HTTP %d).	Chyba servera počasia (HTTP %d).
 Web Config disabled	Webová konfigurácia vypnutá
-Web Config locked while MQTT is on	Webová konfigurácia zamknutá, kým je zapnuté MQTT
 Web Config start failed	Spustenie webovej konfigurácie zlyhalo
 Web Config stopped.\n\nThe Bluetooth keyboard and Web Config share one radio and cannot run at the same time.\n\nTurn the keyboard off to use Web Config again.	Webová konfigurácia zastavená.\n\nKlávesnica Bluetooth a webová konfigurácia zdieľajú jedno rádio a nemôžu bežať súčasne.\n\nVypnite klávesnicu, aby ste mohli webovú konfiguráciu znova používať.
 Web Config: Disabled	Webová konfigurácia: Vypnutá
 Web Config: Enabled	Webová konfigurácia: Zapnutá
-Web Config: Off (MQTT on)	Webová konfigurácia: Vyp. (MQTT zap.)
 Web Config: Off (WiFi off)	Webová konfigurácia: Vyp. (WiFi vyp.)
 Web Config: On	Webová konfigurácia: Zap.
+Web Config: On (waiting for WiFi)	Webová konfigurácia: Zap. (čaká na WiFi)
 Web Config: On (Lite)	Webová konfigurácia: Zap. (Lite)
 Web Config: On (chat PAUSED)	Webová konfigurácia: Zap. (chat POZASTAVENÝ)
 Web config: %s\n\nChat is PAUSED while web config runs - this device needs that memory for Wi-Fi. Messages sent to you now are not received or stored.\n\nTurn web config off to resume messaging.	Webová konfigurácia: %s\n\nChat je POZASTAVENÝ, kým beží webová konfigurácia - zariadenie potrebuje túto pamäť pre Wi-Fi. Správy, ktoré vám teraz prídu, sa neprijmú ani neuložia.\n\nVypnite webovú konfiguráciu a pokračujte v písaní správ.

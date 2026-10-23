@@ -2355,6 +2355,14 @@ There are two versions of the page:
 The Cardputer always serves Lite, on its own network or yours, because it has no
 PSRAM to spare.
 
+Web Config and the **MQTT Bridge** can be on together; both use your Wi-Fi
+network. While the bridge is on, Web Config never falls back to its own access
+point, which would cut the bridge off from the broker. If your network is out of
+reach when Web Config starts, the row reads **Web Config: On (waiting for
+WiFi)**, and the page comes up once the device joins the network. Choosing the
+**AP** entry in Choose WiFi still switches the bridge off, since a device
+serving its own network has no route to a broker.
+
 On the **Nodes** tab, the *Nodes Seen* dropdown lists favorited nodes first,
 separated from the rest by a dashed divider, and a favorite's detail panel reads
 *(favorite)* after its long name. Both come straight from the same ranking the

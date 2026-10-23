@@ -79,6 +79,9 @@ static uint32_t       gLastRequestMs   = 0;
 // single-threadedly unable to answer anyone.
 static uint32_t       gFirstServiceMs  = 0;
 static uint32_t       gIdleTimeoutMs   = 0;     // 0 = never expire
+// Set when the last webCfgBegin() gave up waiting for the station rather than
+// fall back to the SoftAP; see fallBackToAp in webCfgBegin().
+static bool           gStartDeferred   = false;
 static bool           gIdleExpired     = false;
 // True while the server is serving the SoftAP variant ("web config lite"): the
 // Config tab only, no Utilities/Live/Chat/Nodes. AP mode has far less internal
@@ -10697,6 +10700,7 @@ bool webCfgBegin(RhinoConfig *cfg, WebCfgSaveCb onSave,
     // Reclaim chat/DM buffers for the duration of the web session, then restore
     // from persistence in webCfgEnd().
     gWebBuffersReclaimed = false;
+    gStartDeferred = false;
     bool reclaimUiBuffers = false;
 #if defined(DEVICE_CARDPUTER_LORA_HAT)
     reclaimUiBuffers = true;
@@ -10835,9 +10839,21 @@ bool webCfgBegin(RhinoConfig *cfg, WebCfgSaveCb onSave,
 
     // ── Normal mode: connect to saved WiFi ────────────────────
     gOnboarding = false;
+    // With the MQTT bridge on, the station is not web config's to give up: the
+    // fallback SoftAP would cut the bridge off for the whole session, which
+    // the idle timeout may never end. Web config waits for the network
+    // instead, and the main loop starts it once the station associates.
+    auto fallBackToAp = [&]() -> bool {
+        if (gCfg && gCfg->mqttEnabled) {
+            Serial.println("[web] no station and MQTT is on - waiting for WiFi, not falling back to AP");
+            gStartDeferred = true;
+            return false;
+        }
+        return startApMode("AP fallback", false);
+    };
     if (!ensureWifiMode(WIFI_STA, "STA connect")) {
         Serial.println("[web] STA mode failed — using AP fallback");
-        bool ok = startApMode("AP fallback", false);
+        bool ok = fallBackToAp();
         if (!ok) restoreUiBuffersIfNeeded();
         return ok;
     }
@@ -10854,7 +10870,7 @@ bool webCfgBegin(RhinoConfig *cfg, WebCfgSaveCb onSave,
     if (beginStatus == WL_CONNECT_FAILED || beginStatus == WL_NO_SHIELD) {
         Serial.printf("[web] STA begin failed (%d)\n", (int)beginStatus);
         logWifiHeapDiag("STA begin failed");
-        bool ok = startApMode("AP fallback", false);
+        bool ok = fallBackToAp();
         if (!ok) restoreUiBuffersIfNeeded();
         return ok;
     }
@@ -10875,13 +10891,13 @@ bool webCfgBegin(RhinoConfig *cfg, WebCfgSaveCb onSave,
 #endif
             Serial.println("[web] WiFi stack unavailable during STA connect");
             logWifiHeapDiag("STA connect unavailable");
-            bool ok = startApMode("AP fallback", false);
+            bool ok = fallBackToAp();
             if (!ok) restoreUiBuffersIfNeeded();
             return ok;
         }
         if (millis() - start >= kConnectTimeout) {
             Serial.println("[web] STA connect timeout — falling back to AP mode");
-            bool ok = startApMode("AP fallback", false);
+            bool ok = fallBackToAp();
             if (!ok) restoreUiBuffersIfNeeded();
             return ok;
         }
@@ -11082,6 +11098,7 @@ void webCfgLoop() {
 }
 
 bool webCfgRunning() { return running; }
+bool webCfgStartDeferred() { return gStartDeferred; }
 
 uint32_t webCfgMsSinceRequest() {
     if (!running) return 0xFFFFFFFFu;   // UINT32_MAX, spelled without the header

@@ -819,14 +819,13 @@ Weather	Vreme
 Weather - %s	Vreme - %s
 Weather server error (HTTP %d).	Napaka strežnika za vreme (HTTP %d).
 Web Config disabled	Spletne nastavitve onemogočene
-Web Config locked while MQTT is on	Spletne nastavitve zaklenjene, dokler je MQTT vklopljen
 Web Config start failed	Zagon spletnih nastavitev ni uspel
 Web Config stopped.\n\nThe Bluetooth keyboard and Web Config share one radio and cannot run at the same time.\n\nTurn the keyboard off to use Web Config again.	Spletne nastavitve ustavljene.\n\nTipkovnica Bluetooth in spletne nastavitve si delijo en radio in ne morejo delovati hkrati.\n\nIzklopite tipkovnico, da boste lahko znova uporabljali spletne nastavitve.
 Web Config: Disabled	Spletne nastavitve: Onemogočene
 Web Config: Enabled	Spletne nastavitve: Omogočene
-Web Config: Off (MQTT on)	Spletne nastavitve: Izkl. (MQTT vkl.)
 Web Config: Off (WiFi off)	Spletne nastavitve: Izkl. (WiFi izkl.)
 Web Config: On	Spletne nastavitve: Vkl.
+Web Config: On (waiting for WiFi)	Spletne nastavitve: Vkl. (čaka na WiFi)
 Web Config: On (Lite)	Spletne nastavitve: Vkl. (Lite)
 Web Config: On (chat PAUSED)	Spletne nastavitve: Vkl. (klepet ZAUSTAVLJEN)
 Web config: %s\n\nChat is PAUSED while web config runs - this device needs that memory for Wi-Fi. Messages sent to you now are not received or stored.\n\nTurn web config off to resume messaging.	Spletne nastavitve: %s\n\nKlepet je ZAUSTAVLJEN, dokler delujejo spletne nastavitve - naprava potrebuje ta pomnilnik za Wi-Fi. Sporočila, ki vam jih zdaj pošljejo, niso prejeta ali shranjena.\n\nIzklopite spletne nastavitve za nadaljevanje dopisovanja.
