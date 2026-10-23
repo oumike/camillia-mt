@@ -50662,7 +50662,7 @@ static void drawBootSplash() {
     const char *nodeShort = s_cfg.nodeShort[0] ? s_cfg.nodeShort : "----";
     snprintf(nodeLine, sizeof(nodeLine), "%s (%s)", nodeLong, nodeShort);
 
-    // A logo from the flasher's Customize dialog takes the title's place. The
+    // A logo from the flasher's Customize dialog takes the flower's place. The
     // box is recorded whether or not one is stored: `cfg caps` reports it so
     // the page can size the image for this device.
     s_splashLogoBg = cardBg;
@@ -50694,27 +50694,19 @@ static void drawBootSplash() {
         splashDev().drawString(text, cardX + max(0, (cardW - w) / 2), y);
     };
 
-    // Measured first: a stored logo fills the same block the title would.
+    // Large brand name on top (Roboto Bold 26pt).
     splashDev().setFont(&Roboto_Bold26pt7b);
     splashDev().setTextSize(MY_SPLASH_TITLE_SCALE);
     const int brandY = cardY + 12 + MY_SPLASH_TITLE_Y_OFFSET;
+    drawCentered("Camillia", brandY);
     const int brandCap = max(8, (int)splashDev().fontHeight() - MY_SPLASH_SUBTITLE_GAP_TRIM);
-    const int subY = brandY + brandCap;
+
+    // "for Meshtastic" underneath (Roboto Medium 14pt).
     splashDev().setFont(&Roboto_Medium14pt7b);
     splashDev().setTextSize(MY_SPLASH_SUBTITLE_SCALE);
+    const int subY = brandY + brandCap;
+    drawCentered("for Meshtastic", subY);
     splashContentBottom = subY + splashDev().fontHeight();
-
-    if (!drawStoredLogo(cardX + 12, brandY, cardW - 24, splashContentBottom - brandY)) {
-        // Large brand name on top (Roboto Bold 26pt).
-        splashDev().setFont(&Roboto_Bold26pt7b);
-        splashDev().setTextSize(MY_SPLASH_TITLE_SCALE);
-        drawCentered("Camillia", brandY);
-
-        // "for Meshtastic" underneath (Roboto Medium 14pt).
-        splashDev().setFont(&Roboto_Medium14pt7b);
-        splashDev().setTextSize(MY_SPLASH_SUBTITLE_SCALE);
-        drawCentered("for Meshtastic", subY);
-    }
 
     // Version tucked under the subtitle in a small face. It moved here from the
     // footer so the footer line can carry the boot progress instead — the
@@ -50740,7 +50732,7 @@ static void drawBootSplash() {
     const int flowerCy = cardY + (cardH / 2) - 10;
     const float cardputerFlowerScale = 0.90f;
     const int flowerBottom = flowerCy + (int)lroundf(36.0f * cardputerFlowerScale);
-    // No title on this card, so a logo stands in for the flower.
+    // As on the other cards, a logo stands in for the flower.
     const int logoTop = flowerCy - (int)lroundf(32.0f * cardputerFlowerScale);
     if (!drawStoredLogo(cardX + 8, logoTop, cardW - 16, flowerBottom - logoTop)) {
         drawCamelliaMark(flowerCx, flowerCy, cardputerFlowerScale);
@@ -50813,28 +50805,28 @@ static void drawBootSplash() {
     const int meshY = titleY + 3;
     const int titleBlockBottom = max(titleY + camilliaH, meshY + meshH);
 
-    // The title row sits above both panes, so a logo may use the full width.
-    if (!drawStoredLogo(leftX, titleY, cardW - contentInset * 2, titleBlockBottom - titleY)) {
-        splashDev().setFont(&Roboto_Bold26pt7b);
-        splashDev().setTextSize(MY_SPLASH_TITLE_SCALE);
-        splashDev().setTextColor(titleCol, cardBg);
-        splashDev().drawString("Camillia", lineX, titleY);
+    splashDev().setFont(&Roboto_Bold26pt7b);
+    splashDev().setTextSize(MY_SPLASH_TITLE_SCALE);
+    splashDev().setTextColor(titleCol, cardBg);
+    splashDev().drawString("Camillia", lineX, titleY);
 
-        splashDev().setFont(&Roboto_Medium14pt7b);
-        splashDev().setTextSize(MY_SPLASH_SUBTITLE_SCALE);
-        splashDev().setTextColor(subCol, cardBg);
-        splashDev().drawString("for Meshtastic", lineX + camilliaW + titleGap, meshY);
-    }
+    splashDev().setFont(&Roboto_Medium14pt7b);
+    splashDev().setTextSize(MY_SPLASH_SUBTITLE_SCALE);
+    splashDev().setTextColor(subCol, cardBg);
+    splashDev().drawString("for Meshtastic", lineX + camilliaW + titleGap, meshY);
 
     const int flowerAreaTop = titleBlockBottom + 8;
     const int flowerAreaBottom = cardY + cardH - 14;
-    float pagerFlowerScale = min((float)(flowerAreaBottom - flowerAreaTop) / 76.0f,
-                                 (float)(leftW - 16) / 70.0f);
-    if (pagerFlowerScale < 1.10f) pagerFlowerScale = 1.10f;
-    if (pagerFlowerScale > 1.70f) pagerFlowerScale = 1.70f;
-    drawCamelliaMark(leftX + (leftW / 2),
-                     (flowerAreaTop + flowerAreaBottom) / 2,
-                     pagerFlowerScale);
+    // A logo from the flasher's Customize dialog takes the flower's pane.
+    if (!drawStoredLogo(leftX + 4, flowerAreaTop, leftW - 8, flowerAreaBottom - flowerAreaTop)) {
+        float pagerFlowerScale = min((float)(flowerAreaBottom - flowerAreaTop) / 76.0f,
+                                     (float)(leftW - 16) / 70.0f);
+        if (pagerFlowerScale < 1.10f) pagerFlowerScale = 1.10f;
+        if (pagerFlowerScale > 1.70f) pagerFlowerScale = 1.70f;
+        drawCamelliaMark(leftX + (leftW / 2),
+                         (flowerAreaTop + flowerAreaBottom) / 2,
+                         pagerFlowerScale);
+    }
 
     const int rightInfoTop = titleBlockBottom + 6;
     const int dividerTop = rightInfoTop;
@@ -50859,12 +50851,15 @@ static void drawBootSplash() {
     const int versionY = dividerBottom - splashDev().fontHeight();
     splashDev().drawString(verText.c_str(), rightX, versionY);
 #else
-    // Center the flower in the space between the title block and the footer text.
+    // Center the flower in the space between the title block and the footer
+    // text. A logo from the flasher's Customize dialog takes its place.
     const int flowerBandTop = splashContentBottom;
     const int flowerBandBottom = cardY + cardH - 40;
-    drawCamelliaMark(cardX + (cardW / 2),
-                     (flowerBandTop + flowerBandBottom) / 2,
-                     flowerScale);
+    if (!drawStoredLogo(cardX + 12, flowerBandTop + 4, cardW - 24, flowerBandBottom - flowerBandTop - 8)) {
+        drawCamelliaMark(cardX + (cardW / 2),
+                         (flowerBandTop + flowerBandBottom) / 2,
+                         flowerScale);
+    }
 
     splashDev().setFont(&fonts::DejaVu12);
     splashDev().setTextSize(1.0f);
@@ -59002,6 +58997,12 @@ static void seedChatForRepro(int requestedCount) {
 //   cfg logo begin <bytes>             then `logo data <hex>` lines, then
 //   cfg logo end <crc32 hex>           a PNG no larger than caps' logo=WxH
 //   cfg logo clear
+//   cfg set longname <%-encoded>       the on-device setup answers; on first
+//   cfg set shortname <%-encoded>      boot a commit with a region finishes
+//   cfg set region <code>              setup in their place (unset names come
+//   cfg set role <CLIENT|CLIENT_MUTE|TRACKER|CLIENT_HIDDEN>   from the node ID)
+//   cfg set ssid <%-encoded>
+//   cfg set wifipass <%-encoded>
 //   cfg commit
 static constexpr int kCfgProtoVersion = 1;
 
@@ -59041,6 +59042,28 @@ static CfgLogoState s_cfgLogoState = CFG_LOGO_NONE;
 static uint8_t *s_cfgLogoBuf = nullptr;
 static size_t s_cfgLogoSize = 0;
 static size_t s_cfgLogoRecv = 0;
+
+// What on-device setup would otherwise ask (see onboardingFinalize()). Empty
+// strings and role < 0 are "not sent".
+struct CfgStagedSetup {
+    char nodeLong[MESH_LONG_NAME_MAX_BYTES + 1];
+    char nodeShort[sizeof(RhinoConfig::nodeShort)];
+    char region[sizeof(RhinoConfig::region)];
+    int  role;
+    char wifiSsid[sizeof(RhinoConfig::wifiSsid)];
+    char wifiPass[sizeof(RhinoConfig::wifiPass)];
+    bool wifiPassSet;   // an open network's password is legitimately empty
+};
+static CfgStagedSetup s_cfgSetup = { {}, {}, {}, -1, {}, {}, false };
+
+static void cfgSetupReset() {
+    s_cfgSetup = CfgStagedSetup{ {}, {}, {}, -1, {}, {}, false };
+}
+
+static bool cfgSetupStaged() {
+    return s_cfgSetup.nodeLong[0] || s_cfgSetup.nodeShort[0] || s_cfgSetup.region[0]
+        || s_cfgSetup.role >= 0 || s_cfgSetup.wifiSsid[0] || s_cfgSetup.wifiPassSet;
+}
 
 static void cfgLogoReset() {
     free(s_cfgLogoBuf);
@@ -59174,6 +59197,83 @@ static void cfgSetChannel(const char *args) {
     }
     s_cfgStagedChans[idx] = c;
     s_cliOut->printf("[cfg] ok channel %ld staged\n", idx);
+}
+
+// `cfg set <field> <value>` for the setup answers. False when `args` names
+// none of them, so the caller can go on to its other `set` forms.
+static bool cfgSetSetupField(const char *args) {
+    const char *sp = strchr(args, ' ');
+    const size_t keyLen = sp ? (size_t)(sp - args) : strlen(args);
+    const char *value = sp ? sp + 1 : "";
+    auto is = [&](const char *key) { return strlen(key) == keyLen && !strncasecmp(args, key, keyLen); };
+
+    // Decoded into a buffer one byte larger than the field, so that a value
+    // which does not fit is refused rather than cut short.
+    auto decodeInto = [&](const char *what, char *dst, size_t dstLen, bool allowEmpty) -> bool {
+        char buf[72];
+        if (dstLen + 1 > sizeof(buf)) dstLen = sizeof(buf) - 1;
+        if (!cfgPercentDecode(value, buf, dstLen + 1) || strlen(buf) >= dstLen) {
+            s_cliOut->printf("[cfg] err %s: at most %u bytes\n", what, (unsigned)(dstLen - 1));
+            return false;
+        }
+        if (!allowEmpty && !buf[0]) {
+            s_cliOut->printf("[cfg] err %s: cannot be empty\n", what);
+            return false;
+        }
+        memcpy(dst, buf, strlen(buf) + 1);
+        s_cliOut->printf("[cfg] ok %s staged\n", what);
+        return true;
+    };
+
+    if (is("longname")) {
+        decodeInto("longname", s_cfgSetup.nodeLong, sizeof(s_cfgSetup.nodeLong), false);
+        return true;
+    }
+    if (is("shortname")) {
+        decodeInto("shortname", s_cfgSetup.nodeShort, sizeof(s_cfgSetup.nodeShort), false);
+        return true;
+    }
+    if (is("ssid")) {
+        decodeInto("ssid", s_cfgSetup.wifiSsid, sizeof(s_cfgSetup.wifiSsid), false);
+        return true;
+    }
+    if (is("wifipass")) {
+        if (decodeInto("wifipass", s_cfgSetup.wifiPass, sizeof(s_cfgSetup.wifiPass), true)) {
+            s_cfgSetup.wifiPassSet = true;
+        }
+        return true;
+    }
+    if (is("region")) {
+        for (uint8_t i = 0; i < kRegionCount; i++) {
+            if (!strcasecmp(value, kRegions[i].code)) {
+                utf8util::copyTruncate(s_cfgSetup.region, sizeof(s_cfgSetup.region), kRegions[i].code);
+                s_cliOut->printf("[cfg] ok region=%s staged\n", kRegions[i].code);
+                return true;
+            }
+        }
+        s_cliOut->printf("[cfg] err region: unknown \"%s\"\n", value);
+        return true;
+    }
+    if (is("role")) {
+        // The roles setup offers, and no others.
+        for (int i = 0; i < kOnboardRoleCount; i++) {
+            if (!strcasecmp(value, kOnboardRoles[i].label)) {
+                s_cfgSetup.role = kOnboardRoles[i].value;
+                s_cliOut->printf("[cfg] ok role=%s staged\n", kOnboardRoles[i].label);
+                return true;
+            }
+        }
+        s_cliOut->printf("[cfg] err role: unknown \"%s\"\n", value);
+        return true;
+    }
+    return false;
+}
+
+// Meshtastic's own default naming: the last four hex digits of the node ID.
+static void cfgNamesFromNodeId(char *nodeLong, size_t longLen, char *nodeShort, size_t shortLen) {
+    const unsigned tail = (unsigned)(s_myNodeId & 0xFFFF);
+    snprintf(nodeShort, shortLen, "%04x", tail);
+    snprintf(nodeLong, longLen, "Camillia %04x", tail);
 }
 
 static void cfgLogoCommand(const char *args) {
@@ -59312,7 +59412,7 @@ static void cfgApplyStagedChannels() {
 
 static void handleCfgCommand(const char *args) {
     if (!strcasecmp(args, "caps")) {
-        s_cliOut->printf("[cfg] caps v=%d firstboot=%d keys=preset,channels%s channels=%d",
+        s_cliOut->printf("[cfg] caps v=%d firstboot=%d keys=preset,channels,setup%s channels=%d",
                       kCfgProtoVersion, s_firstBoot ? 1 : 0,
                       (s_splashLogoW > 0 && s_splashLogoH > 0) ? ",logo" : "", MESH_CHANNELS);
         if (s_splashLogoW > 0 && s_splashLogoH > 0) {
@@ -59338,6 +59438,7 @@ static void handleCfgCommand(const char *args) {
         s_cfgStagedPreset = -1;
         s_cfgChansStaged = false;
         cfgLogoReset();
+        cfgSetupReset();
         s_cliOut->println("[cfg] ok aborted");
         return;
     }
@@ -59378,6 +59479,8 @@ static void handleCfgCommand(const char *args) {
         return;
     }
 
+    if (!strncasecmp(args, "set ", 4) && cfgSetSetupField(args + 4)) return;
+
     if (!strncasecmp(args, "logo ", 5)) {
         cfgLogoCommand(args + 5);
         return;
@@ -59392,12 +59495,20 @@ static void handleCfgCommand(const char *args) {
         const bool havePreset = s_cfgStagedPreset >= 0;
         const bool haveChans = s_cfgChansStaged;
         const bool haveLogo = s_cfgLogoState == CFG_LOGO_READY || s_cfgLogoState == CFG_LOGO_CLEAR;
-        if (!havePreset && !haveChans && !haveLogo) {
+        const bool haveSetup = cfgSetupStaged();
+        if (!havePreset && !haveChans && !haveLogo && !haveSetup) {
             s_cliOut->println("[cfg] ok nothing staged");
             return;
         }
         if (haveChans && s_cfgStagedChans[0].role != 0) {
             s_cliOut->println("[cfg] err commit: slot 0 must be the primary channel");
+            return;
+        }
+        // Setup is finished in one go or not at all: the region is what it
+        // cannot do without (names come from the node ID, role and Wi-Fi have
+        // defaults), and a partial answer would only be lost to setup.
+        if (s_firstBoot && haveSetup && !s_cfgSetup.region[0]) {
+            s_cliOut->println("[cfg] err commit: setup needs a region");
             return;
         }
         const uint8_t preset = havePreset ? (uint8_t)s_cfgStagedPreset : 0;
@@ -59443,23 +59554,59 @@ static void handleCfgCommand(const char *args) {
             }
             snprintf(chans, sizeof(chans), "%d", n);
         }
-        char summary[96];
-        snprintf(summary, sizeof(summary), "preset=%s channels=%s logo=%s",
+        char summary[128];
+        snprintf(summary, sizeof(summary), "preset=%s channels=%s logo=%s setup=%s",
                  havePreset ? kPresets[preset].channelName : "-", chans,
-                 !haveLogo ? "-" : (s_cfgLogoState == CFG_LOGO_CLEAR ? "cleared" : "set"));
+                 !haveLogo ? "-" : (s_cfgLogoState == CFG_LOGO_CLEAR ? "cleared" : "set"),
+                 !haveSetup ? "-" : (s_cfgSetup.region[0] ? s_cfgSetup.region : "set"));
+        const CfgStagedSetup setup = s_cfgSetup;
         s_cfgStagedPreset = -1;
         s_cfgChansStaged = false;
         cfgLogoReset();
+        cfgSetupReset();
+
+        // Answers setup in the user's place: onboardingFinalize() saves them
+        // with everything committed above, ends first boot and reboots.
+        if (s_firstBoot && haveSetup) {
+            cfgNamesFromNodeId(s_onboardingLongScratch, sizeof(s_onboardingLongScratch),
+                               s_onboardingShortScratch, sizeof(s_onboardingShortScratch));
+            if (setup.nodeLong[0]) {
+                utf8util::copyTruncate(s_onboardingLongScratch, sizeof(s_onboardingLongScratch), setup.nodeLong);
+            }
+            if (setup.nodeShort[0]) {
+                utf8util::copyTruncate(s_onboardingShortScratch, sizeof(s_onboardingShortScratch), setup.nodeShort);
+            }
+            utf8util::copyTruncate(s_onboardingRegionScratch, sizeof(s_onboardingRegionScratch), setup.region);
+            s_onboardingRoleScratch = setup.role >= 0 ? (uint8_t)setup.role : 1;   // setup's CLIENT_MUTE
+            utf8util::copyTruncate(s_onboardingWifiSsidScratch, sizeof(s_onboardingWifiSsidScratch), setup.wifiSsid);
+            utf8util::copyTruncate(s_onboardingWifiPassScratch, sizeof(s_onboardingWifiPassScratch), setup.wifiPass);
+            s_cliOut->printf("[cfg] ok committed %s setup-done rebooting\n", summary);
+            s_cliOut->flush();
+            delay(300);
+            onboardingFinalize();   // does not return
+            return;
+        }
 
         if (s_firstBoot) {
             s_cliOut->printf("[cfg] ok committed %s applies-after=setup\n", summary);
             return;
         }
-        if (!presetChanges && !haveChans && !haveLogo) {
+
+        // An existing install: only what was sent changes.
+        if (haveSetup) {
+            if (setup.nodeLong[0]) utf8util::copyTruncate(s_cfg.nodeLong, MESH_LONG_NAME_MAX_BYTES + 1, setup.nodeLong);
+            if (setup.nodeShort[0]) utf8util::copyTruncate(s_cfg.nodeShort, sizeof(s_cfg.nodeShort), setup.nodeShort);
+            if (setup.region[0]) utf8util::copyTruncate(s_cfg.region, sizeof(s_cfg.region), setup.region);
+            if (setup.role >= 0) s_cfg.deviceRole = cfgCoerceDeviceRole((uint8_t)setup.role);
+            if (setup.wifiSsid[0]) utf8util::copyTruncate(s_cfg.wifiSsid, sizeof(s_cfg.wifiSsid), setup.wifiSsid);
+            if (setup.wifiPassSet) utf8util::copyTruncate(s_cfg.wifiPass, sizeof(s_cfg.wifiPass), setup.wifiPass);
+            applyPresetParams(s_cfg);   // the region moves the frequency
+        }
+        if (!presetChanges && !haveChans && !haveLogo && !haveSetup) {
             s_cliOut->printf("[cfg] ok committed %s unchanged\n", summary);
             return;
         }
-        if (presetChanges) persistConfigToPrefs();
+        if (presetChanges || haveSetup) persistConfigToPrefs();
         s_cliOut->printf("[cfg] ok committed %s rebooting\n", summary);
         s_cliOut->flush();
         delay(300);
@@ -59486,7 +59633,7 @@ static void handleSerialCommandLine(char *line) {
     if (!line[0]) return;
 
     if (strcmp(line, "help") == 0 || strcmp(line, "?") == 0) {
-        s_cliOut->println("[cli] commands: help | nvs | batt | chatdump | keys | gps | env | env scan | env scan all | telemetry now | announce now | nodes stats | nodes seed [count] | chat seed [count] | cfg caps | cfg abort | cfg get preset | cfg set preset <name> | cfg channels clear | cfg set channel <i> k=v.. | cfg logo begin|data|end|clear | cfg commit");
+        s_cliOut->println("[cli] commands: help | nvs | batt | chatdump | keys | gps | env | env scan | env scan all | telemetry now | announce now | nodes stats | nodes seed [count] | chat seed [count] | cfg caps | cfg abort | cfg get preset | cfg set preset <name> | cfg channels clear | cfg set channel <i> k=v.. | cfg logo begin|data|end|clear | cfg set longname|shortname|region|role|ssid|wifipass <v> | cfg commit");
         return;
     }
 
