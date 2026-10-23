@@ -46361,7 +46361,14 @@ static void pumpKeyboardInput() {
         // alias and give nothing back, since they have no caret to move yet.
         // Widen this to typingContext at the point their carets get wired.
         const bool m9ComposeCaret = (s_composeModal && !s_emojiPickerModal);
-        if (!m9FourWaySelection && !m9ComposeCaret) {
+        // The Locate map pans in all four directions; folded, Left panned it
+        // up and Right down.
+#if HAS_NODE_LOCATE
+        const bool m9MapPan = s_nodeLocateModal != nullptr;
+#else
+        const bool m9MapPan = false;
+#endif
+        if (!m9FourWaySelection && !m9ComposeCaret && !m9MapPan) {
             if (k == KEY_PREV_CHAN)      k = KEY_SCROLL_UP;
             else if (k == KEY_NEXT_CHAN) k = KEY_SCROLL_DN;
         }
