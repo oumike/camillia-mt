@@ -11138,7 +11138,7 @@ static void loadProvisionedConfig() {
 }
 
 // Boot logo, also from the flasher: a PNG drawn on the splash card in place of
-// the title. NVS rather than the filesystem because the splash is drawn before
+// the flower. NVS rather than the filesystem because the splash is drawn before
 // either filesystem is mounted. kLogoMaxBytes keeps it to ~260 of the
 // partition's ~2000 entries.
 static constexpr const char *kLogoNs = "cm_logo";
