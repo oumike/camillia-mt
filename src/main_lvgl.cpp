@@ -87,6 +87,10 @@ LV_FONT_DECLARE(lv_font_eink_bold_18);
 #include <esp_random.h>
 #include <esp_heap_caps.h>
 #include <esp_idf_version.h>
+#include <soc/soc_caps.h>
+#if SOC_USB_SERIAL_JTAG_SUPPORTED && ARDUINO_USB_MODE
+#include "hal/usb_serial_jtag_ll.h"   // serviceSerialCommands() re-arms its TX
+#endif
 #if ESP_IDF_VERSION_MAJOR >= 5
 #include <esp_chip_info.h>
 #endif
@@ -59683,6 +59687,27 @@ static void serviceSerialCommands() {
     serviceSerialInput(Serial, s_serialCmdUart);
 #if CLI_ON_NATIVE_USB
     serviceSerialInput(USBSerial, s_serialCmdUsb);
+#endif
+#if SOC_USB_SERIAL_JTAG_SUPPORTED && ARDUINO_USB_MODE && (ARDUINO_USB_CDC_ON_BOOT || CLI_ON_NATIVE_USB)
+    // Core 2.0.17's HWCDC can strand output: a write made while it thinks the
+    // host is away arms the TX-empty interrupt before queueing, and if that
+    // fires in between it finds nothing, disarms itself, and the bytes wait
+    // for the next write -- seconds or more. A `cfg` reply stuck like that
+    // times out in the web flasher. While anything is queued, do what the
+    // driver does to reconnect: arm the interrupt and commit the FIFO, whose
+    // (possibly empty) packet the host's pickup turns into that interrupt.
+#if ARDUINO_USB_CDC_ON_BOOT
+    HWCDC &usbCdc = Serial;
+#else
+    HWCDC &usbCdc = USBSerial;
+#endif
+    static int s_usbCdcTxIdleFree = 0;   // ring free space with nothing queued
+    const int txFree = usbCdc.availableForWrite();
+    if (txFree > s_usbCdcTxIdleFree) s_usbCdcTxIdleFree = txFree;
+    if (txFree < s_usbCdcTxIdleFree) {
+        usb_serial_jtag_ll_ena_intr_mask(USB_SERIAL_JTAG_INTR_SERIAL_IN_EMPTY);
+        usb_serial_jtag_ll_txfifo_flush();
+    }
 #endif
 }
 
