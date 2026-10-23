@@ -821,14 +821,13 @@ Weather	Sää
 Weather - %s	Sää - %s
 Weather server error (HTTP %d).	Sääpalvelimen virhe (HTTP %d).
 Web Config disabled	Web-asetukset pois käytöstä
-Web Config locked while MQTT is on	Web-asetukset lukittu, kun MQTT on päällä
 Web Config start failed	Web-asetusten käynnistys epäonnistui
 Web Config stopped.\n\nThe Bluetooth keyboard and Web Config share one radio and cannot run at the same time.\n\nTurn the keyboard off to use Web Config again.	Web-asetukset pysäytetty.\n\nBluetooth-näppäimistö ja web-asetukset jakavat yhden radion eivätkä voi toimia samaan aikaan.\n\nSammuta näppäimistö käyttääksesi web-asetuksia uudelleen.
 Web Config: Disabled	Web-asetukset: Pois käytöstä
 Web Config: Enabled	Web-asetukset: Käytössä
-Web Config: Off (MQTT on)	Web-asetukset: Pois (MQTT päällä)
 Web Config: Off (WiFi off)	Web-asetukset: Pois (WiFi pois)
 Web Config: On	Web-asetukset: Päällä
+Web Config: On (waiting for WiFi)	Web-asetukset: Päällä (odottaa WiFiä)
 Web Config: On (Lite)	Web-asetukset: Päällä (Lite)
 Web Config: On (chat PAUSED)	Web-asetukset: Päällä (chat TAUOLLA)
 Web config: %s\n\nChat is PAUSED while web config runs - this device needs that memory for Wi-Fi. Messages sent to you now are not received or stored.\n\nTurn web config off to resume messaging.	Web-asetukset: %s\n\nChat on TAUOLLA web-asetusten ollessa käynnissä - laite tarvitsee muistin Wi-Fiä varten. Sinulle nyt lähetettyjä viestejä ei vastaanoteta eikä tallenneta.\n\nSammuta web-asetukset jatkaaksesi viestittelyä.

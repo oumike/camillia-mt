@@ -808,14 +808,13 @@ Weather	Vær
 Weather - %s	Vær - %s
 Weather server error (HTTP %d).	Feil fra værserveren (HTTP %d).
 Web Config disabled	Webkonfigurasjon deaktivert
-Web Config locked while MQTT is on	Webkonfigurasjonen låst mens MQTT er på
 Web Config start failed	Webkonfigurasjonen kunne ikke starte
 Web Config stopped.\n\nThe Bluetooth keyboard and Web Config share one radio and cannot run at the same time.\n\nTurn the keyboard off to use Web Config again.	Webkonfigurasjonen stoppet.\n\nBluetooth-tastaturet og webkonfigurasjonen deler én radio og kan ikke kjøre samtidig.\n\nSlå av tastaturet for å bruke webkonfigurasjonen igjen.
 Web Config: Disabled	Webkonfigurasjon: Deaktivert
 Web Config: Enabled	Webkonfigurasjon: Aktivert
-Web Config: Off (MQTT on)	Webkonfigurasjon: Av (MQTT på)
 Web Config: Off (WiFi off)	Webkonfigurasjon: Av (WiFi av)
 Web Config: On	Webkonfigurasjon: På
+Web Config: On (waiting for WiFi)	Webkonfigurasjon: På (venter på WiFi)
 Web Config: On (Lite)	Webkonfigurasjon: På (Lite)
 Web Config: On (chat PAUSED)	Webkonfigurasjon: På (chat PAUSET)
 Web config: %s\n\nChat is PAUSED while web config runs - this device needs that memory for Wi-Fi. Messages sent to you now are not received or stored.\n\nTurn web config off to resume messaging.	Webkonfigurasjon: %s\n\nChatten er PAUSET mens webkonfigurasjonen kjører - enheten trenger minnet til Wi-Fi. Meldinger som sendes til deg nå, blir ikke mottatt eller lagret.\n\nSlå av webkonfigurasjonen for å fortsette å chatte.

@@ -1904,6 +1904,8 @@ static void tdeckProNoteRecentMessage(int chanIdx, uint32_t fromNode, const char
 static uint32_t s_lastChannelGlowAnimMs = 0;
 static bool s_radioReady = false;
 static bool s_webCfgEnabled = false;
+// Web config is wanted but waiting for the station (webCfgStartDeferred()).
+static bool s_webCfgAwaitStation = false;
 #if HAS_VNC_HOST
 static bool s_vncEnabled = false;
 #endif
@@ -5472,8 +5474,6 @@ static const char *cfgActionLabel(int actionId, char *buf, size_t bufLen) {
         case CFG_ACTION_WEBCFG:
             if (!s_cfg.wifiEnabled) {
                 snprintf(buf, bufLen, "%s", TR("Web Config: Off (WiFi off)"));
-            } else if (s_cfg.mqttEnabled) {
-                snprintf(buf, bufLen, "%s", TR("Web Config: Off (MQTT on)"));
             } else if (!s_webCfgEnabled) {
                 snprintf(buf, bufLen, "%s", TR("Web Config: Disabled"));
             } else if (webCfgRunning()) {
@@ -5486,6 +5486,8 @@ static const char *cfgActionLabel(int actionId, char *buf, size_t bufLen) {
                     snprintf(buf, bufLen, webCfgIsLite() ? TR("Web Config: On (Lite)")
                                                          : TR("Web Config: On"));
                 }
+            } else if (s_webCfgAwaitStation) {
+                snprintf(buf, bufLen, "%s", TR("Web Config: On (waiting for WiFi)"));
             } else {
                 snprintf(buf, bufLen, "%s", TR("Web Config: Enabled"));
             }
@@ -5859,7 +5861,7 @@ static bool cfgActionDisabled(int actionId) {
         case CFG_ACTION_SD_SCAN: return !sdCardMounted();
 #endif
         case CFG_ACTION_WEBCFG:
-            return !s_cfg.wifiEnabled || s_cfg.mqttEnabled;
+            return !s_cfg.wifiEnabled;
 #if HAS_FILE_STORAGE
         // Nowhere to write: greyed out, but never while on, so it can always
         // be switched off again.
@@ -5911,8 +5913,7 @@ static bool cfgActionNeedsConfirm(int actionId) {
     // question on top of a deliberate choice, which is the kind people learn to
     // dismiss without reading.
     return
-        // Reboots to apply, and the load-time invariant re-derives the
-        // MQTT/web-config exclusion on the way back up.
+        // Reboots to apply.
         actionId == CFG_ACTION_MQTT_TOGGLE
         || actionId == CFG_ACTION_EXPORT
         || actionId == CFG_ACTION_IMPORT
@@ -6952,6 +6953,12 @@ static void serviceWifiStation(uint32_t now) {
         // This is the only place that knows an association actually succeeded,
         // so it is where a picked network earns its place in the config.
         wifiPromoteConnectedNetwork();
+        // And where web config, held back while MQTT kept the station, can
+        // finally join it.
+        if (s_webCfgAwaitStation) {
+            s_webCfgAwaitStation = false;
+            startWebConfigAuto();
+        }
         return;
     }
     if (s_wifiStaKickMs != 0 && (now - s_wifiStaKickMs) < s_wifiStaKickIntervalMs) return;
@@ -11455,9 +11462,8 @@ static void cfgMigrateStoredConfig() {
 }
 
 // Cross-setting rules every load path must finish with, whichever storage
-// format it read: MQTT needs WiFi, the MQTT bridge and the web-config portal
-// are mutually exclusive, and the radio parameters are always re-derived from
-// region + preset rather than trusted from storage.
+// format it read: MQTT and web config need WiFi, and the radio parameters are
+// always re-derived from region + preset rather than trusted from storage.
 static void applyLoadedConfigInvariants() {
     // Chat server (replacing the S&F client in the same bytes): an unmigrated
     // flags byte means the node id slot still holds an S&F router pin.
@@ -11484,9 +11490,6 @@ static void applyLoadedConfigInvariants() {
     if (!s_cfg.wifiEnabled) {
         s_cfg.mqttEnabled = false;
         s_webCfgEnabled   = false;
-    }
-    if (s_cfg.mqttEnabled) {
-        s_webCfgEnabled = false;
     }
     // Anything but a known source would silently disable both NTP and GPS.
     s_cfg.timeSource = cfgCoerceTimeSource(s_cfg.timeSource);
@@ -15717,11 +15720,11 @@ static void applyCfgWifiSelection(int idx) {
         snprintf(s_cfgStatus, sizeof(s_cfgStatus), "%s", TR("AP mode selected - enable WiFi first"));
     } else if (forceAp) {
         // MQTT first: the bridge dials out to a broker, and a device serving
-        // its own network has no route to one. It is also mutually exclusive
-        // with web config (see applyLoadedConfigInvariants), so it has to go
-        // before web config can come on at all. Stopped live rather than
-        // through the CFG row's reboot — this is a network being chosen, and a
-        // restart in the middle of that is not what anyone pressed.
+        // its own network has no route to one -- and while it is on, web
+        // config will not leave the station for the SoftAP (see
+        // webCfgStartDeferred()). Stopped live rather than through the CFG
+        // row's reboot — this is a network being chosen, and a restart in the
+        // middle of that is not what anyone pressed.
         if (s_cfg.mqttEnabled) {
             s_cfg.mqttEnabled = false;
             mqttBridgeConfigChanged();
@@ -15775,6 +15778,9 @@ static void applyCfgWifiSelection(int idx) {
                 openCfgActionMessageModal(TR(kWebBleKbdExclusiveNotice));
             }
 #endif
+        } else if (webCfgStartDeferred()) {
+            s_webCfgAwaitStation = true;
+            snprintf(s_cfgStatus, sizeof(s_cfgStatus), "%s", TR("Web Config: On (waiting for WiFi)"));
         } else {
             s_webCfgEnabled = false;
             persistWebCfgEnabled();
@@ -42448,11 +42454,8 @@ static void activateCfgSelection() {
     const int actionId = s_cfgActions[s_cfgSelection];
     if (cfgActionDisabled(actionId)) {
         const char *disabledMessage = TR("Enable WiFi first");
-        if (actionId == CFG_ACTION_WEBCFG && s_cfg.mqttEnabled) {
-            disabledMessage = TR("Web Config locked while MQTT is on");
-        }
 #if HAS_VNC_HOST
-        else if (actionId == CFG_ACTION_VNC_HOST && !vncNetworkConnected()) {
+        if (actionId == CFG_ACTION_VNC_HOST && !vncNetworkConnected()) {
             disabledMessage = TR("Connect to WiFi before enabling VNC");
         }
 #endif
@@ -42929,6 +42932,9 @@ static void performCfgAction(int actionId) {
                         openCfgActionMessageModal(TR(kWebBleKbdExclusiveNotice));
                     }
 #endif
+                } else if (webCfgStartDeferred()) {
+                    s_webCfgAwaitStation = true;
+                    snprintf(s_cfgStatus, sizeof(s_cfgStatus), "%s", TR("Web Config: On (waiting for WiFi)"));
                 } else {
                     s_webCfgEnabled = false;
                     persistWebCfgEnabled();
@@ -43459,8 +43465,7 @@ static void performCfgAction(int actionId) {
             if (s_cfgDebugLog) Serial.println("[lvgl-cfg] exec MQTT_TOGGLE");
             s_cfg.mqttEnabled = !s_cfg.mqttEnabled;
             persistConfigToPrefs();
-            // Reboot so the change applies cleanly; the load-time invariant also
-            // enforces MQTT/web-config mutual exclusion on the way back up.
+            // Reboot so the change applies cleanly.
             snprintf(s_cfgStatus, sizeof(s_cfgStatus),
                      TR("MQTT Bridge: %s - rebooting..."), s_cfg.mqttEnabled ? TR("On") : TR("Off"));
             refreshCfgModal();
@@ -46356,7 +46361,14 @@ static void pumpKeyboardInput() {
         // alias and give nothing back, since they have no caret to move yet.
         // Widen this to typingContext at the point their carets get wired.
         const bool m9ComposeCaret = (s_composeModal && !s_emojiPickerModal);
-        if (!m9FourWaySelection && !m9ComposeCaret) {
+        // The Locate map pans in all four directions; folded, Left panned it
+        // up and Right down.
+#if HAS_NODE_LOCATE
+        const bool m9MapPan = s_nodeLocateModal != nullptr;
+#else
+        const bool m9MapPan = false;
+#endif
+        if (!m9FourWaySelection && !m9ComposeCaret && !m9MapPan) {
             if (k == KEY_PREV_CHAN)      k = KEY_SCROLL_UP;
             else if (k == KEY_NEXT_CHAN) k = KEY_SCROLL_DN;
         }
@@ -49860,6 +49872,11 @@ static void startWebConfigAuto() {
 #else
     bool ok = webCfgBegin(&s_cfg, onWebCfgSaved, nullptr);
 #endif
+    s_webCfgAwaitStation = !ok && webCfgStartDeferred();
+    if (s_webCfgAwaitStation) {
+        Serial.println("[web] auto start waits for WiFi (MQTT holds the station)");
+        return;
+    }
     if (!ok) {
         Serial.println("[web] auto start failed");
         s_webCfgEnabled = false;

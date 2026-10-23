@@ -819,14 +819,13 @@ Weather	Ilm
 Weather - %s	Ilm - %s
 Weather server error (HTTP %d).	Ilmaserveri viga (HTTP %d).
 Web Config disabled	Veebiseaded keelatud
-Web Config locked while MQTT is on	Veebiseaded lukus, kuni MQTT on sees
 Web Config start failed	Veebiseadete käivitamine ebaõnnestus
 Web Config stopped.\n\nThe Bluetooth keyboard and Web Config share one radio and cannot run at the same time.\n\nTurn the keyboard off to use Web Config again.	Veebiseaded peatatud.\n\nBluetooth-klaviatuur ja veebiseaded jagavad üht raadiot ega saa korraga töötada.\n\nLülitage klaviatuur välja, et veebiseadeid uuesti kasutada.
 Web Config: Disabled	Veebiseaded: Keelatud
 Web Config: Enabled	Veebiseaded: Lubatud
-Web Config: Off (MQTT on)	Veebiseaded: Väljas (MQTT sees)
 Web Config: Off (WiFi off)	Veebiseaded: Väljas (WiFi väljas)
 Web Config: On	Veebiseaded: Sees
+Web Config: On (waiting for WiFi)	Veebiseaded: Sees (ootab WiFi-t)
 Web Config: On (Lite)	Veebiseaded: Sees (Lite)
 Web Config: On (chat PAUSED)	Veebiseaded: Sees (vestlus PEATATUD)
 Web config: %s\n\nChat is PAUSED while web config runs - this device needs that memory for Wi-Fi. Messages sent to you now are not received or stored.\n\nTurn web config off to resume messaging.	Veebiseaded: %s\n\nVestlus on PEATATUD, kuni veebiseaded töötavad - seade vajab seda mälu Wi-Fi jaoks. Teile praegu saadetud sõnumeid ei võeta vastu ega salvestata.\n\nLülitage veebiseaded välja, et sõnumite saatmist jätkata.

@@ -36,6 +36,10 @@ void webCfgLoop();
 
 // True while the server is active.
 bool webCfgRunning();
+// True when the last webCfgBegin() failed only because the station was not up
+// and the MQTT bridge, which needs it, ruled out the AP fallback. Web config
+// is still wanted: start it again once WiFi connects.
+bool webCfgStartDeferred();
 
 // Milliseconds since the last HTTP request, or UINT32_MAX when the server is
 // not running. The clock starts when the server comes up rather than at the

@@ -822,14 +822,13 @@ Weather	Hava durumu
 Weather - %s	Hava durumu - %s
 Weather server error (HTTP %d).	Hava durumu sunucusu hatası (HTTP %d).
 Web Config disabled	Web yapılandırması devre dışı
-Web Config locked while MQTT is on	MQTT açıkken web yapılandırması kilitli
 Web Config start failed	Web yapılandırması başlatılamadı
 Web Config stopped.\n\nThe Bluetooth keyboard and Web Config share one radio and cannot run at the same time.\n\nTurn the keyboard off to use Web Config again.	Web yapılandırması durduruldu.\n\nBluetooth klavye ve web yapılandırması aynı radyoyu paylaşır ve aynı anda çalışamaz.\n\nWeb yapılandırmasını yeniden kullanmak için klavyeyi kapatın.
 Web Config: Disabled	Web yapılandırması: Devre dışı
 Web Config: Enabled	Web yapılandırması: Etkin
-Web Config: Off (MQTT on)	Web yapılandırması: Kapalı (MQTT açık)
 Web Config: Off (WiFi off)	Web yapılandırması: Kapalı (WiFi kapalı)
 Web Config: On	Web yapılandırması: Açık
+Web Config: On (waiting for WiFi)	Web yapılandırması: Açık (WiFi bekleniyor)
 Web Config: On (Lite)	Web yapılandırması: Açık (Lite)
 Web Config: On (chat PAUSED)	Web yapılandırması: Açık (sohbet DURAKLATILDI)
 Web config: %s\n\nChat is PAUSED while web config runs - this device needs that memory for Wi-Fi. Messages sent to you now are not received or stored.\n\nTurn web config off to resume messaging.	Web yapılandırması: %s\n\nWeb yapılandırması çalışırken sohbet DURAKLATILIR - cihazın bu belleğe Wi-Fi için ihtiyacı var. Şu an size gönderilen mesajlar alınmaz ve kaydedilmez.\n\nMesajlaşmaya devam etmek için web yapılandırmasını kapatın.
