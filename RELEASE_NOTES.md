@@ -21,3 +21,11 @@ Pull request: #122
 
 ### Fixed
 - ThinkNode M9: on the Locate map, the d-pad Left and Right buttons now move the map left and right. Before, they moved it up and down.
+
+
+### Update (v6.1.2)
+### Changed
+- T-Deck Pro: the node list now fills the whole Nodes screen. Node details have moved out of the cramped panel below the list.
+- T-Deck Pro: a new **(N)ode Info** action in Node Actions opens a node's Identity, Link, Position and Telemetry details full-screen. Scroll with J/K and close with the back key, Enter, N or a tap.
+- T-Deck Pro: on the Nodes screen, Enter now opens the selected node's actions. On an archived node, Enter shows its saved details.
+- T-Deck Pro: "Request (P)osition" in Node Actions is now just "(P)osition".
