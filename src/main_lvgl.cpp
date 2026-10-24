@@ -1236,6 +1236,23 @@ static lv_obj_t *s_nodesDetail = nullptr;
 #define NODES_LAYOUT_WIDE 1
 #endif
 
+// T-Deck Pro: the details are not on the Nodes screen at all. Stacked under the
+// list on its portrait paper they left the list 92 px, three rows, and the
+// panel below was still too short to show a whole section. There the list
+// takes the screen, and the same sections open full height in a scrollable
+// modal from the node's (N)ode Info action (openNodesInfoDlg()).
+#if defined(DEVICE_TDECK_PRO)
+#define NODES_INFO_AS_MODAL 1
+#else
+#define NODES_INFO_AS_MODAL 0
+#endif
+#if NODES_INFO_AS_MODAL && !NODES_LAYOUT_WIDE
+#error "The Node Info modal is built from the wide layout's sections"
+#endif
+// The modal the sections live in while it is open; null otherwise, and always
+// null where NODES_INFO_AS_MODAL is 0.
+static lv_obj_t *s_nodesInfoDlg = nullptr;
+
 // Which panel the keys are steering. Selecting a node and pressing Enter hands
 // the navigation keys to the detail panel so its fields can be scrolled; the
 // close key hands them back to the list. Touch builds ignore this — a finger
@@ -1401,12 +1418,19 @@ static constexpr int kNodesActionBaseCount = 6;
 // boards, so none of their fixed indices move, and before Admin, which has to
 // stay last (see activeActionCount()).
 static constexpr int kNodesActionLos    = kNodesActionBaseCount;
-static constexpr int kNodesActionShare  = kNodesActionBaseCount + 1;
-static constexpr int kNodesActionDelete = kNodesActionBaseCount + 2;
+static constexpr int kNodesActionAfterLos = kNodesActionBaseCount + 1;
 #else
-static constexpr int kNodesActionShare  = kNodesActionBaseCount;
-static constexpr int kNodesActionDelete = kNodesActionBaseCount + 1;
+static constexpr int kNodesActionAfterLos = kNodesActionBaseCount;
 #endif
+#if NODES_INFO_AS_MODAL
+// Node Info goes ahead of Share for the same reason Share goes ahead of Delete:
+// after the actions some boards lack, so their indices stay put.
+static constexpr int kNodesActionInfo   = kNodesActionAfterLos;
+static constexpr int kNodesActionShare  = kNodesActionAfterLos + 1;
+#else
+static constexpr int kNodesActionShare  = kNodesActionAfterLos;
+#endif
+static constexpr int kNodesActionDelete = kNodesActionShare + 1;
 // Delete goes last on every board, after whichever of Locate and LOS this one
 // has. Appending rather than inserting is what keeps kMsgActionNodeMap — which
 // indexes this list by position — pointing at the same actions it always did.
@@ -1443,6 +1467,10 @@ static constexpr char kNodesActionShortcuts[kNodesActionCount] = {
     // that is not the word's first letter.
     'S',
 #endif
+#if NODES_INFO_AS_MODAL
+    // 'N' for (N)ode Info: I is Message Info's, as with Re(q)uest Node.
+    'N',
+#endif
     // 'H' for S(h)are: S is LOS's where LOS exists.
     'H',
     // 'E' for Del(e)te: D is Send DM's and L is Locate's. It is one key on a
@@ -1471,6 +1499,11 @@ static bool s_nodesActionDeleteEnabled = false;
 // Share needs something to share: a node in the table with a real name, and
 // not this one (its own NodeInfo has its own send).
 static bool s_nodesActionShareEnabled = false;
+#if NODES_INFO_AS_MODAL
+// Node Info renders the Nodes screen's selection, so it needs that screen up
+// with this node under its cursor. Opened from the chat there is no list.
+static bool s_nodesActionInfoEnabled = false;
+#endif
 #if HAS_NODE_LOCATE
 // Locate needs a position to show. The row is built either way — a menu whose
 // contents move around depending on the node is harder to learn than one with a
@@ -1528,6 +1561,8 @@ static constexpr char kMsgActionShortcuts[kMsgActionCount] = {
 
 // Sized for the larger of the two modes.
 static lv_obj_t *s_nodesActionRows[kMsgActionCount] = {};
+static_assert(kNodesActionCount <= kMsgActionCount,
+              "s_nodesActionRows is sized for message mode being the larger");
 // True while the modal is acting on a message rather than a bare node.
 static bool s_nodesActionMsgMode = false;
 // The message being acted on. Message mode requires it to be non-zero — without
@@ -1621,6 +1656,9 @@ static inline bool nodesActionRowDisabled(int idx) {
 #endif
     if (idx == kNodesActionDelete && !s_nodesActionDeleteEnabled) return true;
     if (idx == kNodesActionShare && !s_nodesActionShareEnabled) return true;
+#if NODES_INFO_AS_MODAL
+    if (idx == kNodesActionInfo && !s_nodesActionInfoEnabled) return true;
+#endif
     return false;
 }
 
@@ -2939,6 +2977,10 @@ static void onNodeSnapshotClicked(lv_event_t *e);
 #endif
 static void onNodesActionRowPressed(lv_event_t *e);
 static void openNodesActionMenu();
+#if NODES_INFO_AS_MODAL
+static void openNodesInfoDlg();
+static void closeNodesInfoDlg();
+#endif
 static void openNodesActionMenuFor(uint32_t nodeId, bool msgMode = false,
                                    uint32_t packetId = 0);
 // Defined down with the action menu, but the Locate modal above it wants the
@@ -26062,6 +26104,10 @@ static void closeNodesModal() {
     clearNavBarStatusIcons();
     closeNodesFilterDialog();
     closeNodesActionMenu();
+#if NODES_INFO_AS_MODAL
+    // On the root screen too, and holding the section pointers cleared below.
+    closeNodesInfoDlg();
+#endif
 #if HAS_NODE_LOCATE
     // Parented to the root screen, so closing the screen it was opened from
     // would otherwise strand it with nothing behind it.
@@ -30016,6 +30062,18 @@ static void refreshNodesHint() {
                               s_nodesFilterOpen ? TR("Enter=Clear search  %s=Back")
                                                 : TR("Enter=Search  %s=Back"),
                               modalCloseKeyLabel());
+#if NODES_INFO_AS_MODAL
+    // Enter opens the actions here: Node Info is one of them.
+    } else if (s_nodesFilterOpen) {
+        lv_label_set_text_fmt(s_nodesHintLabel,
+                              TR("Enter=Actions  Space=Clear  %s=Back"),
+                              modalCloseKeyLabel());
+    } else {
+        lv_label_set_text_fmt(s_nodesHintLabel,
+                              TR("Enter=Actions  Space=Search  %s=Back"),
+                              modalCloseKeyLabel());
+    }
+#else
     } else if (s_nodesFilterOpen) {
         // Showing search results. Space presses the button, which reads Clear
         // now; Bksp does too, ahead of Back, since on most boards Backspace is
@@ -30028,6 +30086,7 @@ static void refreshNodesHint() {
                               TR("Enter=Info  A=Actions  Space=Search  %s=Back"),
                               modalCloseKeyLabel());
     }
+#endif
 #endif   // !UI_TOUCH_ONLY_PROFILE
 }
 
@@ -30604,6 +30663,14 @@ static void onNodeSnapshotPressed(lv_event_t *e) {
     if (s_nodesActionModal) {
         closeNodesActionMenu();
     }
+#if NODES_INFO_AS_MODAL
+    // A press reaching the list through the modal's edge: the modal goes,
+    // rather than quietly re-rendering itself for a different node.
+    if (s_nodesInfoDlg) {
+        closeNodesInfoDlg();
+        return;
+    }
+#endif
     s_nodesSelected = idx;
     if (s_nodesSearchBtnFocused) {
         s_nodesSearchBtnFocused = false;
@@ -31371,6 +31438,15 @@ static void executeNodesActionSelection() {
     }
 #endif
 
+#if NODES_INFO_AS_MODAL
+    if (s_nodesActionSelection == kNodesActionInfo) {
+        if (!s_nodesActionInfoEnabled) return;
+        closeNodesActionMenu();
+        openNodesInfoDlg();
+        return;
+    }
+#endif
+
     if (s_nodesActionSelection == kNodesActionShare) {
         if (!s_nodesActionShareEnabled) return;
         const uint32_t shareId = s_nodesActionNodeId;
@@ -31637,6 +31713,12 @@ static void openNodesActionMenuFor(uint32_t nodeId, bool msgMode, uint32_t packe
     s_nodesActionDeleteEnabled = (actionNode != nullptr);
     s_nodesActionShareEnabled = actionNode && actionNode->hasName
                                 && nodeId != s_myNodeId;
+#if NODES_INFO_AS_MODAL
+    {
+        const NodeEntry *sel = s_nodesModal ? currentNodesSelection() : nullptr;
+        s_nodesActionInfoEnabled = !msgMode && sel && sel->nodeId == nodeId;
+    }
+#endif
 #if HAS_NODE_LOCATE
     // A node the table has never had a position for has nothing to point at, so
     // Locate is greyed rather than opening an empty map. (0, 0) is a real place
@@ -31673,6 +31755,9 @@ static void openNodesActionMenuFor(uint32_t nodeId, bool msgMode, uint32_t packe
     #if HAS_NODE_LOS
         TR_NOOP("LOS"),
     #endif
+    #if NODES_INFO_AS_MODAL
+        TR_NOOP("Node Info"),
+    #endif
         TR_NOOP("Share"),
         TR_NOOP("Delete"),
     #if HAS_ADMIN_TERMINAL
@@ -31692,6 +31777,9 @@ static void openNodesActionMenuFor(uint32_t nodeId, bool msgMode, uint32_t packe
 #endif
 #if HAS_NODE_LOS
         TR_NOOP("LO(S)"),
+#endif
+#if NODES_INFO_AS_MODAL
+        TR_NOOP("(N)ode Info"),
 #endif
         TR_NOOP("S(h)are"),
         TR_NOOP("Del(e)te"),
@@ -41369,6 +41457,247 @@ static void openDmModal() {
     s_dmDrawerAnimReady = true;
 }
 
+#if NODES_LAYOUT_WIDE
+// The details pane: the placeholder label and the four section tables, every
+// one of them registered in the s_nodes* pointers refreshNodesDetails() writes.
+// On the Nodes screen beside or under the list; on the T-Deck Pro inside the
+// Node Info modal instead (NODES_INFO_AS_MODAL). `growHeight` takes the
+// parent's remaining height from a column flex, else the full height of a row.
+static lv_obj_t *buildNodesInfoPanel(lv_obj_t *parent, int width, bool growHeight,
+                                     const lv_font_t *font) {
+    // On the T-Deck Pro this is only ever built into the Node Info modal, which
+    // is ink on paper: every pale blue below would cross the 1 bpp threshold to
+    // white and vanish into the modal's white face.
+#if defined(DEVICE_TDECK_PRO)
+    const lv_color_t valueInk = lv_color_make(0, 0, 0);
+    const lv_color_t scrollInk = lv_color_make(0, 0, 0);
+#else
+    const lv_color_t valueInk = lv_color_hex(0xD9E8FF);
+    const lv_color_t scrollInk = lv_color_hex(0x8FB5E6);
+#endif
+    lv_obj_t *infoPanel = lv_obj_create(parent);
+    s_nodesInfoPanel = infoPanel;
+    lv_obj_set_width(infoPanel, width);
+    if (growHeight) {
+        lv_obj_set_flex_grow(infoPanel, 1);
+    } else {
+        lv_obj_set_height(infoPanel, lv_pct(100));
+    }
+    lv_obj_add_flag(infoPanel, LV_OBJ_FLAG_SCROLLABLE);
+    setupVScroll(infoPanel);
+    lv_obj_set_scrollbar_mode(infoPanel, LV_SCROLLBAR_MODE_AUTO);
+    lv_obj_set_style_bg_opa(infoPanel, LV_OPA_TRANSP, 0);
+    lv_obj_set_style_border_width(infoPanel, 0, 0);
+    lv_obj_set_style_pad_all(infoPanel, 4, 0);
+    lv_obj_set_style_pad_row(infoPanel, 3, 0);
+    lv_obj_set_style_width(infoPanel, 2, LV_PART_SCROLLBAR);
+    lv_obj_set_style_bg_color(infoPanel, scrollInk, LV_PART_SCROLLBAR);
+    lv_obj_set_style_bg_opa(infoPanel, LV_OPA_70, LV_PART_SCROLLBAR);
+    lv_obj_set_style_radius(infoPanel, 2, LV_PART_SCROLLBAR);
+    lv_obj_set_flex_flow(infoPanel, LV_FLEX_FLOW_ROW_WRAP);
+    lv_obj_set_flex_align(infoPanel, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_START,
+                          LV_FLEX_ALIGN_START);
+    lv_obj_set_style_pad_column(infoPanel, 8, 0);
+
+    // Shown only when there is nothing selected; the sections replace it as soon
+    // as there is.
+    s_nodesDetail = lv_label_create(infoPanel);
+    lv_obj_set_width(s_nodesDetail, lv_pct(100));
+    lv_obj_set_style_text_font(s_nodesDetail, font, 0);
+    lv_obj_set_style_text_color(s_nodesDetail, valueInk, 0);
+    lv_label_set_long_mode(s_nodesDetail, LV_LABEL_LONG_WRAP);
+    lv_label_set_text(s_nodesDetail, "");
+
+    // Section width: the Pager has room for two sections abreast, which is what
+    // its old two-column detail split was for. Everywhere else they stack, and
+    // the panel scrolls.
+#if defined(DEVICE_TLORA_PAGER_TFT)
+    const int32_t nodesSectionW = lv_pct(48);
+#else
+    const int32_t nodesSectionW = lv_pct(100);
+#endif
+    // Measured from the font rather than hardcoded per board: the widest field
+    // name decides the column, so changing the font above can never again leave
+    // the names clipped or the values starting halfway across the panel. The
+    // value column takes whatever is left.
+    int nodesKeyColW;
+    {
+        lv_point_t keySz;
+        lv_text_get_size(&keySz, TR("Last heard"), font, 0, 0,
+                         LV_COORD_MAX, LV_TEXT_FLAG_NONE);
+        nodesKeyColW = keySz.x + 6;   // + the gutter to the values
+    }
+    static const char *kNodesSectionTitles[NODES_SEC_COUNT] = {
+        TR("Identity"), TR("Link"), TR("Position"), TR("Telemetry")
+    };
+    for (int i = 0; i < NODES_SEC_COUNT; i++) {
+        lv_obj_t *box = lv_obj_create(infoPanel);
+        s_nodesSectionBox[i] = box;
+        lv_obj_set_width(box, nodesSectionW);
+        lv_obj_set_height(box, LV_SIZE_CONTENT);
+        lv_obj_clear_flag(box, LV_OBJ_FLAG_SCROLLABLE);
+        lv_obj_set_style_bg_opa(box, LV_OPA_TRANSP, 0);
+        lv_obj_set_style_border_width(box, 0, 0);
+        lv_obj_set_style_pad_all(box, 0, 0);
+        lv_obj_set_style_pad_top(box, (i == 0) ? 0 : 2, 0);
+        lv_obj_set_style_pad_row(box, 1, 0);
+        lv_obj_set_flex_flow(box, LV_FLEX_FLOW_COLUMN);
+        lv_obj_set_flex_align(box, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_START,
+                              LV_FLEX_ALIGN_START);
+
+        lv_obj_t *hdr = lv_label_create(box);
+        lv_obj_set_width(hdr, lv_pct(100));
+        lv_obj_set_style_text_font(hdr, font, 0);
+        // Amber against the pale-blue body, the same split Discovery and Beacons
+        // use for a heading.
+    #if defined(DEVICE_TDECK_PRO)
+        lv_obj_set_style_text_color(hdr, lv_color_make(0, 0, 0), 0);
+    #else
+        lv_obj_set_style_text_color(hdr, lv_color_hex(0xFFC98A), 0);
+    #endif
+        lv_obj_set_style_border_color(hdr, lv_color_hex(0x335D9D), 0);
+        lv_obj_set_style_border_side(hdr, LV_BORDER_SIDE_BOTTOM, 0);
+        lv_obj_set_style_border_width(hdr, 1, 0);
+        lv_label_set_long_mode(hdr, LV_LABEL_LONG_CLIP);
+        lv_label_set_text(hdr, kNodesSectionTitles[i]);
+
+        lv_obj_t *table = lv_obj_create(box);
+        lv_obj_set_width(table, lv_pct(100));
+        lv_obj_set_height(table, LV_SIZE_CONTENT);
+        lv_obj_clear_flag(table, LV_OBJ_FLAG_SCROLLABLE);
+        lv_obj_set_style_bg_opa(table, LV_OPA_TRANSP, 0);
+        lv_obj_set_style_border_width(table, 0, 0);
+        lv_obj_set_style_pad_all(table, 0, 0);
+        lv_obj_set_style_pad_column(table, 4, 0);
+        lv_obj_set_flex_flow(table, LV_FLEX_FLOW_ROW);
+        lv_obj_set_flex_align(table, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_START,
+                              LV_FLEX_ALIGN_START);
+
+        s_nodesSectionKeys[i] = lv_label_create(table);
+        lv_obj_set_width(s_nodesSectionKeys[i], nodesKeyColW);
+        lv_obj_set_style_text_font(s_nodesSectionKeys[i], font, 0);
+    #if defined(DEVICE_TDECK_PRO)
+        lv_obj_set_style_text_color(s_nodesSectionKeys[i], lv_color_make(0, 0, 0), 0);
+    #else
+        lv_obj_set_style_text_color(s_nodesSectionKeys[i], lv_color_hex(0x9FBEEA), 0);
+    #endif
+        lv_label_set_long_mode(s_nodesSectionKeys[i], LV_LABEL_LONG_CLIP);
+        lv_label_set_text(s_nodesSectionKeys[i], "");
+
+        // LONG_DOT, never WRAP: a wrapped value would take two lines where its
+        // field name takes one, and every row below it would stop lining up.
+        s_nodesSectionVals[i] = lv_label_create(table);
+        lv_obj_set_flex_grow(s_nodesSectionVals[i], 1);
+        lv_obj_set_style_text_font(s_nodesSectionVals[i], font, 0);
+        lv_obj_set_style_text_color(s_nodesSectionVals[i], valueInk, 0);
+        lv_label_set_long_mode(s_nodesSectionVals[i], LV_LABEL_LONG_DOT);
+        lv_label_set_text(s_nodesSectionVals[i], "");
+    }
+    return infoPanel;
+}
+#endif  // NODES_LAYOUT_WIDE
+
+#if NODES_INFO_AS_MODAL
+static void closeNodesInfoDlg() {
+    if (!s_nodesInfoDlg) return;
+    lvObjDeleteSafe(s_nodesInfoDlg);
+    // The sections went with it. refreshNodesDetails() finds the placeholder
+    // gone and does nothing until the modal is opened again.
+    s_nodesInfoPanel = nullptr;
+    s_nodesDetail = nullptr;
+    memset(s_nodesSectionBox, 0, sizeof(s_nodesSectionBox));
+    memset(s_nodesSectionKeys, 0, sizeof(s_nodesSectionKeys));
+    memset(s_nodesSectionVals, 0, sizeof(s_nodesSectionVals));
+}
+
+// Node Actions -> Node Info: the Nodes screen's detail sections for the node
+// under the list cursor, in a modal the full height of the panel. The sections
+// are the same objects the screen would have built (buildNodesInfoPanel()), so
+// refreshNodesDetails() fills them, and keeps them current, unchanged.
+static void openNodesInfoDlg() {
+    if (!s_rootScreen || !s_nodesModal || s_nodesInfoDlg) return;
+    // Archived rows too: refreshNodesDetails() gives them their record, and this
+    // is the only place on this board it is shown (see the Enter handler).
+    const NodeEntry *live = currentNodesSelection();
+    const ArchivedNode *archived = live ? nullptr : currentNodesArchivedSelection();
+    if (!live && !archived) return;
+    const uint32_t nodeId = live ? live->nodeId : archived->nodeId;
+    {
+        lv_mem_monitor_t mem;
+        lv_mem_monitor(&mem);
+        if (mem.free_biggest_size < 8192) {
+            logLvglMemDiag("openNodesInfoDlg aborted (low LVGL mem)");
+            return;
+        }
+    }
+
+    const int modalW = lv_disp_get_hor_res(NULL) - 8;
+    const int modalH = lv_disp_get_ver_res(NULL) - 8;
+    const lv_color_t ink = lv_color_make(0, 0, 0);
+
+    s_nodesInfoDlg = lv_obj_create(s_rootScreen);
+    lv_obj_set_size(s_nodesInfoDlg, modalW, modalH);
+    lv_obj_align(s_nodesInfoDlg, LV_ALIGN_CENTER, 0, 0);
+    lv_obj_clear_flag(s_nodesInfoDlg, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_set_style_bg_color(s_nodesInfoDlg, lv_color_make(255, 255, 255), 0);
+    lv_obj_set_style_bg_opa(s_nodesInfoDlg, LV_OPA_COVER, 0);
+    lv_obj_set_style_border_color(s_nodesInfoDlg, ink, 0);
+    lv_obj_set_style_border_width(s_nodesInfoDlg, 1, 0);
+    lv_obj_set_style_radius(s_nodesInfoDlg, 0, 0);
+    lv_obj_set_style_pad_all(s_nodesInfoDlg, 4, 0);
+    lv_obj_set_style_pad_row(s_nodesInfoDlg, 3, 0);
+    lv_obj_set_flex_flow(s_nodesInfoDlg, LV_FLEX_FLOW_COLUMN);
+    lv_obj_set_flex_align(s_nodesInfoDlg, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_START,
+                          LV_FLEX_ALIGN_START);
+    lv_obj_move_foreground(s_nodesInfoDlg);
+
+    lv_obj_t *title = lv_label_create(s_nodesInfoDlg);
+    lv_obj_set_width(title, lv_pct(100));
+    lv_obj_set_style_text_font(title, emojiFont(&lv_font_montserrat_14), 0);
+    lv_obj_set_style_text_color(title, ink, 0);
+    lv_obj_set_style_border_color(title, ink, 0);
+    lv_obj_set_style_border_side(title, LV_BORDER_SIDE_BOTTOM, 0);
+    lv_obj_set_style_border_width(title, 1, 0);
+    lv_obj_set_style_pad_bottom(title, 2, 0);
+    lv_label_set_long_mode(title, LV_LABEL_LONG_DOT);
+    {
+        char who[48];
+        char titleBuf[80];
+        if (archived) {
+            utf8util::copyTruncate(who, sizeof(who),
+                                   archived->longName[0] ? archived->longName
+                                                         : archived->shortName);
+            if (!who[0]) snprintf(who, sizeof(who), "!%08lX", (unsigned long)nodeId);
+        } else {
+            nodesActionTitleLabel(nodeId, who, sizeof(who));
+        }
+        snprintf(titleBuf, sizeof(titleBuf), "%s: %s", TR("Node Info"), who);
+        setLabelTextEmojiSafe(title, titleBuf);
+    }
+
+    // Content width less the modal's padding and border; the panel grows into
+    // the height between the title and the hint, and scrolls.
+    lv_obj_t *panel = buildNodesInfoPanel(s_nodesInfoDlg, modalW - 10,
+                                          /*growHeight=*/true,
+                                          emojiFont(&lv_font_montserrat_12));
+
+    // A tap anywhere on it closes it; a drag scrolls the panel instead, and
+    // LVGL sends no click for a press that became a scroll.
+    auto onTap = [](lv_event_t *ev) { LV_UNUSED(ev); closeNodesInfoDlg(); };
+    lv_obj_add_event_cb(s_nodesInfoDlg, onTap, LV_EVENT_CLICKED, nullptr);
+    lv_obj_add_event_cb(panel, onTap, LV_EVENT_CLICKED, nullptr);
+
+    lv_obj_t *hint = lv_label_create(s_nodesInfoDlg);
+    lv_obj_set_width(hint, lv_pct(100));
+    lv_obj_set_style_text_font(hint, &lv_font_montserrat_10, 0);
+    lv_obj_set_style_text_color(hint, ink, 0);
+    lv_obj_set_style_text_align(hint, LV_TEXT_ALIGN_CENTER, 0);
+    lv_label_set_text_fmt(hint, TR("J/K = Scroll   %s / Tap = Close"), modalCloseKeyLabel());
+
+    refreshNodesDetails();
+}
+#endif  // NODES_INFO_AS_MODAL
+
 static void openNodesModal() {
     if (s_nodesModal && !lvObjAlive(s_nodesModal)) {
         s_nodesModal = nullptr;
@@ -41551,8 +41880,9 @@ static void openNodesModal() {
     lv_obj_t *listPanel = lv_obj_create(content);
     s_nodesListPanel = listPanel;
     lv_obj_set_width(listPanel, listW);
-#if defined(DEVICE_TDECK_PRO)
-    lv_obj_set_height(listPanel, 92);
+#if NODES_INFO_AS_MODAL
+    // Nothing under it: the details are the Node Info action's modal.
+    lv_obj_set_flex_grow(listPanel, 1);
 #else
     // Stacked (P4 portrait): the list takes the top 45% and the details grow
     // into the rest; side by side it runs the full height.
@@ -41591,127 +41921,13 @@ static void openNodesModal() {
     lv_obj_set_flex_flow(s_nodesList, LV_FLEX_FLOW_COLUMN);
     lv_obj_set_flex_align(s_nodesList, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_START);
 
+#if !NODES_INFO_AS_MODAL
     buildPaneRule(content, nodesStacked);
-
-    // Detail panel, on the right.
-    lv_obj_t *infoPanel = lv_obj_create(content);
-    s_nodesInfoPanel = infoPanel;
-    lv_obj_set_width(infoPanel, detailW);
-    if (nodesStacked) {
-        lv_obj_set_flex_grow(infoPanel, 1);
-    } else {
-        lv_obj_set_height(infoPanel, lv_pct(100));
-    }
-    lv_obj_add_flag(infoPanel, LV_OBJ_FLAG_SCROLLABLE);
-    setupVScroll(infoPanel);
-    lv_obj_set_scrollbar_mode(infoPanel, LV_SCROLLBAR_MODE_AUTO);
-    lv_obj_set_style_bg_opa(infoPanel, LV_OPA_TRANSP, 0);
-    lv_obj_set_style_border_width(infoPanel, 0, 0);
-    lv_obj_set_style_pad_all(infoPanel, 4, 0);
-    lv_obj_set_style_pad_row(infoPanel, 3, 0);
-    lv_obj_set_style_width(infoPanel, 2, LV_PART_SCROLLBAR);
-    lv_obj_set_style_bg_color(infoPanel, lv_color_hex(0x8FB5E6), LV_PART_SCROLLBAR);
-    lv_obj_set_style_bg_opa(infoPanel, LV_OPA_70, LV_PART_SCROLLBAR);
-    lv_obj_set_style_radius(infoPanel, 2, LV_PART_SCROLLBAR);
-    lv_obj_set_flex_flow(infoPanel, LV_FLEX_FLOW_ROW_WRAP);
-    lv_obj_set_flex_align(infoPanel, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_START,
-                          LV_FLEX_ALIGN_START);
-    lv_obj_set_style_pad_column(infoPanel, 8, 0);
-
-    // Shown only when there is nothing selected; the sections replace it as soon
-    // as there is.
-    s_nodesDetail = lv_label_create(infoPanel);
-    lv_obj_set_width(s_nodesDetail, lv_pct(100));
-    lv_obj_set_style_text_font(s_nodesDetail, nodesDetailFont, 0);
-    lv_obj_set_style_text_color(s_nodesDetail, lv_color_hex(0xD9E8FF), 0);
-    lv_label_set_long_mode(s_nodesDetail, LV_LABEL_LONG_WRAP);
-    lv_label_set_text(s_nodesDetail, "");
-
-    // Section width: the Pager has room for two sections abreast, which is what
-    // its old two-column detail split was for. Everywhere else they stack, and
-    // the panel scrolls.
-#if defined(DEVICE_TLORA_PAGER_TFT)
-    const int32_t nodesSectionW = lv_pct(48);
+    buildNodesInfoPanel(content, detailW, nodesStacked, nodesDetailFont);
 #else
-    const int32_t nodesSectionW = lv_pct(100);
+    LV_UNUSED(detailW);
+    LV_UNUSED(nodesDetailFont);
 #endif
-    // Measured from the font rather than hardcoded per board: the widest field
-    // name decides the column, so changing the font above can never again leave
-    // the names clipped or the values starting halfway across the panel. The
-    // value column takes whatever is left.
-    int nodesKeyColW;
-    {
-        lv_point_t keySz;
-        lv_text_get_size(&keySz, TR("Last heard"), nodesDetailFont, 0, 0,
-                         LV_COORD_MAX, LV_TEXT_FLAG_NONE);
-        nodesKeyColW = keySz.x + 6;   // + the gutter to the values
-    }
-    static const char *kNodesSectionTitles[NODES_SEC_COUNT] = {
-        TR("Identity"), TR("Link"), TR("Position"), TR("Telemetry")
-    };
-    for (int i = 0; i < NODES_SEC_COUNT; i++) {
-        lv_obj_t *box = lv_obj_create(infoPanel);
-        s_nodesSectionBox[i] = box;
-        lv_obj_set_width(box, nodesSectionW);
-        lv_obj_set_height(box, LV_SIZE_CONTENT);
-        lv_obj_clear_flag(box, LV_OBJ_FLAG_SCROLLABLE);
-        lv_obj_set_style_bg_opa(box, LV_OPA_TRANSP, 0);
-        lv_obj_set_style_border_width(box, 0, 0);
-        lv_obj_set_style_pad_all(box, 0, 0);
-        lv_obj_set_style_pad_top(box, (i == 0) ? 0 : 2, 0);
-        lv_obj_set_style_pad_row(box, 1, 0);
-        lv_obj_set_flex_flow(box, LV_FLEX_FLOW_COLUMN);
-        lv_obj_set_flex_align(box, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_START,
-                              LV_FLEX_ALIGN_START);
-
-        lv_obj_t *hdr = lv_label_create(box);
-        lv_obj_set_width(hdr, lv_pct(100));
-        lv_obj_set_style_text_font(hdr, nodesDetailFont, 0);
-        // Amber against the pale-blue body, the same split Discovery and Beacons
-        // use for a heading.
-    #if defined(DEVICE_TDECK_PRO)
-        lv_obj_set_style_text_color(hdr, lv_color_make(0, 0, 0), 0);
-    #else
-        lv_obj_set_style_text_color(hdr, lv_color_hex(0xFFC98A), 0);
-    #endif
-        lv_obj_set_style_border_color(hdr, lv_color_hex(0x335D9D), 0);
-        lv_obj_set_style_border_side(hdr, LV_BORDER_SIDE_BOTTOM, 0);
-        lv_obj_set_style_border_width(hdr, 1, 0);
-        lv_label_set_long_mode(hdr, LV_LABEL_LONG_CLIP);
-        lv_label_set_text(hdr, kNodesSectionTitles[i]);
-
-        lv_obj_t *table = lv_obj_create(box);
-        lv_obj_set_width(table, lv_pct(100));
-        lv_obj_set_height(table, LV_SIZE_CONTENT);
-        lv_obj_clear_flag(table, LV_OBJ_FLAG_SCROLLABLE);
-        lv_obj_set_style_bg_opa(table, LV_OPA_TRANSP, 0);
-        lv_obj_set_style_border_width(table, 0, 0);
-        lv_obj_set_style_pad_all(table, 0, 0);
-        lv_obj_set_style_pad_column(table, 4, 0);
-        lv_obj_set_flex_flow(table, LV_FLEX_FLOW_ROW);
-        lv_obj_set_flex_align(table, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_START,
-                              LV_FLEX_ALIGN_START);
-
-        s_nodesSectionKeys[i] = lv_label_create(table);
-        lv_obj_set_width(s_nodesSectionKeys[i], nodesKeyColW);
-        lv_obj_set_style_text_font(s_nodesSectionKeys[i], nodesDetailFont, 0);
-    #if defined(DEVICE_TDECK_PRO)
-        lv_obj_set_style_text_color(s_nodesSectionKeys[i], lv_color_make(0, 0, 0), 0);
-    #else
-        lv_obj_set_style_text_color(s_nodesSectionKeys[i], lv_color_hex(0x9FBEEA), 0);
-    #endif
-        lv_label_set_long_mode(s_nodesSectionKeys[i], LV_LABEL_LONG_CLIP);
-        lv_label_set_text(s_nodesSectionKeys[i], "");
-
-        // LONG_DOT, never WRAP: a wrapped value would take two lines where its
-        // field name takes one, and every row below it would stop lining up.
-        s_nodesSectionVals[i] = lv_label_create(table);
-        lv_obj_set_flex_grow(s_nodesSectionVals[i], 1);
-        lv_obj_set_style_text_font(s_nodesSectionVals[i], nodesDetailFont, 0);
-        lv_obj_set_style_text_color(s_nodesSectionVals[i], lv_color_hex(0xD9E8FF), 0);
-        lv_label_set_long_mode(s_nodesSectionVals[i], LV_LABEL_LONG_DOT);
-        lv_label_set_text(s_nodesSectionVals[i], "");
-    }
 #else
     // Cardputer: the original arrangement — detail panel on the left taking most
     // of the width, narrow node list on the right.
@@ -48293,6 +48509,21 @@ static void pumpKeyboardInput() {
         }
 #endif
 
+#if NODES_INFO_AS_MODAL
+        // Over the Nodes screen, which would otherwise take these keys and move
+        // the cursor off the node this is describing.
+        if (s_nodesInfoDlg) {
+            if (k == KEY_SCROLL_UP) { scrollListClamped(s_nodesInfoPanel, 18);  continue; }
+            if (k == KEY_SCROLL_DN) { scrollListClamped(s_nodesInfoPanel, -18); continue; }
+            if (k == KEY_PAGE_UP)   { scrollListClamped(s_nodesInfoPanel, 60);  continue; }
+            if (k == KEY_PAGE_DN)   { scrollListClamped(s_nodesInfoPanel, -60); continue; }
+            if (isModalCloseKey(k) || k == KEY_ENTER || k == 'n' || k == 'N') {
+                closeNodesInfoDlg();
+            }
+            continue;
+        }
+#endif
+
         if (s_nodesActionModal && !s_composeModal) {
             if (isModalCloseKey(k)) {
                 closeNodesActionMenu();
@@ -48443,6 +48674,15 @@ static void pumpKeyboardInput() {
                     nodesFocusedButtonActivate();
                     continue;
                 }
+#if NODES_INFO_AS_MODAL
+                // No details pane to hand the keys to: Enter opens the node's
+                // actions, Node Info among them, as A does. An archived row's
+                // only action is Restore, so there Enter shows its record and
+                // A stays the way to restore it.
+                if (currentNodesArchivedSelection()) openNodesInfoDlg();
+                else                                 openNodesActionMenu();
+                continue;
+#endif
                 // Enter hands the keys to the details; the Pager's wheel click
                 // toggles, matching how it swaps panels on Config and DM.
                 const bool wantFocus = (k == KEY_ROLLER) ? !s_nodesInfoFocused : true;
