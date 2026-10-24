@@ -3256,8 +3256,8 @@ static void appendCommunityPresetPicker(String &html) {
     if (area) html += "</optgroup>";
     html += "</select></label>"
             "<p class='gps-hint' id='cp-info'>Sets the region, radio preset and every channel "
-            "the way a local mesh publishes them, then reboots. Your current channels "
-            "are replaced.</p>"
+            "the way a local mesh publishes them, clears messages and non-favorite nodes, "
+            "then reboots. Your current channels are replaced.</p>"
             "<button type='button' id='cp-apply' disabled onclick='cpApply()'>"
             "Apply Community Preset</button>";
     // One entry per preset: label, region, radio, channel names, notes, url.
@@ -3293,13 +3293,15 @@ static void appendCommunityPresetPicker(String &html) {
             "function cpShow(){var id=document.getElementById('sel-cp').value,e=document.getElementById('cp-info'),"
             "b=document.getElementById('cp-apply'),p=CP[id];b.disabled=!p;"
             "if(!p){e.textContent='Sets the region, radio preset and every channel the way a local mesh "
-            "publishes them, then reboots. Your current channels are replaced.';return;}"
+            "publishes them, clears messages and non-favorite nodes, then reboots. Your current "
+            "channels are replaced.';return;}"
             "e.innerHTML='Region <b>'+cpEsc(p.r)+'</b>, radio <b>'+cpEsc(p.p)+'</b>, channels: '"
             "+cpEsc(p.c.join(', '))+(p.n?'<br>'+cpEsc(p.n):'')"
             "+(p.u?'<br><a href=\"'+cpEsc(p.u)+'\" target=\"_blank\" rel=\"noopener\">Community page</a>':'');}"
             "function cpApply(){var id=document.getElementById('sel-cp').value,p=CP[id];if(!p)return;"
             "if(!confirm('Apply '+p.l+'?\\n\\nRegion: '+p.r+'\\nRadio: '+p.p+'\\nChannels: replaced with '"
-            "+p.c.length+'\\n\\nYour current channels are overwritten and the device reboots. Continue?'))return;"
+            "+p.c.length+'\\n\\nYour current channels are overwritten, all messages and non-favorite "
+            "nodes are cleared, and the device reboots. Continue?'))return;"
             "var f=document.createElement('form');f.method='POST';f.action='/community-preset';"
             "var i=document.createElement('input');i.type='hidden';i.name='id';i.value=id;"
             "f.appendChild(i);document.body.appendChild(f);f.submit();}"

@@ -22834,7 +22834,7 @@ static int       s_cfgCommunityCount = 0;
 static int       s_cfgCommunitySelection = 0;
 // The confirmation names everything that changes plus the community's own
 // notes, which run to a few hundred bytes.
-static char      s_cfgCommunityConfirm[512] = {};
+static char      s_cfgCommunityConfirm[768] = {};
 
 static void closeCfgCommunityModal() {
     if (lvObjValid(s_cfgCommunityBackdrop)) lv_obj_del(s_cfgCommunityBackdrop);
@@ -22992,7 +22992,8 @@ static void openCfgCommunityModal() {
     lv_obj_set_style_text_align(warn, LV_TEXT_ALIGN_CENTER, 0);
     lv_label_set_long_mode(warn, LV_LABEL_LONG_WRAP);
     lv_label_set_text(warn, TR("Sets region, radio and channels as a local mesh "
-                            "publishes them. Asks first, then reboots."));
+                            "publishes them, and clears messages and nodes. "
+                            "Asks first, then reboots."));
 
     lv_obj_t *list = lv_obj_create(s_cfgCommunityModal);
     lv_obj_remove_style_all(list);
@@ -44433,9 +44434,10 @@ static void openCfgConfirmModal(int actionId, const char *text,
         }
     }
 
-    // Sized for the SD scan's dialog, which names the files it is about to
-    // delete. Everything else here is one row label and fits many times over.
-    char actionText[512];
+    // Sized for the community preset confirmation, a summary plus the
+    // community's notes; the SD scan's, which names the files it is about to
+    // delete, is next. Everything else here is one row label.
+    char actionText[768];
     const bool ownText = (text && text[0]);
     if (ownText) {
         strncpy(actionText, text, sizeof(actionText) - 1);
@@ -60825,7 +60827,8 @@ static void communityPresetSummary(int idx, char *out, size_t outLen) {
     }
     int n = snprintf(out, outLen,
                      TR("Apply %s?\n\nRegion: %s\nRadio: %s\nChannels: replaced with %u\n\n"
-                        "Your channels are overwritten. The device reboots."),
+                        "Your channels are overwritten, messages and non-favorite "
+                        "nodes are cleared, and the device reboots."),
                      cp.label, cp.region, radioText, (unsigned)cp.channelCount);
     if (cp.notes[0] && n > 0 && (size_t)n < outLen) {
         snprintf(out + n, outLen - n, "\n\n%s", cp.notes);
@@ -60892,6 +60895,16 @@ static const char *communityPresetApply(int idx) {
         ok = run(cmd);
     }
     if (ok) {
+        // A different mesh: what was heard on the old one is noise on the new
+        // one. Everything staged was accepted, so the commit below is what
+        // remains, and it reboots -- the same clears as Config's Clear
+        // Messages and Clear Nodes, which keeps favorites.
+        Channels.clearAllMessages(true);
+        DMs.clearAll(true);
+        clearSelectedMsgContext();
+        const int removed = Nodes.clearNonFavorites();
+        Serial.printf("[cfg] community preset: messages cleared, %d nodes cleared, %d favorites kept\n",
+                      removed, Nodes.count());
         // Reboots on success. Whatever it prints first goes to `cap`, which is
         // fine: nobody is waiting on a USB answer to this.
         ok = run("commit");

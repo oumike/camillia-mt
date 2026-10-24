@@ -61,7 +61,8 @@ publishes them. The flasher's logos are not included.
 
 Choosing one shows what it changes and the community's own advice (MQTT broker,
 hop limit and so on, which you set by hand), and asks before applying. Applying
-**replaces all of your channels** and reboots. Setups that need more channels
+**replaces all of your channels**, clears all messages and every node that is not
+a favorite (the same as Clear Messages and Clear Nodes), and reboots. Setups that need more channels
 than the device has (ten on the Cardputer, which has eight) are not offered.
 
 Your **long name** is capped at 24 bytes here, matching what Meshtastic 2.8
