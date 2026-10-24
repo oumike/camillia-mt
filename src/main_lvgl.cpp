@@ -31770,7 +31770,11 @@ static void openNodesActionMenuFor(uint32_t nodeId, bool msgMode, uint32_t packe
         TR_NOOP("Sen(d) DM"),
         selectedIsFavorite ? TR_NOOP("Un(f)avorite") : TR_NOOP("(F)avorite"),
         TR_NOOP("Re(q)uest Node"),
+#if defined(DEVICE_TDECK_PRO)
+        TR_NOOP("(P)osition"),
+#else
         TR_NOOP("Request (P)osition"),
+#endif
         selectedIsIgnored ? TR_NOOP("Uni(g)nore") : TR_NOOP("I(g)nore"),
 #if HAS_NODE_LOCATE
         TR_NOOP("(L)ocate"),
