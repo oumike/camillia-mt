@@ -1,0 +1,54 @@
+<header class='app-hd'><span class='nm'>CAML</span><span class='ln'>Camillia T-Deck</span><span class='chips'><button type='button' class='chip key-chip' id='pubkey-chip' title='Copy the public key of this node'>KEY a3F9xQ2b1L&hellip;</button><span class='chip chip-good'>BAT <b>87%</b></span><span class='chip'>GPS <b>3D</b></span><a class='logout' href='#'>Logout</a></span></header>
+<div class='app'>
+<nav class='app-rail' aria-label='Sections'><a data-tab='config' href='#config'>Config</a><div id='rail-secs'></div><a data-tab='live' href='#live'>Live</a><a data-tab='chat' href='#chat'>Chat</a><a data-tab='map' href='#map'>Nodes</a><a data-tab='utils' href='#utils'>Utilities</a><a data-tab='remote' href='#remote'>Remote</a></nav>
+<main class='app-main'>
+<div class='secbar'><b id='sec-current'>Node Identity</b><button type='button' class='btn-2' onclick="appOpenSheet('sheet-secs')">Sections &#9662;</button></div>
+<div class='tab-panel active' id='tab-config'>
+<form id='cfg-form' method='POST' action='/save' onsubmit="return confirm('Saving may restart the device to apply these changes. Continue?')">
+<section class='cfg-sec' id='sec-identity'><h2>Node Identity</h2><p class='sec-desc'>How this node appears to others on the mesh.</p>
+<label>Long Name (max 24 bytes)<input name='long' type='text' maxlength='24' value='Camillia T-Deck'></label>
+<label>Short Name (max 4 chars)<input name='short' type='text' maxlength='4' value='CAML'></label>
+<input type='hidden' name='nodeid_present' value='1'>
+<label><input type='checkbox' name='nodeid_pubkey' value='1'> Derive node ID from public key (Meshtastic 2.8 style)</label>
+<p class='hint'>Changes this node's address on the mesh. Reboot to apply.</p>
+<label>Signed packets<select name='sig_policy'><option value='0' selected>Compatible</option><option value='1'>Balanced</option><option value='2'>Strict</option></select></label>
+</section>
+<section class='cfg-sec' id='sec-device'><h2>Device</h2><p class='sec-desc'>Role, rebroadcasting and clock.</p>
+<div class='row2'><label>Role<select name='role'><option value='0' selected>CLIENT</option><option value='1'>CLIENT_MUTE</option></select></label><label>Rebroadcast<select name='rebroadcast'><option>ALL</option><option>LOCAL_ONLY</option></select></label></div>
+<label>Brightness<input name='brightness' type='range' min='0' max='255' value='180'></label>
+</section>
+<section class='cfg-sec' id='sec-lora'><h2>LoRa Radio</h2><p class='sec-desc'>Must match the other nodes you want to hear.</p>
+<div class='row2'><label>Region<select name='region' id='sel-rgn'><option value='EU_868'>EU_868</option><option value='US'>US</option></select></label><label>Modem Preset<select id='sel-pst' name='modem_preset'><option>LongFast</option><option>MediumFast</option></select></label></div>
+<script>document.getElementById('sel-rgn').value='US';</script>
+<label><input type='checkbox' name='tx_enabled' value='1' checked> Transmit</label>
+</section>
+<section class='cfg-sec' id='sec-channels'><h2>Channels</h2><p class='sec-desc'>Up to 8 channels; the first is primary.</p>
+<div id='ch-list'><div class='ch-row'><div class='ch-hd'><span class='ch-no'>Channel 0</span><button type='button' class='ch-btn' disabled>&#9650;</button><button type='button' class='ch-btn' disabled>&#9660;</button><button type='button' class='ch-clear'>Clear</button></div>
+<div class='ch-fields'><label>Role<select name='ch0_role'><option>PRIMARY</option></select></label><label>Name<input type='text' name='ch0_name' value='LongFast'></label><label>Key<input type='text' name='ch0_key' value='AQ=='></label></div>
+<div class='ch-tog'><label><input type='checkbox' name='ch0_up' value='1'>Uplink</label><label><input type='checkbox' name='ch0_down' value='1'>Downlink</label></div></div></div>
+<button type='button' class='btn-2' id='add-ch' onclick="document.getElementById('ch-list').insertAdjacentHTML('beforeend','<div class=\'ch-row\'><div class=\'ch-fields\'><label>Name<input type=\'text\' name=\'ch1_name\' value=\'\'></label></div></div>')">Add channel row (preview test)</button>
+</section>
+<section class='cfg-sec' id='sec-modules'><h2>Modules</h2><p class='sec-desc'>Telemetry, beacons and other optional features.</p>
+<h3 class='cfg-sub'>Telemetry</h3>
+<label>Interval (minutes)<input type='number' name='tlm_int' value='30'></label>
+</section>
+</form>
+</div>
+<div class='tab-panel' id='tab-utils'>
+<section class='cfg-sec' id='sec-u-diag'><h2>Diagnostics</h2>
+<p class='notice'>Saved. The device is restarting.</p>
+<button type='button' class='btn'>Send node info</button><button type='button' class='btn-2'>Refresh</button><button type='button' class='btn-danger'>Factory reset</button>
+<p class='notice-err'>Chat is paused while web config is on.</p>
+</section>
+</div>
+<div class='tab-panel' id='tab-live'><h3>Live RX/TX</h3><div class='live-wrap'><div class='live-feed'><div class='live-line live-rx-text'>RX text !a3f9 &rarr; LongFast "hello"</div><div class='live-line live-tx-ack'>TX ack !a3f9</div></div></div></div>
+<div class='tab-panel' id='tab-chat'><h3>Chat</h3></div>
+<div class='tab-panel' id='tab-map'><h3>Nodes Seen</h3></div>
+<div class='tab-panel' id='tab-remote'><h3>Remote</h3></div>
+</main></div>
+<nav class='tabbar' aria-label='Tabs'><a data-tab='config' href='#config'><svg viewBox='0 0 24 24'><circle cx='12' cy='12' r='3'/><path d='M12 2v3M12 19v3M2 12h3M19 12h3M4.9 4.9l2.1 2.1M17 17l2.1 2.1M4.9 19.1L7 17M17 7l2.1-2.1'/></svg>Config</a><a data-tab='live' href='#live'><svg viewBox='0 0 24 24'><path d='M3 12h4l3-7 4 14 3-7h4'/></svg>Live</a><a data-tab='chat' href='#chat'><svg viewBox='0 0 24 24'><path d='M4 5h16v11H9l-5 4z'/></svg>Chat</a><a data-tab='map' href='#map'><svg viewBox='0 0 24 24'><circle cx='12' cy='12' r='8'/><circle cx='12' cy='12' r='2'/></svg>Nodes</a><button type='button' onclick="appOpenSheet('sheet-more')"><svg viewBox='0 0 24 24'><circle cx='5' cy='12' r='1.5'/><circle cx='12' cy='12' r='1.5'/><circle cx='19' cy='12' r='1.5'/></svg>More</button></nav>
+<div class='scrim' id='scrim'></div>
+<div class='sheet' id='sheet-secs'></div>
+<div class='sheet' id='sheet-more'><a data-tab='utils' href='#utils'>Utilities</a><a data-tab='remote' href='#remote'>Remote</a><a href='#'>Logout</a></div>
+<div class='savebar' id='savebar'><span id='save-count'></span><button type='button' class='btn-2' id='save-discard'>Discard</button><button type='submit' form='cfg-form' class='btn'>Save and restart</button></div>
+<script>function switchTab(t){appTab(t);}</script>
