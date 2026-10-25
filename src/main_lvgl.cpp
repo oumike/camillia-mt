@@ -5048,6 +5048,28 @@ static void applyUiThemePalette() {
     s_appliedUiMode = s_cfg.uiMode;
 }
 
+// web_config.h: the web page wears the palette derived above, so presets,
+// custom themes and the e-ink palette all come out as they look on screen.
+bool webCfgThemeColors(WebThemeColors *out) {
+    if (!out || s_appliedUiTheme == 0xFF) return false;   // not applied yet
+    out->bg          = s_ui.bgMain;
+    out->panel       = s_ui.panelBg;
+    out->panelAlt    = s_ui.panelAlt;
+    out->panelStrong = s_ui.panelStrong;
+    out->divider     = s_ui.divider;
+    out->dividerHi   = s_ui.dividerHi;
+    out->inputBg     = s_ui.inputBg;
+    out->accent      = s_ui.accent;
+    out->text        = s_ui.textMain;
+    out->textDim     = s_ui.textDim;
+    out->onAccent    = s_ui.textOnAccent;
+    out->good        = s_ui.battGood;
+    out->warn        = s_ui.battWarn;
+    out->bad         = s_ui.battBad;
+    out->isLight     = (s_cfg.uiMode == UI_MODE_LIGHT);
+    return true;
+}
+
 static inline lv_color_t lvColorFrom565(uint16_t c) {
     uint8_t r = (uint8_t)((((c >> 11) & 0x1F) * 255) / 31);
     uint8_t g = (uint8_t)((((c >> 5) & 0x3F) * 255) / 63);

@@ -11,6 +11,7 @@
 #include "admin_peers.h"
 #include "admin_client.h"   // the help text, which is the firmware's, not the page's
 #include "web_icon.h"
+#include "web_app_assets.h"   // kAppCss, kAppJs, kAppFontsLink
 #include "node_db.h"
 #include "wardrive_log.h"
 #include "channel_mgr.h"
@@ -644,181 +645,24 @@ static bool fetchLatestReleaseInfo(String &tagOut, String &urlOut, String &errOu
 // second HTML page on a second server and cannot reach this one's route.
 static const char kFavicon[] = CAMELLIA_FAVICON_SVG;
 
-static const char kHead[] =
+// The full page's head, in two halves around the device's theme colours:
+// kHeadOpen links the cached /app.css (web_app_assets.h) and sendFullHead()
+// writes the theme's :root block between them. The ?v= busts the cache once
+// per firmware version, since /app.css itself is cached for a year.
+static const char kHeadOpen[] =
     "<!DOCTYPE html><html><head>"
     "<meta charset='utf-8'>"
-    "<meta name='viewport' content='width=device-width,initial-scale=1'>"
+    "<meta name='viewport' content='width=device-width,initial-scale=1,viewport-fit=cover'>"
     "<title>Camillia for Meshtastic</title>"
     "<link rel='icon' type='image/svg+xml' href='/favicon.ico'>"
     "<link rel='stylesheet' href='https://unpkg.com/leaflet@1.9.4/dist/leaflet.css'>"
-    "<style>"
-        ":root{color-scheme:dark;--bg:#10141d;--panel:#1a2230;--panel-2:#232d3e;--line:#4a5b73;"
-        "--text:#f4f6fb;--text-dim:#b0b8c8;--accent:#d7869d;--accent-ink:#ffffff}"
-        "body{font-family:system-ui,-apple-system,Segoe UI,Roboto,sans-serif;max-width:620px;"
-        "margin:1.5em auto;padding:0 1em 2em;background:linear-gradient(180deg,var(--bg),var(--panel));"
-        "color:var(--text)}"
-        "h2{color:var(--accent);margin-bottom:.2em}"
-        "h3{color:var(--text-dim);margin:1.2em 0 .4em;border-bottom:1px solid var(--line);padding-bottom:.2em}"
-        "label{display:block;margin:.6em 0 .1em;font-size:.9em;color:var(--text)}"
-    "input[type=text],input[type=number],input[type=password],select"
-            "{width:100%;padding:.45em;box-sizing:border-box;border:1px solid var(--line);border-radius:5px;"
-            "background:var(--panel-2);color:var(--text)}"
-        "option{background:var(--panel-2);color:var(--text)}"
-        "input[readonly]{background:var(--panel);color:var(--text-dim)}"
-        "button{margin-top:1.2em;padding:.55em 1.8em;background:var(--accent);color:var(--accent-ink);"
-                     "border:none;border-radius:5px;cursor:pointer;font-size:1em;font-weight:600}"
-        ".msg{color:var(--accent);margin:.5em 0}"
-        ".err{color:#ff8d8d;margin:.5em 0}"
-        // Chooser modal (font size). Reused via the .chooser-* classes.
-        ".chooser-btn{width:100%;margin-top:.1em;padding:.45em;text-align:left;background:var(--panel-2);"
-             "color:var(--text);border:1px solid var(--line);border-radius:5px;cursor:pointer;font-size:.95em;"
-             "font-weight:600}"
-        ".modal-back{display:none;position:fixed;inset:0;background:rgba(0,0,0,.55);z-index:50;"
-             "align-items:center;justify-content:center}"
-        ".modal-back.open{display:flex}"
-        ".modal-card{background:var(--panel);border:1px solid var(--line);border-radius:10px;padding:1em;"
-             "width:min(90vw,320px);box-shadow:0 10px 30px rgba(0,0,0,.5)}"
-        ".modal-card h3{margin:.1em 0 .6em;border:none;color:var(--accent)}"
-        ".modal-opt{width:100%;margin:.35em 0;padding:.6em;background:var(--panel-2);color:var(--text);"
-             "border:1px solid var(--line);border-radius:6px;cursor:pointer;font-size:.95em;text-align:left}"
-        ".modal-opt.sel{border-color:var(--accent);background:var(--panel-2)}"
-        ".modal-opt b{display:block;font-weight:700}"
-        ".modal-opt span{display:block;font-size:.8em;color:var(--text-dim)}"
-        ".logout{float:right;font-size:.9em;color:var(--accent);text-decoration:none}"
-           ".tab-row{display:flex;align-items:center;gap:.6em;margin:1em 0 .4em;flex-wrap:wrap}"
-           ".tab-btns{display:flex;gap:.5em;flex-wrap:wrap}"
-           ".tab-metrics{margin-left:auto;display:flex;gap:.4em;align-items:center;flex-wrap:wrap}"
-           ".metric-chip{padding:.28em .62em;border-radius:999px;border:1px solid var(--line);"
-               "background:var(--panel-2);font-size:.78em;font-weight:700;line-height:1.2;white-space:nowrap}"
-           ".metric-good{color:#8ef2b8;border-color:#3e8f66}"
-           ".metric-warn{color:#ffd181;border-color:#a57a2d}"
-           ".metric-bad{color:#ff9f9f;border-color:#a75454}"
-           ".key-chip{cursor:pointer;font-family:ui-monospace,SFMono-Regular,Menlo,monospace;"
-               "color:var(--muted)}"
-           ".key-chip:hover{color:var(--text);border-color:var(--accent)}"
-           ".key-chip.copied{color:#8ef2b8;border-color:#3e8f66}"
-        ".tab-btn{margin:0;padding:.45em 1em;background:var(--panel-2);color:var(--text);"
-             "border:1px solid var(--line);border-radius:999px;cursor:pointer;font-size:.9em;font-weight:600}"
-        ".tab-btn.active{background:var(--accent);color:var(--accent-ink);border-color:var(--accent)}"
-        ".tab-panel{display:none}"
-        ".tab-panel.active{display:block}"
-        ".tab-pane-center{max-width:760px;margin:0 auto}"
-        "#tab-config form{max-width:760px;margin:0 auto}"
-        // Same 760px column and same left alignment as the config tab, so the
-        // section boxes and their contents line up when switching tabs. The
-        // per-element centering this replaced (auto margins on h3/p/form plus
-        // text-align:center on the pane) is all dropped rather than overridden —
-        // left is the default, so the overrides that fought it are dead weight.
-        "#tab-utils .tab-pane-center{max-width:760px}"
-        "#tab-utils form{max-width:520px;margin:.5em 0}"
-                ".remote-toggle{display:flex;align-items:center;gap:.55em;margin:.7em 0;color:var(--text)}"
-                ".remote-toggle input{width:auto;margin:0}"
-                ".remote-status{font-size:.82em;color:var(--text-dim);margin:.35em 0 .6em}"
-                ".remote-frame{display:block;width:100%;height:min(72vh,520px);border:1px solid var(--line);"
-                         "border-radius:6px;background:#000}"
-                ".remote-lock{display:flex;flex-wrap:wrap;align-items:center;gap:.5em;margin:.4em 0}"
-                ".remote-lock input{width:7.5em;font-size:1.2em;letter-spacing:.2em;text-align:center}"
-        ".map-wrap{margin-top:.6em;border:1px solid var(--line);border-radius:8px;background:var(--panel);padding:.5em}"
-        ".map-canvas{display:block;width:100%;height:320px;border-radius:6px;overflow:hidden;background:#08141f}"
-        ".map-controls{display:flex;gap:.45em;flex-wrap:wrap;margin:.15em 0 .45em}"
-        ".map-mini-btn{margin:0;padding:.35em .75em;background:var(--panel-2);color:var(--text);"
-             "border:1px solid var(--line);border-radius:999px;cursor:pointer;font-size:.82em;font-weight:600}"
-           ".map-mini-right{margin-left:auto}"
-        ".map-mini-btn.active{background:var(--accent);color:var(--accent-ink);border-color:var(--accent)}"
-        ".map-mini-btn:disabled{opacity:.6;cursor:default}"
-        ".map-legend{display:flex;justify-content:space-between;font-size:.8em;color:var(--text-dim);margin-top:.35em;gap:.5em}"
-        ".node-list{margin-top:.8em;display:grid;grid-template-columns:1fr;gap:.5em}"
-        ".node-card{border:1px solid var(--line);border-radius:8px;background:var(--panel);padding:.55em .7em}"
-        ".chat-feed{margin-top:.6em;height:360px;overflow:auto;border:1px solid var(--line);border-radius:8px;background:var(--bg);padding:.5em;display:flex;flex-direction:column;gap:.4em}"
-        ".chat-msg{border:1px solid var(--line);border-radius:8px;background:var(--panel);padding:.4em .55em;max-width:88%}"
-        ".chat-msg.mine{align-self:flex-end;background:var(--panel-2);border-color:var(--accent)}"
-        ".chat-body{font-size:.9em;white-space:pre-wrap;word-break:break-word}"
-        ".chat-actions{margin-top:.3em;display:flex;flex-wrap:wrap;gap:.25em;align-items:center}"
-        ".chat-tap{margin:0;padding:.1em .4em;font-size:.95em;line-height:1.2;background:var(--panel-2);color:var(--text);border:1px solid var(--line);border-radius:999px;cursor:pointer}"
-        ".chat-mini{margin:0;padding:.1em .5em;font-size:.8em;background:var(--panel-2);color:var(--text);border:1px solid var(--line);border-radius:6px;cursor:pointer}"
-        ".chat-reply{margin-top:.5em;display:flex;align-items:center;gap:.5em;font-size:.82em;color:var(--text-dim);border-left:3px solid var(--accent);padding:.2em .5em;background:var(--panel)}"
-        ".chat-reply span{flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}"
-        ".chat-compose{margin-top:.5em;display:flex;flex-direction:column;gap:.45em}"
-        ".chat-compose textarea{width:100%;min-height:4.8em;resize:vertical;font:inherit;line-height:1.35}"
-        ".chat-compose-foot{display:flex;align-items:center;gap:.5em}"
-        ".chat-char-count{font-size:.78em;color:var(--text-dim);margin-right:auto}"
-        ".chat-compose button{margin:0}"
-        ".node-head{display:flex;align-items:flex-start;justify-content:space-between;gap:.6em}"
-        ".node-title{font-weight:700;color:var(--accent);margin-bottom:.2em}"
-        ".fav-tag{margin-left:.4em;font-weight:600;font-size:.78em;color:var(--text-dim)}"
-        ".fav-btn{flex:0 0 auto;white-space:nowrap}"
-        ".fav-btn[data-fav='1']{border-color:var(--accent);color:var(--accent)}"
-        ".fav-btn:disabled{opacity:.6;cursor:default}"
-        ".node-meta{font-size:.82em;color:var(--text-dim);margin:.15em 0;word-break:break-word}"
-        ".node-meta b{color:var(--text)}"
-        ".live-wrap{margin-top:.6em;border:1px solid var(--line);border-radius:8px;background:var(--panel);padding:.5em}"
-        ".live-toolbar{display:flex;justify-content:space-between;align-items:center;gap:.5em;margin-bottom:.45em}"
-        ".live-toolbar span{font-size:.68em;color:var(--text-dim)}"
-        ".live-feed{height:380px;overflow:auto;border:1px solid var(--line);border-radius:6px;background:var(--bg)}"
-        ".chart-wrap{margin-top:.6em;display:grid;grid-template-columns:1fr;gap:.7em}"
-        ".chart-box{border:1px solid var(--line);border-radius:8px;background:var(--panel);padding:.55em .7em}"
-        ".chart-head{display:flex;justify-content:space-between;align-items:baseline;gap:.5em;margin-bottom:.35em;font-size:.85em}"
-        ".chart-stats{font-size:.72em;color:var(--text-dim);font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace}"
-        ".chart-canvas{width:100%;height:180px;display:block;background:var(--bg);border:1px solid var(--line);border-radius:6px}"
-        ".chart-legend{margin-top:.3em;font-size:.72em;color:var(--text-dim)}"
-        ".chart-legend .swatch{display:inline-block;width:.8em;height:.8em;margin-right:.25em;vertical-align:middle;border-radius:2px}"
-        ".sw-chutil{background:#67d8ff}.sw-airutil{background:#ffd56b}"
-        ".sw-snr{background:#9ceadf}.sw-rssi{background:#f7b46d}"
-        ".live-line{padding:.13em .38em;border-bottom:1px solid rgba(255,255,255,.08);"
-            "font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;font-size:.7em;line-height:1.2;"
-            "color:#dfe7ef;background:#10254a}"
-        ".live-line:nth-child(odd){filter:brightness(1.03)}"
-        ".live-line.live-default{background:#10254a;color:#dfe7ef}"
-        ".live-line.live-err{background:#4a1d1d;color:#ff8f8f;font-weight:700}"
-        ".live-line.live-tx-ack{background:#1e3e27;color:#89e7a5}"
-        ".live-line.live-rx-ack{background:#1b3e34;color:#7de8d2}"
-        ".live-line.live-tx-text{background:#4a4318;color:#ffd56b}"
-        ".live-line.live-tx-node{background:#4a2d1f;color:#f7b46d}"
-        ".live-line.live-tx-pos{background:#4a3418;color:#ffc875}"
-        ".live-line.live-tx-tlm{background:#1a3b40;color:#84efff}"
-        ".live-line.live-tx-dm{background:#33224a;color:#f2a4ff}"
-        ".live-line.live-rx-text{background:#12345d;color:#67d8ff}"
-        ".live-line.live-rx-node{background:#1d2e58;color:#9ec3ff}"
-        ".live-line.live-rx-pos{background:#1a3754;color:#b6e5ff}"
-        ".live-line.live-rx-tlm{background:#1a3a3e;color:#9ceadf}"
-        ".live-line.live-rx-enc{background:#4a3618;color:#ffbe73}"
-        ".live-line.live-rx-other{background:#102d52;color:#8fbfff}"
-        ".live-line.live-tx-other{background:#3e3619;color:#e7c96f}"
-        ".leaflet-container{font:12px/1.2 system-ui,-apple-system,Segoe UI,Roboto,sans-serif}"
-        ".leaflet-control-attribution{font-size:.65em}"
-    ".row2{display:grid;grid-template-columns:1fr 1fr;gap:.5em}"
-    ".gps-note{margin:.4em 0;font-size:.9em}"
-    ".gps-note button{padding:.2em .8em;font-size:.9em;margin-left:.4em}"
-        ".gps-hint{font-size:.8em;color:var(--text-dim);margin:.2em 0 .6em}"
-        "details{border:1px solid var(--line);border-radius:6px;margin:.8em 0;padding:0 .8em;background:var(--panel)}"
-    "details[open]{padding-bottom:.8em}"
-        "summary{font-size:1em;font-weight:600;color:var(--accent);cursor:pointer;"
-             "padding:.5em 0;list-style:none}"
-    "summary::-webkit-details-marker{display:none}"
-    "summary::before{content:'\\25B6\\00A0';font-size:.8em}"
-    "details[open] summary::before{content:'\\25BC\\00A0';font-size:.8em}"
-    // One card per channel. The old four-column grid predated the uplink,
-    // downlink and location toggles: with seven children in four tracks the
-    // fields wrapped into implicit rows that lined up with nothing.
-    ".ch-row{border:1px solid var(--line);border-radius:6px;background:var(--bg);"
-         "padding:.45em .6em;margin:.5em 0}"
-    ".ch-row label{margin:0;font-size:.85em}"
-    ".ch-hd{display:flex;align-items:center;gap:.35em;margin-bottom:.4em}"
-    ".ch-no{font-weight:600;font-size:.85em;color:var(--accent);margin-right:auto}"
-    ".ch-fields{display:grid;grid-template-columns:1fr 2fr 1fr;gap:.4em;align-items:end}"
-    ".ch-tog{display:flex;flex-wrap:wrap;gap:.15em .9em;margin-top:.45em}"
-    ".ch-tog label{display:flex;align-items:center;gap:.3em}"
-    ".ch-btn{margin:0;padding:.3em .6em;font-size:.8em;line-height:1.15;cursor:pointer;"
-         "background:var(--panel-2);color:var(--text);border:1px solid var(--line);border-radius:6px}"
-    ".ch-btn[disabled]{opacity:.35;cursor:default}"
-    ".ch-clear{margin:0;padding:.3em .6em;font-size:.8em;line-height:1.15;background:#c0392b;color:#fff}"
-        "@media (max-width:560px){.row2,.ch-fields{grid-template-columns:1fr}}"
-    "</style></head><body>";
+    "<link rel='stylesheet' href='/app.css?v=" APP_VERSION "'>";
+static const char kHeadClose[] = "</head><body>";
 
 // Head for the AP-mode pages (web config lite and its /setup form). AP mode
 // leaves ~20 KB of internal heap with a largest block near 13 KB, so this is
-// deliberately a fraction of kHead's ~4 KB of CSS: no custom properties, no
-// theme table, no layout grid. Everything here streams from flash, so nothing
+// deliberately a fraction of the full page's stylesheet (kAppCss, ~16 KB): no
+// custom properties, no theme table, no layout grid. Everything here streams from flash, so nothing
 // on the lite path ever needs a large contiguous allocation.
 static const char kLiteHead[] =
         "<!DOCTYPE html><html><head>"
@@ -1966,6 +1810,29 @@ static void sendFlash(const char *progmem) {
     // and written straight through — no _P copy step, and the same framed
     // writer as everything else.
     sendSliced(progmem, strlen(progmem), "flash chunk");
+}
+
+// Boards without the LVGL palette (none today) link this instead of the one in
+// main_lvgl.cpp, and the page keeps /app.css's Camillia Dark defaults.
+__attribute__((weak)) bool webCfgThemeColors(WebThemeColors *out) {
+    (void)out;
+    return false;
+}
+
+// The full page's <head>: kHeadOpen, the fonts, the device theme's :root block,
+// kHeadClose. The theme block is a few hundred bytes from the stack, so this
+// costs no more heap than the old inline stylesheet did.
+static void sendFullHead() {
+    sendFlash(kHeadOpen);
+    sendFlash(kAppFontsLink);
+    WebThemeColors tc;
+    char vars[600];
+    if (webCfgThemeColors(&tc) && webThemeCssVars(tc, vars, sizeof(vars))) {
+        server.sendContent("<style>");
+        server.sendContent(vars);
+        server.sendContent("</style>");
+    }
+    sendFlash(kHeadClose);
 }
 
 // Flush only once the buffer is worth a TCP segment. Chunk size is a balance
@@ -3350,11 +3217,11 @@ static void sendLoginPage(const char *err = "") {
     // contiguous DRAM block a fragmented heap often can't provide (the "broken
     // login" symptom). Always stream it via chunked transfer so no large
     // contiguous allocation is needed; only the small form body is built in
-    // RAM. AP mode gets the lite head — kHead's ~4 KB of CSS is more than the
-    // heap left after SoftAP comes up.
+    // RAM. AP mode gets the lite head — the full page's stylesheet is more than
+    // the heap left after SoftAP comes up.
     server.setContentLength(CONTENT_LENGTH_UNKNOWN);
     server.send(200, "text/html", "");
-    sendFlash(webCfgUseLite() ? kLiteHead : kHead);
+    if (webCfgUseLite()) sendFlash(kLiteHead); else sendFullHead();
     String html;
     html +=
         "<h2>Camillia MT</h2>"
@@ -3495,9 +3362,9 @@ static void sendConfigPage(const char *msg = "", bool lite = false) {
 
     char tmp[96];
     // Stream the head straight from flash rather than seeding the String with
-    // it: kHead is ~4 KB and even kLiteHead is ~1 KB, and a contiguous
+    // it: even kLiteHead is ~1 KB, and a contiguous
     // allocation that size is exactly what a fragmented heap can't provide.
-    sendFlash(lite ? kLiteHead : kHead);
+    if (lite) sendFlash(kLiteHead); else sendFullHead();
     if (gSendAborted) {
         server.client().stop();
         logWifiHeapDiag(lite ? "lite page abandoned" : "config page abandoned");
@@ -10054,6 +9921,17 @@ static void handleImportDone() {
     }
 }
 
+// The full page's stylesheet. Cached for a year: the page links it as
+// /app.css?v=APP_VERSION, so a firmware update is a new URL. No login, like the
+// favicon: it is the same bytes for everyone and the login page uses it.
+static void handleGetAppCss() {
+    server.sendHeader("Cache-Control", "public, max-age=31536000, immutable");
+    server.setContentLength(CONTENT_LENGTH_UNKNOWN);
+    server.send(200, "text/css", "");
+    sendFlash(kAppCss);
+    server.sendContent("");
+}
+
 static void handleGetFavicon() {
     // Cached hard: it is a fixed asset on a device whose whole job is to answer
     // a handful of requests without stalling, and re-serving it on every page
@@ -10741,6 +10619,7 @@ static void registerCommonRoutes() {
     onRoute("/chart-data",        HTTP_GET,  handleGetChartData);
     onRoute("/logout",            HTTP_GET,  handleGetLogout);
     onRoute("/favicon.ico",       HTTP_GET,  handleGetFavicon);
+    onRoute("/app.css",           HTTP_GET,  handleGetAppCss);
     onRoute("/announce",          HTTP_POST, handlePostAnnounce);
     onRoute("/telemetry",         HTTP_POST, handlePostTelemetry);
     onRoute("/cs-check",          HTTP_POST, handlePostChatServerCheck);

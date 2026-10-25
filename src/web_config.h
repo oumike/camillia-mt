@@ -2,6 +2,12 @@
 // Embedded web configuration server lifecycle and state/query APIs.
 #include "config_io.h"
 #include "storage.h"
+#include "web_theme.h"
+
+// The active on-device theme's colours, for the page to wear. Defined in
+// main_lvgl.cpp from the palette applyUiThemePalette() derived; returns false
+// (page falls back to Camillia Dark) where no palette exists.
+bool webCfgThemeColors(WebThemeColors *out);
 
 // The Files tab: browse, upload, download, copy and delete on device storage.
 // Every board has storage today; the guard is for one that someday does not.
