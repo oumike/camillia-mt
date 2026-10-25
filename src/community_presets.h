@@ -5,7 +5,8 @@
 //
 // Community setups, as published by each mesh: the radio preset (empty = keep
 // the device's own), a frequency slot (0 = the preset's own), the region and a
-// whole channel plan. Applied through the `cfg` CLI's staging and commit
+// whole channel plan, and the community's MQTT broker where it publishes one.
+// Applied through the `cfg` CLI's staging and commit
 // (communityPresetApply() in main_lvgl.cpp), which replaces every channel.
 #include <stdint.h>
 
@@ -15,6 +16,19 @@ struct CommunityPresetChannel {
     bool pos;
     bool up;
     bool down;
+};
+
+// A community's broker. Empty host = the community publishes none, and the
+// device's MQTT settings are left alone. Applying one switches MQTT on.
+struct CommunityPresetMqtt {
+    const char *host;
+    uint16_t port;
+    const char *user;
+    const char *pass;
+    const char *root;
+    bool tls;
+    bool encryption;
+    int8_t okToMqtt;    // -1 = leave the device's "OK to MQTT" alone
 };
 
 struct CommunityPreset {
@@ -27,6 +41,7 @@ struct CommunityPreset {
     const char *region;   // kRegions[].code
     uint16_t firstChannel;
     uint8_t channelCount;
+    CommunityPresetMqtt mqtt;
     const char *notes;    // what the community also advises, set by hand
 };
 

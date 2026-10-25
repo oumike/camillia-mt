@@ -56,11 +56,14 @@ The community setups the web flasher's **Flash and Customize** offers (ChiMesh,
 MichMesh, Freq51, BayMesh and the rest) are also on the device:
 **Config → Community Preset**, and **Community Preset** in web config's LoRa
 Radio section. Each sets the region, the radio preset (and frequency slot, where
-the mesh uses one) and the mesh's whole channel list, as the community
-publishes them. The flasher's logos are not included.
+the mesh uses one), the mesh's whole channel list and, where the community
+publishes one anyone can use, its MQTT broker (server, port, login and root
+topic), as the community publishes them. A preset with a broker also turns MQTT
+on, and Wi-Fi with it when a network is saved. The flasher's logos are not
+included.
 
-Choosing one shows what it changes and the community's own advice (MQTT broker,
-hop limit and so on, which you set by hand), and asks before applying. Applying
+Choosing one shows what it changes and the community's own advice (hop limit and
+the like, which you set by hand), and asks before applying. Applying
 **replaces all of your channels**, clears all messages and every node that is not
 a favorite (the same as Clear Messages and Clear Nodes), and reboots. Setups that need more channels
 than the device has (ten on the Cardputer, which has eight) are not offered.

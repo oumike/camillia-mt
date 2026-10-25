@@ -11204,6 +11204,23 @@ static void loadProvisionedConfig() {
         applyProvisionedPreset(preset, slot);
         Serial.printf("[cfg] provisioned preset=%s slot=%u\n", kPresets[preset].channelName, slot);
     }
+    // A community broker from the flasher, switched on as `cfg commit` does.
+    if (p.begin(kProvNs, true)) {
+        if (p.isKey("mqHost") && p.isKey("mqRoot")) {
+            utf8util::copyTruncate(s_cfg.mqttServer, sizeof(s_cfg.mqttServer), p.getString("mqHost").c_str());
+            utf8util::copyTruncate(s_cfg.mqttUser, sizeof(s_cfg.mqttUser), p.getString("mqUser", "").c_str());
+            utf8util::copyTruncate(s_cfg.mqttPass, sizeof(s_cfg.mqttPass), p.getString("mqPass", "").c_str());
+            utf8util::copyTruncate(s_cfg.mqttRoot, sizeof(s_cfg.mqttRoot), p.getString("mqRoot").c_str());
+            s_cfg.mqttPort = p.getUShort("mqPort", 1883);
+            s_cfg.mqttTls = p.getBool("mqTls", false);
+            s_cfg.mqttEncryption = p.getBool("mqEnc", true);
+            s_cfg.mqttEnabled = true;
+            if (s_cfg.wifiSsid[0]) s_cfg.wifiEnabled = true;
+            Serial.printf("[cfg] provisioned mqtt=%s:%u\n", s_cfg.mqttServer, (unsigned)s_cfg.mqttPort);
+        }
+        if (p.isKey("ok2mq")) s_cfg.okToMqtt = p.getChar("ok2mq", 0) != 0;
+        p.end();
+    }
 }
 
 // Boot logo, also from the flasher: a PNG drawn on the splash card in place of
@@ -22991,8 +23008,8 @@ static void openCfgCommunityModal() {
     lv_obj_set_style_text_color(warn, hintColor, 0);
     lv_obj_set_style_text_align(warn, LV_TEXT_ALIGN_CENTER, 0);
     lv_label_set_long_mode(warn, LV_LABEL_LONG_WRAP);
-    lv_label_set_text(warn, TR("Sets region, radio and channels as a local mesh "
-                            "publishes them, and clears messages and nodes. "
+    lv_label_set_text(warn, TR("Sets region, radio, channels and MQTT as a local "
+                            "mesh publishes them, and clears messages and nodes. "
                             "Asks first, then reboots."));
 
     lv_obj_t *list = lv_obj_create(s_cfgCommunityModal);
@@ -23049,9 +23066,9 @@ static void openCfgCommunityModal() {
 #endif
             lv_label_set_long_mode(desc, LV_LABEL_LONG_DOT);
             const int radio = communityPresetRadioIndex(cp);
-            lv_label_set_text_fmt(desc, TR("%s  %s  %u ch"), cp.region,
+            lv_label_set_text_fmt(desc, TR("%s  %s  %u ch%s"), cp.region,
                                   radio >= 0 ? kPresets[radio].channelName : TR("own preset"),
-                                  (unsigned)cp.channelCount);
+                                  (unsigned)cp.channelCount, cp.mqtt.host[0] ? TR("  MQTT") : "");
         }
     }
 
@@ -60166,6 +60183,29 @@ static bool cfgSetupStaged() {
         || s_cfgSetup.role >= 0 || s_cfgSetup.wifiSsid[0] || s_cfgSetup.wifiPassSet;
 }
 
+// `cfg set mqtt ...` and `cfg set oktomqtt`: a community's broker. A staged
+// broker is committed with the bridge switched on, which is what sending one
+// means. okToMqtt < 0 is "not sent".
+struct CfgStagedMqtt {
+    bool     set;
+    char     host[sizeof(RhinoConfig::mqttServer)];
+    uint16_t port;
+    char     user[sizeof(RhinoConfig::mqttUser)];
+    char     pass[sizeof(RhinoConfig::mqttPass)];
+    char     root[sizeof(RhinoConfig::mqttRoot)];
+    bool     tls;
+    bool     encryption;
+    int8_t   okToMqtt;
+};
+static CfgStagedMqtt s_cfgMqtt = { false, {}, 0, {}, {}, {}, false, false, -1 };
+
+static void cfgMqttReset() {
+    s_cfgMqtt = CfgStagedMqtt{};
+    s_cfgMqtt.okToMqtt = -1;
+}
+
+static bool cfgMqttStaged() { return s_cfgMqtt.set || s_cfgMqtt.okToMqtt >= 0; }
+
 static void cfgLogoReset() {
     free(s_cfgLogoBuf);
     s_cfgLogoBuf = nullptr;
@@ -60298,6 +60338,81 @@ static void cfgSetChannel(const char *args) {
     }
     s_cfgStagedChans[idx] = c;
     s_cliOut->printf("[cfg] ok channel %ld staged\n", idx);
+}
+
+//   cfg set mqtt host=<%-enc> [port=N] [user=<%-enc>] [pass=<%-enc>] root=<%-enc>
+//                [tls=0|1] [enc=0|1]
+// Every field is sent each time, so nothing of a previous broker is kept: an
+// omitted user/pass is empty, port 1883, tls off, encryption on.
+static void cfgSetMqtt(const char *args) {
+    CfgStagedMqtt m = {};
+    m.port = 1883;
+    m.encryption = true;
+    m.okToMqtt = s_cfgMqtt.okToMqtt;
+    char tok[160];
+    const char *p = args;
+    while (*p) {
+        while (*p == ' ') p++;
+        size_t n = 0;
+        while (p[n] && p[n] != ' ') n++;
+        if (!n) break;
+        if (n >= sizeof(tok)) { s_cliOut->println("[cfg] err mqtt: argument too long"); return; }
+        memcpy(tok, p, n);
+        tok[n] = '\0';
+        p += n;
+        char *eq = strchr(tok, '=');
+        if (!eq) { s_cliOut->printf("[cfg] err mqtt: expected key=value, got \"%s\"\n", tok); return; }
+        *eq = '\0';
+        const char *k = tok;
+        const char *v = eq + 1;
+        auto text = [&](char *dst, size_t len) -> bool {
+            if (cfgPercentDecode(v, dst, len)) return true;
+            s_cliOut->printf("[cfg] err mqtt: %s must be %u bytes or fewer\n", k, (unsigned)(len - 1));
+            return false;
+        };
+        if (!strcasecmp(k, "host")) { if (!text(m.host, sizeof(m.host))) return; }
+        else if (!strcasecmp(k, "user")) { if (!text(m.user, sizeof(m.user))) return; }
+        else if (!strcasecmp(k, "pass")) { if (!text(m.pass, sizeof(m.pass))) return; }
+        else if (!strcasecmp(k, "root")) { if (!text(m.root, sizeof(m.root))) return; }
+        else if (!strcasecmp(k, "port")) {
+            char *end = nullptr;
+            const long port = strtol(v, &end, 10);
+            if (end == v || *end || port < 1 || port > 65535) {
+                s_cliOut->printf("[cfg] err mqtt: bad port \"%s\"\n", v);
+                return;
+            }
+            m.port = (uint16_t)port;
+        }
+        else if (!strcasecmp(k, "tls")) m.tls = !strcmp(v, "1");
+        else if (!strcasecmp(k, "enc")) m.encryption = !strcmp(v, "1");
+        else { s_cliOut->printf("[cfg] err mqtt: unknown key \"%s\"\n", k); return; }
+    }
+    if (!m.host[0] || !m.root[0]) {
+        s_cliOut->println("[cfg] err mqtt: host and root are required");
+        return;
+    }
+    m.set = true;
+    s_cfgMqtt = m;
+    s_cliOut->printf("[cfg] ok mqtt=%s:%u staged\n", m.host, (unsigned)m.port);
+}
+
+// Copies a staged broker into s_cfg and switches the bridge on. Wi-Fi is the
+// bridge's master switch (the load path turns MQTT off without it), so it is
+// switched on too -- but only with a network to join; without one the bridge
+// stays on and waits for Wi-Fi to be set up.
+static void cfgApplyStagedMqtt(const char *wifiSsid) {
+    if (s_cfgMqtt.set) {
+        utf8util::copyTruncate(s_cfg.mqttServer, sizeof(s_cfg.mqttServer), s_cfgMqtt.host);
+        utf8util::copyTruncate(s_cfg.mqttUser, sizeof(s_cfg.mqttUser), s_cfgMqtt.user);
+        utf8util::copyTruncate(s_cfg.mqttPass, sizeof(s_cfg.mqttPass), s_cfgMqtt.pass);
+        utf8util::copyTruncate(s_cfg.mqttRoot, sizeof(s_cfg.mqttRoot), s_cfgMqtt.root);
+        s_cfg.mqttPort = s_cfgMqtt.port;
+        s_cfg.mqttTls = s_cfgMqtt.tls;
+        s_cfg.mqttEncryption = s_cfgMqtt.encryption;
+        s_cfg.mqttEnabled = true;
+        if (wifiSsid && wifiSsid[0]) s_cfg.wifiEnabled = true;
+    }
+    if (s_cfgMqtt.okToMqtt >= 0) s_cfg.okToMqtt = s_cfgMqtt.okToMqtt != 0;
 }
 
 // `cfg set <field> <value>` for the setup answers. False when `args` names
@@ -60513,7 +60628,7 @@ static void cfgApplyStagedChannels() {
 
 static void handleCfgCommand(const char *args) {
     if (!strcasecmp(args, "caps")) {
-        s_cliOut->printf("[cfg] caps v=%d firstboot=%d keys=preset,slot,channels,setup%s channels=%d",
+        s_cliOut->printf("[cfg] caps v=%d firstboot=%d keys=preset,slot,channels,setup,mqtt%s channels=%d",
                       kCfgProtoVersion, s_firstBoot ? 1 : 0,
                       (s_splashLogoW > 0 && s_splashLogoH > 0) ? ",logo" : "", MESH_CHANNELS);
         if (s_splashLogoW > 0 && s_splashLogoH > 0) {
@@ -60541,6 +60656,7 @@ static void handleCfgCommand(const char *args) {
         s_cfgChansStaged = false;
         cfgLogoReset();
         cfgSetupReset();
+        cfgMqttReset();
         s_cliOut->println("[cfg] ok aborted");
         return;
     }
@@ -60593,6 +60709,22 @@ static void handleCfgCommand(const char *args) {
         return;
     }
 
+    if (!strncasecmp(args, "set mqtt ", 9)) {
+        cfgSetMqtt(args + 9);
+        return;
+    }
+
+    if (!strncasecmp(args, "set oktomqtt ", 13)) {
+        const char *v = args + 13;
+        if (strcmp(v, "0") && strcmp(v, "1")) {
+            s_cliOut->printf("[cfg] err oktomqtt: expected 0 or 1, got \"%s\"\n", v);
+            return;
+        }
+        s_cfgMqtt.okToMqtt = (int8_t)(v[0] - '0');
+        s_cliOut->printf("[cfg] ok oktomqtt=%s staged\n", v);
+        return;
+    }
+
     if (!strncasecmp(args, "set ", 4) && cfgSetSetupField(args + 4)) return;
 
     if (!strncasecmp(args, "logo ", 5)) {
@@ -60610,7 +60742,8 @@ static void handleCfgCommand(const char *args) {
         const bool haveChans = s_cfgChansStaged;
         const bool haveLogo = s_cfgLogoState == CFG_LOGO_READY || s_cfgLogoState == CFG_LOGO_CLEAR;
         const bool haveSetup = cfgSetupStaged();
-        if (!havePreset && !haveChans && !haveLogo && !haveSetup) {
+        const bool haveMqtt = cfgMqttStaged();
+        if (!havePreset && !haveChans && !haveLogo && !haveSetup && !haveMqtt) {
             s_cliOut->println("[cfg] ok nothing staged");
             return;
         }
@@ -60671,6 +60804,35 @@ static void handleCfgCommand(const char *args) {
             applyProvisionedPreset(preset, slot);
         }
 
+        // Into s_cfg now, so setup (on the device or answered below) saves it
+        // with everything else. Kept in the provisioning namespace as well, as
+        // the preset is, for a setup that only finishes after a reboot.
+        if (haveMqtt) {
+            cfgApplyStagedMqtt(s_cfgSetup.wifiSsid[0] ? s_cfgSetup.wifiSsid : s_cfg.wifiSsid);
+            if (s_firstBoot) {
+                Preferences p;
+                bool ok = p.begin(kProvNs, false);
+                if (ok && s_cfgMqtt.set) {
+                    // Not chained: an empty user or password writes 0 bytes,
+                    // which is not a failure. Host and root never are empty.
+                    p.putString("mqHost", s_cfgMqtt.host);
+                    p.putUShort("mqPort", s_cfgMqtt.port);
+                    p.putString("mqUser", s_cfgMqtt.user);
+                    p.putString("mqPass", s_cfgMqtt.pass);
+                    p.putString("mqRoot", s_cfgMqtt.root);
+                    p.putBool("mqTls", s_cfgMqtt.tls);
+                    p.putBool("mqEnc", s_cfgMqtt.encryption);
+                    ok = p.isKey("mqHost") && p.isKey("mqRoot");
+                }
+                if (ok && s_cfgMqtt.okToMqtt >= 0) ok = p.putChar("ok2mq", s_cfgMqtt.okToMqtt) == 1;
+                p.end();
+                if (!ok) {
+                    s_cliOut->println("[cfg] err commit: could not write NVS");
+                    return;
+                }
+            }
+        }
+
         // The channel plan lives in its own namespace, which first-boot
         // detection never looks at, so it is saved directly even mid-setup.
         if (haveChans) {
@@ -60695,16 +60857,18 @@ static void handleCfgCommand(const char *args) {
             snprintf(presetSummary, sizeof(presetSummary), slot ? "%s@%u" : "%s",
                      kPresets[preset].channelName, slot);
         }
-        snprintf(summary, sizeof(summary), "preset=%s channels=%s logo=%s setup=%s",
+        snprintf(summary, sizeof(summary), "preset=%s channels=%s logo=%s setup=%s mqtt=%s",
                  presetSummary, chans,
                  !haveLogo ? "-" : (s_cfgLogoState == CFG_LOGO_CLEAR ? "cleared" : "set"),
-                 !haveSetup ? "-" : (s_cfgSetup.region[0] ? s_cfgSetup.region : "set"));
+                 !haveSetup ? "-" : (s_cfgSetup.region[0] ? s_cfgSetup.region : "set"),
+                 s_cfgMqtt.set ? s_cfgMqtt.host : (haveMqtt ? "set" : "-"));
         const CfgStagedSetup setup = s_cfgSetup;
         s_cfgStagedPreset = -1;
         s_cfgStagedSlot = -1;
         s_cfgChansStaged = false;
         cfgLogoReset();
         cfgSetupReset();
+        cfgMqttReset();
 
         // Answers setup in the user's place: onboardingFinalize() saves them
         // with everything committed above, ends first boot and reboots.
@@ -60743,11 +60907,11 @@ static void handleCfgCommand(const char *args) {
             if (setup.wifiPassSet) utf8util::copyTruncate(s_cfg.wifiPass, sizeof(s_cfg.wifiPass), setup.wifiPass);
             applyPresetParams(s_cfg);   // the region moves the frequency
         }
-        if (!presetChanges && !haveChans && !haveLogo && !haveSetup) {
+        if (!presetChanges && !haveChans && !haveLogo && !haveSetup && !haveMqtt) {
             s_cliOut->printf("[cfg] ok committed %s unchanged\n", summary);
             return;
         }
-        if (presetChanges || haveSetup) persistConfigToPrefs();
+        if (presetChanges || haveSetup || haveMqtt) persistConfigToPrefs();
         s_cliOut->printf("[cfg] ok committed %s rebooting\n", summary);
         s_cliOut->flush();
         delay(300);
@@ -60825,11 +60989,18 @@ static void communityPresetSummary(int idx, char *out, size_t outLen) {
     } else {
         snprintf(radioText, sizeof(radioText), "%s", kPresets[radio].name);
     }
+    char mqttText[96];
+    if (cp.mqtt.host[0]) {
+        snprintf(mqttText, sizeof(mqttText), TR("%s (%s), turned on"), cp.mqtt.host, cp.mqtt.root);
+    } else {
+        snprintf(mqttText, sizeof(mqttText), "%s", TR("unchanged"));
+    }
     int n = snprintf(out, outLen,
-                     TR("Apply %s?\n\nRegion: %s\nRadio: %s\nChannels: replaced with %u\n\n"
+                     TR("Apply %s?\n\nRegion: %s\nRadio: %s\nChannels: replaced with %u\n"
+                        "MQTT: %s\n\n"
                         "Your channels are overwritten, messages and non-favorite "
                         "nodes are cleared, and the device reboots."),
-                     cp.label, cp.region, radioText, (unsigned)cp.channelCount);
+                     cp.label, cp.region, radioText, (unsigned)cp.channelCount, mqttText);
     if (cp.notes[0] && n > 0 && (size_t)n < outLen) {
         snprintf(out + n, outLen - n, "\n\n%s", cp.notes);
     }
@@ -60893,6 +61064,33 @@ static const char *communityPresetApply(int idx) {
                  i, i == 0 ? "primary" : "secondary", name, ch.psk,
                  ch.pos ? 1 : 0, ch.up ? 1 : 0, ch.down ? 1 : 0);
         ok = run(cmd);
+    }
+    // The community's broker, %-encoded the same way; staging one is what
+    // switches MQTT on at the commit.
+    auto enc = [](const char *src, char *dst, size_t len) {
+        size_t o = 0;
+        for (const char *s = src; *s && o + 4 < len; s++) {
+            const unsigned char c = (unsigned char)*s;
+            if (isalnum(c) || c == '_' || c == '.' || c == '~' || c == '-') dst[o++] = (char)c;
+            else o += snprintf(dst + o, len - o, "%%%02X", c);
+        }
+        dst[o] = '\0';
+    };
+    if (ok && cp.mqtt.host[0]) {
+        char host[3 * sizeof(s_cfg.mqttServer)], user[3 * sizeof(s_cfg.mqttUser)];
+        char pass[3 * sizeof(s_cfg.mqttPass)], root[3 * sizeof(s_cfg.mqttRoot)];
+        enc(cp.mqtt.host, host, sizeof(host));
+        enc(cp.mqtt.user, user, sizeof(user));
+        enc(cp.mqtt.pass, pass, sizeof(pass));
+        enc(cp.mqtt.root, root, sizeof(root));
+        char mq[sizeof(host) + sizeof(user) + sizeof(pass) + sizeof(root) + 64];
+        snprintf(mq, sizeof(mq), "set mqtt host=%s port=%u user=%s pass=%s root=%s tls=%d enc=%d",
+                 host, (unsigned)cp.mqtt.port, user, pass, root,
+                 cp.mqtt.tls ? 1 : 0, cp.mqtt.encryption ? 1 : 0);
+        ok = run(mq);
+        if (ok && cp.mqtt.okToMqtt >= 0) {
+            ok = run(cp.mqtt.okToMqtt ? "set oktomqtt 1" : "set oktomqtt 0");
+        }
     }
     if (ok) {
         // A different mesh: what was heard on the old one is noise on the new

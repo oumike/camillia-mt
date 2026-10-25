@@ -49,9 +49,16 @@ for (const p of PROFILES) {
   for (const c of p.channels) {
     chanLines.push(`    { ${str(c.name.trim())}, ${str(c.psk.trim())}, ${flag(c.pos)}, ${flag(c.up)}, ${flag(c.down)} },`)
   }
+  // The same defaults the flasher fills in (mqttSettings() in customize.js).
+  const m = p.mqtt
+  const mqtt = m
+    ? `{ ${str(m.host)}, ${m.port || 1883}, ${str(m.user)}, ${str(m.pass)}, ${str(m.root)}, ` +
+      `${flag(m.tls === true)}, ${flag(m.encryption !== false)}, ${typeof m.okToMqtt === 'boolean' ? (m.okToMqtt ? 1 : 0) : -1} }`
+    : '{ "", 0, "", "", "", false, true, -1 }'
   presetLines.push(
     `    { ${str(p.id)}, ${str(p.area)}, ${str(p.label)}, ${str(p.url)},\n` +
     `      ${str(p.preset)}, ${p.slot || 0}, ${str(p.region)}, ${first}, ${p.channels.length},\n` +
+    `      ${mqtt},\n` +
     `      ${str(p.notes)} },`,
   )
 }
@@ -63,7 +70,8 @@ const out = `#pragma once
 //
 // Community setups, as published by each mesh: the radio preset (empty = keep
 // the device's own), a frequency slot (0 = the preset's own), the region and a
-// whole channel plan. Applied through the \`cfg\` CLI's staging and commit
+// whole channel plan, and the community's MQTT broker where it publishes one.
+// Applied through the \`cfg\` CLI's staging and commit
 // (communityPresetApply() in main_lvgl.cpp), which replaces every channel.
 #include <stdint.h>
 
@@ -73,6 +81,19 @@ struct CommunityPresetChannel {
     bool pos;
     bool up;
     bool down;
+};
+
+// A community's broker. Empty host = the community publishes none, and the
+// device's MQTT settings are left alone. Applying one switches MQTT on.
+struct CommunityPresetMqtt {
+    const char *host;
+    uint16_t port;
+    const char *user;
+    const char *pass;
+    const char *root;
+    bool tls;
+    bool encryption;
+    int8_t okToMqtt;    // -1 = leave the device's "OK to MQTT" alone
 };
 
 struct CommunityPreset {
@@ -85,6 +106,7 @@ struct CommunityPreset {
     const char *region;   // kRegions[].code
     uint16_t firstChannel;
     uint8_t channelCount;
+    CommunityPresetMqtt mqtt;
     const char *notes;    // what the community also advises, set by hand
 };
 

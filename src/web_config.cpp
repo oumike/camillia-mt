@@ -3255,7 +3255,7 @@ static void appendCommunityPresetPicker(String &html) {
     }
     if (area) html += "</optgroup>";
     html += "</select></label>"
-            "<p class='gps-hint' id='cp-info'>Sets the region, radio preset and every channel "
+            "<p class='gps-hint' id='cp-info'>Sets the region, radio preset, every channel and the MQTT broker "
             "the way a local mesh publishes them, clears messages and non-favorite nodes, "
             "then reboots. Your current channels are replaced.</p>"
             "<button type='button' id='cp-apply' disabled onclick='cpApply()'>"
@@ -3284,7 +3284,12 @@ static void appendCommunityPresetPicker(String &html) {
             if (c) html += ",";
             html += "'"; appendJsStr(html, ch.name[0] ? ch.name : "(primary)"); html += "'";
         }
-        html += "],n:'"; appendJsStr(html, cp.notes);
+        html += "],m:'";
+        if (cp.mqtt.host[0]) {
+            appendJsStr(html, cp.mqtt.host); html += " (";
+            appendJsStr(html, cp.mqtt.root); html += ")";
+        }
+        html += "',n:'"; appendJsStr(html, cp.notes);
         html += "',u:'"; appendJsStr(html, cp.url); html += "'}";
         if ((i & 7) == 7) sendChunk(html);
     }
@@ -3292,15 +3297,15 @@ static void appendCommunityPresetPicker(String &html) {
             "function cpEsc(t){var d=document.createElement('div');d.textContent=t;return d.innerHTML;}"
             "function cpShow(){var id=document.getElementById('sel-cp').value,e=document.getElementById('cp-info'),"
             "b=document.getElementById('cp-apply'),p=CP[id];b.disabled=!p;"
-            "if(!p){e.textContent='Sets the region, radio preset and every channel the way a local mesh "
+            "if(!p){e.textContent='Sets the region, radio preset, every channel and the MQTT broker the way a local mesh "
             "publishes them, clears messages and non-favorite nodes, then reboots. Your current "
             "channels are replaced.';return;}"
             "e.innerHTML='Region <b>'+cpEsc(p.r)+'</b>, radio <b>'+cpEsc(p.p)+'</b>, channels: '"
-            "+cpEsc(p.c.join(', '))+(p.n?'<br>'+cpEsc(p.n):'')"
+            "+cpEsc(p.c.join(', '))+(p.m?', MQTT <b>'+cpEsc(p.m)+'</b> (turned on)':'')+(p.n?'<br>'+cpEsc(p.n):'')"
             "+(p.u?'<br><a href=\"'+cpEsc(p.u)+'\" target=\"_blank\" rel=\"noopener\">Community page</a>':'');}"
             "function cpApply(){var id=document.getElementById('sel-cp').value,p=CP[id];if(!p)return;"
             "if(!confirm('Apply '+p.l+'?\\n\\nRegion: '+p.r+'\\nRadio: '+p.p+'\\nChannels: replaced with '"
-            "+p.c.length+'\\n\\nYour current channels are overwritten, all messages and non-favorite "
+            "+p.c.length+(p.m?'\\nMQTT: '+p.m+', turned on':'')+'\\n\\nYour current channels are overwritten, all messages and non-favorite "
             "nodes are cleared, and the device reboots. Continue?'))return;"
             "var f=document.createElement('form');f.method='POST';f.action='/community-preset';"
             "var i=document.createElement('input');i.type='hidden';i.name='id';i.value=id;"
