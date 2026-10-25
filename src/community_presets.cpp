@@ -118,8 +118,8 @@ const CommunityPresetChannel kCommunityPresetChannels[] = {
 const CommunityPreset kCommunityPresets[] = {
     { "chimesh", "United States", "ChiMesh (Chicagoland)", "https://chicagolandmesh.org/guides/meshtastic/getting-started/configure/",
       "LongFast", 0, "US", 0, 2,
-      { "mqtt.chimesh.org", 1883, "", "", "msh/US/IL/Chi", false, true, -1 },
-      "ChiMesh also recommends hop limit 7 and a 3-hour NodeInfo interval; set those on the device. Its broker publishes no login, so none is set." },
+      { "mqtt.chimesh.org", 1883, "meshdev", "large4cats", "msh/US/IL/Chi", false, true, -1 },
+      "ChiMesh also recommends hop limit 7 and a 3-hour NodeInfo interval; set those on the device." },
     { "michmesh", "United States", "MichMesh (Michigan)", "https://michmesh.net/docs/Meshtastic/Getting%20Started",
       "LongFast", 0, "US", 2, 10,
       { "mqtt.michmesh.net", 1883, "meshdev", "large4cats", "msh/US/MI", false, true, 1 },
