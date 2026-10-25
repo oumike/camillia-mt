@@ -646,17 +646,15 @@ static bool fetchLatestReleaseInfo(String &tagOut, String &urlOut, String &errOu
 static const char kFavicon[] = CAMELLIA_FAVICON_SVG;
 
 // The full page's head, in two halves around the device's theme colours:
-// kHeadOpen links the cached /app.css (web_app_assets.h) and sendFullHead()
-// writes the theme's :root block between them. The ?v= busts the cache once
-// per firmware version, since /app.css itself is cached for a year.
+// sendFullHead() links the cached /app.css (web_app_assets.h) and writes the
+// theme's :root block between them.
 static const char kHeadOpen[] =
     "<!DOCTYPE html><html><head>"
     "<meta charset='utf-8'>"
     "<meta name='viewport' content='width=device-width,initial-scale=1,viewport-fit=cover'>"
     "<title>Camillia for Meshtastic</title>"
     "<link rel='icon' type='image/svg+xml' href='/favicon.ico'>"
-    "<link rel='stylesheet' href='https://unpkg.com/leaflet@1.9.4/dist/leaflet.css'>"
-    "<link rel='stylesheet' href='/app.css?v=" APP_VERSION "'>";
+    "<link rel='stylesheet' href='https://unpkg.com/leaflet@1.9.4/dist/leaflet.css'>";
 static const char kHeadClose[] = "</head><body>";
 
 // Head for the AP-mode pages (web config lite and its /setup form). AP mode
@@ -1420,6 +1418,11 @@ static const char kThemePicker[] =
           "r.setProperty('--bg',p.bg);r.setProperty('--panel',p.panel);r.setProperty('--panel-2',p.panel2);"
           "r.setProperty('--line',p.line);r.setProperty('--text',p.text);r.setProperty('--text-dim',p.dim);"
           "r.setProperty('--accent',p.accent);r.setProperty('--accent-ink',p.ink);"
+          // The names /app.css reads (web_app_assets.h). A preview has no
+          // derived input or line colours, so it borrows the nearest it has.
+          "r.setProperty('--dim',p.dim);r.setProperty('--on-accent',p.ink);"
+          "r.setProperty('--input',p.panel2);r.setProperty('--panel-3',p.panel2);"
+          "r.setProperty('--line-hi',p.accent);"
           "r.colorScheme=isLightKey(k)?'light':'dark';"
         "}"
         "function select(k){input.value=k;"
@@ -1825,6 +1828,15 @@ __attribute__((weak)) bool webCfgThemeColors(WebThemeColors *out) {
 static void sendFullHead() {
     sendFlash(kHeadOpen);
     sendFlash(kAppFontsLink);
+    // /app.css is cached for a year, so its URL carries a hash of its bytes:
+    // any change to the stylesheet, even in a flash that keeps the version, is
+    // a URL the browser has never cached.
+    static uint32_t cssHash = 0;
+    if (!cssHash) cssHash = webAssetHash(kAppCss);
+    char link[64];
+    snprintf(link, sizeof(link), "<link rel='stylesheet' href='/app.css?v=%08lx'>",
+             (unsigned long)cssHash);
+    server.sendContent(link);
     WebThemeColors tc;
     char vars[600];
     if (webCfgThemeColors(&tc) && webThemeCssVars(tc, vars, sizeof(vars))) {
@@ -6661,6 +6673,11 @@ static void sendConfigPage(const char *msg = "", bool lite = false) {
 #if HAS_WEB_FILES
         if (gCfg && cfgWebFilesEnabled(*gCfg)) html += "<a data-tab='files' href='#files'>Files</a>";
 #endif
+        // The header's key chip does not fit a phone's header, and Remote Admin
+        // setup sends people to it, so the key is one tap away here instead.
+        if (havePubKey)
+            html += "<a href='#' data-copykey onclick=\"copyPubKey(document.getElementById('pubkey-chip'));"
+                    "this.textContent='Public key copied';return false\">Copy public key</a>";
         if (gCfg && gCfg->webCfgAuthEnabled) html += "<a href='/logout'>Logout</a>";
         html += "</div>"
                 "<div class='savebar' id='savebar'><span id='save-count'></span>"
@@ -9972,7 +9989,7 @@ static void handleImportDone() {
 }
 
 // The full page's stylesheet. Cached for a year: the page links it as
-// /app.css?v=APP_VERSION, so a firmware update is a new URL. No login, like the
+// /app.css?v=<hash of its bytes>, so any change is a new URL. No login, like the
 // favicon: it is the same bytes for everyone and the login page uses it.
 static void handleGetAppCss() {
     server.sendHeader("Cache-Control", "public, max-age=31536000, immutable");

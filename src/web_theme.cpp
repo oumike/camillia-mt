@@ -31,6 +31,24 @@ double webThemeContrast(uint16_t a, uint16_t b) {
     return (hi + 0.05) / (lo + 0.05);
 }
 
+// RGB565 moved a fraction toward black (dark=true) or white, in 888 space and
+// back. Only for the status colours, so precision is not a concern.
+static uint16_t shade(uint16_t c, double t, bool dark) {
+    const uint32_t rgb = to888(c);
+    uint32_t ch[3] = {(rgb >> 16) & 0xFF, (rgb >> 8) & 0xFF, rgb & 0xFF};
+    for (uint32_t &v : ch) v = dark ? (uint32_t)(v * (1.0 - t)) : (uint32_t)(v + (255 - v) * t);
+    return (uint16_t)(((ch[0] & 0xF8) << 8) | ((ch[1] & 0xFC) << 3) | (ch[2] >> 3));
+}
+
+// Battery greens and ambers are tuned to glow on the device's dark status bar.
+// On a light page they fade out, so walk each toward black (or white, on a dark
+// page that somehow has a pale one) until it reads at 3:1 against the page.
+static uint16_t readableStatus(uint16_t c, uint16_t bg, bool isLight) {
+    uint16_t out = c;
+    for (int i = 1; i <= 10 && webThemeContrast(out, bg) < 3.0; i++) out = shade(c, i * 0.1, isLight);
+    return out;
+}
+
 size_t webThemeCssVars(const WebThemeColors &c, char *out, size_t outLen) {
     char text[8], dim[8];
     if (webThemeContrast(c.text, c.bg) < 4.5) {
@@ -50,9 +68,19 @@ size_t webThemeCssVars(const WebThemeColors &c, char *out, size_t outLen) {
         c.isLight ? "light" : "dark",
         HEX(c.bg), HEX(c.panel), HEX(c.panelAlt), HEX(c.panelStrong),
         HEX(c.divider), HEX(c.dividerHi), HEX(c.inputBg), HEX(c.accent),
-        text, dim, HEX(c.onAccent), HEX(c.good), HEX(c.warn), HEX(c.bad));
+        text, dim, HEX(c.onAccent), HEX(readableStatus(c.good, c.bg, c.isLight)),
+        HEX(readableStatus(c.warn, c.bg, c.isLight)), HEX(readableStatus(c.bad, c.bg, c.isLight)));
 #undef HEX
     if (n <= 0 || (size_t)n >= sizeof(buf) || (size_t)n >= outLen) return 0;
     memcpy(out, buf, (size_t)n + 1);
     return (size_t)n;
+}
+
+uint32_t webAssetHash(const char *s) {
+    uint32_t h = 0x811c9dc5u;
+    for (; *s; s++) {
+        h ^= (uint8_t)*s;
+        h *= 0x01000193u;
+    }
+    return h;
 }

@@ -36,6 +36,11 @@ h2{font-size:1.15em;font-weight:600;margin:0 0 .15em}
 h3{font-size:1em;font-weight:600;margin:1.2em 0 .45em;color:var(--text)}
 p{margin:.5em 0}
 
+/* Login: the page is just a heading and a form, straight under <body>. */
+body>h2,body>form{max-width:360px;margin-left:auto;margin-right:auto;padding:0 16px}
+body>h2{margin-top:14vh;font:500 1.3em var(--brand);color:var(--accent)}
+body>form{margin-top:12px}
+
 /* Header */
 .app-hd{position:sticky;top:0;z-index:30;height:var(--hd);display:flex;align-items:center;gap:.6em;
 padding:0 16px;background:var(--panel);border-bottom:1px solid var(--line)}
@@ -135,7 +140,8 @@ input[type=range]{width:100%;accent-color:var(--accent)}
 display:grid;grid-template-columns:minmax(9em,38%) minmax(0,1fr);align-items:center;gap:0 12px}
 .cfg-sec label:has(>input:not([type=checkbox],[type=radio],[type=hidden]),>select,>textarea)>*{margin-top:0}
 .cfg-sec .row2 label:has(>input,>select){grid-template-columns:minmax(6em,40%) minmax(0,1fr)}
-.cfg-sec .ch-fields label:has(>input,>select){display:block}}}
+.cfg-sec .ch-fields label:has(>input,>select){display:block}
+.cfg-sec label:has(>output):has(>input[type=range]){grid-template-columns:minmax(9em,38%) 2.6em minmax(0,1fr)}}}
 
 /* Checkbox as a toggle. Still a real checkbox: same name, same POST. */
 input[type=checkbox]{appearance:none;-webkit-appearance:none;flex:none;width:34px;height:20px;margin:0 .55em 0 0;

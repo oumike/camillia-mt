@@ -21,6 +21,8 @@ function cnt(){return D.getElementById('savebar').classList.contains('show')?D.g
   ok(D.querySelectorAll('#rail-secs .sec-link').length===5,'rail lists the 5 sample sections');
   ok(D.querySelectorAll('#sheet-secs .sec-link').length===5,'section sheet lists them too');
   ok(cnt()==='hidden','save bar hidden on load (script-set region not counted)');
+  var br=D.getElementById('briIn'),bl=br.closest('label').getBoundingClientRect(),bb=br.getBoundingClientRect();
+  ok(bb.left>bl.left+bl.width*0.3&&bb.top<bl.top+bl.height/2+12,'slider sits in the control column, beside its label');
   var r=D.getElementById('sel-rgn');r.value='EU_868';fire(r,'change');
   ok(cnt()==='1 unsaved change','region change counts 1');
   ok(D.querySelector('.sec-link[data-sec=lora]').classList.contains('dirty'),'LoRa link marked');
@@ -46,6 +48,7 @@ function cnt(){return D.getElementById('savebar').classList.contains('show')?D.g
   D.querySelector('.app-rail a[data-tab=utils]').click();await wait(20);
   ok(D.getElementById('tab-utils').classList.contains('active')&&W.location.hash==='#utils','rail tab switches pane and hash');
   ok(D.querySelector('.app-rail a[data-tab=utils]').getAttribute('aria-current')==='page','aria-current on active tab');
+  ok(!!D.querySelector('#sheet-more [data-copykey]'),'More sheet offers the public key');
   await load('#live');
   ok(D.getElementById('tab-live').classList.contains('active'),'hash #live restores Live');
   await load('','#utils');

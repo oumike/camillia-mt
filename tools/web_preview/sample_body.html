@@ -15,7 +15,7 @@
 </section>
 <section class='cfg-sec' id='sec-device'><h2>Device</h2><p class='sec-desc'>Role, rebroadcasting and clock.</p>
 <div class='row2'><label>Role<select name='role'><option value='0' selected>CLIENT</option><option value='1'>CLIENT_MUTE</option></select></label><label>Rebroadcast<select name='rebroadcast'><option>ALL</option><option>LOCAL_ONLY</option></select></label></div>
-<label>Brightness<input name='brightness' type='range' min='0' max='255' value='180'></label>
+<label>Brightness <output id='briOut'>180</output><input name='brightness' type='range' id='briIn' min='0' max='255' value='180'></label>
 <input type='hidden' name='ui_theme_preset' id='themeInput' value='0'><button type='button' class='btn-2' id='pick-theme' onclick="document.getElementById('themeInput').value='3'">Pick theme 3 (preview test)</button>
 <div class='tb-back'><input type='radio' name='tbMode' value='0' checked><input type='radio' name='tbMode' value='1' id='tb-light'></div>
 </section>
@@ -51,6 +51,6 @@
 <nav class='tabbar' aria-label='Tabs'><a data-tab='config' href='#config'><svg viewBox='0 0 24 24'><circle cx='12' cy='12' r='3'/><path d='M12 2v3M12 19v3M2 12h3M19 12h3M4.9 4.9l2.1 2.1M17 17l2.1 2.1M4.9 19.1L7 17M17 7l2.1-2.1'/></svg>Config</a><a data-tab='live' href='#live'><svg viewBox='0 0 24 24'><path d='M3 12h4l3-7 4 14 3-7h4'/></svg>Live</a><a data-tab='chat' href='#chat'><svg viewBox='0 0 24 24'><path d='M4 5h16v11H9l-5 4z'/></svg>Chat</a><a data-tab='map' href='#map'><svg viewBox='0 0 24 24'><circle cx='12' cy='12' r='8'/><circle cx='12' cy='12' r='2'/></svg>Nodes</a><button type='button' onclick="appOpenSheet('sheet-more')"><svg viewBox='0 0 24 24'><circle cx='5' cy='12' r='1.5'/><circle cx='12' cy='12' r='1.5'/><circle cx='19' cy='12' r='1.5'/></svg>More</button></nav>
 <div class='scrim' id='scrim'></div>
 <div class='sheet' id='sheet-secs'></div>
-<div class='sheet' id='sheet-more'><a data-tab='utils' href='#utils'>Utilities</a><a data-tab='remote' href='#remote'>Remote</a><a href='#'>Logout</a></div>
+<div class='sheet' id='sheet-more'><a data-tab='utils' href='#utils'>Utilities</a><a data-tab='remote' href='#remote'>Remote</a><a href='#' data-copykey onclick="copyPubKey(document.getElementById('pubkey-chip'));this.textContent='Public key copied';return false">Copy public key</a><a href='#'>Logout</a></div>
 <div class='savebar' id='savebar'><span id='save-count'></span><button type='button' class='btn-2' id='save-discard'>Discard</button><button type='submit' form='cfg-form' class='btn'>Save and restart</button></div>
 <script>function switchTab(t){appTab(t);}</script>

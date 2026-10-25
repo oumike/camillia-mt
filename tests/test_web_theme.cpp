@@ -1,6 +1,7 @@
 #include "../src/web_theme.h"
 
 #include <math.h>
+#include <stdlib.h>
 #include <stdio.h>
 #include <string.h>
 
@@ -53,6 +54,35 @@ static void testContrastGuard() {
     CHECK(strstr(out, "--dim:#b0b8c8") != nullptr);
 }
 
+// "--name:#rrggbb" in a vars block, as RGB565, for a contrast check.
+static uint16_t varAs565(const char *vars, const char *name) {
+    const char *p = strstr(vars, name);
+    if (!p) return 0;
+    unsigned long v = strtoul(p + strlen(name) + 2, nullptr, 16);   // skip ":#"
+    return (uint16_t)(((v >> 8) & 0xF800) | ((v >> 5) & 0x07E0) | ((v >> 3) & 0x1F));
+}
+
+// Battery greens and ambers are picked to glow on a dark status bar; on a light
+// page they all but vanish. Status colours must stay readable on the page.
+static void testLightStatusColours() {
+    WebThemeColors c = camilliaDark();
+    c.isLight = true;
+    c.bg = 0xFFFF; c.panel = 0xFFFF; c.text = 0x0000;
+    c.good = 0x3E2C; c.warn = 0xF5A5; c.bad = 0xF800;   // #3ac762, #f2b52e, red
+    char out[600];
+    CHECK(webThemeCssVars(c, out, sizeof(out)) > 0);
+    CHECK(webThemeContrast(varAs565(out, "--good"), 0xFFFF) >= 3.0);
+    CHECK(webThemeContrast(varAs565(out, "--warn"), 0xFFFF) >= 3.0);
+    CHECK(webThemeContrast(varAs565(out, "--bad"), 0xFFFF) >= 3.0);
+}
+
+// The stylesheet's cache key: FNV-1a, so it changes whenever the bytes do.
+static void testAssetHash() {
+    CHECK(webAssetHash("") == 0x811c9dc5u);
+    CHECK(webAssetHash("a") == 0xe40c292cu);
+    CHECK(webAssetHash("a{}") != webAssetHash("b{}"));
+}
+
 static void testTooSmall() {
     char out[16];
     out[0] = 'x';
@@ -66,6 +96,8 @@ int main() {
     testLightScheme();
     testContrastGuard();
     testTooSmall();
+    testLightStatusColours();
+    testAssetHash();
     printf(g_fail ? "FAILED\n" : "ok\n");
     return g_fail;
 }
