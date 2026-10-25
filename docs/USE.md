@@ -50,6 +50,24 @@ If the mesh near you predates 2.8 it is probably still on Long Fast. Change the
 preset in Config or web config; the region stays as it is. Existing devices are
 never moved by an upgrade — this default applies only to first-time setup.
 
+### Community presets
+
+The community setups the web flasher's **Flash and Customize** offers (ChiMesh,
+MichMesh, Freq51, BayMesh and the rest) are also on the device:
+**Config → Community Preset**, and **Community Preset** in web config's LoRa
+Radio section. Each sets the region, the radio preset (and frequency slot, where
+the mesh uses one), the mesh's whole channel list and, where the community
+publishes one anyone can use, its MQTT broker (server, port, login and root
+topic), as the community publishes them. A preset with a broker also turns MQTT
+on, and Wi-Fi with it when a network is saved. The flasher's logos are not
+included.
+
+Choosing one shows what it changes and the community's own advice (hop limit and
+the like, which you set by hand), and asks before applying. Applying
+**replaces all of your channels**, clears all messages and every node that is not
+a favorite (the same as Clear Messages and Clear Nodes), and reboots. Setups that need more channels
+than the device has (ten on the Cardputer, which has eight) are not offered.
+
 Your **long name** is capped at 24 bytes here, matching what Meshtastic 2.8
 stores and forwards. A longer name is clipped on other people's screens rather
 than shown in full, so the cap is what you will actually be called.

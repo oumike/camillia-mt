@@ -1,4 +1,5 @@
 #include "web_config.h"
+#include "community_presets.h"
 #include "ble_keyboard.h"   // coexistence holds Wi-Fi modem sleep on
 #include "keyboard.h"       // keyboardSetKeypadBacklight(), applied on save
 #if HAS_VNC_HOST
@@ -148,6 +149,11 @@ static char           gWifiSsid[64]    = "";
 static char           gWifiPass[64]    = "";
 static char           gFlashMsg[128]   = "";
 static bool           gRebootPending   = false;
+// A community preset to apply (kCommunityPresets index), and when. The delay
+// lets the redirect reach the browser before the commit reboots the device,
+// as scheduleReboot() does for the restarting actions.
+static int            gCommunityReq    = -1;
+static uint32_t       gCommunityAtMs   = 0;
 static uint32_t       gRebootAtMs      = 0;
 static bool           gWebBuffersReclaimed = false;
 
@@ -3224,6 +3230,89 @@ static void appendJsStr(String &out, const char *s) {
     }
 }
 
+// The Community Preset picker in the LoRa Radio section. It sits inside the
+// /save form but is not part of it: the select has no name, and Apply posts
+// its own one-field form to /community-preset (forms cannot nest), after a
+// confirm that names what changes. Presets this device cannot take are listed
+// disabled with the reason, rather than missing.
+static void appendCommunityPresetPicker(String &html) {
+    html += "<label>Community Preset<select id='sel-cp' onchange='cpShow()'>"
+            "<option value=''>Choose a local mesh&hellip;</option>";
+    const char *area = nullptr;
+    for (int i = 0; i < kCommunityPresetCount; i++) {
+        const CommunityPreset &cp = kCommunityPresets[i];
+        if (!area || strcmp(area, cp.area) != 0) {
+            if (area) html += "</optgroup>";
+            area = cp.area;
+            html += "<optgroup label='"; appendAttr(html, area); html += "'>";
+        }
+        const char *why = communityPresetProblem(i);
+        html += "<option value='"; appendAttr(html, cp.id); html += "'";
+        if (why) html += " disabled";
+        html += ">"; appendAttr(html, cp.label);
+        if (why) { html += " ("; appendAttr(html, why); html += ")"; }
+        html += "</option>";
+    }
+    if (area) html += "</optgroup>";
+    html += "</select></label>"
+            "<p class='gps-hint' id='cp-info'>Sets the region, radio preset, every channel and the MQTT broker "
+            "the way a local mesh publishes them, clears messages and non-favorite nodes, "
+            "then reboots. Your current channels are replaced.</p>"
+            "<button type='button' id='cp-apply' disabled onclick='cpApply()'>"
+            "Apply Community Preset</button>";
+    // One entry per preset: label, region, radio, channel names, notes, url.
+    html += "<script>var CP={";
+    char tmp[16];
+    for (int i = 0; i < kCommunityPresetCount; i++) {
+        const CommunityPreset &cp = kCommunityPresets[i];
+        if (i) html += ",";
+        html += "'"; appendJsStr(html, cp.id); html += "':{l:'";
+        appendJsStr(html, cp.label); html += "',r:'";
+        appendJsStr(html, cp.region); html += "',p:'";
+        int radio = -1;
+        for (uint8_t k = 0; cp.preset[0] && k < PRESET_COUNT; k++) {
+            if (!strcasecmp(cp.preset, kPresets[k].channelName)) { radio = k; break; }
+        }
+        appendJsStr(html, radio >= 0 ? kPresets[radio].name : "unchanged");
+        if (cp.slot) {
+            snprintf(tmp, sizeof(tmp), ", slot %u", (unsigned)cp.slot);
+            html += tmp;
+        }
+        html += "',c:[";
+        for (int c = 0; c < cp.channelCount; c++) {
+            const CommunityPresetChannel &ch = kCommunityPresetChannels[cp.firstChannel + c];
+            if (c) html += ",";
+            html += "'"; appendJsStr(html, ch.name[0] ? ch.name : "(primary)"); html += "'";
+        }
+        html += "],m:'";
+        if (cp.mqtt.host[0]) {
+            appendJsStr(html, cp.mqtt.host); html += " (";
+            appendJsStr(html, cp.mqtt.root); html += ")";
+        }
+        html += "',n:'"; appendJsStr(html, cp.notes);
+        html += "',u:'"; appendJsStr(html, cp.url); html += "'}";
+        if ((i & 7) == 7) sendChunk(html);
+    }
+    html += "};"
+            "function cpEsc(t){var d=document.createElement('div');d.textContent=t;return d.innerHTML;}"
+            "function cpShow(){var id=document.getElementById('sel-cp').value,e=document.getElementById('cp-info'),"
+            "b=document.getElementById('cp-apply'),p=CP[id];b.disabled=!p;"
+            "if(!p){e.textContent='Sets the region, radio preset, every channel and the MQTT broker the way a local mesh "
+            "publishes them, clears messages and non-favorite nodes, then reboots. Your current "
+            "channels are replaced.';return;}"
+            "e.innerHTML='Region <b>'+cpEsc(p.r)+'</b>, radio <b>'+cpEsc(p.p)+'</b>, channels: '"
+            "+cpEsc(p.c.join(', '))+(p.m?', MQTT <b>'+cpEsc(p.m)+'</b> (turned on)':'')+(p.n?'<br>'+cpEsc(p.n):'')"
+            "+(p.u?'<br><a href=\"'+cpEsc(p.u)+'\" target=\"_blank\" rel=\"noopener\">Community page</a>':'');}"
+            "function cpApply(){var id=document.getElementById('sel-cp').value,p=CP[id];if(!p)return;"
+            "if(!confirm('Apply '+p.l+'?\\n\\nRegion: '+p.r+'\\nRadio: '+p.p+'\\nChannels: replaced with '"
+            "+p.c.length+(p.m?'\\nMQTT: '+p.m+', turned on':'')+'\\n\\nYour current channels are overwritten, all messages and non-favorite "
+            "nodes are cleared, and the device reboots. Continue?'))return;"
+            "var f=document.createElement('form');f.method='POST';f.action='/community-preset';"
+            "var i=document.createElement('input');i.type='hidden';i.name='id';i.value=id;"
+            "f.appendChild(i);document.body.appendChild(f);f.submit();}"
+            "</script>";
+}
+
 // Config-pane section wrappers. The full page folds each section into a
 // <details> accordion; web config lite renders a plain heading with everything
 // expanded — no folding, no styling, so nothing depends on CSS being there.
@@ -4161,6 +4250,8 @@ static void sendConfigPage(const char *msg = "", bool lite = false) {
     if (!lite) {
         sendFlash(kPresetJs);
         sendFlash(kLoraReadout);
+        appendCommunityPresetPicker(html);
+        sendChunk(html);
     }
     html += "<div class='row2'>";
     snprintf(tmp, sizeof(tmp), "%d", gCfg->loraPower);
@@ -9097,6 +9188,32 @@ static void handleGetScreenshot() {
 //
 // The 900 ms matches the destructive handlers. Persistence is flushed by the
 // reboot path itself, so a queued transcript snapshot is not lost.
+// Applies a community preset: validated here so a refusal can be shown, then
+// queued for the main loop (webCfgTakeCommunityPreset()), which runs it
+// through the cfg CLI and reboots once this redirect has gone out.
+static void handlePostCommunityPreset() {
+    if (!isLoggedIn()) { redirect("/login"); return; }
+    const String id = server.arg("id");
+    int idx = -1;
+    for (int i = 0; i < kCommunityPresetCount; i++) {
+        if (id == kCommunityPresets[i].id) { idx = i; break; }
+    }
+    if (idx < 0) { redirectHomeWithFlash("Unknown community preset."); return; }
+    if (const char *why = communityPresetProblem(idx)) {
+        char msg[160];
+        snprintf(msg, sizeof(msg), "%s was not applied: %s.", kCommunityPresets[idx].label, why);
+        redirectHomeWithFlash(msg);
+        return;
+    }
+    Serial.printf("[web] community preset %s requested\n", kCommunityPresets[idx].id);
+    gCommunityReq = idx;
+    gCommunityAtMs = millis() + 900;
+    char msg[160];
+    snprintf(msg, sizeof(msg), "Applying %s. The device reboots and this page will "
+             "not respond until it is back.", kCommunityPresets[idx].label);
+    redirectHomeWithFlash(msg);
+}
+
 static void handlePostReboot() {
     if (!isLoggedIn()) { redirect("/login"); return; }
     Serial.println("[web] reboot requested from Danger Zone");
@@ -10651,6 +10768,7 @@ static void registerCommonRoutes() {
     onRoute("/reset-chat-colors", HTTP_POST, handlePostResetChatColors);
 #endif
     onRoute("/reboot",            HTTP_POST, handlePostReboot);
+    onRoute("/community-preset",  HTTP_POST, handlePostCommunityPreset);
     onRoute("/clear-messages",    HTTP_POST, handlePostClearMessages);
     onRoute("/wifi-add",          HTTP_POST, handlePostWifiAdd);
     onRoute("/wifi-forget",       HTTP_POST, handlePostWifiForget);
@@ -11179,6 +11297,13 @@ void webCfgSetChatServerResult(const char *msg) {
 }
 
 const char *webCfgChatServerResult() { return gCsResult; }
+
+bool webCfgTakeCommunityPreset(int &idx) {
+    if (gCommunityReq < 0 || (int32_t)(millis() - gCommunityAtMs) < 0) return false;
+    idx = gCommunityReq;
+    gCommunityReq = -1;
+    return true;
+}
 
 bool webCfgTakeManualTime(int &year, int &mon, int &day, int &hour, int &minute) {
     if (!gManualTimeReq) return false;

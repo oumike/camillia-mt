@@ -58,6 +58,7 @@ LV_FONT_DECLARE(lv_font_eink_bold_18);
 #include "aw9523.h"   // FT6636 reset sits on an expander, released at boot
 #endif
 #include "web_config.h"
+#include "community_presets.h"
 #if HAS_VNC_HOST
 #include "vnc_host.h"
 #endif
@@ -2649,6 +2650,11 @@ static void openCfgNavAlignModal();
 static inline const char *uiOrientName(uint8_t o);
 #endif
 static void openCfgPresetModal();
+static void openCfgCommunityModal();
+static void closeCfgCommunityModal();
+static int communityPresetRadioIndex(const CommunityPreset &cp);
+static void communityPresetSummary(int idx, char *out, size_t outLen);
+static const char *communityPresetApply(int idx);
 static void openCfgBrightnessModal();
 static void openCfgScreenTimeoutModal();
 static const char *screenTimeoutName(uint32_t secs);
@@ -3667,6 +3673,7 @@ enum CfgActionId {
     CFG_ACTION_WEBCFG = 0,
     CFG_ACTION_NODE_NAME,
     CFG_ACTION_PRESET,
+    CFG_ACTION_COMMUNITY_PRESET,
 #if defined(DEVICE_TDISPLAY_P4)
     CFG_ACTION_ANTENNA,        // on-board vs external antenna socket
 #endif
@@ -5602,6 +5609,9 @@ static const char *cfgActionLabel(int actionId, char *buf, size_t bufLen) {
                      !s_cfg.loraUsePreset ? TR("Custom")
                        : kPresets[s_cfg.modemPreset < PRESET_COUNT
                                   ? s_cfg.modemPreset : PRESET_LONG_FAST].name);
+            break;
+        case CFG_ACTION_COMMUNITY_PRESET:
+            snprintf(buf, bufLen, "%s", TR("Community Preset"));
             break;
         case CFG_ACTION_EXPORT:
             snprintf(buf, bufLen, "%s", TR("Export Config"));
@@ -11194,6 +11204,23 @@ static void loadProvisionedConfig() {
         applyProvisionedPreset(preset, slot);
         Serial.printf("[cfg] provisioned preset=%s slot=%u\n", kPresets[preset].channelName, slot);
     }
+    // A community broker from the flasher, switched on as `cfg commit` does.
+    if (p.begin(kProvNs, true)) {
+        if (p.isKey("mqHost") && p.isKey("mqRoot")) {
+            utf8util::copyTruncate(s_cfg.mqttServer, sizeof(s_cfg.mqttServer), p.getString("mqHost").c_str());
+            utf8util::copyTruncate(s_cfg.mqttUser, sizeof(s_cfg.mqttUser), p.getString("mqUser", "").c_str());
+            utf8util::copyTruncate(s_cfg.mqttPass, sizeof(s_cfg.mqttPass), p.getString("mqPass", "").c_str());
+            utf8util::copyTruncate(s_cfg.mqttRoot, sizeof(s_cfg.mqttRoot), p.getString("mqRoot").c_str());
+            s_cfg.mqttPort = p.getUShort("mqPort", 1883);
+            s_cfg.mqttTls = p.getBool("mqTls", false);
+            s_cfg.mqttEncryption = p.getBool("mqEnc", true);
+            s_cfg.mqttEnabled = true;
+            if (s_cfg.wifiSsid[0]) s_cfg.wifiEnabled = true;
+            Serial.printf("[cfg] provisioned mqtt=%s:%u\n", s_cfg.mqttServer, (unsigned)s_cfg.mqttPort);
+        }
+        if (p.isKey("ok2mq")) s_cfg.okToMqtt = p.getChar("ok2mq", 0) != 0;
+        p.end();
+    }
 }
 
 // Boot logo, also from the flasher: a PNG drawn on the splash card in place of
@@ -14840,6 +14867,9 @@ static void initCfgActions() {
     // what the rest of the mesh sees of this node, and a node on the wrong
     // preset is invisible to it entirely.
     s_cfgActions[s_cfgActionCount++] = CFG_ACTION_PRESET;
+    // Under Preset: the other way to pick one, along with the region and the
+    // channels a local mesh uses.
+    s_cfgActions[s_cfgActionCount++] = CFG_ACTION_COMMUNITY_PRESET;
 #if defined(DEVICE_TDISPLAY_P4)
     // Under the preset: the other half of "can this node be heard at all".
     s_cfgActions[s_cfgActionCount++] = CFG_ACTION_ANTENNA;
@@ -22805,6 +22835,257 @@ static void openCfgPresetModal() {
     refreshCfgPresetSelection();
 }
 
+// ── Config -> Community Preset ──────────────────────────────────────────────
+// The web flasher's community setups (community_presets.h): pick one, read
+// what it changes, and confirm. Applying writes region, radio and the whole
+// channel plan through the cfg CLI (communityPresetApply()) and reboots.
+//
+// A sibling of the Modem preset picker above, for the same reason the
+// orientation picker is: the rows say different things and the list is built
+// differently (only the setups this device can take are offered).
+static lv_obj_t *s_cfgCommunityBackdrop = nullptr;
+static lv_obj_t *s_cfgCommunityModal = nullptr;
+static lv_obj_t **s_cfgCommunityRows = nullptr;    // s_cfgCommunityCount entries
+static int      *s_cfgCommunityChoices = nullptr;  // row -> kCommunityPresets index
+static int       s_cfgCommunityCount = 0;
+static int       s_cfgCommunitySelection = 0;
+// The confirmation names everything that changes plus the community's own
+// notes, which run to a few hundred bytes.
+static char      s_cfgCommunityConfirm[768] = {};
+
+static void closeCfgCommunityModal() {
+    if (lvObjValid(s_cfgCommunityBackdrop)) lv_obj_del(s_cfgCommunityBackdrop);
+    s_cfgCommunityBackdrop = nullptr;
+    s_cfgCommunityModal = nullptr;
+    free(s_cfgCommunityRows);
+    free(s_cfgCommunityChoices);
+    s_cfgCommunityRows = nullptr;
+    s_cfgCommunityChoices = nullptr;
+    s_cfgCommunityCount = 0;
+    s_cfgCommunitySelection = 0;
+}
+
+static void refreshCfgCommunitySelection() {
+    if (!s_cfgCommunityModal || !s_cfgCommunityRows) return;
+    paintPickerRows(s_cfgCommunityRows, s_cfgCommunityCount, s_cfgCommunitySelection,
+                    PICKER_SCROLL_VIEW);
+}
+
+// Yes on the confirmation. `presetIdx` is the kCommunityPresets index, not
+// the row: the picker is closed by now and its table with it.
+static void cfgCommunityCommit(int presetIdx) {
+    closeCfgCommunityModal();
+    snprintf(s_cfgStatus, sizeof(s_cfgStatus), TR("%s - rebooting..."),
+             kCommunityPresets[presetIdx].label);
+    refreshCfgModal();
+    // Paint the status before going, as the Modem preset picker does: a
+    // device that reboots with no explanation reads as a crash.
+    lv_timer_handler();
+    const char *err = communityPresetApply(presetIdx);   // reboots on success
+    snprintf(s_cfgStatus, sizeof(s_cfgStatus), TR("Not applied: %s"),
+             err ? err : TR("nothing changed"));
+    refreshCfgModal();
+}
+
+static void cfgCommunityAsk(int row) {
+    if (row < 0 || row >= s_cfgCommunityCount) return;
+    const int presetIdx = s_cfgCommunityChoices[row];
+    communityPresetSummary(presetIdx, s_cfgCommunityConfirm, sizeof(s_cfgCommunityConfirm));
+    openCfgConfirmModal(-1, s_cfgCommunityConfirm,
+                        [](int i) { cfgCommunityCommit(i); }, presetIdx);
+}
+
+static void onCfgCommunityRowPressed(lv_event_t *e) {
+    const int row = (int)(intptr_t)lv_event_get_user_data(e);
+    if (row < 0 || row >= s_cfgCommunityCount) return;
+    s_cfgCommunitySelection = row;
+    refreshCfgCommunitySelection();
+    cfgCommunityAsk(row);
+}
+
+static void openCfgCommunityModal() {
+    if (!s_rootScreen || s_cfgCommunityBackdrop) return;
+    {
+        // Forty-odd rows of two labels each: bail before lv_obj_create would
+        // hit LV_ASSERT_MALLOC, as the Nodes screen does.
+        lv_mem_monitor_t mem;
+        lv_mem_monitor(&mem);
+        if (mem.free_biggest_size < 12288) {
+            logLvglMemDiag("openCfgCommunityModal aborted (low LVGL mem)");
+            snprintf(s_cfgStatus, sizeof(s_cfgStatus), "%s", TR("Not enough memory to list presets."));
+            refreshCfgModal();
+            return;
+        }
+    }
+    s_cfgCommunityRows = (lv_obj_t **)calloc(kCommunityPresetCount, sizeof(lv_obj_t *));
+    s_cfgCommunityChoices = (int *)calloc(kCommunityPresetCount, sizeof(int));
+    if (!s_cfgCommunityRows || !s_cfgCommunityChoices) {
+        closeCfgCommunityModal();
+        return;
+    }
+    s_cfgCommunityCount = 0;
+    for (int i = 0; i < kCommunityPresetCount; i++) {
+        if (communityPresetProblem(i)) continue;   // e.g. ten channels on the Cardputer
+        s_cfgCommunityChoices[s_cfgCommunityCount++] = i;
+    }
+    s_cfgCommunitySelection = 0;
+    if (s_cfgCommunityCount == 0) {
+        closeCfgCommunityModal();
+        return;
+    }
+
+    const int w = lv_disp_get_hor_res(NULL);
+    const int h = lv_disp_get_ver_res(NULL);
+    int modalW = w - 24;
+    if (modalW < 170) modalW = w - 8;
+    if (modalW > 300) modalW = 300;
+
+    s_cfgCommunityBackdrop = lv_obj_create(s_rootScreen);
+    lv_obj_set_size(s_cfgCommunityBackdrop, w, h);
+    lv_obj_align(s_cfgCommunityBackdrop, LV_ALIGN_CENTER, 0, 0);
+    lv_obj_clear_flag(s_cfgCommunityBackdrop, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_add_flag(s_cfgCommunityBackdrop, LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_set_style_bg_color(s_cfgCommunityBackdrop, lv_color_hex(0x000000), 0);
+    lv_obj_set_style_bg_opa(s_cfgCommunityBackdrop, LV_OPA_40, 0);
+    lv_obj_set_style_border_width(s_cfgCommunityBackdrop, 0, 0);
+    lv_obj_set_style_pad_all(s_cfgCommunityBackdrop, 0, 0);
+    lv_obj_add_event_cb(s_cfgCommunityBackdrop,
+                        [](lv_event_t *e) {
+                            if (lv_event_get_target_obj(e) != s_cfgCommunityBackdrop) return;
+                            closeCfgCommunityModal();
+                        },
+                        LV_EVENT_CLICKED, nullptr);
+
+    s_cfgCommunityModal = lv_obj_create(s_cfgCommunityBackdrop);
+    lv_obj_set_size(s_cfgCommunityModal, modalW, LV_SIZE_CONTENT);
+    lv_obj_set_style_max_height(s_cfgCommunityModal, (h > 40) ? (h - 16) : LV_SIZE_CONTENT, 0);
+    lv_obj_align(s_cfgCommunityModal, LV_ALIGN_CENTER, 0, 0);
+    lv_obj_clear_flag(s_cfgCommunityModal, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_add_flag(s_cfgCommunityModal, LV_OBJ_FLAG_CLICKABLE);
+#if defined(DEVICE_TDECK_PRO)
+    lv_obj_set_style_bg_color(s_cfgCommunityModal, lv_color_make(255, 255, 255), 0);
+    lv_obj_set_style_border_color(s_cfgCommunityModal, lv_color_make(0, 0, 0), 0);
+#else
+    lv_obj_set_style_bg_color(s_cfgCommunityModal, lv_color_hex(0x0E285B), 0);
+    lv_obj_set_style_border_color(s_cfgCommunityModal, lv_color_hex(0x5C86C6), 0);
+#endif
+    lv_obj_set_style_bg_opa(s_cfgCommunityModal, LV_OPA_COVER, 0);
+    lv_obj_set_style_border_width(s_cfgCommunityModal, 1, 0);
+    lv_obj_set_style_pad_all(s_cfgCommunityModal, 8, 0);
+    lv_obj_set_style_pad_row(s_cfgCommunityModal, 5, 0);
+    lv_obj_set_flex_flow(s_cfgCommunityModal, LV_FLEX_FLOW_COLUMN);
+    lv_obj_set_flex_align(s_cfgCommunityModal, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_CENTER,
+                          LV_FLEX_ALIGN_CENTER);
+    lv_obj_move_foreground(s_cfgCommunityBackdrop);
+
+#if defined(DEVICE_TDECK_PRO)
+    const lv_color_t titleColor = lv_color_make(0, 0, 0);
+    const lv_color_t hintColor  = lv_color_make(0, 0, 0);
+    const lv_color_t rowColor   = lv_color_make(0, 0, 0);
+#else
+    const lv_color_t titleColor = lv_color_hex(0xD9E8FF);
+    const lv_color_t hintColor  = lv_color_hex(0xA7C7FF);
+    const lv_color_t rowColor   = (s_cfg.uiMode == UI_MODE_LIGHT)
+                                      ? lv_color_hex(0x13233D) : lv_color_hex(0xD9E8FF);
+#endif
+
+    lv_obj_t *title = lv_label_create(s_cfgCommunityModal);
+    lv_obj_set_width(title, lv_pct(100));
+    lv_obj_set_style_text_font(title, &lv_font_montserrat_14, 0);
+    lv_obj_set_style_text_color(title, titleColor, 0);
+    lv_obj_set_style_text_align(title, LV_TEXT_ALIGN_CENTER, 0);
+    lv_label_set_text(title, TR("Community preset"));
+
+#if UI_TOUCH_ONLY_PROFILE
+    reserveHeltecCloseXRow(title);
+    appendHeltecCloseX(s_cfgCommunityModal,
+                       [](lv_event_t *ev) { LV_UNUSED(ev); closeCfgCommunityModal(); });
+#endif
+
+    lv_obj_t *warn = lv_label_create(s_cfgCommunityModal);
+    lv_obj_set_width(warn, lv_pct(100));
+    lv_obj_set_style_text_font(warn, &lv_font_montserrat_10, 0);
+    lv_obj_set_style_text_color(warn, hintColor, 0);
+    lv_obj_set_style_text_align(warn, LV_TEXT_ALIGN_CENTER, 0);
+    lv_label_set_long_mode(warn, LV_LABEL_LONG_WRAP);
+    lv_label_set_text(warn, TR("Sets region, radio, channels and MQTT as a local "
+                            "mesh publishes them, and clears messages and nodes. "
+                            "Asks first, then reboots."));
+
+    lv_obj_t *list = lv_obj_create(s_cfgCommunityModal);
+    lv_obj_remove_style_all(list);
+    lv_obj_set_width(list, lv_pct(100));
+    lv_obj_set_height(list, LV_SIZE_CONTENT);
+    lv_obj_set_style_max_height(list, (h > 150) ? (h - 104) : LV_SIZE_CONTENT, 0);
+    lv_obj_add_flag(list, LV_OBJ_FLAG_SCROLLABLE);
+    setupVScroll(list);
+    lv_obj_set_scrollbar_mode(list, LV_SCROLLBAR_MODE_AUTO);
+    lv_obj_set_flex_flow(list, LV_FLEX_FLOW_COLUMN);
+    lv_obj_set_flex_align(list, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_CENTER,
+                          LV_FLEX_ALIGN_CENTER);
+    lv_obj_set_style_pad_row(list, 4, 0);
+    lv_obj_set_style_pad_right(list, 2, 0);
+
+    for (int i = 0; i < s_cfgCommunityCount; i++) {
+        const CommunityPreset &cp = kCommunityPresets[s_cfgCommunityChoices[i]];
+
+        lv_obj_t *row = lv_btn_create(list);
+#if defined(DEVICE_TDECK_PRO)
+        lv_obj_remove_style_all(row);
+        lv_obj_add_flag(row, LV_OBJ_FLAG_CLICKABLE);
+#endif
+        s_cfgCommunityRows[i] = row;
+        lv_obj_set_width(row, lv_pct(100));
+        lv_obj_set_height(row, LV_SIZE_CONTENT);
+        lv_obj_set_style_radius(row, 4, 0);
+        lv_obj_set_style_pad_all(row, 5, 0);
+        lv_obj_set_style_pad_row(row, 1, 0);
+        lv_obj_set_style_shadow_width(row, 0, 0);
+        lv_obj_set_flex_flow(row, LV_FLEX_FLOW_COLUMN);
+        lv_obj_set_flex_align(row, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_START,
+                              LV_FLEX_ALIGN_START);
+        lv_obj_add_event_cb(row, onCfgCommunityRowPressed, LV_EVENT_CLICKED,
+                            (void *)(intptr_t)i);
+
+        lv_obj_t *name = lv_label_create(row);
+        lv_obj_set_width(name, lv_pct(100));
+        lv_obj_set_style_text_font(name, &lv_font_montserrat_12, 0);
+        lv_obj_set_style_text_color(name, rowColor, 0);
+        lv_label_set_long_mode(name, LV_LABEL_LONG_DOT);
+        lv_label_set_text(name, cp.label);
+
+        if (kModalRowDescriptions) {
+            lv_obj_t *desc = lv_label_create(row);
+            lv_obj_set_width(desc, lv_pct(100));
+            lv_obj_set_style_text_font(desc, &lv_font_montserrat_10, 0);
+            lv_obj_set_style_text_color(desc, rowColor, 0);
+#if defined(DEVICE_TDECK_PRO)
+            lv_obj_set_style_text_opa(desc, LV_OPA_COVER, 0);
+#else
+            lv_obj_set_style_text_opa(desc, LV_OPA_70, 0);
+#endif
+            lv_label_set_long_mode(desc, LV_LABEL_LONG_DOT);
+            const int radio = communityPresetRadioIndex(cp);
+            lv_label_set_text_fmt(desc, TR("%s  %s  %u ch%s"), cp.region,
+                                  radio >= 0 ? kPresets[radio].channelName : TR("own preset"),
+                                  (unsigned)cp.channelCount, cp.mqtt.host[0] ? TR("  MQTT") : "");
+        }
+    }
+
+    lv_obj_t *hint = lv_label_create(s_cfgCommunityModal);
+    lv_obj_set_width(hint, lv_pct(100));
+    lv_obj_set_style_text_font(hint, &lv_font_montserrat_10, 0);
+    lv_obj_set_style_text_color(hint, hintColor, 0);
+    lv_obj_set_style_text_align(hint, LV_TEXT_ALIGN_CENTER, 0);
+#if UI_TOUCH_ONLY_PROFILE
+    lv_label_set_text(hint, TR("Tap a preset to review it."));
+#else
+    lv_label_set_text_fmt(hint, TR("Move  Enter=Review  %s=Cancel"), modalCloseKeyLabel());
+#endif
+
+    refreshCfgCommunitySelection();
+}
+
 #if HAS_RUNTIME_ORIENTATION
 // ── Config -> Orientation ────────────────────────────────────────────────────
 // Three ways up, shown at once. This replaced a row that cycled through them:
@@ -23973,6 +24254,7 @@ static void closeCfgModal() {
     closeCfgWifiPickerModal();
     closeCfgNodeNameModal();
     closeCfgPresetModal();
+    closeCfgCommunityModal();
     closeCfgLangModal();
 #if HAS_RUNTIME_ORIENTATION
     closeCfgOrientModal();
@@ -43479,6 +43761,12 @@ static void performCfgAction(int actionId) {
             openCfgPresetModal();
             break;
 
+        case CFG_ACTION_COMMUNITY_PRESET:
+            if (s_cfgDebugLog) Serial.println("[lvgl-cfg] exec COMMUNITY_PRESET");
+            showActionPopup = false;   // the modal is the whole interaction
+            openCfgCommunityModal();
+            break;
+
         case CFG_ACTION_CHAT_COLORS:
             if (s_cfgDebugLog) Serial.println("[lvgl-cfg] exec CHAT_COLORS");
             showActionPopup = false;   // row already reads On/Off; applies live
@@ -44163,9 +44451,10 @@ static void openCfgConfirmModal(int actionId, const char *text,
         }
     }
 
-    // Sized for the SD scan's dialog, which names the files it is about to
-    // delete. Everything else here is one row label and fits many times over.
-    char actionText[512];
+    // Sized for the community preset confirmation, a summary plus the
+    // community's notes; the SD scan's, which names the files it is about to
+    // delete, is next. Everything else here is one row label.
+    char actionText[768];
     const bool ownText = (text && text[0]);
     if (ownText) {
         strncpy(actionText, text, sizeof(actionText) - 1);
@@ -47489,6 +47778,32 @@ static void pumpKeyboardInput() {
                 if (next != s_cfgPresetSelection) {
                     s_cfgPresetSelection = next;
                     refreshCfgPresetSelection();
+                }
+            }
+            continue;
+        }
+
+        if (s_cfgCommunityModal) {
+            if (isModalCloseKey(k)) {
+                closeCfgCommunityModal();
+                continue;
+            }
+            if (k == KEY_ENTER || k == KEY_ROLLER) {
+                cfgCommunityAsk(s_cfgCommunitySelection);
+                continue;
+            }
+            int delta = 0;
+            if (k == KEY_SCROLL_UP)      delta = invertScrollNav ? 1 : -1;
+            else if (k == KEY_SCROLL_DN) delta = invertScrollNav ? -1 : 1;
+            else if (k == KEY_PAGE_UP)   delta = invertScrollNav ? 8 : -8;
+            else if (k == KEY_PAGE_DN)   delta = invertScrollNav ? -8 : 8;
+            if (delta != 0) {
+                int next = s_cfgCommunitySelection + delta;
+                if (next < 0) next = 0;
+                if (next > s_cfgCommunityCount - 1) next = s_cfgCommunityCount - 1;
+                if (next != s_cfgCommunitySelection) {
+                    s_cfgCommunitySelection = next;
+                    refreshCfgCommunitySelection();
                 }
             }
             continue;
@@ -55907,6 +56222,15 @@ static bool processMeshPacket(const MeshPacket &rxPkt) {
 // Drain a clock set queued by the web config form. Same reason as the chat send
 // below: the form handler runs on the web server task, and the system clock is
 // set from here.
+static void serviceWebCommunityPreset() {
+    int idx = -1;
+    if (!webCfgTakeCommunityPreset(idx)) return;
+    const char *err = communityPresetApply(idx);   // reboots on success
+    Serial.printf("[web] community preset not applied: %s\n", err ? err : "nothing changed");
+    snprintf(s_cfgStatus, sizeof(s_cfgStatus), TR("Web preset not applied: %s"),
+             err ? err : TR("nothing changed"));
+}
+
 static void serviceWebManualTime() {
     int y = 0, mo = 0, d = 0, h = 0, mi = 0;
     if (!webCfgTakeManualTime(y, mo, d, h, mi)) return;
@@ -59859,6 +60183,29 @@ static bool cfgSetupStaged() {
         || s_cfgSetup.role >= 0 || s_cfgSetup.wifiSsid[0] || s_cfgSetup.wifiPassSet;
 }
 
+// `cfg set mqtt ...` and `cfg set oktomqtt`: a community's broker. A staged
+// broker is committed with the bridge switched on, which is what sending one
+// means. okToMqtt < 0 is "not sent".
+struct CfgStagedMqtt {
+    bool     set;
+    char     host[sizeof(RhinoConfig::mqttServer)];
+    uint16_t port;
+    char     user[sizeof(RhinoConfig::mqttUser)];
+    char     pass[sizeof(RhinoConfig::mqttPass)];
+    char     root[sizeof(RhinoConfig::mqttRoot)];
+    bool     tls;
+    bool     encryption;
+    int8_t   okToMqtt;
+};
+static CfgStagedMqtt s_cfgMqtt = { false, {}, 0, {}, {}, {}, false, false, -1 };
+
+static void cfgMqttReset() {
+    s_cfgMqtt = CfgStagedMqtt{};
+    s_cfgMqtt.okToMqtt = -1;
+}
+
+static bool cfgMqttStaged() { return s_cfgMqtt.set || s_cfgMqtt.okToMqtt >= 0; }
+
 static void cfgLogoReset() {
     free(s_cfgLogoBuf);
     s_cfgLogoBuf = nullptr;
@@ -59991,6 +60338,81 @@ static void cfgSetChannel(const char *args) {
     }
     s_cfgStagedChans[idx] = c;
     s_cliOut->printf("[cfg] ok channel %ld staged\n", idx);
+}
+
+//   cfg set mqtt host=<%-enc> [port=N] [user=<%-enc>] [pass=<%-enc>] root=<%-enc>
+//                [tls=0|1] [enc=0|1]
+// Every field is sent each time, so nothing of a previous broker is kept: an
+// omitted user/pass is empty, port 1883, tls off, encryption on.
+static void cfgSetMqtt(const char *args) {
+    CfgStagedMqtt m = {};
+    m.port = 1883;
+    m.encryption = true;
+    m.okToMqtt = s_cfgMqtt.okToMqtt;
+    char tok[160];
+    const char *p = args;
+    while (*p) {
+        while (*p == ' ') p++;
+        size_t n = 0;
+        while (p[n] && p[n] != ' ') n++;
+        if (!n) break;
+        if (n >= sizeof(tok)) { s_cliOut->println("[cfg] err mqtt: argument too long"); return; }
+        memcpy(tok, p, n);
+        tok[n] = '\0';
+        p += n;
+        char *eq = strchr(tok, '=');
+        if (!eq) { s_cliOut->printf("[cfg] err mqtt: expected key=value, got \"%s\"\n", tok); return; }
+        *eq = '\0';
+        const char *k = tok;
+        const char *v = eq + 1;
+        auto text = [&](char *dst, size_t len) -> bool {
+            if (cfgPercentDecode(v, dst, len)) return true;
+            s_cliOut->printf("[cfg] err mqtt: %s must be %u bytes or fewer\n", k, (unsigned)(len - 1));
+            return false;
+        };
+        if (!strcasecmp(k, "host")) { if (!text(m.host, sizeof(m.host))) return; }
+        else if (!strcasecmp(k, "user")) { if (!text(m.user, sizeof(m.user))) return; }
+        else if (!strcasecmp(k, "pass")) { if (!text(m.pass, sizeof(m.pass))) return; }
+        else if (!strcasecmp(k, "root")) { if (!text(m.root, sizeof(m.root))) return; }
+        else if (!strcasecmp(k, "port")) {
+            char *end = nullptr;
+            const long port = strtol(v, &end, 10);
+            if (end == v || *end || port < 1 || port > 65535) {
+                s_cliOut->printf("[cfg] err mqtt: bad port \"%s\"\n", v);
+                return;
+            }
+            m.port = (uint16_t)port;
+        }
+        else if (!strcasecmp(k, "tls")) m.tls = !strcmp(v, "1");
+        else if (!strcasecmp(k, "enc")) m.encryption = !strcmp(v, "1");
+        else { s_cliOut->printf("[cfg] err mqtt: unknown key \"%s\"\n", k); return; }
+    }
+    if (!m.host[0] || !m.root[0]) {
+        s_cliOut->println("[cfg] err mqtt: host and root are required");
+        return;
+    }
+    m.set = true;
+    s_cfgMqtt = m;
+    s_cliOut->printf("[cfg] ok mqtt=%s:%u staged\n", m.host, (unsigned)m.port);
+}
+
+// Copies a staged broker into s_cfg and switches the bridge on. Wi-Fi is the
+// bridge's master switch (the load path turns MQTT off without it), so it is
+// switched on too -- but only with a network to join; without one the bridge
+// stays on and waits for Wi-Fi to be set up.
+static void cfgApplyStagedMqtt(const char *wifiSsid) {
+    if (s_cfgMqtt.set) {
+        utf8util::copyTruncate(s_cfg.mqttServer, sizeof(s_cfg.mqttServer), s_cfgMqtt.host);
+        utf8util::copyTruncate(s_cfg.mqttUser, sizeof(s_cfg.mqttUser), s_cfgMqtt.user);
+        utf8util::copyTruncate(s_cfg.mqttPass, sizeof(s_cfg.mqttPass), s_cfgMqtt.pass);
+        utf8util::copyTruncate(s_cfg.mqttRoot, sizeof(s_cfg.mqttRoot), s_cfgMqtt.root);
+        s_cfg.mqttPort = s_cfgMqtt.port;
+        s_cfg.mqttTls = s_cfgMqtt.tls;
+        s_cfg.mqttEncryption = s_cfgMqtt.encryption;
+        s_cfg.mqttEnabled = true;
+        if (wifiSsid && wifiSsid[0]) s_cfg.wifiEnabled = true;
+    }
+    if (s_cfgMqtt.okToMqtt >= 0) s_cfg.okToMqtt = s_cfgMqtt.okToMqtt != 0;
 }
 
 // `cfg set <field> <value>` for the setup answers. False when `args` names
@@ -60206,7 +60628,7 @@ static void cfgApplyStagedChannels() {
 
 static void handleCfgCommand(const char *args) {
     if (!strcasecmp(args, "caps")) {
-        s_cliOut->printf("[cfg] caps v=%d firstboot=%d keys=preset,slot,channels,setup%s channels=%d",
+        s_cliOut->printf("[cfg] caps v=%d firstboot=%d keys=preset,slot,channels,setup,mqtt%s channels=%d",
                       kCfgProtoVersion, s_firstBoot ? 1 : 0,
                       (s_splashLogoW > 0 && s_splashLogoH > 0) ? ",logo" : "", MESH_CHANNELS);
         if (s_splashLogoW > 0 && s_splashLogoH > 0) {
@@ -60234,6 +60656,7 @@ static void handleCfgCommand(const char *args) {
         s_cfgChansStaged = false;
         cfgLogoReset();
         cfgSetupReset();
+        cfgMqttReset();
         s_cliOut->println("[cfg] ok aborted");
         return;
     }
@@ -60286,6 +60709,22 @@ static void handleCfgCommand(const char *args) {
         return;
     }
 
+    if (!strncasecmp(args, "set mqtt ", 9)) {
+        cfgSetMqtt(args + 9);
+        return;
+    }
+
+    if (!strncasecmp(args, "set oktomqtt ", 13)) {
+        const char *v = args + 13;
+        if (strcmp(v, "0") && strcmp(v, "1")) {
+            s_cliOut->printf("[cfg] err oktomqtt: expected 0 or 1, got \"%s\"\n", v);
+            return;
+        }
+        s_cfgMqtt.okToMqtt = (int8_t)(v[0] - '0');
+        s_cliOut->printf("[cfg] ok oktomqtt=%s staged\n", v);
+        return;
+    }
+
     if (!strncasecmp(args, "set ", 4) && cfgSetSetupField(args + 4)) return;
 
     if (!strncasecmp(args, "logo ", 5)) {
@@ -60303,7 +60742,8 @@ static void handleCfgCommand(const char *args) {
         const bool haveChans = s_cfgChansStaged;
         const bool haveLogo = s_cfgLogoState == CFG_LOGO_READY || s_cfgLogoState == CFG_LOGO_CLEAR;
         const bool haveSetup = cfgSetupStaged();
-        if (!havePreset && !haveChans && !haveLogo && !haveSetup) {
+        const bool haveMqtt = cfgMqttStaged();
+        if (!havePreset && !haveChans && !haveLogo && !haveSetup && !haveMqtt) {
             s_cliOut->println("[cfg] ok nothing staged");
             return;
         }
@@ -60364,6 +60804,35 @@ static void handleCfgCommand(const char *args) {
             applyProvisionedPreset(preset, slot);
         }
 
+        // Into s_cfg now, so setup (on the device or answered below) saves it
+        // with everything else. Kept in the provisioning namespace as well, as
+        // the preset is, for a setup that only finishes after a reboot.
+        if (haveMqtt) {
+            cfgApplyStagedMqtt(s_cfgSetup.wifiSsid[0] ? s_cfgSetup.wifiSsid : s_cfg.wifiSsid);
+            if (s_firstBoot) {
+                Preferences p;
+                bool ok = p.begin(kProvNs, false);
+                if (ok && s_cfgMqtt.set) {
+                    // Not chained: an empty user or password writes 0 bytes,
+                    // which is not a failure. Host and root never are empty.
+                    p.putString("mqHost", s_cfgMqtt.host);
+                    p.putUShort("mqPort", s_cfgMqtt.port);
+                    p.putString("mqUser", s_cfgMqtt.user);
+                    p.putString("mqPass", s_cfgMqtt.pass);
+                    p.putString("mqRoot", s_cfgMqtt.root);
+                    p.putBool("mqTls", s_cfgMqtt.tls);
+                    p.putBool("mqEnc", s_cfgMqtt.encryption);
+                    ok = p.isKey("mqHost") && p.isKey("mqRoot");
+                }
+                if (ok && s_cfgMqtt.okToMqtt >= 0) ok = p.putChar("ok2mq", s_cfgMqtt.okToMqtt) == 1;
+                p.end();
+                if (!ok) {
+                    s_cliOut->println("[cfg] err commit: could not write NVS");
+                    return;
+                }
+            }
+        }
+
         // The channel plan lives in its own namespace, which first-boot
         // detection never looks at, so it is saved directly even mid-setup.
         if (haveChans) {
@@ -60388,16 +60857,18 @@ static void handleCfgCommand(const char *args) {
             snprintf(presetSummary, sizeof(presetSummary), slot ? "%s@%u" : "%s",
                      kPresets[preset].channelName, slot);
         }
-        snprintf(summary, sizeof(summary), "preset=%s channels=%s logo=%s setup=%s",
+        snprintf(summary, sizeof(summary), "preset=%s channels=%s logo=%s setup=%s mqtt=%s",
                  presetSummary, chans,
                  !haveLogo ? "-" : (s_cfgLogoState == CFG_LOGO_CLEAR ? "cleared" : "set"),
-                 !haveSetup ? "-" : (s_cfgSetup.region[0] ? s_cfgSetup.region : "set"));
+                 !haveSetup ? "-" : (s_cfgSetup.region[0] ? s_cfgSetup.region : "set"),
+                 s_cfgMqtt.set ? s_cfgMqtt.host : (haveMqtt ? "set" : "-"));
         const CfgStagedSetup setup = s_cfgSetup;
         s_cfgStagedPreset = -1;
         s_cfgStagedSlot = -1;
         s_cfgChansStaged = false;
         cfgLogoReset();
         cfgSetupReset();
+        cfgMqttReset();
 
         // Answers setup in the user's place: onboardingFinalize() saves them
         // with everything committed above, ends first boot and reboots.
@@ -60436,11 +60907,11 @@ static void handleCfgCommand(const char *args) {
             if (setup.wifiPassSet) utf8util::copyTruncate(s_cfg.wifiPass, sizeof(s_cfg.wifiPass), setup.wifiPass);
             applyPresetParams(s_cfg);   // the region moves the frequency
         }
-        if (!presetChanges && !haveChans && !haveLogo && !haveSetup) {
+        if (!presetChanges && !haveChans && !haveLogo && !haveSetup && !haveMqtt) {
             s_cliOut->printf("[cfg] ok committed %s unchanged\n", summary);
             return;
         }
-        if (presetChanges || haveSetup) persistConfigToPrefs();
+        if (presetChanges || haveSetup || haveMqtt) persistConfigToPrefs();
         s_cliOut->printf("[cfg] ok committed %s rebooting\n", summary);
         s_cliOut->flush();
         delay(300);
@@ -60450,6 +60921,198 @@ static void handleCfgCommand(const char *args) {
     }
 
     s_cliOut->printf("[cfg] err unknown: %s\n", args);
+}
+
+// ── Community presets ───────────────────────────────────────────────────────
+// The web flasher's community setups (community_presets.h, generated from the
+// flasher's own list), applied on the device: Config -> Community Preset, and
+// the web config's LoRa Radio section. Each is turned into the very `cfg`
+// commands the flasher would send over USB and run through handleCfgCommand(),
+// so the staging, the validation and the commit (save, then reboot) are the
+// CLI's, not a second copy of them that could drift.
+
+// Holds the last line written to it, which is all a `cfg` command's answer is.
+class CfgCaptureStream : public Stream {
+public:
+    char line[160] = {};
+    size_t write(uint8_t c) override {
+        if (c == '\n') { m_pending = true; return 1; }
+        if (m_pending) { m_len = 0; m_pending = false; }
+        if (m_len + 1 < sizeof(line)) { line[m_len++] = (char)c; line[m_len] = '\0'; }
+        return 1;
+    }
+    int available() override { return 0; }
+    int read() override { return -1; }
+    int peek() override { return -1; }
+    void flush() override {}
+private:
+    size_t m_len = 0;
+    bool m_pending = false;
+};
+
+static int communityPresetRadioIndex(const CommunityPreset &cp) {
+    return cp.preset[0] ? presetFromCliName(cp.preset) : -1;
+}
+
+const char *communityPresetProblem(int idx) {
+    if (idx < 0 || idx >= kCommunityPresetCount) return "unknown preset";
+    const CommunityPreset &cp = kCommunityPresets[idx];
+    if (cp.channelCount > MESH_CHANNELS) {
+        static char why[48];
+        snprintf(why, sizeof(why), TR("needs %u channels, this device has %d"),
+                 (unsigned)cp.channelCount, MESH_CHANNELS);
+        return why;
+    }
+    const int radio = communityPresetRadioIndex(cp);
+    if (cp.preset[0] && (radio < 0 || !presetUsableOnThisRadio((uint8_t)radio))) {
+        return TR("its radio preset is not supported by this radio");
+    }
+    // A slot is only ever published with the preset it pins (the commit
+    // refuses one without), so `radio` is a real index here.
+    if (cp.slot && radio >= 0) {
+        const uint32_t slots = regionSlotCount(cp.region, kPresets[radio].bw);
+        if (slots && cp.slot > slots) return TR("its frequency slot is outside the region");
+    }
+    return nullptr;
+}
+
+// What applying preset `idx` changes, for the confirmation.
+static void communityPresetSummary(int idx, char *out, size_t outLen) {
+    const CommunityPreset &cp = kCommunityPresets[idx];
+    const int radio = communityPresetRadioIndex(cp);
+    char radioText[48];
+    if (radio < 0) {
+        snprintf(radioText, sizeof(radioText), "%s", TR("unchanged"));
+    } else if (cp.slot) {
+        snprintf(radioText, sizeof(radioText), TR("%s, slot %u"), kPresets[radio].name,
+                 (unsigned)cp.slot);
+    } else {
+        snprintf(radioText, sizeof(radioText), "%s", kPresets[radio].name);
+    }
+    char mqttText[96];
+    if (cp.mqtt.host[0]) {
+        snprintf(mqttText, sizeof(mqttText), TR("%s (%s), turned on"), cp.mqtt.host, cp.mqtt.root);
+    } else {
+        snprintf(mqttText, sizeof(mqttText), "%s", TR("unchanged"));
+    }
+    int n = snprintf(out, outLen,
+                     TR("Apply %s?\n\nRegion: %s\nRadio: %s\nChannels: replaced with %u\n"
+                        "MQTT: %s\n\n"
+                        "Your channels are overwritten, messages and non-favorite "
+                        "nodes are cleared, and the device reboots."),
+                     cp.label, cp.region, radioText, (unsigned)cp.channelCount, mqttText);
+    if (cp.notes[0] && n > 0 && (size_t)n < outLen) {
+        snprintf(out + n, outLen - n, "\n\n%s", cp.notes);
+    }
+}
+
+// Stages preset `idx` and commits it. On success the commit reboots and this
+// does not return; otherwise it returns why, from the CLI's own answer.
+static const char *communityPresetApply(int idx) {
+    static char err[160];
+    if (const char *why = communityPresetProblem(idx)) {
+        snprintf(err, sizeof(err), "%s", why);
+        return err;
+    }
+    // Setup is still to run, and commits made under it wait for it: that is
+    // the flasher's path. Config and web config are not reachable from there.
+    if (s_firstBoot) {
+        snprintf(err, sizeof(err), "%s", TR("finish setup first"));
+        return err;
+    }
+    const CommunityPreset &cp = kCommunityPresets[idx];
+    Serial.printf("[cfg] applying community preset %s\n", cp.id);
+
+    CfgCaptureStream cap;
+    Stream *const prevOut = s_cliOut;
+    s_cliOut = &cap;
+    auto run = [&](const char *cmd) -> bool {
+        cap.line[0] = '\0';
+        handleCfgCommand(cmd);
+        Serial.printf("[cfg] %s -> %s\n", cmd, cap.line);
+        return strncmp(cap.line, "[cfg] err", 9) != 0;
+    };
+
+    char cmd[192];
+    bool ok = run("abort");
+    if (ok && cp.preset[0]) {
+        snprintf(cmd, sizeof(cmd), "set preset %s", cp.preset);
+        ok = run(cmd);
+        if (ok && cp.slot) {
+            snprintf(cmd, sizeof(cmd), "set slot %u", (unsigned)cp.slot);
+            ok = run(cmd);
+        }
+    }
+    if (ok) {
+        snprintf(cmd, sizeof(cmd), "set region %s", cp.region);
+        ok = run(cmd);
+    }
+    if (ok) ok = run("channels clear");
+    for (int i = 0; ok && i < cp.channelCount; i++) {
+        const CommunityPresetChannel &ch = kCommunityPresetChannels[cp.firstChannel + i];
+        // The name is %-encoded as the flasher sends it, so spaces and
+        // punctuation survive the CLI's space-separated arguments.
+        char name[40];
+        size_t o = 0;
+        for (const char *s = ch.name; *s && o + 4 < sizeof(name); s++) {
+            const unsigned char c = (unsigned char)*s;
+            if (isalnum(c) || c == '_' || c == '.' || c == '~' || c == '-') name[o++] = (char)c;
+            else o += snprintf(name + o, sizeof(name) - o, "%%%02X", c);
+        }
+        name[o] = '\0';
+        snprintf(cmd, sizeof(cmd), "set channel %d role=%s name=%s psk=%s pos=%d up=%d down=%d",
+                 i, i == 0 ? "primary" : "secondary", name, ch.psk,
+                 ch.pos ? 1 : 0, ch.up ? 1 : 0, ch.down ? 1 : 0);
+        ok = run(cmd);
+    }
+    // The community's broker, %-encoded the same way; staging one is what
+    // switches MQTT on at the commit.
+    auto enc = [](const char *src, char *dst, size_t len) {
+        size_t o = 0;
+        for (const char *s = src; *s && o + 4 < len; s++) {
+            const unsigned char c = (unsigned char)*s;
+            if (isalnum(c) || c == '_' || c == '.' || c == '~' || c == '-') dst[o++] = (char)c;
+            else o += snprintf(dst + o, len - o, "%%%02X", c);
+        }
+        dst[o] = '\0';
+    };
+    if (ok && cp.mqtt.host[0]) {
+        char host[3 * sizeof(s_cfg.mqttServer)], user[3 * sizeof(s_cfg.mqttUser)];
+        char pass[3 * sizeof(s_cfg.mqttPass)], root[3 * sizeof(s_cfg.mqttRoot)];
+        enc(cp.mqtt.host, host, sizeof(host));
+        enc(cp.mqtt.user, user, sizeof(user));
+        enc(cp.mqtt.pass, pass, sizeof(pass));
+        enc(cp.mqtt.root, root, sizeof(root));
+        char mq[sizeof(host) + sizeof(user) + sizeof(pass) + sizeof(root) + 64];
+        snprintf(mq, sizeof(mq), "set mqtt host=%s port=%u user=%s pass=%s root=%s tls=%d enc=%d",
+                 host, (unsigned)cp.mqtt.port, user, pass, root,
+                 cp.mqtt.tls ? 1 : 0, cp.mqtt.encryption ? 1 : 0);
+        ok = run(mq);
+        if (ok && cp.mqtt.okToMqtt >= 0) {
+            ok = run(cp.mqtt.okToMqtt ? "set oktomqtt 1" : "set oktomqtt 0");
+        }
+    }
+    if (ok) {
+        // A different mesh: what was heard on the old one is noise on the new
+        // one. Everything staged was accepted, so the commit below is what
+        // remains, and it reboots -- the same clears as Config's Clear
+        // Messages and Clear Nodes, which keeps favorites.
+        Channels.clearAllMessages(true);
+        DMs.clearAll(true);
+        clearSelectedMsgContext();
+        const int removed = Nodes.clearNonFavorites();
+        Serial.printf("[cfg] community preset: messages cleared, %d nodes cleared, %d favorites kept\n",
+                      removed, Nodes.count());
+        // Reboots on success. Whatever it prints first goes to `cap`, which is
+        // fine: nobody is waiting on a USB answer to this.
+        ok = run("commit");
+    }
+    if (!ok) {
+        snprintf(err, sizeof(err), "%s", cap.line[0] ? cap.line + 6 : "failed");
+    }
+    run("abort");   // nothing half-staged may ride along on a later commit
+    s_cliOut = prevOut;
+    return ok ? nullptr : err;
 }
 
 // Dispatch a single normalised CLI command. Aliases are intentional so the
@@ -62153,6 +62816,7 @@ void loop() {
 #endif
         LOOP_PHASE("web:chat", serviceWebChatSend());
         LOOP_PHASE("web:time", serviceWebManualTime());
+        LOOP_PHASE("web:preset", serviceWebCommunityPreset());
         // Idle auto-stop. Mirrors the manual CFG_ACTION_WEBCFG disable exactly:
         // the flag is cleared and persisted too, so the device doesn't come
         // back showing "Enabled" for a server that is no longer listening.

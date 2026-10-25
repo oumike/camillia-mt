@@ -138,6 +138,11 @@ int         webCfgAdminRescanFavorites(uint32_t &waitSecs);
 // 24-hour form. Returns false when nothing is queued.
 bool webCfgTakeManualTime(int &year, int &mon, int &day, int &hour, int &minute);
 
+// Pending community preset from the LoRa Radio section (a kCommunityPresets
+// index), handed over once the browser has had its redirect. The main loop
+// applies it through the cfg CLI, which reboots. False when none is due.
+bool webCfgTakeCommunityPreset(int &idx);
+
 #if HAS_VNC_HOST
 // Remote-tab checkbox request, queued by the HTTP handler and applied by the
 // main loop that owns VNC allocation and persistence.
