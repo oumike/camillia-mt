@@ -3837,11 +3837,11 @@ static void sendConfigPage(const char *msg = "", bool lite = false) {
         // Marker so the POST handler can apply this checkbox (an unchecked box
         // submits nothing) only when the control was actually on the page.
         html += "<input type='hidden' name='nodeid_present' value='1'>";
-        html += "<label style='display:flex;align-items:center;gap:.5em'>"
+        html += "<label>"
                 "<input type='checkbox' name='nodeid_pubkey' value='1'";
         if (gCfg->nodeIdFromPubKey) html += " checked";
         html += "> Derive node ID from public key (Meshtastic 2.8 style)</label>";
-        html += "<p class='gps-hint'>Changes this node's address on the mesh. Other "
+        html += "<p class='hint'>Changes this node's address on the mesh. Other "
                 "nodes will see a new node and keep the old one until it ages "
                 "out, and direct messages people already have with you stay "
                 "attached to the old address. Your own chat history is carried "
@@ -3856,7 +3856,7 @@ static void sendConfigPage(const char *msg = "", bool lite = false) {
             html += ">"; html += sigPolicyName((uint8_t)i); html += "</option>";
         }
         html += "</select></label>";
-        html += "<p class='gps-hint'>Which received packets to accept, by their "
+        html += "<p class='hint'>Which received packets to accept, by their "
                 "signature, as Meshtastic 2.8.1 decides it. <b>Compatible</b> "
                 "(the default) accepts unsigned packets, so it hears every 2.7 "
                 "node. <b>Balanced</b> also drops an unsigned broadcast from a "
@@ -3900,7 +3900,7 @@ static void sendConfigPage(const char *msg = "", bool lite = false) {
     // it is mostly an advertised identity rather than a behaviour switch — and
     // someone picking TRACKER expecting upstream's power-saving duty cycle
     // should find that out on this page, not from a battery that never lasts.
-    html += "<p class='gps-hint'>The role goes out in this node's NodeInfo, so other "
+    html += "<p class='hint'>The role goes out in this node's NodeInfo, so other "
             "nodes and the map see how it means to be treated. "
             "<b>CLIENT</b> is an ordinary node. <b>CLIENT_MUTE</b> does not relay "
             "other people's traffic. <b>CLIENT_HIDDEN</b> only speaks when spoken "
@@ -3952,7 +3952,7 @@ static void sendConfigPage(const char *msg = "", bool lite = false) {
     appendAttr(html, gCfg->losElevServer);
     html += "' placeholder='http://host:port'></label>";
     html += "</div>";
-    html += "<p class='gps-hint'>Terrain line-of-sight fetches ground elevation from "
+    html += "<p class='hint'>Terrain line-of-sight fetches ground elevation from "
             "<code>&lt;server&gt;/elev?locations=lat,lon|...</code>, expecting a CSV of "
             "metres. Must be <b>http://</b> — there is no TLS client in this firmware. "
             "Leave empty to disable LOS.</p>";
@@ -3966,7 +3966,7 @@ static void sendConfigPage(const char *msg = "", bool lite = false) {
     appendAttr(html, gCfg->weatherServer);
     html += "' placeholder='http://host:port'></label>";
     html += "</div>";
-    html += "<p class='gps-hint'>The weather screen fetches current conditions from "
+    html += "<p class='hint'>The weather screen fetches current conditions from "
             "<code>&lt;server&gt;/weather?lat=&amp;lon=&amp;units=</code>. Must be "
             "<b>http://</b> — there is no TLS client in this firmware. The position is "
             "rounded to about a kilometre before it is sent. Leave empty to disable "
@@ -4019,11 +4019,11 @@ static void sendConfigPage(const char *msg = "", bool lite = false) {
         html += tbuf;
         html += "'></label></div>";
         sendChunkIfBig(html);   // AP mode renders this with very little heap
-        html += "<p class='gps-hint' id='manual_hint'";
+        html += "<p class='hint' id='manual_hint'";
         if (!manual) html += " style='display:none'";
         html += ">Saving applies this time to the device clock. "
                 "The clock is not battery-backed, so it restarts unset after a power cycle.</p>";
-        html += "<p class='gps-hint'><button type='button' id='browser_time'>Use this browser's time"
+        html += "<p class='hint'><button type='button' id='browser_time'>Use this browser's time"
                 "</button></p>";
         html += "<script>"
                 "(function(){"
@@ -4048,11 +4048,11 @@ static void sendConfigPage(const char *msg = "", bool lite = false) {
 
     // ── Position ──────────────────────────────────────────────
     section(html, lite, "Position", "position", "GPS and what location this node shares.");
-    html += "<label style='display:flex;align-items:center;gap:.5em'>"
+    html += "<label>"
             "<input type='checkbox' name='shareLocation' value='1'";
     if (gCfg->shareLocation) html += " checked";
     html += "> Share Location (broadcast position to the mesh)</label>";
-    html += "<p class='gps-hint'>Off suppresses every position transmission, including "
+    html += "<p class='hint'>Off suppresses every position transmission, including "
             "the manual announce, whatever the settings below say. Nothing else on this "
             "page stops the broadcast: GPS Enabled only chooses where the coordinates "
             "come from.</p>";
@@ -4064,16 +4064,16 @@ static void sendConfigPage(const char *msg = "", bool lite = false) {
         html += ">"; html += kPositionPrecisions[i].label; html += "</option>";
     }
     html += "</select></label>";
-    html += "<p class='gps-hint'>Rounds the coordinates before they are transmitted, so "
+    html += "<p class='hint'>Rounds the coordinates before they are transmitted, so "
             "the mesh sees the area you are in rather than the spot you are standing on. "
             "The device still uses your exact position locally. Receiving nodes are told "
             "how coarse the value is, so other Meshtastic clients can show it as an area. "
             "Applies to every channel this node shares position on.</p>";
-    html += "<label style='display:flex;align-items:center;gap:.5em'>"
+    html += "<label>"
             "<input type='checkbox' name='gpsEnabled' value='1'";
     if (gCfg->gpsEnabled) html += " checked";
     html += "> GPS Enabled (L76K hardware GPS)</label>";
-    html += "<p class='gps-hint'>When GPS is enabled, position is sourced from the GPS module. "
+    html += "<p class='hint'>When GPS is enabled, position is sourced from the GPS module. "
             "The manual coordinates below are used as fallback until a fix is acquired.</p>";
     html += "<div class='row2'>";
     snprintf(tmp, sizeof(tmp), "%lu", (unsigned long)gCfg->gpsPollIntervalS);
@@ -4082,7 +4082,7 @@ static void sendConfigPage(const char *msg = "", bool lite = false) {
     snprintf(tmp, sizeof(tmp), "%lu", (unsigned long)gCfg->posIntervalS);
     html += "<label>GPS Broadcast Interval (s)<input name='pos_intv' type='number' min='60' value='";
     html += tmp; html += "'></label></div>";
-    html += "<p class='gps-hint'>Poll is how often this device reads its own GPS "
+    html += "<p class='hint'>Poll is how often this device reads its own GPS "
             "(0 = every loop). Broadcast is how often that position is sent to "
             "the mesh.</p>";
     html += "<div class='row2'>";
@@ -4140,7 +4140,7 @@ static void sendConfigPage(const char *msg = "", bool lite = false) {
     // it to do, and the block it would show/hide is always visible here.
     if (lite) html += "function applyPreset(){}";
     html += "</script>";
-    html += "<p class='gps-hint'>Frequency and modem parameters are derived automatically "
+    html += "<p class='hint'>Frequency and modem parameters are derived automatically "
             "from region and preset, or from the fields above when the preset is Custom.</p>";
     sendChunk(html);
     if (!lite) {
@@ -4156,11 +4156,11 @@ static void sendConfigPage(const char *msg = "", bool lite = false) {
     snprintf(tmp, sizeof(tmp), "%d", gCfg->loraHopLimit);
     html += "<label>Hop Limit (1&ndash;7)<input name='hop' type='number' min='1' max='7' value='";
     html += tmp; html += "'></label></div>";
-    html += "<label style='display:flex;align-items:center;gap:.5em'>"
+    html += "<label>"
             "<input type='checkbox' name='ok_to_mqtt' value='1'";
     if (gCfg->okToMqtt) html += " checked";
     html += "> OK to MQTT &mdash; allow MQTT-connected nodes to forward your packets upstream</label>";
-    html += "<label style='display:flex;align-items:center;gap:.5em'>"
+    html += "<label>"
             "<input type='checkbox' name='ignore_mqtt' value='1'";
     if (gCfg->ignoreMqtt) html += " checked";
     html += "> Ignore MQTT &mdash; drop received packets that arrived via MQTT</label>";
@@ -4189,7 +4189,7 @@ static void sendConfigPage(const char *msg = "", bool lite = false) {
 
     // ── Channels ──────────────────────────────────────────────
     section(html, lite, "Channels", "channels", "Up to 8 channels; the first is primary.");
-    html += "<p class='gps-hint'>Key: base64 (e.g. \"AQ==\" or \"MA==\"). "
+    html += "<p class='hint'>Key: base64 (e.g. \"AQ==\" or \"MA==\"). "
             "Hash is recomputed automatically on save. "
             "Uplink publishes this channel's traffic to MQTT; downlink re-broadcasts "
             "MQTT traffic for it onto LoRa. Location broadcasts this node's position "
@@ -4201,7 +4201,7 @@ static void sendConfigPage(const char *msg = "", bool lite = false) {
     // box submits nothing) only when this section was rendered.
     html += "<input type='hidden' name='ch_flags' value='1'>";
     if (!lite) {
-        html += "<p class='gps-hint'>Use &#9650;/&#9660; to move a channel between "
+        html += "<p class='hint'>Use &#9650;/&#9660; to move a channel between "
                 "slots. Channel 0 is the primary and stays where it is.</p>";
     }
     html += "<div id='ch-list'>";
@@ -4334,7 +4334,7 @@ static void sendConfigPage(const char *msg = "", bool lite = false) {
     // Marker so the POST handler can apply checkbox state (unchecked boxes send
     // nothing) only when this section was actually rendered.
     html += "<input type='hidden' name='mqtt_present' value='1'>";
-    html += "<label style='display:flex;align-items:center;gap:.5em'>"
+    html += "<label>"
             "<input type='checkbox' name='mqtt_en' value='1'";
     if (gCfg->mqttEnabled) html += " checked";
     html += "> Enable MQTT bridge</label>";
@@ -4349,7 +4349,7 @@ static void sendConfigPage(const char *msg = "", bool lite = false) {
     // plaintext (use port 1883). Channel payloads remain end-to-end encrypted
     // with the channel key regardless of transport.
     html += "</div>";
-    html += "<p class='gps-hint'>MQTT is plaintext only (port 1883) — this "
+    html += "<p class='hint'>MQTT is plaintext only (port 1883) — this "
             "firmware has no TLS client. Channel payloads stay encrypted with "
             "your channel key.</p>";
     html += "<label>Username<input name='mqtt_user' type='text' maxlength='31' value='";
@@ -4361,15 +4361,15 @@ static void sendConfigPage(const char *msg = "", bool lite = false) {
     html += "<label>Root topic<input name='mqtt_root' type='text' maxlength='47' value='";
     appendAttr(html, gCfg->mqttRoot);
     html += "'></label>";
-    html += "<label style='display:flex;align-items:center;gap:.5em'>"
+    html += "<label>"
             "<input type='checkbox' name='mqtt_encrypt' value='1'";
     if (gCfg->mqttEncryption) html += " checked";
     html += "> Encrypt payloads (publish ciphertext to /2/e/)</label>";
-    html += "<label style='display:flex;align-items:center;gap:.5em'>"
+    html += "<label>"
             "<input type='checkbox' name='mqtt_map_report' value='1'";
     if (gCfg->mqttMapReport) html += " checked";
     html += "> Map reporting (this node to /2/map/ every 15 min)</label>";
-    html += "<p style='font-size:.8em;color:var(--muted);margin:.4em 0 0'>"
+    html += "<p class='hint'>"
             "Requires WiFi credentials above. Default broker: mqtt.meshtastic.org:8883.</p>";
     sectionEnd(html, lite);
     sendChunk(html);
@@ -4433,7 +4433,7 @@ static void sendConfigPage(const char *msg = "", bool lite = false) {
         html += "' value='"; html += b;
         html += "' oninput=\"document.getElementById('lbriOut').textContent=this.value+'%'\">"
                 "</label>";
-        html += "<p style='font-size:.82em;color:#888;margin:.1em 0 .5em'>"
+        html += "<p class='hint'>"
                 "Backlight level while the lock screen is showing, separate from "
                 "the brightness above. Defaults to 10% — it is a glance surface, "
                 "and on a lit panel this is most of what the lock screen costs "
@@ -4458,7 +4458,7 @@ static void sendConfigPage(const char *msg = "", bool lite = false) {
         if (gCfg->uiOrientation == 2) html += " selected";
         html += ">Portrait (180&deg;)</option>"
                 "</select></label>";
-        html += "<p style='font-size:.82em;color:#888;margin:.1em 0 .5em'>"
+        html += "<p class='hint'>"
                 "Which way up the display runs. The panel is rotated once at "
                 "startup, so this takes effect when the device reboots — which "
                 "saving here does anyway.</p>";
@@ -4565,7 +4565,7 @@ static void sendConfigPage(const char *msg = "", bool lite = false) {
             sendChunk(html);
             sendFlash(kChatBlinkModal);
         }
-        html += "<p style='font-size:.8em;color:var(--muted);margin:.2em 0 0'>"
+        html += "<p class='hint'>"
                 "How long a new message blinks in chat and DMs once it is on "
                 "screen. Takes effect immediately, no reboot.</p>";
     }
@@ -4773,7 +4773,7 @@ static void sendConfigPage(const char *msg = "", bool lite = false) {
         html += "</select></label>";
     }
     html += "</div>";
-    html += "<p style='font-size:.8em;color:var(--muted);margin:.2em 0 0'>"
+    html += "<p class='hint'>"
             "Only used while the screen is off.</p>";
 #endif
 #if HAS_LIGHT_NOTIFY
@@ -4788,7 +4788,7 @@ static void sendConfigPage(const char *msg = "", bool lite = false) {
         html += tmp;
     }
     html += "</select></label>";
-    html += "<p style='font-size:.8em;color:var(--muted);margin:.2em 0 0'>"
+    html += "<p class='hint'>"
             "How long the light keeps reminding you after a message arrives. The "
             "clock restarts on each new message, and reading the message stops it "
             "immediately either way. Never means it keeps reminding until read.</p>";
@@ -4803,7 +4803,7 @@ static void sendConfigPage(const char *msg = "", bool lite = false) {
         html += tmp;
     }
     html += "</select></label>";
-    html += "<p style='font-size:.8em;color:var(--muted);margin:.2em 0 0'>"
+    html += "<p class='hint'>"
 #if defined(DEVICE_M9)
             "How brightly the keypad lights itself after a keypress. The keypad "
             "LEDs belong to the keyboard's own controller, which lights them for "
@@ -4836,7 +4836,7 @@ static void sendConfigPage(const char *msg = "", bool lite = false) {
         html += tmp;
     }
     html += "</select></label>";
-    html += "<p style='font-size:.8em;color:var(--muted);margin:.2em 0 0'>"
+    html += "<p class='hint'>"
             "Turns the keyboard light off after this long with no key press or "
             "touch, the way Screen Timeout does for the screen. The next key or "
             "touch lights it again. Notification blinks still flash while it is "
@@ -4848,7 +4848,7 @@ static void sendConfigPage(const char *msg = "", bool lite = false) {
             "<option value='1'"; if ( gCfg->navBarEnabled) html += " selected"; html += ">Enabled</option>"
             "<option value='0'"; if (!gCfg->navBarEnabled) html += " selected"; html += ">Disabled</option>"
             "</select></label>";
-    html += "<p style='font-size:.8em;color:var(--muted);margin:.2em 0 0'>"
+    html += "<p class='hint'>"
             "Row of icons along the bottom of the screen - Home, Chats, DM, "
             "Nodes, Tools, Config, Help - carrying the GPS and Wi-Fi readouts "
             "and the unread marks. Disabled restores the keyboard shortcut "
@@ -4865,7 +4865,7 @@ static void sendConfigPage(const char *msg = "", bool lite = false) {
                 "<option value='right'";  if (navAlign == NAV_ALIGN_RIGHT)  html += " selected"; html += ">Right</option>"
                 "</select></label>";
     }
-    html += "<p style='font-size:.8em;color:var(--muted);margin:.2em 0 0'>"
+    html += "<p class='hint'>"
             "Where the nav bar sits. Center is the row of icons along the bottom "
             "of the screen. Left and Right condense it into a narrow column down "
             "that side, one icon per button, and give the screen its full height "
@@ -4899,7 +4899,7 @@ static void sendConfigPage(const char *msg = "", bool lite = false) {
     // ── Modules ───────────────────────────────────────────────
     section(html, lite, "Modules", "modules", "Telemetry, beacons and other optional features.");
     // Telemetry
-    html += "<h3 style='font-size:.95em;margin:.8em 0 .3em'>Telemetry</h3>";
+    html += "<h3 class='cfg-sub'>Telemetry</h3>";
     html += "<div class='row2'>";
     html += "<label>Device Telemetry<select name='tel_dev_en'>"
             "<option value='1'"; if ( gCfg->telDeviceEnabled) html += " selected"; html += ">Enabled</option>"
@@ -4913,7 +4913,7 @@ static void sendConfigPage(const char *msg = "", bool lite = false) {
     html += "<label>Broadcast Interval (min)<input name='tel_bcast_mins' type='number' min='60' value='";
     html += tmp; html += "'></label></div>";
 
-    html += "<h3 style='font-size:.95em;margin:.8em 0 .3em'>Sensor Telemetry</h3>";
+    html += "<h3 class='cfg-sub'>Sensor Telemetry</h3>";
     html += "<div class='row2'>";
 #if HAS_ENV_SENSOR_TELEMETRY
     // Three states, and they are worth telling apart. A board that supports the
@@ -4940,7 +4940,7 @@ static void sendConfigPage(const char *msg = "", bool lite = false) {
                 "</select></label>";
         html += "<label>Sensor Interval<input type='text' value='Uses broadcast interval above' disabled></label>";
 
-        html += "<p style='font-size:.82em;color:#888;margin:.3em 0 .6em;grid-column:1/-1'>";
+        html += "<p class='hint hint-wide'>";
         if (sensorFound) {
             html += "Detected <b>";
             html += envSensorName();
@@ -4964,19 +4964,19 @@ static void sendConfigPage(const char *msg = "", bool lite = false) {
 #endif
     html += "</div>";
 
-    html += "<h3 style='font-size:.95em;margin:.8em 0 .3em'>Mesh Beacons</h3>";
+    html += "<h3 class='cfg-sub'>Mesh Beacons</h3>";
     html += "<label>Listen for beacons<select name='mesh_beacon_listen'>"
             "<option value='1'"; if ( gCfg->meshBeaconListen) html += " selected"; html += ">Enabled</option>"
             "<option value='0'"; if (!gCfg->meshBeaconListen) html += " selected"; html += ">Disabled</option>"
             "</select></label>";
-    html += "<p style='font-size:.82em;color:var(--muted);margin:.2em 0 0'>"
+    html += "<p class='hint'>"
             "Meshtastic 2.7 nodes can retune briefly to advertise a different mesh, "
             "naming a channel, preset and region. With this on, any such beacon that "
             "reaches this device is listed on the Beacons screen, under Live &rarr; "
             "Tools. Receive-only &mdash; nothing "
             "is transmitted, and an offer is never applied to your radio. Off by default.</p>";
 
-    html += "<h3 style='font-size:.95em;margin:.8em 0 .3em'>Neighborhood Info</h3>";
+    html += "<h3 class='cfg-sub'>Neighborhood Info</h3>";
     html += "<div class='row2'>";
     html += "<label>Enabled<select name='neighbor_info_en'>"
             "<option value='1'"; if ( gCfg->neighborInfoEnabled) html += " selected"; html += ">Enabled</option>"
@@ -4995,7 +4995,7 @@ static void sendConfigPage(const char *msg = "", bool lite = false) {
             "</select></label>";
 
     // camillia chat server client
-    html += "<h3 style='font-size:.95em;margin:.8em 0 .3em'>Chat Server</h3>";
+    html += "<h3 class='cfg-sub'>Chat Server</h3>";
     html += "<label>Catch-up<select name='cs_mode'>";
     {
         static const char *const kModes[3] = {"Off", "Automatic (boot + every 15 min)", "Manual only"};
@@ -5013,7 +5013,7 @@ static void sendConfigPage(const char *msg = "", bool lite = false) {
         html += idBuf;
     }
     html += "'></label>"
-            "<p style='font-size:.82em;color:#888;margin:.1em 0 .6em'>"
+            "<p class='hint'>"
             "A camillia chat server keeps channel messages and replays the ones this node "
             "missed. Leave blank to use the first one found nearby. Enter a short name or "
             "<code>!aabbccdd</code> to always use that node: a server set here is never "
@@ -5041,7 +5041,7 @@ static void sendConfigPage(const char *msg = "", bool lite = false) {
     appendAttr(html, gWifiPass);
     html += "'></label>";
     if (!lite) {
-        html += "<p class='gps-hint'>This is the network the device joins.</p>";
+        html += "<p class='hint'>This is the network the device joins.</p>";
         appendSavedNetworks(html);
     }
     {
@@ -5083,7 +5083,7 @@ static void sendConfigPage(const char *msg = "", bool lite = false) {
             html += tmp;
         }
         html += "</select></label>";
-        html += "<p class='gps-hint'>How long web config stays up with no requests "
+        html += "<p class='hint'>How long web config stays up with no requests "
                 "before it closes itself and releases WiFi. Loading or saving a "
                 "page counts as activity; reading one does not. <b>Never</b> "
                 "keeps WiFi and its power draw on until you stop it yourself.</p>";
@@ -5100,13 +5100,13 @@ static void sendConfigPage(const char *msg = "", bool lite = false) {
         // Installed by a third-party flasher into its own partition layout: the
         // slot an update would land in belongs to another firmware. Say so
         // instead of offering a toggle that leads nowhere.
-        html += "<p style='font-size:.82em;color:#888;margin:.1em 0 .5em'>"
+        html += "<p class='hint'>"
                 "Updates are unavailable on this install: the device was flashed "
                 "with a third-party partition layout, where the spare app slot may "
                 "hold other firmware. Re-flash the factory image to enable "
                 "over-the-air updates.</p>";
     } else {
-        html += "<p style='font-size:.82em;color:#888;margin:.1em 0 .5em'>"
+        html += "<p class='hint'>"
                 "On boot, once WiFi is up, the device asks whether a newer release "
                 "exists and offers to install it. Declining is remembered until the "
                 "next reboot.</p>";
@@ -5126,7 +5126,7 @@ static void sendConfigPage(const char *msg = "", bool lite = false) {
         if (otaChannelNow == OTA_CHANNEL_ALPHA) html += " selected";
         html += ">Alpha</option>"
                 "</select></label>";
-        html += "<p style='font-size:.82em;color:#888;margin:.1em 0 .5em'>"
+        html += "<p class='hint'>"
                 "<b>Stable</b> installs published releases only. <b>Alpha</b> also "
                 "takes prerelease builds cut from a development branch — earlier "
                 "access, and rougher. Alpha images are signed and verified exactly "
@@ -5153,7 +5153,7 @@ static void sendConfigPage(const char *msg = "", bool lite = false) {
             html += ">"; html += opt.label; html += "</option>";
         }
         html += "</select></label>";
-        html += "<p style='font-size:.82em;color:#888;margin:.1em 0 .5em'>"
+        html += "<p class='hint'>"
                 "When set, the device checks for a new release on this schedule and "
                 "installs it <b>without asking</b>, then reboots. Intended for nodes "
                 "left unattended; anything in progress on the device is lost at the "
@@ -5176,21 +5176,21 @@ static void sendConfigPage(const char *msg = "", bool lite = false) {
         const bool slot    = nodeArchiveSlotExists();
         const bool canArch = slot && nodeArchiveAvailable();
         section(html, lite, "Node Management", "nodes", "Clean up the node list.");
-        html += "<p style='font-size:.82em;color:#888;margin:.1em 0 .5em'>"
+        html += "<p class='hint'>"
                 "The device keeps the ";
         html += String(MAX_NODES);
         html += " most recently heard nodes. When that fills up, the "
                 "oldest non-favorite is dropped to make room — favorites are never "
                 "dropped.</p>";
 
-        html += "<label style='display:flex;align-items:center;gap:.5em'>"
+        html += "<label>"
                 "<input type='checkbox' name='node_archive' value='1'";
         if (gCfg->nodeArchiveEnabled) html += " checked";
         if (!canArch) html += " disabled";
-        html += " style='width:auto;margin:0'>"
+        html += ">"
                 "<span>Archive dropped nodes to SD card</span></label>";
 
-        html += "<p style='font-size:.82em;color:#888;margin:.3em 0 .6em'>";
+        html += "<p class='hint'>";
         if (!slot) {
             html += "Unavailable: this board has no SD card slot. Dropped nodes "
                     "are discarded.";
@@ -5209,14 +5209,14 @@ static void sendConfigPage(const char *msg = "", bool lite = false) {
         // availability rule, and the same reason for it -- an unchecked checkbox
         // is not submitted, so saving from a card-less device must not be read
         // as the user turning this off.
-        html += "<label style='display:flex;align-items:center;gap:.5em'>"
+        html += "<label>"
                 "<input type='checkbox' name='node_archive_show' value='1'";
         if (gCfg->nodeArchiveShow) html += " checked";
         if (!canArch) html += " disabled";
-        html += " style='width:auto;margin:0'>"
+        html += ">"
                 "<span>Show archived nodes on the Nodes screen</span></label>";
 
-        html += "<p style='font-size:.82em;color:#888;margin:.3em 0 .6em'>";
+        html += "<p class='hint'>";
         if (!slot) {
             html += "Unavailable: this board has no SD card slot.";
         } else if (!canArch) {
@@ -5242,10 +5242,10 @@ static void sendConfigPage(const char *msg = "", bool lite = false) {
         char rangeBuf[24];
         snprintf(rangeBuf, sizeof(rangeBuf), "%.2f", (double)shown);
 
-        html += "<label style='display:flex;align-items:center;gap:.5em;margin-top:.6em'>"
+        html += "<label>"
                 "<input type='checkbox' name='autofav' value='1'";
         if (gCfg->autoFavoriteEnabled) html += " checked";
-        html += " style='width:auto;margin:0'>"
+        html += ">"
                 "<span>Auto-favorite nearby nodes</span></label>";
 
         html += "<label>Auto-favorite radius (";
@@ -5258,7 +5258,7 @@ static void sendConfigPage(const char *msg = "", bool lite = false) {
         html += rangeBuf;
         html += "'></label>";
 
-        html += "<p style='font-size:.82em;color:#888;margin:.3em 0 .8em'>"
+        html += "<p class='hint'>"
                 "Any node reporting a position within this radius is favorited "
                 "automatically. Favorites sort to the top of the node and DM lists "
                 "and are never dropped when the node table fills up. This only ever "
@@ -5266,11 +5266,11 @@ static void sendConfigPage(const char *msg = "", bool lite = false) {
                 "un-favorited, so it can't undo one you set by hand. Requires a known "
                 "position for both your node and theirs.</p>";
 
-        html += "<p style='margin:.2em 0 1em'><a href='/nodes.csv'"
+        html += "<p><a href='/nodes.csv'"
                 " style='display:inline-block;padding:.4em 1.2em;background:#3b82f6;"
                 "color:#fff;border-radius:3px;text-decoration:none;font-size:.95em'>"
                 "&#11015; Export Node List (CSV)</a></p>"
-                "<p style='font-size:.82em;color:#888;margin:-.6em 0 1em'>"
+                "<p class='hint'>"
                 "Downloads every node currently known to the device, plus any "
                 "previously archived nodes if an archive exists. While wardriving "
                 "is on, the <code>mapLat</code>/<code>mapLon</code> columns also "
@@ -5281,13 +5281,13 @@ static void sendConfigPage(const char *msg = "", bool lite = false) {
         // ── Wardrive log ────────────────────────────────────────────────────
         {
             const bool wdOk = wardriveLogFilePath() && wardriveLogAvailable();
-            html += "<label style='display:flex;align-items:center;gap:.5em;margin-top:.6em'>"
+            html += "<label>"
                     "<input type='checkbox' name='wardrive_log' value='1'";
             if (gCfg->wardriveLogEnabled) html += " checked";
             if (!wdOk) html += " disabled";
-            html += " style='width:auto;margin:0'>"
+            html += ">"
                     "<span>Wardriving (log sightings with this device's GPS position)</span></label>";
-            html += "<p style='font-size:.82em;color:#888;margin:.3em 0 .6em'>";
+            html += "<p class='hint'>";
             if (!wardriveLogFilePath()) {
                 html += "Unavailable: this board has no file storage.";
             } else if (!wdOk) {
@@ -5311,16 +5311,16 @@ static void sendConfigPage(const char *msg = "", bool lite = false) {
                          (unsigned long)wardriveLogNodes(),
                          (unsigned long)wardriveLogSkippedNoFix(),
                          (unsigned long)wardriveLogDropped(),
-                         gpsHasFix() ? "fix" : "<b style='color:#c0392b'>NO FIX</b>",
+                         gpsHasFix() ? "fix" : "<b class='danger-text'>NO FIX</b>",
                          wardriveLogIsFull()
-                             ? "<br><b style='color:#c0392b'>Log full: nothing more is "
+                             ? "<br><b class='danger-text'>Log full: nothing more is "
                                "being written. Download it, then clear it.</b>"
                              : "");
                 html += st;
             }
             html += "</p>";
             if (wdOk) {
-                html += "<p style='margin:.2em 0 .4em'><a href='/wardrive.csv'"
+                html += "<p><a href='/wardrive.csv'"
                         " style='display:inline-block;padding:.4em 1.2em;background:#3b82f6;"
                         "color:#fff;border-radius:3px;text-decoration:none;font-size:.95em'>"
                         "&#11015; Download Wardrive Log (CSV)</a></p>"
@@ -5329,8 +5329,8 @@ static void sendConfigPage(const char *msg = "", bool lite = false) {
                         // </form> closed the Save form instead, leaving Save All
                         // outside any form, where it did nothing. So the button
                         // names its own form, which is emitted after Save's.
-                        "<p style='margin:0 0 1em'>"
-                        "<button type='submit' form='wdclear' style='background:#c0392b'>"
+                        "<p>"
+                        "<button type='submit' form='wdclear' class='btn-danger'>"
                         "Clear Wardrive Log</button></p>";
             }
         }
@@ -5341,13 +5341,13 @@ static void sendConfigPage(const char *msg = "", bool lite = false) {
     // reach this page rather than how the device behaves, so it sits after
     // everything someone actually came here to change.
     section(html, lite, "Web Config Access", "access", "Who can open this page.");
-    html += "<label style='display:flex;align-items:center;gap:.5em'>"
+    html += "<label>"
             "<input type='checkbox' name='web_auth' value='1' id='web-auth-cb'"
             " onchange=\"document.getElementById('web-auth-creds').style.display="
             "this.checked?'':'none'\"";
     if (gCfg->webCfgAuthEnabled) html += " checked";
     html += "> Require login (authentication)</label>";
-    html += "<p class='gps-hint'>When disabled, the web config is reachable without a "
+    html += "<p class='hint'>When disabled, the web config is reachable without a "
             "username or password. Only leave this off on trusted networks.</p>";
     html += "<div id='web-auth-creds'";
     if (!gCfg->webCfgAuthEnabled) html += " style='display:none'";

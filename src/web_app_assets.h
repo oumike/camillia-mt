@@ -114,6 +114,8 @@ scroll-margin-top:calc(var(--hd) + 56px)}
 .sec-desc{margin:.1em 0 .6em;color:var(--dim);font-size:.88em}
 .cfg-sub{font-size:.95em;margin:1.1em 0 .3em;padding-top:.8em;border-top:1px solid var(--line)}
 .hint,.gps-hint{font-size:.82em;color:var(--dim);margin:.15em 0 .6em}
+.hint-wide{grid-column:1/-1}
+.danger-text{color:var(--bad)}
 .gps-note{margin:.4em 0;font-size:.9em}
 .gps-note button{padding:.2em .8em;font-size:.9em;margin:0 0 0 .4em}
 .row2{display:grid;grid-template-columns:1fr 1fr;gap:0 .9em}
