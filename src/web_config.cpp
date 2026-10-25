@@ -3180,10 +3180,12 @@ static void appendCommunityPresetPicker(String &html) {
             "</script>";
 }
 
-// Config-pane section wrappers. The full page folds each section into a
-// <details> accordion; web config lite renders a plain heading with everything
-// expanded — no folding, no styling, so nothing depends on CSS being there.
-static void section(String &html, bool lite, const char *title, bool open) {
+// Config- and Utilities-pane section wrappers. The full page gives each one a
+// panel with an id (sec-<slug>) that the rail, the phone's section sheet and
+// the URL (#config/<slug>) all point at; web config lite renders a plain
+// heading — no styling, so nothing depends on CSS being there.
+static void section(String &html, bool lite, const char *title, const char *slug,
+                    const char *desc = nullptr) {
     const char *safeTitle = title ? title : "?";
     if (lite) {
         // Progress marker: if a render stalls, the last line names the section.
@@ -3198,13 +3200,20 @@ static void section(String &html, bool lite, const char *title, bool open) {
         html += "</h3>";
         return;
     }
-    html += open ? "<details open><summary>" : "<details><summary>";
+    html += "<section class='cfg-sec' id='sec-";
+    html += slug;
+    html += "'><h2>";
     html += safeTitle;
-    html += "</summary>";
+    html += "</h2>";
+    if (desc) {
+        html += "<p class='sec-desc'>";
+        html += desc;
+        html += "</p>";
+    }
 }
 
 static void sectionEnd(String &html, bool lite) {
-    if (!lite) html += "</details>";
+    if (!lite) html += "</section>";
 }
 
 // ── Login page ────────────────────────────────────────────────
@@ -3709,71 +3718,91 @@ static void sendConfigPage(const char *msg = "", bool lite = false) {
     // and here, it is that build, not the socket.
     if (!lite) logWifiHeapDiag("node list built");
 
-    html += lite ? "<h2>Camillia &mdash; Web Config Lite"
-                 : "<h2>Camillia for Meshtastic";
-    if (gCfg && gCfg->webCfgAuthEnabled)
-        html += " <a class='logout' href='/logout'>Logout</a>";
-    html += "</h2>";
-
-    if (msg[0]) { html += "<p class='msg'>"; appendAttr(html, msg); html += "</p>"; }
-
     // This board freed its chat buffers so Wi-Fi could start, so the device is
     // dropping messages for as long as this page is being served. Say so
     // prominently — it is not recoverable by anything on this page.
-    if (gWebBuffersReclaimed) {
-        html += "<p style='color:#d81f2a;font-weight:700;border:1px solid #d81f2a;"
-                "border-radius:4px;padding:.5em;margin:.5em 0'>"
-                "Chat is paused. This device needed its message memory to run "
-                "Wi-Fi, so messages sent to it are not being received or stored "
-                "while web config is on. Turn web config off on the device to "
-                "resume messaging.</p>";
-    }
+    static const char kChatPaused[] =
+        "Chat is paused. This device needed its message memory to run "
+        "Wi-Fi, so messages sent to it are not being received or stored "
+        "while web config is on. Turn web config off on the device to "
+        "resume messaging.";
 
     if (lite) {
+        html += "<h2>Camillia &mdash; Web Config Lite";
+        if (gCfg && gCfg->webCfgAuthEnabled)
+            html += " <a class='logout' href='/logout'>Logout</a>";
+        html += "</h2>";
+        if (msg[0]) { html += "<p class='msg'>"; appendAttr(html, msg); html += "</p>"; }
+        if (gWebBuffersReclaimed) {
+            html += "<p style='color:#d81f2a;font-weight:700;border:1px solid #d81f2a;"
+                    "border-radius:4px;padding:.5em;margin:.5em 0'>";
+            html += kChatPaused;
+            html += "</p>";
+        }
         html += "<p>Access-point mode. All settings are here; the live feed, "
                 "chat and node map need the device on your WiFi network. "
                 "<a href='/setup'>Quick WiFi setup</a></p>";
     } else {
-        html += "<div class='tab-row'><div class='tab-btns'>"
-            "<button type='button' class='tab-btn active' id='tab-btn-config' onclick=\"switchTab('config')\">Config</button>"
-            "<button type='button' class='tab-btn' id='tab-btn-utils' onclick=\"switchTab('utils')\">Utilities</button>"
-            "<button type='button' class='tab-btn' id='tab-btn-live' onclick=\"switchTab('live')\">Live</button>"
-#if !defined(DEVICE_CARDPUTER_LORA_HAT)
-            "<button type='button' class='tab-btn' id='tab-btn-chat' onclick=\"switchTab('chat')\">Chat</button>"
-#endif
-            "<button type='button' class='tab-btn' id='tab-btn-map' onclick=\"switchTab('map')\">Nodes</button>";
-#if HAS_VNC_HOST
-    html += "<button type='button' class='tab-btn' id='tab-btn-remote' onclick=\"switchTab('remote')\">Remote</button>";
-#endif
-#if HAS_WEB_FILES
-    if (gCfg && cfgWebFilesEnabled(*gCfg)) {
-        html += "<button type='button' class='tab-btn' id='tab-btn-files' onclick=\"switchTab('files')\">Files</button>";
-    }
-#endif
-        html += "</div>";
+        // Header: who this is and how it is doing. The node's short name in the
+        // brand face, its long name, then battery / GPS / key chips.
+        html += "<header class='app-hd'><span class='nm'>";
+        appendAttr(html, gCfg ? gCfg->nodeShort : "");
+        html += "</span><span class='ln'>";
+        appendAttr(html, gCfg ? gCfg->nodeLong : "");
+        html += "</span><span class='chips'>";
         if (havePubKey) {
-            // Left of the row: .tab-metrics carries margin-left:auto, so
-            // anything emitted before it stays packed against the tabs rather
-            // than drifting right with the battery and GPS chips.
-            html += "<button type='button' class='metric-chip key-chip' id='pubkey-chip'"
+            html += "<button type='button' class='chip key-chip' id='pubkey-chip'"
                     " data-key='";
             html += pubKeyB64;
             html += "' onclick='copyPubKey(this)' title='Copy the public key of this node'>"
                     "KEY ";
-            // Enough of it to recognise, not so much that it crowds the tabs.
+            // Enough of it to recognise, not so much that it crowds the header.
             // The whole key travels in data-key; this is only the label.
             html += String(pubKeyB64).substring(0, 10);
             html += "&hellip;</button>";
         }
-        html += "<div class='tab-metrics'><span class='metric-chip ";
+        html += "<span class='chip ";
         html += battCls;
         html += "'>";
         html += battChip;
-        html += "</span><span class='metric-chip ";
+        html += "</span><span class='chip ";
         html += gpsCls;
         html += "'>";
         html += gpsChip;
-        html += "</span></div></div>";
+        html += "</span>";
+        if (gCfg && gCfg->webCfgAuthEnabled)
+            html += "<a class='logout' href='/logout'>Logout</a>";
+        html += "</span></header>";
+
+        // Wide screens: the rail. Config's section links are filled in by
+        // appBuildSectionNav() (kAppJs) from the sections on the page, so a
+        // section a board leaves out never leaves a dead link behind.
+        html += "<div class='app'><nav class='app-rail' aria-label='Pages'>"
+                "<a data-tab='config' href='#config' class='active' aria-current='page'>Config</a>"
+                "<div id='rail-secs'></div>"
+                "<a data-tab='live' href='#live'>Live</a>"
+#if !defined(DEVICE_CARDPUTER_LORA_HAT)
+                "<a data-tab='chat' href='#chat'>Chat</a>"
+#endif
+                "<a data-tab='map' href='#map'>Nodes</a>"
+                "<a data-tab='utils' href='#utils'>Utilities</a>";
+#if HAS_VNC_HOST
+        html += "<a data-tab='remote' href='#remote'>Remote</a>";
+#endif
+#if HAS_WEB_FILES
+        if (gCfg && cfgWebFilesEnabled(*gCfg)) html += "<a data-tab='files' href='#files'>Files</a>";
+#endif
+        html += "</nav><main class='app-main'>";
+        if (msg[0]) { html += "<p class='notice'>"; appendAttr(html, msg); html += "</p>"; }
+        if (gWebBuffersReclaimed) {
+            html += "<p class='notice-err'>";
+            html += kChatPaused;
+            html += "</p>";
+        }
+        // Phones: the current section, and the sheet that jumps between them.
+        html += "<div class='secbar'><b id='sec-current'>Config</b>"
+                "<button type='button' class='btn-2' onclick=\"appOpenSheet('sheet-secs')\">"
+                "Sections &#9662;</button></div>";
         html += "<div class='tab-panel active' id='tab-config'><div class='tab-pane-center'>";
     }
     sendChunk(html);
@@ -3782,12 +3811,12 @@ static void sendConfigPage(const char *msg = "", bool lite = false) {
     // other restarting action on this page. The one exception it cannot see
     // from here is a font-size-only change, which applies without restarting --
     // the wording hedges rather than promising a reboot that may not happen.
-    html += "<form method='POST' action='/save'"
+    html += "<form id='cfg-form' method='POST' action='/save'"
             " onsubmit=\"return confirm('Saving may restart the device to apply "
             "these changes. Continue?')\">";
 
     // ── Node Identity ─────────────────────────────────────────
-    section(html, lite, "Node Identity", true);
+    section(html, lite, "Node Identity", "identity", "How this node appears to others on the mesh.");
     // maxlength counts UTF-16 code units, not bytes, so it is a UI hint only —
     // the byte cap is enforced by copyTruncate in the POST handler.
     html += "<label>Long Name (max 24 bytes)"
@@ -3840,7 +3869,7 @@ static void sendConfigPage(const char *msg = "", bool lite = false) {
     sendChunk(html);
 
     // ── Device ────────────────────────────────────────────────
-    section(html, lite, "Device", false);
+    section(html, lite, "Device", "device", "Role, rebroadcasting and clock.");
     html += "<div class='row2'>";
     html += "<label>Role<select name='role'>";
     // See cfgCoerceDeviceRole for which roles this firmware offers and why the
@@ -4018,7 +4047,7 @@ static void sendConfigPage(const char *msg = "", bool lite = false) {
     sendChunk(html);
 
     // ── Position ──────────────────────────────────────────────
-    section(html, lite, "Position", false);
+    section(html, lite, "Position", "position", "GPS and what location this node shares.");
     html += "<label style='display:flex;align-items:center;gap:.5em'>"
             "<input type='checkbox' name='shareLocation' value='1'";
     if (gCfg->shareLocation) html += " checked";
@@ -4070,7 +4099,7 @@ static void sendConfigPage(const char *msg = "", bool lite = false) {
     sendChunk(html);
 
     // ── LoRa Radio ────────────────────────────────────────────
-    section(html, lite, "LoRa Radio", false);
+    section(html, lite, "LoRa Radio", "lora", "Must match the other nodes you want to hear.");
     // The live frequency/BW/SF/CR readout is driven by kPresetJs. Lite skips
     // both, so its selects carry no onchange handler to call.
     html += lite ? "<div class='row2'><label>Region<select name='region' id='sel-rgn'>"
@@ -4159,7 +4188,7 @@ static void sendConfigPage(const char *msg = "", bool lite = false) {
     sendChunk(html);
 
     // ── Channels ──────────────────────────────────────────────
-    section(html, lite, "Channels", false);
+    section(html, lite, "Channels", "channels", "Up to 8 channels; the first is primary.");
     html += "<p class='gps-hint'>Key: base64 (e.g. \"AQ==\" or \"MA==\"). "
             "Hash is recomputed automatically on save. "
             "Uplink publishes this channel's traffic to MQTT; downlink re-broadcasts "
@@ -4301,7 +4330,7 @@ static void sendConfigPage(const char *msg = "", bool lite = false) {
     sendChunk(html);
 
     // ── MQTT ──────────────────────────────────────────────────
-    section(html, lite, "MQTT", false);
+    section(html, lite, "MQTT", "mqtt", "Bridge the mesh to an MQTT broker over WiFi.");
     // Marker so the POST handler can apply checkbox state (unchecked boxes send
     // nothing) only when this section was actually rendered.
     html += "<input type='hidden' name='mqtt_present' value='1'>";
@@ -4346,7 +4375,7 @@ static void sendConfigPage(const char *msg = "", bool lite = false) {
     sendChunk(html);
 
     // ── Display ───────────────────────────────────────────────
-    section(html, lite, "Display", false);
+    section(html, lite, "Display", "display", "Theme, brightness and fonts on the device.");
     // Language of the on-device UI (issue #99). The page itself stays English.
     // Each name is written in its own language, as the device picker shows it;
     // the value is the index stored in RhinoConfig::uiLanguage. Changing it
@@ -4647,7 +4676,7 @@ static void sendConfigPage(const char *msg = "", bool lite = false) {
     // split between Display (volume) and Modules (alert tones). The name holds
     // on every board: where there is no audio hardware the section is the
     // notification LED and keyboard blink alone.
-    section(html, lite, "Notifications", false);
+    section(html, lite, "Notifications", "notify", "Sounds, vibration and LED for new messages.");
 #if HAS_VOLUME_CONTROL
     // Same shape as the brightness slider. Compiled out where the board alerts
     // through a passive buzzer: amplitude is not controllable there, so the
@@ -4852,7 +4881,7 @@ static void sendConfigPage(const char *msg = "", bool lite = false) {
     sendChunk(html);
 
     // ── Power ─────────────────────────────────────────────────
-    section(html, lite, "Power", false);
+    section(html, lite, "Power", "power");
     html += "<label>Power Saving<select name='pwr_saving'>"
             "<option value='1'"; if ( gCfg->isPowerSaving) html += " selected"; html += ">Enabled</option>"
             "<option value='0'"; if (!gCfg->isPowerSaving) html += " selected"; html += ">Disabled</option>"
@@ -4868,7 +4897,7 @@ static void sendConfigPage(const char *msg = "", bool lite = false) {
     sendChunk(html);
 
     // ── Modules ───────────────────────────────────────────────
-    section(html, lite, "Modules", false);
+    section(html, lite, "Modules", "modules", "Telemetry, beacons and other optional features.");
     // Telemetry
     html += "<h3 style='font-size:.95em;margin:.8em 0 .3em'>Telemetry</h3>";
     html += "<div class='row2'>";
@@ -5000,7 +5029,7 @@ static void sendConfigPage(const char *msg = "", bool lite = false) {
     // WiFi. Collapsed by default, matching MQTT / Power / Modules. A <details>
     // only hides its contents visually — the inputs stay in the form and submit
     // either way, which is what the other collapsed sections already rely on.
-    section(html, lite, "WiFi", false);
+    section(html, lite, "WiFi", "wifi", "Networks this device joins.");
     // appendAttr, not a raw append: an SSID or password containing an
     // apostrophe would close the value= attribute and mangle the rest of the
     // form, so the field would come back truncated on the next save. Same
@@ -5066,7 +5095,7 @@ static void sendConfigPage(const char *msg = "", bool lite = false) {
     // altogether — offering the toggle there would promise a check that never
     // leads anywhere. The update source itself is not configurable by design.
 #if !defined(DEVICE_CARDPUTER_LORA_HAT)
-    section(html, lite, "Firmware Updates", false);
+    section(html, lite, "Firmware Updates", "firmware", "Update checks and over-the-air updates.");
     if (!otaLayoutSupportsUpdate()) {
         // Installed by a third-party flasher into its own partition layout: the
         // slot an update would land in belongs to another firmware. Say so
@@ -5146,7 +5175,7 @@ static void sendConfigPage(const char *msg = "", bool lite = false) {
     {
         const bool slot    = nodeArchiveSlotExists();
         const bool canArch = slot && nodeArchiveAvailable();
-        section(html, lite, "Node Management", false);
+        section(html, lite, "Node Management", "nodes", "Clean up the node list.");
         html += "<p style='font-size:.82em;color:#888;margin:.1em 0 .5em'>"
                 "The device keeps the ";
         html += String(MAX_NODES);
@@ -5311,7 +5340,7 @@ static void sendConfigPage(const char *msg = "", bool lite = false) {
     // Web Config Access. Last section on the page by design: it governs who can
     // reach this page rather than how the device behaves, so it sits after
     // everything someone actually came here to change.
-    section(html, lite, "Web Config Access", false);
+    section(html, lite, "Web Config Access", "access", "Who can open this page.");
     html += "<label style='display:flex;align-items:center;gap:.5em'>"
             "<input type='checkbox' name='web_auth' value='1' id='web-auth-cb'"
             " onchange=\"document.getElementById('web-auth-creds').style.display="
@@ -5331,7 +5360,11 @@ static void sendConfigPage(const char *msg = "", bool lite = false) {
     sectionEnd(html, lite);
     sendChunk(html);
 
-    html += "<button type='submit' style='width:100%;margin-top:1.5em'>Save All</button></form>";
+    // The full page saves from the save bar (kAppJs), which appears once a
+    // field differs from what the page loaded with. Lite has no script, so it
+    // keeps a plain button at the end of the form.
+    if (lite) html += "<button type='submit'>Save All</button>";
+    html += "</form>";
     // The Clear Wardrive Log button above submits this, by its form attribute.
     // Empty and invisible when there is no log to clear.
     html += "<form id='wdclear' method='POST' action='/clear-wardrive'"
@@ -5339,7 +5372,10 @@ static void sendConfigPage(const char *msg = "", bool lite = false) {
     // A field the browser rejects stops the submit, and if it sits in a closed
     // section the browser cannot show why: Save just does nothing. Open the
     // section first so the message has somewhere to appear.
+    // Saving from the save bar while another tab is showing would leave the
+    // browser nowhere to point at, so bring Config back first.
     html += "<script>document.addEventListener('invalid',function(e){"
+            "if(window.switchTab&&document.body.getAttribute('data-tab')!=='config')switchTab('config');"
             "for(var d=e.target.parentNode;d;d=d.parentNode)"
             "if(d.tagName==='DETAILS')d.open=true;},true);</script>";
     sendChunk(html);
@@ -5400,7 +5436,7 @@ static void sendConfigPage(const char *msg = "", bool lite = false) {
     // ── Diagnostics / Utilities ───────────────────────────────
     // Collapsible, matching the config tab. These pass `false` rather than
     // `lite` because the lite page returns above and never reaches this tab.
-    section(html, false, "Diagnostics", false);
+    section(html, false, "Diagnostics", "u-diag");
     html +=
         "<form method='POST' action='/announce'>"
         "<button type='submit' style='background:#e07b00'>"
@@ -5480,7 +5516,7 @@ static void sendConfigPage(const char *msg = "", bool lite = false) {
     // Peers are added and proved here rather than from a node's menu: a node
     // menu offering "claim admin over this stranger" invites unauthorized admin
     // packets across the mesh and the broker.
-    section(html, false, "Remote Admin", true);
+    section(html, false, "Remote Admin", "u-admin");
     html +=
         "<p style='font-size:.82em;color:#888;margin:.1em 0 .8em'>"
         "Administer another Meshtastic node over LoRa or MQTT. The remote must "
@@ -5609,7 +5645,7 @@ static void sendConfigPage(const char *msg = "", bool lite = false) {
     // center tile per positioned node at every zoom from 13 through the chosen
     // detail ceiling, deduplicates overlaps, and uploads the original PNGs.
     if (stateMapStorageReady()) {
-        section(html, false, "Maps Download", false);
+        section(html, false, "Maps Download", "u-maps");
         html +=
             "<p style='font-size:.82em;color:#888;margin:.1em 0 .6em'>"
             "Downloads offline map tiles centered on every positioned node in the database. "
@@ -5668,7 +5704,7 @@ static void sendConfigPage(const char *msg = "", bool lite = false) {
     }
 #endif
 
-    section(html, false, "Debug Output", false);
+    section(html, false, "Debug Output", "u-debug");
     html +=
         "<form method='POST' action='/set-debug-monitor'>"
         "<label style='display:flex;align-items:center;gap:.5em'>"
@@ -5683,7 +5719,7 @@ static void sendConfigPage(const char *msg = "", bool lite = false) {
     sectionEnd(html, false);
     sendChunk(html);
 
-    section(html, false, "Software Update", false);
+    section(html, false, "Software Update", "u-update");
     html +=
         "<p style='font-size:.82em;color:#888;margin:.3em 0 1em'>Current firmware: <b>";
     html += APP_VERSION;
@@ -5697,7 +5733,7 @@ static void sendConfigPage(const char *msg = "", bool lite = false) {
     sectionEnd(html, false);
     sendChunk(html);
 
-    section(html, false, "Backup &amp; Restore", false);
+    section(html, false, "Backup &amp; Restore", "u-backup");
     html +=
         "<p><a href='/export'"
         " style='display:inline-block;padding:.4em 1.2em;background:#2a9d8f;"
@@ -5716,7 +5752,7 @@ static void sendConfigPage(const char *msg = "", bool lite = false) {
     sendChunk(html);
 
     if (gOnScreenshotPng) {
-        section(html, false, "Display Capture", false);
+        section(html, false, "Display Capture", "u-capture");
         html +=
             "<p><a href='/screenshot'"
             " style='display:inline-block;padding:.4em 1.2em;background:#3b82f6;"
@@ -5731,7 +5767,7 @@ static void sendConfigPage(const char *msg = "", bool lite = false) {
 #if HAS_UI_COLOR_OPTIONS
     // Above the Danger Zone rather than inside it: it changes nothing but which
     // palette entry each node draws in, and nothing about it needs a confirm.
-    section(html, false, "Chat Colors", false);
+    section(html, false, "Chat Colors", "u-colors");
     html +=
         "<form method='POST' action='/reset-chat-colors'>"
         "<button type='submit'>&#127912; Reset Chat Colors</button>"
@@ -5746,7 +5782,7 @@ static void sendConfigPage(const char *msg = "", bool lite = false) {
 
     // Directly above the Danger Zone, which is where Clear Messages lives:
     // someone reading that button is exactly the person who wants this first.
-    section(html, false, "Messages", false);
+    section(html, false, "Messages", "u-messages");
     html += "<p style='margin:.2em 0 1em'><a href='/messages.csv'"
             " style='display:inline-block;padding:.4em 1.2em;background:#3b82f6;"
             "color:#fff;border-radius:3px;text-decoration:none;font-size:.95em'>"
@@ -6601,6 +6637,42 @@ static void sendConfigPage(const char *msg = "", bool lite = false) {
             html += "</div>";
         }
 #endif
+        // Close the frame, then the phone tab bar, the two sheets and the save
+        // bar, all fixed to the viewport, then the shell script they use.
+        html += "</main></div>"
+                "<nav class='tabbar' aria-label='Pages'>"
+                "<a data-tab='config' href='#config' class='active'><svg viewBox='0 0 24 24'>"
+                "<circle cx='12' cy='12' r='3'/><path d='M12 2v3M12 19v3M2 12h3M19 12h3M4.9 4.9l2.1 2.1"
+                "M17 17l2.1 2.1M4.9 19.1L7 17M17 7l2.1-2.1'/></svg>Config</a>"
+                "<a data-tab='live' href='#live'><svg viewBox='0 0 24 24'><path d='M3 12h4l3-7 4 14 3-7h4'/>"
+                "</svg>Live</a>"
+#if !defined(DEVICE_CARDPUTER_LORA_HAT)
+                "<a data-tab='chat' href='#chat'><svg viewBox='0 0 24 24'><path d='M4 5h16v11H9l-5 4z'/>"
+                "</svg>Chat</a>"
+#endif
+                "<a data-tab='map' href='#map'><svg viewBox='0 0 24 24'><circle cx='12' cy='12' r='8'/>"
+                "<circle cx='12' cy='12' r='2'/></svg>Nodes</a>"
+                "<button type='button' onclick=\"appOpenSheet('sheet-more')\"><svg viewBox='0 0 24 24'>"
+                "<circle cx='5' cy='12' r='1.5'/><circle cx='12' cy='12' r='1.5'/><circle cx='19' cy='12' r='1.5'/>"
+                "</svg>More</button></nav>"
+                "<div class='scrim' id='scrim'></div>"
+                "<div class='sheet' id='sheet-secs'></div>"
+                "<div class='sheet' id='sheet-more'><a data-tab='utils' href='#utils'>Utilities</a>";
+#if HAS_VNC_HOST
+        html += "<a data-tab='remote' href='#remote'>Remote</a>";
+#endif
+#if HAS_WEB_FILES
+        if (gCfg && cfgWebFilesEnabled(*gCfg)) html += "<a data-tab='files' href='#files'>Files</a>";
+#endif
+        if (gCfg && gCfg->webCfgAuthEnabled) html += "<a href='/logout'>Logout</a>";
+        html += "</div>"
+                "<div class='savebar' id='savebar'><span id='save-count'></span>"
+                "<button type='button' class='btn-2' id='save-discard'>Discard</button>"
+                "<button type='submit' form='cfg-form' class='btn'>Save and restart</button></div>"
+                "<script>";
+        sendChunk(html);
+        sendFlash(kAppJs);
+        html += "</script>";
 #if HAS_ADMIN_TERMINAL
         // Body level, outside every panel -- see kAdminModal.
         sendChunk(html);
@@ -7592,41 +7664,22 @@ static void sendConfigPage(const char *msg = "", bool lite = false) {
                             "document.body.removeChild(ta);"
                             "if(okc){done();}else{window.prompt('Public key (copy with Ctrl/Cmd+C):',text);}"
                         "}"
+                        // appTab() (kAppJs) marks the pane and every nav that
+                        // points at it; this adds what each tab starts or stops.
                         "function switchTab(tab){"
-                            "var isCfg=(tab==='config');"
-                            "var isUtil=(tab==='utils');"
+                            "if(!document.getElementById('tab-'+tab))tab='config';"
+                            "appTab(tab);"
                             "var isLive=(tab==='live');"
                             "var isMap=(tab==='map');"
-                            "document.getElementById('tab-config').classList.toggle('active',isCfg);"
-                            "document.getElementById('tab-utils').classList.toggle('active',isUtil);"
-                            "document.getElementById('tab-live').classList.toggle('active',isLive);"
-                            "document.getElementById('tab-map').classList.toggle('active',isMap);"
-                            "document.getElementById('tab-btn-config').classList.toggle('active',isCfg);"
-                            "document.getElementById('tab-btn-utils').classList.toggle('active',isUtil);"
-                            "document.getElementById('tab-btn-live').classList.toggle('active',isLive);"
-                            "document.getElementById('tab-btn-map').classList.toggle('active',isMap);"
                             "if(isLive)startLivePolling();else stopLivePolling();"
 #if HAS_VNC_HOST
-                            "var isRemote=(tab==='remote');"
-                            "document.getElementById('tab-remote').classList.toggle('active',isRemote);"
-                            "document.getElementById('tab-btn-remote').classList.toggle('active',isRemote);"
-                            "if(isRemote)startRemotePolling();else stopRemotePolling();"
+                            "if(tab==='remote')startRemotePolling();else stopRemotePolling();"
 #endif
 #if HAS_WEB_FILES
-                            // Only present while the device has the tab on.
-                            "var fp=document.getElementById('tab-files');"
-                            "if(fp){"
-                                "var isFiles=(tab==='files');"
-                                "fp.classList.toggle('active',isFiles);"
-                                "document.getElementById('tab-btn-files').classList.toggle('active',isFiles);"
-                                "if(isFiles)filesOpen();"
-                            "}"
+                            "if(tab==='files')filesOpen();"
 #endif
 #if !defined(DEVICE_CARDPUTER_LORA_HAT)
-                            "var isChat=(tab==='chat');"
-                            "document.getElementById('tab-chat').classList.toggle('active',isChat);"
-                            "document.getElementById('tab-btn-chat').classList.toggle('active',isChat);"
-                            "if(isChat)startChatPolling();else stopChatPolling();"
+                            "if(tab==='chat')startChatPolling();else stopChatPolling();"
 #endif
                             "if(isMap){"
                                 "ensureNodeMap();"
