@@ -5387,7 +5387,7 @@ static void sendConfigPage(const char *msg = "", bool lite = false) {
         // of multi-KB contiguous allocation this mode cannot promise. Outside
         // the form above rather than inside it — a nested form would submit to
         // /save instead.
-        html += "<hr style='margin:1.4em 0;border:0;border-top:1px solid #3a4553'>"
+        html += "<hr style='margin:1.4em 0;border:0;border-top:1px solid var(--line)'>"
                 "<h3 style='margin:.2em 0 .4em'>Restore Config</h3>"
                 "<form method='POST' action='/import' enctype='multipart/form-data'"
                 " onsubmit=\"return confirm('This will replace your settings with "
@@ -5396,7 +5396,7 @@ static void sendConfigPage(const char *msg = "", bool lite = false) {
                 "<input type='file' name='f' accept='.yaml,.yml'></label>"
                 "<button type='submit' style='width:100%;margin-top:.6em'>"
                 "Upload &amp; Apply</button></form>"
-                "<p style='font-size:.82em;color:#888'>Applies the file and reboots. "
+                "<p class='hint'>Applies the file and reboots. "
                 "Files over 8 KB are rejected rather than partly applied. Export is "
                 "available once the device is on your WiFi.</p>";
 #if HAS_WEB_FILES
@@ -5439,26 +5439,26 @@ static void sendConfigPage(const char *msg = "", bool lite = false) {
     section(html, false, "Diagnostics", "u-diag");
     html +=
         "<form method='POST' action='/announce'>"
-        "<button type='submit' style='background:#e07b00'>"
+        "<button type='submit' class='btn'>"
         "&#128225; Send NODEINFO Broadcast</button>"
         "</form>"
-        "<p style='font-size:.82em;color:#888;margin:.3em 0 1em'>"
+        "<p class='hint'>"
         "Forces immediate re-announcement to the mesh (NODEINFO + position).</p>";
 
     html +=
         "<form method='POST' action='/telemetry'>"
-        "<button type='submit' style='background:#0f766e'>"
+        "<button type='submit' class='btn'>"
         "&#128202; Send Telemetry Now</button>"
         "</form>"
-        "<p style='font-size:.82em;color:#888;margin:.3em 0 1em'>"
+        "<p class='hint'>"
         "Forces immediate telemetry TX (device + environment when available).</p>";
 
     html +=
         "<form method='POST' action='/cs-check'>"
-        "<button type='submit' style='background:#6b4fa0'>"
+        "<button type='submit' class='btn'>"
         "&#128260; Check for Messages Now</button>"
         "</form>"
-        "<p style='font-size:.82em;color:#888;margin:.3em 0 1em'>"
+        "<p class='hint'>"
         "Asks the chat server for messages missed on this node's channels, "
         "or searches for one if none has been found yet. "
         "At most once every 5 minutes.";
@@ -5474,10 +5474,10 @@ static void sendConfigPage(const char *msg = "", bool lite = false) {
     // below it does, and only appears once there is something to delete.
     html +=
         "<form method='POST' action='/sd-scan'>"
-        "<button type='submit' style='background:#2563a8'>"
+        "<button type='submit' class='btn'>"
         "&#128269; Scan SD Card for Malware</button>"
         "</form>"
-        "<p style='font-size:.82em;color:#888;margin:.3em 0 1em'>"
+        "<p class='hint'>"
         "Looks through the card for Windows programs, scripts, shortcuts and "
         "autorun files &mdash; including a program wearing a harmless-looking "
         "name, which is caught by its header rather than its extension. None of "
@@ -5497,10 +5497,10 @@ static void sendConfigPage(const char *msg = "", bool lite = false) {
         html +=
             " file(s) the scan matched? Nothing else on the card is touched, and "
             "this cannot be undone.')\">"
-            "<button type='submit' style='background:#b03030'>"
+            "<button type='submit' class='btn-danger'>"
             "&#128465; Delete Matched Files</button>"
             "</form>"
-            "<p style='font-size:.82em;color:#888;margin:.3em 0 1em'>"
+            "<p class='hint'>"
             "Re-walks the card and deletes only what it still recognises &mdash; it "
             "is handed no list, so nothing here can be pointed at map tiles, chat "
             "history or a backup. Reformatting the card is still the only thing "
@@ -5518,15 +5518,15 @@ static void sendConfigPage(const char *msg = "", bool lite = false) {
     // packets across the mesh and the broker.
     section(html, false, "Remote Admin", "u-admin");
     html +=
-        "<p style='font-size:.82em;color:#888;margin:.1em 0 .8em'>"
+        "<p class='hint'>"
         "Administer another Meshtastic node over LoRa or MQTT. The remote must "
         "carry this node's public key in its <code>security.admin_key</code> &mdash; "
         "copy it from the chip at the top of this page. Favourite nodes are "
         "probed once per boot, so anything that accepts us turns up here on its "
         "own; <em>Verify</em> asks again."
-        "<br><span style='color:#8ef2b8;font-weight:700'>(C)</span> confirmed &mdash; "
+        "<br><span style='color:var(--good);font-weight:700'>(C)</span> confirmed &mdash; "
         "the remote answered and accepts us. "
-        "<span style='color:#ffd181;font-weight:700'>(U)</span> unconfirmed &mdash; "
+        "<span style='color:var(--warn);font-weight:700'>(U)</span> unconfirmed &mdash; "
         "listed but not yet proved.</p>";
 
     // Above the table rather than in it. Verify asks one peer that is already
@@ -5535,8 +5535,8 @@ static void sendConfigPage(const char *msg = "", bool lite = false) {
     html +=
         "<p style='margin:.1em 0 .9em'>"
         "<button type='button' onclick='adminRescan(this)'>Scan favourites</button> "
-        "<span id='admin-rescan-msg' style='font-size:.82em;color:#888'></span>"
-        "<br><span style='font-size:.78em;color:#888'>"
+        "<span id='admin-rescan-msg' class='hint'></span>"
+        "<br><span class='hint'>"
         "Asks every favourite node with a public key whether it accepts "
         "administration from this device, one every few seconds. Results appear "
         "in the table as they arrive &mdash; reload to see them. "
@@ -5624,7 +5624,7 @@ static void sendConfigPage(const char *msg = "", bool lite = false) {
         }
 
         if (shown == 0) {
-            html += "<p style='font-size:.82em;color:#888'>"
+            html += "<p class='hint'>"
                     "Nothing to administer yet. Favourite a node that carries this "
                     "device's public key and it will be probed on the next boot.</p>";
         } else {
@@ -5647,55 +5647,55 @@ static void sendConfigPage(const char *msg = "", bool lite = false) {
     if (stateMapStorageReady()) {
         section(html, false, "Maps Download", "u-maps");
         html +=
-            "<p style='font-size:.82em;color:#888;margin:.1em 0 .6em'>"
+            "<p class='hint'>"
             "Downloads offline map tiles centered on every positioned node in the database. "
             "Zoom 13 is always included. Higher detail adds every tile needed for a "
             "node-centered Locate viewport at each zoom through the selected maximum. "
             "Offline gaps between those node areas are expected; Locate "
             "fills and saves missing viewport tiles whenever internet access is available.</p>";
         html +=
-            "<div id='mapdl-status' style='font-size:.82em;color:#888;margin:.2em 0 .6em'>"
+            "<div id='mapdl-status' class='hint'>"
             "Checking maps stored on the device&hellip;</div>";
         html +=
             "<div style='display:flex;align-items:center;gap:.45em;margin:.1em 0 .15em'>"
             "<div id='mapdl-progress-wrap' role='progressbar' aria-label='Map download progress' "
             "aria-valuemin='0' aria-valuemax='100' aria-valuenow='0' "
-            "style='flex:1 1 auto;height:10px;border:1px solid #2a6f97;border-radius:999px;background:#e6eef4;overflow:hidden;margin:0'>"
-            "<div id='mapdl-progress-bar' style='height:100%;width:0%;background:linear-gradient(90deg,#2a6f97,#4ea3d1);transition:width .2s ease'></div>"
+            "style='flex:1 1 auto;height:10px;border:1px solid var(--line);border-radius:999px;background:var(--panel-3);overflow:hidden;margin:0'>"
+            "<div id='mapdl-progress-bar' style='height:100%;width:0%;background:var(--accent);transition:width .2s ease'></div>"
             "</div>"
             "<button type='button' id='mapdl-stop' title='Stop current download' aria-label='Stop current download' disabled "
-            "style='min-width:30px;height:24px;line-height:1;padding:0 .45em;background:#c0392b;color:#fff;border:0;border-radius:4px;font-weight:700;opacity:.6;cursor:default'>X</button>"
+            "class='btn-danger' style='margin:0;min-width:30px;height:24px;padding:0 .5em;opacity:.6;cursor:default'>X</button>"
             "</div>"
-            "<div id='mapdl-progress-text' style='font-size:.78em;color:#68788a;margin:0 0 .5em'>0%</div>";
+            "<div id='mapdl-progress-text' style='font-size:.78em;color:var(--dim);margin:0 0 .5em'>0%</div>";
         html +=
             "<div style='display:flex;flex-direction:column;align-items:flex-start;gap:.45em'>"
-            "<label style='font-size:.82em;color:#888;display:flex;align-items:center;gap:.35em'>"
+            "<label style='font-size:.82em;color:var(--dim);display:flex;align-items:center;gap:.35em'>"
             "Detail"
             "<select id='mapdl-level' style='margin:0'>"
             "<option value='13'>Roads (zoom 13 only)</option>"
             "<option value='16' selected>Streets (zooms 13-16)</option>"
             "<option value='19'>Buildings (zooms 13-19)</option>"
             "</select></label>"
-            "<button type='button' id='mapdl-btn' style='background:#2a6f97' disabled>"
+            "<button type='button' id='mapdl-btn' class='btn' disabled>"
             "&#128506; Download offline tiles for known nodes</button></div>"
-            "<div id='mapdl-warn' style='font-size:.8em;color:#9a4f00;margin:.45em 0 .15em;font-weight:600'>"
+            "<div id='mapdl-warn' style='font-size:.8em;color:var(--warn);margin:.45em 0 .15em;font-weight:600'>"
             "Detailed plans can take a very long time. Buildings may require up to 42 tile "
             "downloads per positioned node before overlap is removed. Keep this page open "
             "and the device connected for the entire run.</div>";
         html +=
             "<details id='mapdl-debug-wrap' style='margin:.55em 0 .8em'>"
-            "<summary style='font-size:.82em;color:#68788a;cursor:pointer'>"
+            "<summary style='font-size:.82em;color:var(--dim);cursor:pointer'>"
             "Map download debug (<span id='mapdl-debug-count'>0</span>)</summary>"
             "<textarea id='mapdl-debug' readonly spellcheck='false' "
             "style='box-sizing:border-box;width:100%;height:170px;margin:.45em 0 .35em;"
             "font:11px/1.35 monospace;white-space:pre;resize:vertical'></textarea>"
             "<div style='display:flex;align-items:center;gap:.4em;flex-wrap:wrap'>"
-            "<button type='button' id='mapdl-debug-copy' style='margin:0;background:#355f9b'>Copy report</button>"
-            "<button type='button' id='mapdl-debug-clear' style='margin:0;background:#68788a'>Clear</button>"
-            "<span id='mapdl-debug-copy-status' style='font-size:.78em;color:#68788a'></span>"
+            "<button type='button' id='mapdl-debug-copy' class='btn-2' style='margin:0'>Copy report</button>"
+            "<button type='button' id='mapdl-debug-clear' class='btn-2' style='margin:0'>Clear</button>"
+            "<span id='mapdl-debug-copy-status' class='hint'></span>"
             "</div></details>";
         html +=
-            "<p style='font-size:.82em;color:#888;margin:.4em 0 1em'>"
+            "<p class='hint'>"
             "Downloading writes to the card over the same SPI bus the radio uses, "
             "so expect the mesh to miss traffic while it runs. Tiles are based on "
             "OpenStreetMap data.</p>";
@@ -5712,16 +5712,16 @@ static void sendConfigPage(const char *msg = "", bool lite = false) {
     if (monitorDebugEnabled()) html += " checked";
     html +=
         "> Enable serial debug output in pio device monitor</label>"
-        "<button type='submit' style='margin-top:.45em;background:#355f9b'>Apply Debug Flag</button>"
+        "<button type='submit' class='btn'>Apply Debug Flag</button>"
         "</form>"
-        "<p style='font-size:.82em;color:#888;margin:.3em 0 1em'>"
+        "<p class='hint'>"
         "When disabled, debug logs are suppressed from serial monitor output.</p>";
     sectionEnd(html, false);
     sendChunk(html);
 
     section(html, false, "Software Update", "u-update");
     html +=
-        "<p style='font-size:.82em;color:#888;margin:.3em 0 1em'>Current firmware: <b>";
+        "<p class='hint'>Current firmware: <b>";
     html += APP_VERSION;
     html +=
         "</b></p>";
@@ -5736,8 +5736,7 @@ static void sendConfigPage(const char *msg = "", bool lite = false) {
     section(html, false, "Backup &amp; Restore", "u-backup");
     html +=
         "<p><a href='/export'"
-        " style='display:inline-block;padding:.4em 1.2em;background:#2a9d8f;"
-        "color:#fff;border-radius:3px;text-decoration:none;font-size:.95em'>"
+        " class='btn'>"
         "&#11015; Export Config</a></p>"
         "<form method='POST' action='/import' enctype='multipart/form-data'"
         " onsubmit=\"return confirm('This will replace your settings with the "
@@ -5755,10 +5754,9 @@ static void sendConfigPage(const char *msg = "", bool lite = false) {
         section(html, false, "Display Capture", "u-capture");
         html +=
             "<p><a href='/screenshot'"
-            " style='display:inline-block;padding:.4em 1.2em;background:#3b82f6;"
-            "color:#fff;border-radius:3px;text-decoration:none;font-size:.95em'>"
+            " class='btn'>"
             "&#128247; Capture &amp; Download PNG</a></p>"
-            "<p style='font-size:.82em;color:#888;margin:.3em 0 1em'>"
+            "<p class='hint'>"
             "Captures the current on-device screen and downloads it as a PNG file.</p>";
         sectionEnd(html, false);
         sendChunk(html);
@@ -5772,7 +5770,7 @@ static void sendConfigPage(const char *msg = "", bool lite = false) {
         "<form method='POST' action='/reset-chat-colors'>"
         "<button type='submit'>&#127912; Reset Chat Colors</button>"
         "</form>"
-        "<p style='font-size:.82em;color:#888;margin:.3em 0 1em'>"
+        "<p class='hint'>"
         "Each node's chat color comes from its node ID, so two nodes can end up "
         "sharing one. This re-rolls every assignment at once &mdash; press again "
         "for another arrangement. Messages are not touched.</p>";
@@ -5784,10 +5782,9 @@ static void sendConfigPage(const char *msg = "", bool lite = false) {
     // someone reading that button is exactly the person who wants this first.
     section(html, false, "Messages", "u-messages");
     html += "<p style='margin:.2em 0 1em'><a href='/messages.csv'"
-            " style='display:inline-block;padding:.4em 1.2em;background:#3b82f6;"
-            "color:#fff;border-radius:3px;text-decoration:none;font-size:.95em'>"
+            " class='btn'>"
             "&#11015; Export Messages (CSV)</a></p>"
-            "<p style='font-size:.82em;color:#888;margin:-.6em 0 1em'>"
+            "<p class='hint'>"
             "Downloads every channel message and direct message the device still "
             "holds, one row each, with the channel or peer, timestamp, sender and "
             "delivery state. Long messages are joined back into one row. The file "
@@ -5802,40 +5799,40 @@ static void sendConfigPage(const char *msg = "", bool lite = false) {
     // other group. Collapsed like the rest, which also puts a deliberate click
     // in front of Factory Reset.
     html +=
-        "<details><summary style='color:#c0392b'>Danger Zone</summary>"
+        "<details><summary class='danger-text'>Danger Zone</summary>"
         "<form method='POST' action='/reboot'"
         " onsubmit=\"return confirm('This will restart the device. Continue?')\">"
-        "<button type='submit' style='background:#c0392b'>"
+        "<button type='submit' class='btn-danger'>"
         "Reboot Device</button>"
         "</form>"
-        "<p style='font-size:.82em;color:#888;margin:.3em 0 .6em'>"
+        "<p class='hint'>"
         "Restarts the firmware. Nothing is erased and no settings change &mdash; "
         "messages, nodes and configuration are all kept. The device is "
         "unreachable for a few seconds while it comes back.</p>"
         "<form method='POST' action='/clear-messages'"
         " onsubmit=\"return confirm('This will clear all stored channel and DM messages. Continue?')\">"
-        "<button type='submit' style='background:#c0392b'>"
+        "<button type='submit' class='btn-danger'>"
         "Clear Messages</button>"
         "</form>"
-        "<p style='font-size:.82em;color:#888;margin:.3em 0 .6em'>"
+        "<p class='hint'>"
         "Clears saved and in-memory chat/DM history without resetting device configuration.</p>"
         "<form method='POST' action='/clear-nodes'"
         " onsubmit=\"return confirm('This will clear all discovered nodes EXCEPT favorites, "
         "then reboot. Continue?')\">"
-        "<button type='submit' style='background:#c0392b'>"
+        "<button type='submit' class='btn-danger'>"
         "Clear Nodes (Keep Favorites)</button>"
         "</form>"
-        "<p style='font-size:.82em;color:#888;margin:.3em 0 .6em'>"
+        "<p class='hint'>"
         "Drops every non-favorited node from the persisted database and reboots. "
         "Favorited nodes are kept, with their names, keys and positions.</p>"
         "<form method='POST' action='/clear-nodes'"
         " onsubmit=\"return confirm('This will clear all discovered nodes INCLUDING favorites, "
         "then reboot. Continue?')\">"
         "<input type='hidden' name='all' value='1'>"
-        "<button type='submit' style='background:#c0392b'>"
+        "<button type='submit' class='btn-danger'>"
         "Clear Nodes (All)</button>"
         "</form>"
-        "<p style='font-size:.82em;color:#888;margin:.3em 0 .6em'>"
+        "<p class='hint'>"
         "Clears the entire persisted node database &mdash; favorites included &mdash; "
         "and reboots.</p>";
 
@@ -5848,10 +5845,10 @@ static void sendConfigPage(const char *msg = "", bool lite = false) {
             "<form method='POST' action='/clear-maps'"
             " onsubmit=\"return confirm('This will delete every offline map tile and any legacy map files. "
             "Maps Download can rebuild node-centered coverage, and Locate will refill online gaps. Continue?')\">"
-            "<button type='submit' style='background:#c0392b'>"
+            "<button type='submit' class='btn-danger'>"
             "Clear Maps</button>"
             "</form>"
-            "<p style='font-size:.82em;color:#888;margin:.3em 0 .6em'>"
+            "<p class='hint'>"
             "Deletes offline slippy tiles plus obsolete state/detail map files. Nothing else on "
             "the card is touched, and no node or message data is affected. Maps Download rebuilds "
             "the selected node-centered coverage; online Locate use fills additional gaps.</p>";
@@ -5861,16 +5858,16 @@ static void sendConfigPage(const char *msg = "", bool lite = false) {
     html +=
         "<form method='POST' action='/factory-reset'"
         " onsubmit=\"return confirm('This will erase ALL settings and reboot the device. Continue?')\">"
-        "<button type='submit' style='background:#c0392b'>"
+        "<button type='submit' class='btn-danger'>"
         "Factory Reset</button>"
         "</form>"
-        "<p style='font-size:.82em;color:#888;margin:.3em 0 1em'>"
+        "<p class='hint'>"
         "Erases all NVS configuration (node identity, channels, keys) and reboots."
         " The device will behave as if freshly flashed.</p>"
         "</details>";
 
     html += "</div></div><div class='tab-panel' id='tab-live'>";
-    html += "<h3 style='margin-top:1.2em'>Live RX/TX</h3>"
+    html += "<h3>Live RX/TX</h3>"
             "<p class='gps-hint'>Streams the Announcements feed from the device, similar to the on-device ANN view.</p>"
             "<div class='live-wrap'>"
             "<div class='live-toolbar'>"
@@ -5879,7 +5876,7 @@ static void sendConfigPage(const char *msg = "", bool lite = false) {
             "</div>"
             "<div id='live-feed' class='live-feed'></div>"
             "</div>"
-            "<h3 style='margin-top:1.2em'>Live Charts</h3>"
+            "<h3>Live Charts</h3>"
             "<p class='gps-hint'>Same data shown on-device under Live &rarr; Tools. Last 60 samples, newest on the right.</p>"
             "<div class='chart-wrap'>"
               "<div class='chart-box'>"
@@ -5907,7 +5904,7 @@ static void sendConfigPage(const char *msg = "", bool lite = false) {
     // nothing, and dropping it trims the page and the polling load.
 #if !defined(DEVICE_CARDPUTER_LORA_HAT)
     html += "</div><div class='tab-panel' id='tab-chat'>";
-    html += "<h3 style='margin-top:1.2em'>Chat</h3>";
+    html += "<h3>Chat</h3>";
     html += "<label style='display:inline-flex;align-items:center;gap:.4em;margin:.2em 0'>"
             "<input type='checkbox' id='chat-live' checked onchange='chatLiveToggle()' style='width:auto'>"
             " Live updates</label>";
@@ -5931,7 +5928,7 @@ static void sendConfigPage(const char *msg = "", bool lite = false) {
     html += "</div>";  // #chat-body
 #endif
     html += "</div><div class='tab-panel' id='tab-map'>";
-    html += "<h3 style='margin-top:1.2em'>Node Heatmap</h3>";
+    html += "<h3>Node Heatmap</h3>";
     html += "<p class='gps-hint'>Positioned nodes: ";
     snprintf(tmp, sizeof(tmp), "%d", mapPointCount);
     html += tmp;
@@ -5950,7 +5947,7 @@ static void sendConfigPage(const char *msg = "", bool lite = false) {
             "<div id='node-heatmap' class='map-canvas'></div>"
             "<div class='map-legend'><span>Drag to pan, scroll/pinch to zoom</span><span id='map-status'></span></div>"
             "</div>";
-    html += "<h3 style='margin-top:1em'>Nodes Seen</h3>";
+    html += "<h3>Nodes Seen</h3>";
     if (totalNodes > 0) {
         html += "<p class='gps-hint'>Select a node to see its details and location.</p>";
         html += "<select id='node-select' onchange='selectNode()'>";
@@ -6612,7 +6609,7 @@ static void sendConfigPage(const char *msg = "", bool lite = false) {
 #if HAS_VNC_HOST
         const String vncIp = WiFi.localIP().toString();
         html += "<div class='tab-panel' id='tab-remote'><div class='tab-pane-center'>"
-            "<h3 style='margin-top:1.2em'>Remote</h3>"
+            "<h3>Remote</h3>"
             "<label class='remote-toggle'><input type='checkbox' id='remote-enabled' onchange='remoteToggle()'";
         if (vncHostEnabled()) html += " checked";
         html += "><span>Enable VNC host</span></label>"
