@@ -1,0 +1,61 @@
+<!DOCTYPE html>
+<!-- Behaviour checks for the web config shell script, run against a preview
+     page in an iframe. Usage: serve .superpowers/preview, copy this file next
+     to the previews, open checks.html?t=camD; results land in #out. -->
+<meta charset="utf-8"><pre id="out">running</pre>
+<iframe id="f" style="width:1280px;height:900px"></iframe>
+<script>
+var k=0,out=[],fails=0,f=document.getElementById('f'),W,D;
+function ok(c,msg){out.push((c?'ok   ':'FAIL ')+msg);if(!c)fails++;}
+function fire(el,t){el.dispatchEvent(new Event(t,{bubbles:true}));}
+function wait(ms){return new Promise(function(r){setTimeout(r,ms);});}
+function load(hash,store){return new Promise(function(r){
+  f.onload=function(){W=f.contentWindow;D=f.contentDocument;setTimeout(r,150);};
+  var t=new URLSearchParams(location.search).get('t')||'camD';
+  if(store!==undefined){try{sessionStorage.setItem('wcLoc',store);}catch(e){}}
+  f.src=t+'.html?n='+(++k)+(hash||'');});}
+function cnt(){return D.getElementById('savebar').classList.contains('show')?D.getElementById('save-count').textContent:'hidden';}
+(async function(){
+  await load('');
+  ok(D.body.getAttribute('data-tab')==='config','loads on config');
+  ok(D.querySelectorAll('#rail-secs .sec-link').length===5,'rail lists the 5 sample sections');
+  ok(D.querySelectorAll('#sheet-secs .sec-link').length===5,'section sheet lists them too');
+  ok(cnt()==='hidden','save bar hidden on load (script-set region not counted)');
+  var br=D.getElementById('briIn'),bl=br.closest('label').getBoundingClientRect(),bb=br.getBoundingClientRect();
+  ok(bb.left>bl.left+bl.width*0.3&&bb.top<bl.top+bl.height/2+12,'slider sits in the control column, beside its label');
+  var r=D.getElementById('sel-rgn');r.value='EU_868';fire(r,'change');
+  ok(cnt()==='1 unsaved change','region change counts 1');
+  ok(D.querySelector('.sec-link[data-sec=lora]').classList.contains('dirty'),'LoRa link marked');
+  ok(r.classList.contains('changed'),'region outlined');
+  r.value='US';fire(r,'change');
+  ok(cnt()==='hidden','changing back clears it');
+  D.getElementById('add-ch').click();await wait(20);
+  ok(cnt()==='hidden','added channel row not counted');
+  var n=D.querySelector("input[name=ch1_name]");n.value='Hiking';fire(n,'input');
+  ok(cnt()==='1 unsaved change','typing in added row counts');
+  D.getElementById('pick-theme').click();await wait(20);
+  ok(cnt()==='2 unsaved changes','picker writing a hidden input counts');
+  D.getElementById('tb-light').click();await wait(20);
+  ok(cnt()==='2 unsaved changes','theme builder radio ignored');
+  var t=D.querySelector('input[name=tx_enabled]');t.click();
+  ok(cnt()==='3 unsaved changes','toggle counts');
+  D.getElementById('save-discard').click();await wait(20);
+  ok(cnt()==='hidden','discard clears everything');
+  ok(D.getElementById('sel-rgn').value==='US','discard keeps script-set region');
+  ok(t.checked===true,'discard restores toggle');
+  D.querySelector('#rail-secs .sec-link[data-sec=lora]').click();await wait(50);
+  ok(W.location.hash==='#config/lora','section link sets hash');
+  D.querySelector('.app-rail a[data-tab=utils]').click();await wait(20);
+  ok(D.getElementById('tab-utils').classList.contains('active')&&W.location.hash==='#utils','rail tab switches pane and hash');
+  ok(D.querySelector('.app-rail a[data-tab=utils]').getAttribute('aria-current')==='page','aria-current on active tab');
+  ok(!!D.querySelector('#sheet-more [data-copykey]'),'More sheet offers the public key');
+  await load('#live');
+  ok(D.getElementById('tab-live').classList.contains('active'),'hash #live restores Live');
+  await load('','#utils');
+  ok(D.getElementById('tab-utils').classList.contains('active'),'stored location after save restores Utilities');
+  await load('#config/lora');
+  ok(D.querySelector('.sec-link.here')&&D.querySelector('.sec-link.here').getAttribute('data-sec')==='lora','hash #config/lora marks LoRa');
+  out.push(fails?fails+' FAILED':'ALL OK');
+  document.getElementById('out').textContent=out.join('\n');
+})().catch(function(e){document.getElementById('out').textContent='ERROR '+e+'\n'+out.join('\n');});
+</script>

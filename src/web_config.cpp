@@ -11,6 +11,7 @@
 #include "admin_peers.h"
 #include "admin_client.h"   // the help text, which is the firmware's, not the page's
 #include "web_icon.h"
+#include "web_app_assets.h"   // kAppCss, kAppJs, kAppFontsLink
 #include "node_db.h"
 #include "wardrive_log.h"
 #include "channel_mgr.h"
@@ -84,10 +85,10 @@ static uint32_t       gIdleTimeoutMs   = 0;     // 0 = never expire
 // fall back to the SoftAP; see fallBackToAp in webCfgBegin().
 static bool           gStartDeferred   = false;
 static bool           gIdleExpired     = false;
-// True while the server is serving the SoftAP variant ("web config lite"): the
-// Config tab only, no Utilities/Live/Chat/Nodes. AP mode has far less internal
-// heap to work with than STA, and the heavy tabs are what tip it over. This is
-// the page weight follows the radio mode.
+// True while the server is hosting its own SoftAP. On boards without PSRAM that
+// means web config lite (Config tab only): AP mode leaves them far less
+// internal heap than STA, and the heavy tabs are what tip it over. Boards with
+// PSRAM serve the full page here too; see apHasRoomForFullPage().
 static bool           gApMode          = false;
 // Set from the on-device WiFi picker's "AP" entry: start the SoftAP even when
 // credentials are saved, instead of joining the network.
@@ -114,7 +115,21 @@ static const bool     kLiteOnlyBoard   = false;
 #endif
 
 // True when the current response should be the lite page.
-static inline bool webCfgUseLite() { return gApMode || kLiteOnlyBoard; }
+// Whether AP mode can carry the full page. Measured on the T-Deck Plus with
+// every tab open: internal heap never fell below 65 KB free, largest block
+// 65.5 KB, where lite was sized for ~20 KB free and a 13 KB block. Boards
+// without PSRAM keep their chat buffers in that same internal heap (they free
+// them to start Wi-Fi at all), so they stay on lite.
+static bool apHasRoomForFullPage() {
+#if defined(BOARD_HAS_PSRAM)
+    return ESP.getPsramSize() > 0;
+#else
+    return false;
+#endif
+}
+static inline bool webCfgUseLite() {
+    return kLiteOnlyBoard || (gApMode && !apHasRoomForFullPage());
+}
 static char           ipBuf[16]        = "";
 static char           sessionToken[17] = "";   // hex token; empty = no session
 static RhinoConfig   *gCfg             = nullptr;
@@ -644,181 +659,22 @@ static bool fetchLatestReleaseInfo(String &tagOut, String &urlOut, String &errOu
 // second HTML page on a second server and cannot reach this one's route.
 static const char kFavicon[] = CAMELLIA_FAVICON_SVG;
 
-static const char kHead[] =
+// The full page's head, in two halves around the device's theme colours:
+// sendFullHead() links the cached /app.css (web_app_assets.h) and writes the
+// theme's :root block between them.
+static const char kHeadOpen[] =
     "<!DOCTYPE html><html><head>"
     "<meta charset='utf-8'>"
-    "<meta name='viewport' content='width=device-width,initial-scale=1'>"
+    "<meta name='viewport' content='width=device-width,initial-scale=1,viewport-fit=cover'>"
     "<title>Camillia for Meshtastic</title>"
     "<link rel='icon' type='image/svg+xml' href='/favicon.ico'>"
-    "<link rel='stylesheet' href='https://unpkg.com/leaflet@1.9.4/dist/leaflet.css'>"
-    "<style>"
-        ":root{color-scheme:dark;--bg:#10141d;--panel:#1a2230;--panel-2:#232d3e;--line:#4a5b73;"
-        "--text:#f4f6fb;--text-dim:#b0b8c8;--accent:#d7869d;--accent-ink:#ffffff}"
-        "body{font-family:system-ui,-apple-system,Segoe UI,Roboto,sans-serif;max-width:620px;"
-        "margin:1.5em auto;padding:0 1em 2em;background:linear-gradient(180deg,var(--bg),var(--panel));"
-        "color:var(--text)}"
-        "h2{color:var(--accent);margin-bottom:.2em}"
-        "h3{color:var(--text-dim);margin:1.2em 0 .4em;border-bottom:1px solid var(--line);padding-bottom:.2em}"
-        "label{display:block;margin:.6em 0 .1em;font-size:.9em;color:var(--text)}"
-    "input[type=text],input[type=number],input[type=password],select"
-            "{width:100%;padding:.45em;box-sizing:border-box;border:1px solid var(--line);border-radius:5px;"
-            "background:var(--panel-2);color:var(--text)}"
-        "option{background:var(--panel-2);color:var(--text)}"
-        "input[readonly]{background:var(--panel);color:var(--text-dim)}"
-        "button{margin-top:1.2em;padding:.55em 1.8em;background:var(--accent);color:var(--accent-ink);"
-                     "border:none;border-radius:5px;cursor:pointer;font-size:1em;font-weight:600}"
-        ".msg{color:var(--accent);margin:.5em 0}"
-        ".err{color:#ff8d8d;margin:.5em 0}"
-        // Chooser modal (font size). Reused via the .chooser-* classes.
-        ".chooser-btn{width:100%;margin-top:.1em;padding:.45em;text-align:left;background:var(--panel-2);"
-             "color:var(--text);border:1px solid var(--line);border-radius:5px;cursor:pointer;font-size:.95em;"
-             "font-weight:600}"
-        ".modal-back{display:none;position:fixed;inset:0;background:rgba(0,0,0,.55);z-index:50;"
-             "align-items:center;justify-content:center}"
-        ".modal-back.open{display:flex}"
-        ".modal-card{background:var(--panel);border:1px solid var(--line);border-radius:10px;padding:1em;"
-             "width:min(90vw,320px);box-shadow:0 10px 30px rgba(0,0,0,.5)}"
-        ".modal-card h3{margin:.1em 0 .6em;border:none;color:var(--accent)}"
-        ".modal-opt{width:100%;margin:.35em 0;padding:.6em;background:var(--panel-2);color:var(--text);"
-             "border:1px solid var(--line);border-radius:6px;cursor:pointer;font-size:.95em;text-align:left}"
-        ".modal-opt.sel{border-color:var(--accent);background:var(--panel-2)}"
-        ".modal-opt b{display:block;font-weight:700}"
-        ".modal-opt span{display:block;font-size:.8em;color:var(--text-dim)}"
-        ".logout{float:right;font-size:.9em;color:var(--accent);text-decoration:none}"
-           ".tab-row{display:flex;align-items:center;gap:.6em;margin:1em 0 .4em;flex-wrap:wrap}"
-           ".tab-btns{display:flex;gap:.5em;flex-wrap:wrap}"
-           ".tab-metrics{margin-left:auto;display:flex;gap:.4em;align-items:center;flex-wrap:wrap}"
-           ".metric-chip{padding:.28em .62em;border-radius:999px;border:1px solid var(--line);"
-               "background:var(--panel-2);font-size:.78em;font-weight:700;line-height:1.2;white-space:nowrap}"
-           ".metric-good{color:#8ef2b8;border-color:#3e8f66}"
-           ".metric-warn{color:#ffd181;border-color:#a57a2d}"
-           ".metric-bad{color:#ff9f9f;border-color:#a75454}"
-           ".key-chip{cursor:pointer;font-family:ui-monospace,SFMono-Regular,Menlo,monospace;"
-               "color:var(--muted)}"
-           ".key-chip:hover{color:var(--text);border-color:var(--accent)}"
-           ".key-chip.copied{color:#8ef2b8;border-color:#3e8f66}"
-        ".tab-btn{margin:0;padding:.45em 1em;background:var(--panel-2);color:var(--text);"
-             "border:1px solid var(--line);border-radius:999px;cursor:pointer;font-size:.9em;font-weight:600}"
-        ".tab-btn.active{background:var(--accent);color:var(--accent-ink);border-color:var(--accent)}"
-        ".tab-panel{display:none}"
-        ".tab-panel.active{display:block}"
-        ".tab-pane-center{max-width:760px;margin:0 auto}"
-        "#tab-config form{max-width:760px;margin:0 auto}"
-        // Same 760px column and same left alignment as the config tab, so the
-        // section boxes and their contents line up when switching tabs. The
-        // per-element centering this replaced (auto margins on h3/p/form plus
-        // text-align:center on the pane) is all dropped rather than overridden —
-        // left is the default, so the overrides that fought it are dead weight.
-        "#tab-utils .tab-pane-center{max-width:760px}"
-        "#tab-utils form{max-width:520px;margin:.5em 0}"
-                ".remote-toggle{display:flex;align-items:center;gap:.55em;margin:.7em 0;color:var(--text)}"
-                ".remote-toggle input{width:auto;margin:0}"
-                ".remote-status{font-size:.82em;color:var(--text-dim);margin:.35em 0 .6em}"
-                ".remote-frame{display:block;width:100%;height:min(72vh,520px);border:1px solid var(--line);"
-                         "border-radius:6px;background:#000}"
-                ".remote-lock{display:flex;flex-wrap:wrap;align-items:center;gap:.5em;margin:.4em 0}"
-                ".remote-lock input{width:7.5em;font-size:1.2em;letter-spacing:.2em;text-align:center}"
-        ".map-wrap{margin-top:.6em;border:1px solid var(--line);border-radius:8px;background:var(--panel);padding:.5em}"
-        ".map-canvas{display:block;width:100%;height:320px;border-radius:6px;overflow:hidden;background:#08141f}"
-        ".map-controls{display:flex;gap:.45em;flex-wrap:wrap;margin:.15em 0 .45em}"
-        ".map-mini-btn{margin:0;padding:.35em .75em;background:var(--panel-2);color:var(--text);"
-             "border:1px solid var(--line);border-radius:999px;cursor:pointer;font-size:.82em;font-weight:600}"
-           ".map-mini-right{margin-left:auto}"
-        ".map-mini-btn.active{background:var(--accent);color:var(--accent-ink);border-color:var(--accent)}"
-        ".map-mini-btn:disabled{opacity:.6;cursor:default}"
-        ".map-legend{display:flex;justify-content:space-between;font-size:.8em;color:var(--text-dim);margin-top:.35em;gap:.5em}"
-        ".node-list{margin-top:.8em;display:grid;grid-template-columns:1fr;gap:.5em}"
-        ".node-card{border:1px solid var(--line);border-radius:8px;background:var(--panel);padding:.55em .7em}"
-        ".chat-feed{margin-top:.6em;height:360px;overflow:auto;border:1px solid var(--line);border-radius:8px;background:var(--bg);padding:.5em;display:flex;flex-direction:column;gap:.4em}"
-        ".chat-msg{border:1px solid var(--line);border-radius:8px;background:var(--panel);padding:.4em .55em;max-width:88%}"
-        ".chat-msg.mine{align-self:flex-end;background:var(--panel-2);border-color:var(--accent)}"
-        ".chat-body{font-size:.9em;white-space:pre-wrap;word-break:break-word}"
-        ".chat-actions{margin-top:.3em;display:flex;flex-wrap:wrap;gap:.25em;align-items:center}"
-        ".chat-tap{margin:0;padding:.1em .4em;font-size:.95em;line-height:1.2;background:var(--panel-2);color:var(--text);border:1px solid var(--line);border-radius:999px;cursor:pointer}"
-        ".chat-mini{margin:0;padding:.1em .5em;font-size:.8em;background:var(--panel-2);color:var(--text);border:1px solid var(--line);border-radius:6px;cursor:pointer}"
-        ".chat-reply{margin-top:.5em;display:flex;align-items:center;gap:.5em;font-size:.82em;color:var(--text-dim);border-left:3px solid var(--accent);padding:.2em .5em;background:var(--panel)}"
-        ".chat-reply span{flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}"
-        ".chat-compose{margin-top:.5em;display:flex;flex-direction:column;gap:.45em}"
-        ".chat-compose textarea{width:100%;min-height:4.8em;resize:vertical;font:inherit;line-height:1.35}"
-        ".chat-compose-foot{display:flex;align-items:center;gap:.5em}"
-        ".chat-char-count{font-size:.78em;color:var(--text-dim);margin-right:auto}"
-        ".chat-compose button{margin:0}"
-        ".node-head{display:flex;align-items:flex-start;justify-content:space-between;gap:.6em}"
-        ".node-title{font-weight:700;color:var(--accent);margin-bottom:.2em}"
-        ".fav-tag{margin-left:.4em;font-weight:600;font-size:.78em;color:var(--text-dim)}"
-        ".fav-btn{flex:0 0 auto;white-space:nowrap}"
-        ".fav-btn[data-fav='1']{border-color:var(--accent);color:var(--accent)}"
-        ".fav-btn:disabled{opacity:.6;cursor:default}"
-        ".node-meta{font-size:.82em;color:var(--text-dim);margin:.15em 0;word-break:break-word}"
-        ".node-meta b{color:var(--text)}"
-        ".live-wrap{margin-top:.6em;border:1px solid var(--line);border-radius:8px;background:var(--panel);padding:.5em}"
-        ".live-toolbar{display:flex;justify-content:space-between;align-items:center;gap:.5em;margin-bottom:.45em}"
-        ".live-toolbar span{font-size:.68em;color:var(--text-dim)}"
-        ".live-feed{height:380px;overflow:auto;border:1px solid var(--line);border-radius:6px;background:var(--bg)}"
-        ".chart-wrap{margin-top:.6em;display:grid;grid-template-columns:1fr;gap:.7em}"
-        ".chart-box{border:1px solid var(--line);border-radius:8px;background:var(--panel);padding:.55em .7em}"
-        ".chart-head{display:flex;justify-content:space-between;align-items:baseline;gap:.5em;margin-bottom:.35em;font-size:.85em}"
-        ".chart-stats{font-size:.72em;color:var(--text-dim);font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace}"
-        ".chart-canvas{width:100%;height:180px;display:block;background:var(--bg);border:1px solid var(--line);border-radius:6px}"
-        ".chart-legend{margin-top:.3em;font-size:.72em;color:var(--text-dim)}"
-        ".chart-legend .swatch{display:inline-block;width:.8em;height:.8em;margin-right:.25em;vertical-align:middle;border-radius:2px}"
-        ".sw-chutil{background:#67d8ff}.sw-airutil{background:#ffd56b}"
-        ".sw-snr{background:#9ceadf}.sw-rssi{background:#f7b46d}"
-        ".live-line{padding:.13em .38em;border-bottom:1px solid rgba(255,255,255,.08);"
-            "font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;font-size:.7em;line-height:1.2;"
-            "color:#dfe7ef;background:#10254a}"
-        ".live-line:nth-child(odd){filter:brightness(1.03)}"
-        ".live-line.live-default{background:#10254a;color:#dfe7ef}"
-        ".live-line.live-err{background:#4a1d1d;color:#ff8f8f;font-weight:700}"
-        ".live-line.live-tx-ack{background:#1e3e27;color:#89e7a5}"
-        ".live-line.live-rx-ack{background:#1b3e34;color:#7de8d2}"
-        ".live-line.live-tx-text{background:#4a4318;color:#ffd56b}"
-        ".live-line.live-tx-node{background:#4a2d1f;color:#f7b46d}"
-        ".live-line.live-tx-pos{background:#4a3418;color:#ffc875}"
-        ".live-line.live-tx-tlm{background:#1a3b40;color:#84efff}"
-        ".live-line.live-tx-dm{background:#33224a;color:#f2a4ff}"
-        ".live-line.live-rx-text{background:#12345d;color:#67d8ff}"
-        ".live-line.live-rx-node{background:#1d2e58;color:#9ec3ff}"
-        ".live-line.live-rx-pos{background:#1a3754;color:#b6e5ff}"
-        ".live-line.live-rx-tlm{background:#1a3a3e;color:#9ceadf}"
-        ".live-line.live-rx-enc{background:#4a3618;color:#ffbe73}"
-        ".live-line.live-rx-other{background:#102d52;color:#8fbfff}"
-        ".live-line.live-tx-other{background:#3e3619;color:#e7c96f}"
-        ".leaflet-container{font:12px/1.2 system-ui,-apple-system,Segoe UI,Roboto,sans-serif}"
-        ".leaflet-control-attribution{font-size:.65em}"
-    ".row2{display:grid;grid-template-columns:1fr 1fr;gap:.5em}"
-    ".gps-note{margin:.4em 0;font-size:.9em}"
-    ".gps-note button{padding:.2em .8em;font-size:.9em;margin-left:.4em}"
-        ".gps-hint{font-size:.8em;color:var(--text-dim);margin:.2em 0 .6em}"
-        "details{border:1px solid var(--line);border-radius:6px;margin:.8em 0;padding:0 .8em;background:var(--panel)}"
-    "details[open]{padding-bottom:.8em}"
-        "summary{font-size:1em;font-weight:600;color:var(--accent);cursor:pointer;"
-             "padding:.5em 0;list-style:none}"
-    "summary::-webkit-details-marker{display:none}"
-    "summary::before{content:'\\25B6\\00A0';font-size:.8em}"
-    "details[open] summary::before{content:'\\25BC\\00A0';font-size:.8em}"
-    // One card per channel. The old four-column grid predated the uplink,
-    // downlink and location toggles: with seven children in four tracks the
-    // fields wrapped into implicit rows that lined up with nothing.
-    ".ch-row{border:1px solid var(--line);border-radius:6px;background:var(--bg);"
-         "padding:.45em .6em;margin:.5em 0}"
-    ".ch-row label{margin:0;font-size:.85em}"
-    ".ch-hd{display:flex;align-items:center;gap:.35em;margin-bottom:.4em}"
-    ".ch-no{font-weight:600;font-size:.85em;color:var(--accent);margin-right:auto}"
-    ".ch-fields{display:grid;grid-template-columns:1fr 2fr 1fr;gap:.4em;align-items:end}"
-    ".ch-tog{display:flex;flex-wrap:wrap;gap:.15em .9em;margin-top:.45em}"
-    ".ch-tog label{display:flex;align-items:center;gap:.3em}"
-    ".ch-btn{margin:0;padding:.3em .6em;font-size:.8em;line-height:1.15;cursor:pointer;"
-         "background:var(--panel-2);color:var(--text);border:1px solid var(--line);border-radius:6px}"
-    ".ch-btn[disabled]{opacity:.35;cursor:default}"
-    ".ch-clear{margin:0;padding:.3em .6em;font-size:.8em;line-height:1.15;background:#c0392b;color:#fff}"
-        "@media (max-width:560px){.row2,.ch-fields{grid-template-columns:1fr}}"
-    "</style></head><body>";
+    "<link rel='stylesheet' href='https://unpkg.com/leaflet@1.9.4/dist/leaflet.css'>";
+static const char kHeadClose[] = "</head><body>";
 
 // Head for the AP-mode pages (web config lite and its /setup form). AP mode
 // leaves ~20 KB of internal heap with a largest block near 13 KB, so this is
-// deliberately a fraction of kHead's ~4 KB of CSS: no custom properties, no
-// theme table, no layout grid. Everything here streams from flash, so nothing
+// deliberately a fraction of the full page's stylesheet (kAppCss, ~16 KB): no
+// custom properties, no theme table, no layout grid. Everything here streams from flash, so nothing
 // on the lite path ever needs a large contiguous allocation.
 static const char kLiteHead[] =
         "<!DOCTYPE html><html><head>"
@@ -1576,6 +1432,11 @@ static const char kThemePicker[] =
           "r.setProperty('--bg',p.bg);r.setProperty('--panel',p.panel);r.setProperty('--panel-2',p.panel2);"
           "r.setProperty('--line',p.line);r.setProperty('--text',p.text);r.setProperty('--text-dim',p.dim);"
           "r.setProperty('--accent',p.accent);r.setProperty('--accent-ink',p.ink);"
+          // The names /app.css reads (web_app_assets.h). A preview has no
+          // derived input or line colours, so it borrows the nearest it has.
+          "r.setProperty('--dim',p.dim);r.setProperty('--on-accent',p.ink);"
+          "r.setProperty('--input',p.panel2);r.setProperty('--panel-3',p.panel2);"
+          "r.setProperty('--line-hi',p.accent);"
           "r.colorScheme=isLightKey(k)?'light':'dark';"
         "}"
         "function select(k){input.value=k;"
@@ -1966,6 +1827,38 @@ static void sendFlash(const char *progmem) {
     // and written straight through — no _P copy step, and the same framed
     // writer as everything else.
     sendSliced(progmem, strlen(progmem), "flash chunk");
+}
+
+// Boards without the LVGL palette (none today) link this instead of the one in
+// main_lvgl.cpp, and the page keeps /app.css's Camillia Dark defaults.
+__attribute__((weak)) bool webCfgThemeColors(WebThemeColors *out) {
+    (void)out;
+    return false;
+}
+
+// The full page's <head>: kHeadOpen, the fonts, the device theme's :root block,
+// kHeadClose. The theme block is a few hundred bytes from the stack, so this
+// costs no more heap than the old inline stylesheet did.
+static void sendFullHead() {
+    sendFlash(kHeadOpen);
+    sendFlash(kAppFontsLink);
+    // /app.css is cached for a year, so its URL carries a hash of its bytes:
+    // any change to the stylesheet, even in a flash that keeps the version, is
+    // a URL the browser has never cached.
+    static uint32_t cssHash = 0;
+    if (!cssHash) cssHash = webAssetHash(kAppCss);
+    char link[64];
+    snprintf(link, sizeof(link), "<link rel='stylesheet' href='/app.css?v=%08lx'>",
+             (unsigned long)cssHash);
+    server.sendContent(link);
+    WebThemeColors tc;
+    char vars[600];
+    if (webCfgThemeColors(&tc) && webThemeCssVars(tc, vars, sizeof(vars))) {
+        server.sendContent("<style>");
+        server.sendContent(vars);
+        server.sendContent("</style>");
+    }
+    sendFlash(kHeadClose);
 }
 
 // Flush only once the buffer is worth a TCP segment. Chunk size is a balance
@@ -3313,10 +3206,12 @@ static void appendCommunityPresetPicker(String &html) {
             "</script>";
 }
 
-// Config-pane section wrappers. The full page folds each section into a
-// <details> accordion; web config lite renders a plain heading with everything
-// expanded — no folding, no styling, so nothing depends on CSS being there.
-static void section(String &html, bool lite, const char *title, bool open) {
+// Config- and Utilities-pane section wrappers. The full page gives each one a
+// panel with an id (sec-<slug>) that the rail, the phone's section sheet and
+// the URL (#config/<slug>) all point at; web config lite renders a plain
+// heading — no styling, so nothing depends on CSS being there.
+static void section(String &html, bool lite, const char *title, const char *slug,
+                    const char *desc = nullptr) {
     const char *safeTitle = title ? title : "?";
     if (lite) {
         // Progress marker: if a render stalls, the last line names the section.
@@ -3331,13 +3226,20 @@ static void section(String &html, bool lite, const char *title, bool open) {
         html += "</h3>";
         return;
     }
-    html += open ? "<details open><summary>" : "<details><summary>";
+    html += "<section class='cfg-sec' id='sec-";
+    html += slug;
+    html += "'><h2>";
     html += safeTitle;
-    html += "</summary>";
+    html += "</h2>";
+    if (desc) {
+        html += "<p class='sec-desc'>";
+        html += desc;
+        html += "</p>";
+    }
 }
 
 static void sectionEnd(String &html, bool lite) {
-    if (!lite) html += "</details>";
+    if (!lite) html += "</section>";
 }
 
 // ── Login page ────────────────────────────────────────────────
@@ -3350,11 +3252,11 @@ static void sendLoginPage(const char *err = "") {
     // contiguous DRAM block a fragmented heap often can't provide (the "broken
     // login" symptom). Always stream it via chunked transfer so no large
     // contiguous allocation is needed; only the small form body is built in
-    // RAM. AP mode gets the lite head — kHead's ~4 KB of CSS is more than the
-    // heap left after SoftAP comes up.
+    // RAM. AP mode gets the lite head — the full page's stylesheet is more than
+    // the heap left after SoftAP comes up.
     server.setContentLength(CONTENT_LENGTH_UNKNOWN);
     server.send(200, "text/html", "");
-    sendFlash(webCfgUseLite() ? kLiteHead : kHead);
+    if (webCfgUseLite()) sendFlash(kLiteHead); else sendFullHead();
     String html;
     html +=
         "<h2>Camillia MT</h2>"
@@ -3495,9 +3397,9 @@ static void sendConfigPage(const char *msg = "", bool lite = false) {
 
     char tmp[96];
     // Stream the head straight from flash rather than seeding the String with
-    // it: kHead is ~4 KB and even kLiteHead is ~1 KB, and a contiguous
+    // it: even kLiteHead is ~1 KB, and a contiguous
     // allocation that size is exactly what a fragmented heap can't provide.
-    sendFlash(lite ? kLiteHead : kHead);
+    if (lite) sendFlash(kLiteHead); else sendFullHead();
     if (gSendAborted) {
         server.client().stop();
         logWifiHeapDiag(lite ? "lite page abandoned" : "config page abandoned");
@@ -3842,71 +3744,98 @@ static void sendConfigPage(const char *msg = "", bool lite = false) {
     // and here, it is that build, not the socket.
     if (!lite) logWifiHeapDiag("node list built");
 
-    html += lite ? "<h2>Camillia &mdash; Web Config Lite"
-                 : "<h2>Camillia for Meshtastic";
-    if (gCfg && gCfg->webCfgAuthEnabled)
-        html += " <a class='logout' href='/logout'>Logout</a>";
-    html += "</h2>";
-
-    if (msg[0]) { html += "<p class='msg'>"; appendAttr(html, msg); html += "</p>"; }
-
     // This board freed its chat buffers so Wi-Fi could start, so the device is
     // dropping messages for as long as this page is being served. Say so
     // prominently — it is not recoverable by anything on this page.
-    if (gWebBuffersReclaimed) {
-        html += "<p style='color:#d81f2a;font-weight:700;border:1px solid #d81f2a;"
-                "border-radius:4px;padding:.5em;margin:.5em 0'>"
-                "Chat is paused. This device needed its message memory to run "
-                "Wi-Fi, so messages sent to it are not being received or stored "
-                "while web config is on. Turn web config off on the device to "
-                "resume messaging.</p>";
-    }
+    static const char kChatPaused[] =
+        "Chat is paused. This device needed its message memory to run "
+        "Wi-Fi, so messages sent to it are not being received or stored "
+        "while web config is on. Turn web config off on the device to "
+        "resume messaging.";
 
     if (lite) {
+        html += "<h2>Camillia &mdash; Web Config Lite";
+        if (gCfg && gCfg->webCfgAuthEnabled)
+            html += " <a class='logout' href='/logout'>Logout</a>";
+        html += "</h2>";
+        if (msg[0]) { html += "<p class='msg'>"; appendAttr(html, msg); html += "</p>"; }
+        if (gWebBuffersReclaimed) {
+            html += "<p style='color:#d81f2a;font-weight:700;border:1px solid #d81f2a;"
+                    "border-radius:4px;padding:.5em;margin:.5em 0'>";
+            html += kChatPaused;
+            html += "</p>";
+        }
         html += "<p>Access-point mode. All settings are here; the live feed, "
                 "chat and node map need the device on your WiFi network. "
                 "<a href='/setup'>Quick WiFi setup</a></p>";
     } else {
-        html += "<div class='tab-row'><div class='tab-btns'>"
-            "<button type='button' class='tab-btn active' id='tab-btn-config' onclick=\"switchTab('config')\">Config</button>"
-            "<button type='button' class='tab-btn' id='tab-btn-utils' onclick=\"switchTab('utils')\">Utilities</button>"
-            "<button type='button' class='tab-btn' id='tab-btn-live' onclick=\"switchTab('live')\">Live</button>"
-#if !defined(DEVICE_CARDPUTER_LORA_HAT)
-            "<button type='button' class='tab-btn' id='tab-btn-chat' onclick=\"switchTab('chat')\">Chat</button>"
-#endif
-            "<button type='button' class='tab-btn' id='tab-btn-map' onclick=\"switchTab('map')\">Nodes</button>";
-#if HAS_VNC_HOST
-    html += "<button type='button' class='tab-btn' id='tab-btn-remote' onclick=\"switchTab('remote')\">Remote</button>";
-#endif
-#if HAS_WEB_FILES
-    if (gCfg && cfgWebFilesEnabled(*gCfg)) {
-        html += "<button type='button' class='tab-btn' id='tab-btn-files' onclick=\"switchTab('files')\">Files</button>";
-    }
-#endif
-        html += "</div>";
+        // Header: who this is and how it is doing. The node's short name in the
+        // brand face, its long name, then battery / GPS / key chips.
+        html += "<header class='app-hd'><span class='nm'>";
+        appendAttr(html, gCfg ? gCfg->nodeShort : "");
+        html += "</span><span class='ln'>";
+        appendAttr(html, gCfg ? gCfg->nodeLong : "");
+        html += "</span><span class='chips'>";
         if (havePubKey) {
-            // Left of the row: .tab-metrics carries margin-left:auto, so
-            // anything emitted before it stays packed against the tabs rather
-            // than drifting right with the battery and GPS chips.
-            html += "<button type='button' class='metric-chip key-chip' id='pubkey-chip'"
+            html += "<button type='button' class='chip key-chip' id='pubkey-chip'"
                     " data-key='";
             html += pubKeyB64;
             html += "' onclick='copyPubKey(this)' title='Copy the public key of this node'>"
                     "KEY ";
-            // Enough of it to recognise, not so much that it crowds the tabs.
+            // Enough of it to recognise, not so much that it crowds the header.
             // The whole key travels in data-key; this is only the label.
             html += String(pubKeyB64).substring(0, 10);
             html += "&hellip;</button>";
         }
-        html += "<div class='tab-metrics'><span class='metric-chip ";
+        html += "<span class='chip ";
         html += battCls;
         html += "'>";
         html += battChip;
-        html += "</span><span class='metric-chip ";
+        html += "</span><span class='chip ";
         html += gpsCls;
         html += "'>";
         html += gpsChip;
-        html += "</span></div></div>";
+        html += "</span>";
+        if (gCfg && gCfg->webCfgAuthEnabled)
+            html += "<a class='logout' href='/logout'>Logout</a>";
+        html += "</span></header>";
+
+        // Wide screens: the rail. Config's section links are filled in by
+        // appBuildSectionNav() (kAppJs) from the sections on the page, so a
+        // section a board leaves out never leaves a dead link behind.
+        html += "<div class='app'><nav class='app-rail' aria-label='Pages'>"
+                "<a data-tab='config' href='#config' class='active' aria-current='page'>Config</a>"
+                "<div id='rail-secs'></div>"
+                "<a data-tab='live' href='#live'>Live</a>"
+#if !defined(DEVICE_CARDPUTER_LORA_HAT)
+                "<a data-tab='chat' href='#chat'>Chat</a>"
+#endif
+                "<a data-tab='map' href='#map'>Nodes</a>"
+                "<a data-tab='utils' href='#utils'>Utilities</a>";
+#if HAS_VNC_HOST
+        html += "<a data-tab='remote' href='#remote'>Remote</a>";
+#endif
+#if HAS_WEB_FILES
+        if (gCfg && cfgWebFilesEnabled(*gCfg)) html += "<a data-tab='files' href='#files'>Files</a>";
+#endif
+        html += "</nav><main class='app-main'>";
+        if (msg[0]) { html += "<p class='notice'>"; appendAttr(html, msg); html += "</p>"; }
+        // The full page on the device's own AP: the browser has no internet, so
+        // say what that leaves out before someone wonders why the map is grey.
+        if (gApMode) {
+            html += "<p class='notice'>Connected to this device's own network. The node "
+                    "map, map downloads and update checks need the device on your WiFi. "
+                    "<a href='/setup'>Quick WiFi setup</a></p>";
+        }
+        if (gWebBuffersReclaimed) {
+            html += "<p class='notice-err'>";
+            html += kChatPaused;
+            html += "</p>";
+        }
+        // Phones: the current section, and the sheet that jumps between them.
+        html += "<div class='secbar'><b id='sec-current'>Config</b>"
+                "<button type='button' class='btn-2' onclick=\"appOpenSheet('sheet-secs')\">"
+                "Sections &#9662;</button></div>";
         html += "<div class='tab-panel active' id='tab-config'><div class='tab-pane-center'>";
     }
     sendChunk(html);
@@ -3915,12 +3844,12 @@ static void sendConfigPage(const char *msg = "", bool lite = false) {
     // other restarting action on this page. The one exception it cannot see
     // from here is a font-size-only change, which applies without restarting --
     // the wording hedges rather than promising a reboot that may not happen.
-    html += "<form method='POST' action='/save'"
+    html += "<form id='cfg-form' method='POST' action='/save'"
             " onsubmit=\"return confirm('Saving may restart the device to apply "
             "these changes. Continue?')\">";
 
     // ── Node Identity ─────────────────────────────────────────
-    section(html, lite, "Node Identity", true);
+    section(html, lite, "Node Identity", "identity", "How this node appears to others on the mesh.");
     // maxlength counts UTF-16 code units, not bytes, so it is a UI hint only —
     // the byte cap is enforced by copyTruncate in the POST handler.
     html += "<label>Long Name (max 24 bytes)"
@@ -3941,11 +3870,11 @@ static void sendConfigPage(const char *msg = "", bool lite = false) {
         // Marker so the POST handler can apply this checkbox (an unchecked box
         // submits nothing) only when the control was actually on the page.
         html += "<input type='hidden' name='nodeid_present' value='1'>";
-        html += "<label style='display:flex;align-items:center;gap:.5em'>"
+        html += "<label>"
                 "<input type='checkbox' name='nodeid_pubkey' value='1'";
         if (gCfg->nodeIdFromPubKey) html += " checked";
         html += "> Derive node ID from public key (Meshtastic 2.8 style)</label>";
-        html += "<p class='gps-hint'>Changes this node's address on the mesh. Other "
+        html += "<p class='hint'>Changes this node's address on the mesh. Other "
                 "nodes will see a new node and keep the old one until it ages "
                 "out, and direct messages people already have with you stay "
                 "attached to the old address. Your own chat history is carried "
@@ -3960,7 +3889,7 @@ static void sendConfigPage(const char *msg = "", bool lite = false) {
             html += ">"; html += sigPolicyName((uint8_t)i); html += "</option>";
         }
         html += "</select></label>";
-        html += "<p class='gps-hint'>Which received packets to accept, by their "
+        html += "<p class='hint'>Which received packets to accept, by their "
                 "signature, as Meshtastic 2.8.1 decides it. <b>Compatible</b> "
                 "(the default) accepts unsigned packets, so it hears every 2.7 "
                 "node. <b>Balanced</b> also drops an unsigned broadcast from a "
@@ -3973,7 +3902,7 @@ static void sendConfigPage(const char *msg = "", bool lite = false) {
     sendChunk(html);
 
     // ── Device ────────────────────────────────────────────────
-    section(html, lite, "Device", false);
+    section(html, lite, "Device", "device", "Role, rebroadcasting and clock.");
     html += "<div class='row2'>";
     html += "<label>Role<select name='role'>";
     // See cfgCoerceDeviceRole for which roles this firmware offers and why the
@@ -4004,7 +3933,7 @@ static void sendConfigPage(const char *msg = "", bool lite = false) {
     // it is mostly an advertised identity rather than a behaviour switch — and
     // someone picking TRACKER expecting upstream's power-saving duty cycle
     // should find that out on this page, not from a battery that never lasts.
-    html += "<p class='gps-hint'>The role goes out in this node's NodeInfo, so other "
+    html += "<p class='hint'>The role goes out in this node's NodeInfo, so other "
             "nodes and the map see how it means to be treated. "
             "<b>CLIENT</b> is an ordinary node. <b>CLIENT_MUTE</b> does not relay "
             "other people's traffic. <b>CLIENT_HIDDEN</b> only speaks when spoken "
@@ -4056,7 +3985,7 @@ static void sendConfigPage(const char *msg = "", bool lite = false) {
     appendAttr(html, gCfg->losElevServer);
     html += "' placeholder='http://host:port'></label>";
     html += "</div>";
-    html += "<p class='gps-hint'>Terrain line-of-sight fetches ground elevation from "
+    html += "<p class='hint'>Terrain line-of-sight fetches ground elevation from "
             "<code>&lt;server&gt;/elev?locations=lat,lon|...</code>, expecting a CSV of "
             "metres. Must be <b>http://</b> — there is no TLS client in this firmware. "
             "Leave empty to disable LOS.</p>";
@@ -4070,7 +3999,7 @@ static void sendConfigPage(const char *msg = "", bool lite = false) {
     appendAttr(html, gCfg->weatherServer);
     html += "' placeholder='http://host:port'></label>";
     html += "</div>";
-    html += "<p class='gps-hint'>The weather screen fetches current conditions from "
+    html += "<p class='hint'>The weather screen fetches current conditions from "
             "<code>&lt;server&gt;/weather?lat=&amp;lon=&amp;units=</code>. Must be "
             "<b>http://</b> — there is no TLS client in this firmware. The position is "
             "rounded to about a kilometre before it is sent. Leave empty to disable "
@@ -4123,11 +4052,11 @@ static void sendConfigPage(const char *msg = "", bool lite = false) {
         html += tbuf;
         html += "'></label></div>";
         sendChunkIfBig(html);   // AP mode renders this with very little heap
-        html += "<p class='gps-hint' id='manual_hint'";
+        html += "<p class='hint' id='manual_hint'";
         if (!manual) html += " style='display:none'";
         html += ">Saving applies this time to the device clock. "
                 "The clock is not battery-backed, so it restarts unset after a power cycle.</p>";
-        html += "<p class='gps-hint'><button type='button' id='browser_time'>Use this browser's time"
+        html += "<p class='hint'><button type='button' id='browser_time'>Use this browser's time"
                 "</button></p>";
         html += "<script>"
                 "(function(){"
@@ -4151,12 +4080,12 @@ static void sendConfigPage(const char *msg = "", bool lite = false) {
     sendChunk(html);
 
     // ── Position ──────────────────────────────────────────────
-    section(html, lite, "Position", false);
-    html += "<label style='display:flex;align-items:center;gap:.5em'>"
+    section(html, lite, "Position", "position", "GPS and what location this node shares.");
+    html += "<label>"
             "<input type='checkbox' name='shareLocation' value='1'";
     if (gCfg->shareLocation) html += " checked";
     html += "> Share Location (broadcast position to the mesh)</label>";
-    html += "<p class='gps-hint'>Off suppresses every position transmission, including "
+    html += "<p class='hint'>Off suppresses every position transmission, including "
             "the manual announce, whatever the settings below say. Nothing else on this "
             "page stops the broadcast: GPS Enabled only chooses where the coordinates "
             "come from.</p>";
@@ -4168,16 +4097,16 @@ static void sendConfigPage(const char *msg = "", bool lite = false) {
         html += ">"; html += kPositionPrecisions[i].label; html += "</option>";
     }
     html += "</select></label>";
-    html += "<p class='gps-hint'>Rounds the coordinates before they are transmitted, so "
+    html += "<p class='hint'>Rounds the coordinates before they are transmitted, so "
             "the mesh sees the area you are in rather than the spot you are standing on. "
             "The device still uses your exact position locally. Receiving nodes are told "
             "how coarse the value is, so other Meshtastic clients can show it as an area. "
             "Applies to every channel this node shares position on.</p>";
-    html += "<label style='display:flex;align-items:center;gap:.5em'>"
+    html += "<label>"
             "<input type='checkbox' name='gpsEnabled' value='1'";
     if (gCfg->gpsEnabled) html += " checked";
     html += "> GPS Enabled (L76K hardware GPS)</label>";
-    html += "<p class='gps-hint'>When GPS is enabled, position is sourced from the GPS module. "
+    html += "<p class='hint'>When GPS is enabled, position is sourced from the GPS module. "
             "The manual coordinates below are used as fallback until a fix is acquired.</p>";
     html += "<div class='row2'>";
     snprintf(tmp, sizeof(tmp), "%lu", (unsigned long)gCfg->gpsPollIntervalS);
@@ -4186,7 +4115,7 @@ static void sendConfigPage(const char *msg = "", bool lite = false) {
     snprintf(tmp, sizeof(tmp), "%lu", (unsigned long)gCfg->posIntervalS);
     html += "<label>GPS Broadcast Interval (s)<input name='pos_intv' type='number' min='60' value='";
     html += tmp; html += "'></label></div>";
-    html += "<p class='gps-hint'>Poll is how often this device reads its own GPS "
+    html += "<p class='hint'>Poll is how often this device reads its own GPS "
             "(0 = every loop). Broadcast is how often that position is sent to "
             "the mesh.</p>";
     html += "<div class='row2'>";
@@ -4203,7 +4132,7 @@ static void sendConfigPage(const char *msg = "", bool lite = false) {
     sendChunk(html);
 
     // ── LoRa Radio ────────────────────────────────────────────
-    section(html, lite, "LoRa Radio", false);
+    section(html, lite, "LoRa Radio", "lora", "Must match the other nodes you want to hear.");
     // The live frequency/BW/SF/CR readout is driven by kPresetJs. Lite skips
     // both, so its selects carry no onchange handler to call.
     html += lite ? "<div class='row2'><label>Region<select name='region' id='sel-rgn'>"
@@ -4244,7 +4173,7 @@ static void sendConfigPage(const char *msg = "", bool lite = false) {
     // it to do, and the block it would show/hide is always visible here.
     if (lite) html += "function applyPreset(){}";
     html += "</script>";
-    html += "<p class='gps-hint'>Frequency and modem parameters are derived automatically "
+    html += "<p class='hint'>Frequency and modem parameters are derived automatically "
             "from region and preset, or from the fields above when the preset is Custom.</p>";
     sendChunk(html);
     if (!lite) {
@@ -4260,11 +4189,11 @@ static void sendConfigPage(const char *msg = "", bool lite = false) {
     snprintf(tmp, sizeof(tmp), "%d", gCfg->loraHopLimit);
     html += "<label>Hop Limit (1&ndash;7)<input name='hop' type='number' min='1' max='7' value='";
     html += tmp; html += "'></label></div>";
-    html += "<label style='display:flex;align-items:center;gap:.5em'>"
+    html += "<label>"
             "<input type='checkbox' name='ok_to_mqtt' value='1'";
     if (gCfg->okToMqtt) html += " checked";
     html += "> OK to MQTT &mdash; allow MQTT-connected nodes to forward your packets upstream</label>";
-    html += "<label style='display:flex;align-items:center;gap:.5em'>"
+    html += "<label>"
             "<input type='checkbox' name='ignore_mqtt' value='1'";
     if (gCfg->ignoreMqtt) html += " checked";
     html += "> Ignore MQTT &mdash; drop received packets that arrived via MQTT</label>";
@@ -4292,8 +4221,8 @@ static void sendConfigPage(const char *msg = "", bool lite = false) {
     sendChunk(html);
 
     // ── Channels ──────────────────────────────────────────────
-    section(html, lite, "Channels", false);
-    html += "<p class='gps-hint'>Key: base64 (e.g. \"AQ==\" or \"MA==\"). "
+    section(html, lite, "Channels", "channels", "Up to 8 channels; the first is primary.");
+    html += "<p class='hint'>Key: base64 (e.g. \"AQ==\" or \"MA==\"). "
             "Hash is recomputed automatically on save. "
             "Uplink publishes this channel's traffic to MQTT; downlink re-broadcasts "
             "MQTT traffic for it onto LoRa. Location broadcasts this node's position "
@@ -4305,7 +4234,7 @@ static void sendConfigPage(const char *msg = "", bool lite = false) {
     // box submits nothing) only when this section was rendered.
     html += "<input type='hidden' name='ch_flags' value='1'>";
     if (!lite) {
-        html += "<p class='gps-hint'>Use &#9650;/&#9660; to move a channel between "
+        html += "<p class='hint'>Use &#9650;/&#9660; to move a channel between "
                 "slots. Channel 0 is the primary and stays where it is.</p>";
     }
     html += "<div id='ch-list'>";
@@ -4434,11 +4363,11 @@ static void sendConfigPage(const char *msg = "", bool lite = false) {
     sendChunk(html);
 
     // ── MQTT ──────────────────────────────────────────────────
-    section(html, lite, "MQTT", false);
+    section(html, lite, "MQTT", "mqtt", "Bridge the mesh to an MQTT broker over WiFi.");
     // Marker so the POST handler can apply checkbox state (unchecked boxes send
     // nothing) only when this section was actually rendered.
     html += "<input type='hidden' name='mqtt_present' value='1'>";
-    html += "<label style='display:flex;align-items:center;gap:.5em'>"
+    html += "<label>"
             "<input type='checkbox' name='mqtt_en' value='1'";
     if (gCfg->mqttEnabled) html += " checked";
     html += "> Enable MQTT bridge</label>";
@@ -4453,7 +4382,7 @@ static void sendConfigPage(const char *msg = "", bool lite = false) {
     // plaintext (use port 1883). Channel payloads remain end-to-end encrypted
     // with the channel key regardless of transport.
     html += "</div>";
-    html += "<p class='gps-hint'>MQTT is plaintext only (port 1883) — this "
+    html += "<p class='hint'>MQTT is plaintext only (port 1883) — this "
             "firmware has no TLS client. Channel payloads stay encrypted with "
             "your channel key.</p>";
     html += "<label>Username<input name='mqtt_user' type='text' maxlength='31' value='";
@@ -4465,21 +4394,21 @@ static void sendConfigPage(const char *msg = "", bool lite = false) {
     html += "<label>Root topic<input name='mqtt_root' type='text' maxlength='47' value='";
     appendAttr(html, gCfg->mqttRoot);
     html += "'></label>";
-    html += "<label style='display:flex;align-items:center;gap:.5em'>"
+    html += "<label>"
             "<input type='checkbox' name='mqtt_encrypt' value='1'";
     if (gCfg->mqttEncryption) html += " checked";
     html += "> Encrypt payloads (publish ciphertext to /2/e/)</label>";
-    html += "<label style='display:flex;align-items:center;gap:.5em'>"
+    html += "<label>"
             "<input type='checkbox' name='mqtt_map_report' value='1'";
     if (gCfg->mqttMapReport) html += " checked";
     html += "> Map reporting (this node to /2/map/ every 15 min)</label>";
-    html += "<p style='font-size:.8em;color:var(--muted);margin:.4em 0 0'>"
+    html += "<p class='hint'>"
             "Requires WiFi credentials above. Default broker: mqtt.meshtastic.org:8883.</p>";
     sectionEnd(html, lite);
     sendChunk(html);
 
     // ── Display ───────────────────────────────────────────────
-    section(html, lite, "Display", false);
+    section(html, lite, "Display", "display", "Theme, brightness and fonts on the device.");
     // Language of the on-device UI (issue #99). The page itself stays English.
     // Each name is written in its own language, as the device picker shows it;
     // the value is the index stored in RhinoConfig::uiLanguage. Changing it
@@ -4537,7 +4466,7 @@ static void sendConfigPage(const char *msg = "", bool lite = false) {
         html += "' value='"; html += b;
         html += "' oninput=\"document.getElementById('lbriOut').textContent=this.value+'%'\">"
                 "</label>";
-        html += "<p style='font-size:.82em;color:#888;margin:.1em 0 .5em'>"
+        html += "<p class='hint'>"
                 "Backlight level while the lock screen is showing, separate from "
                 "the brightness above. Defaults to 10% — it is a glance surface, "
                 "and on a lit panel this is most of what the lock screen costs "
@@ -4562,7 +4491,7 @@ static void sendConfigPage(const char *msg = "", bool lite = false) {
         if (gCfg->uiOrientation == 2) html += " selected";
         html += ">Portrait (180&deg;)</option>"
                 "</select></label>";
-        html += "<p style='font-size:.82em;color:#888;margin:.1em 0 .5em'>"
+        html += "<p class='hint'>"
                 "Which way up the display runs. The panel is rotated once at "
                 "startup, so this takes effect when the device reboots — which "
                 "saving here does anyway.</p>";
@@ -4669,7 +4598,7 @@ static void sendConfigPage(const char *msg = "", bool lite = false) {
             sendChunk(html);
             sendFlash(kChatBlinkModal);
         }
-        html += "<p style='font-size:.8em;color:var(--muted);margin:.2em 0 0'>"
+        html += "<p class='hint'>"
                 "How long a new message blinks in chat and DMs once it is on "
                 "screen. Takes effect immediately, no reboot.</p>";
     }
@@ -4780,7 +4709,7 @@ static void sendConfigPage(const char *msg = "", bool lite = false) {
     // split between Display (volume) and Modules (alert tones). The name holds
     // on every board: where there is no audio hardware the section is the
     // notification LED and keyboard blink alone.
-    section(html, lite, "Notifications", false);
+    section(html, lite, "Notifications", "notify", "Sounds, vibration and LED for new messages.");
 #if HAS_VOLUME_CONTROL
     // Same shape as the brightness slider. Compiled out where the board alerts
     // through a passive buzzer: amplitude is not controllable there, so the
@@ -4877,7 +4806,7 @@ static void sendConfigPage(const char *msg = "", bool lite = false) {
         html += "</select></label>";
     }
     html += "</div>";
-    html += "<p style='font-size:.8em;color:var(--muted);margin:.2em 0 0'>"
+    html += "<p class='hint'>"
             "Only used while the screen is off.</p>";
 #endif
 #if HAS_LIGHT_NOTIFY
@@ -4892,7 +4821,7 @@ static void sendConfigPage(const char *msg = "", bool lite = false) {
         html += tmp;
     }
     html += "</select></label>";
-    html += "<p style='font-size:.8em;color:var(--muted);margin:.2em 0 0'>"
+    html += "<p class='hint'>"
             "How long the light keeps reminding you after a message arrives. The "
             "clock restarts on each new message, and reading the message stops it "
             "immediately either way. Never means it keeps reminding until read.</p>";
@@ -4907,7 +4836,7 @@ static void sendConfigPage(const char *msg = "", bool lite = false) {
         html += tmp;
     }
     html += "</select></label>";
-    html += "<p style='font-size:.8em;color:var(--muted);margin:.2em 0 0'>"
+    html += "<p class='hint'>"
 #if defined(DEVICE_M9)
             "How brightly the keypad lights itself after a keypress. The keypad "
             "LEDs belong to the keyboard's own controller, which lights them for "
@@ -4940,7 +4869,7 @@ static void sendConfigPage(const char *msg = "", bool lite = false) {
         html += tmp;
     }
     html += "</select></label>";
-    html += "<p style='font-size:.8em;color:var(--muted);margin:.2em 0 0'>"
+    html += "<p class='hint'>"
             "Turns the keyboard light off after this long with no key press or "
             "touch, the way Screen Timeout does for the screen. The next key or "
             "touch lights it again. Notification blinks still flash while it is "
@@ -4952,7 +4881,7 @@ static void sendConfigPage(const char *msg = "", bool lite = false) {
             "<option value='1'"; if ( gCfg->navBarEnabled) html += " selected"; html += ">Enabled</option>"
             "<option value='0'"; if (!gCfg->navBarEnabled) html += " selected"; html += ">Disabled</option>"
             "</select></label>";
-    html += "<p style='font-size:.8em;color:var(--muted);margin:.2em 0 0'>"
+    html += "<p class='hint'>"
             "Row of icons along the bottom of the screen - Home, Chats, DM, "
             "Nodes, Tools, Config, Help - carrying the GPS and Wi-Fi readouts "
             "and the unread marks. Disabled restores the keyboard shortcut "
@@ -4969,7 +4898,7 @@ static void sendConfigPage(const char *msg = "", bool lite = false) {
                 "<option value='right'";  if (navAlign == NAV_ALIGN_RIGHT)  html += " selected"; html += ">Right</option>"
                 "</select></label>";
     }
-    html += "<p style='font-size:.8em;color:var(--muted);margin:.2em 0 0'>"
+    html += "<p class='hint'>"
             "Where the nav bar sits. Center is the row of icons along the bottom "
             "of the screen. Left and Right condense it into a narrow column down "
             "that side, one icon per button, and give the screen its full height "
@@ -4985,7 +4914,7 @@ static void sendConfigPage(const char *msg = "", bool lite = false) {
     sendChunk(html);
 
     // ── Power ─────────────────────────────────────────────────
-    section(html, lite, "Power", false);
+    section(html, lite, "Power", "power");
     html += "<label>Power Saving<select name='pwr_saving'>"
             "<option value='1'"; if ( gCfg->isPowerSaving) html += " selected"; html += ">Enabled</option>"
             "<option value='0'"; if (!gCfg->isPowerSaving) html += " selected"; html += ">Disabled</option>"
@@ -5001,9 +4930,9 @@ static void sendConfigPage(const char *msg = "", bool lite = false) {
     sendChunk(html);
 
     // ── Modules ───────────────────────────────────────────────
-    section(html, lite, "Modules", false);
+    section(html, lite, "Modules", "modules", "Telemetry, beacons and other optional features.");
     // Telemetry
-    html += "<h3 style='font-size:.95em;margin:.8em 0 .3em'>Telemetry</h3>";
+    html += "<h3 class='cfg-sub'>Telemetry</h3>";
     html += "<div class='row2'>";
     html += "<label>Device Telemetry<select name='tel_dev_en'>"
             "<option value='1'"; if ( gCfg->telDeviceEnabled) html += " selected"; html += ">Enabled</option>"
@@ -5017,7 +4946,7 @@ static void sendConfigPage(const char *msg = "", bool lite = false) {
     html += "<label>Broadcast Interval (min)<input name='tel_bcast_mins' type='number' min='60' value='";
     html += tmp; html += "'></label></div>";
 
-    html += "<h3 style='font-size:.95em;margin:.8em 0 .3em'>Sensor Telemetry</h3>";
+    html += "<h3 class='cfg-sub'>Sensor Telemetry</h3>";
     html += "<div class='row2'>";
 #if HAS_ENV_SENSOR_TELEMETRY
     // Three states, and they are worth telling apart. A board that supports the
@@ -5044,7 +4973,7 @@ static void sendConfigPage(const char *msg = "", bool lite = false) {
                 "</select></label>";
         html += "<label>Sensor Interval<input type='text' value='Uses broadcast interval above' disabled></label>";
 
-        html += "<p style='font-size:.82em;color:#888;margin:.3em 0 .6em;grid-column:1/-1'>";
+        html += "<p class='hint hint-wide'>";
         if (sensorFound) {
             html += "Detected <b>";
             html += envSensorName();
@@ -5068,19 +4997,19 @@ static void sendConfigPage(const char *msg = "", bool lite = false) {
 #endif
     html += "</div>";
 
-    html += "<h3 style='font-size:.95em;margin:.8em 0 .3em'>Mesh Beacons</h3>";
+    html += "<h3 class='cfg-sub'>Mesh Beacons</h3>";
     html += "<label>Listen for beacons<select name='mesh_beacon_listen'>"
             "<option value='1'"; if ( gCfg->meshBeaconListen) html += " selected"; html += ">Enabled</option>"
             "<option value='0'"; if (!gCfg->meshBeaconListen) html += " selected"; html += ">Disabled</option>"
             "</select></label>";
-    html += "<p style='font-size:.82em;color:var(--muted);margin:.2em 0 0'>"
+    html += "<p class='hint'>"
             "Meshtastic 2.7 nodes can retune briefly to advertise a different mesh, "
             "naming a channel, preset and region. With this on, any such beacon that "
             "reaches this device is listed on the Beacons screen, under Live &rarr; "
             "Tools. Receive-only &mdash; nothing "
             "is transmitted, and an offer is never applied to your radio. Off by default.</p>";
 
-    html += "<h3 style='font-size:.95em;margin:.8em 0 .3em'>Neighborhood Info</h3>";
+    html += "<h3 class='cfg-sub'>Neighborhood Info</h3>";
     html += "<div class='row2'>";
     html += "<label>Enabled<select name='neighbor_info_en'>"
             "<option value='1'"; if ( gCfg->neighborInfoEnabled) html += " selected"; html += ">Enabled</option>"
@@ -5099,7 +5028,7 @@ static void sendConfigPage(const char *msg = "", bool lite = false) {
             "</select></label>";
 
     // camillia chat server client
-    html += "<h3 style='font-size:.95em;margin:.8em 0 .3em'>Chat Server</h3>";
+    html += "<h3 class='cfg-sub'>Chat Server</h3>";
     html += "<label>Catch-up<select name='cs_mode'>";
     {
         static const char *const kModes[3] = {"Off", "Automatic (boot + every 15 min)", "Manual only"};
@@ -5117,7 +5046,7 @@ static void sendConfigPage(const char *msg = "", bool lite = false) {
         html += idBuf;
     }
     html += "'></label>"
-            "<p style='font-size:.82em;color:#888;margin:.1em 0 .6em'>"
+            "<p class='hint'>"
             "A camillia chat server keeps channel messages and replays the ones this node "
             "missed. Leave blank to use the first one found nearby. Enter a short name or "
             "<code>!aabbccdd</code> to always use that node: a server set here is never "
@@ -5133,7 +5062,7 @@ static void sendConfigPage(const char *msg = "", bool lite = false) {
     // WiFi. Collapsed by default, matching MQTT / Power / Modules. A <details>
     // only hides its contents visually — the inputs stay in the form and submit
     // either way, which is what the other collapsed sections already rely on.
-    section(html, lite, "WiFi", false);
+    section(html, lite, "WiFi", "wifi", "Networks this device joins.");
     // appendAttr, not a raw append: an SSID or password containing an
     // apostrophe would close the value= attribute and mangle the rest of the
     // form, so the field would come back truncated on the next save. Same
@@ -5145,7 +5074,7 @@ static void sendConfigPage(const char *msg = "", bool lite = false) {
     appendAttr(html, gWifiPass);
     html += "'></label>";
     if (!lite) {
-        html += "<p class='gps-hint'>This is the network the device joins.</p>";
+        html += "<p class='hint'>This is the network the device joins.</p>";
         appendSavedNetworks(html);
     }
     {
@@ -5187,7 +5116,7 @@ static void sendConfigPage(const char *msg = "", bool lite = false) {
             html += tmp;
         }
         html += "</select></label>";
-        html += "<p class='gps-hint'>How long web config stays up with no requests "
+        html += "<p class='hint'>How long web config stays up with no requests "
                 "before it closes itself and releases WiFi. Loading or saving a "
                 "page counts as activity; reading one does not. <b>Never</b> "
                 "keeps WiFi and its power draw on until you stop it yourself.</p>";
@@ -5199,18 +5128,18 @@ static void sendConfigPage(const char *msg = "", bool lite = false) {
     // altogether — offering the toggle there would promise a check that never
     // leads anywhere. The update source itself is not configurable by design.
 #if !defined(DEVICE_CARDPUTER_LORA_HAT)
-    section(html, lite, "Firmware Updates", false);
+    section(html, lite, "Firmware Updates", "firmware", "Update checks and over-the-air updates.");
     if (!otaLayoutSupportsUpdate()) {
         // Installed by a third-party flasher into its own partition layout: the
         // slot an update would land in belongs to another firmware. Say so
         // instead of offering a toggle that leads nowhere.
-        html += "<p style='font-size:.82em;color:#888;margin:.1em 0 .5em'>"
+        html += "<p class='hint'>"
                 "Updates are unavailable on this install: the device was flashed "
                 "with a third-party partition layout, where the spare app slot may "
                 "hold other firmware. Re-flash the factory image to enable "
                 "over-the-air updates.</p>";
     } else {
-        html += "<p style='font-size:.82em;color:#888;margin:.1em 0 .5em'>"
+        html += "<p class='hint'>"
                 "On boot, once WiFi is up, the device asks whether a newer release "
                 "exists and offers to install it. Declining is remembered until the "
                 "next reboot.</p>";
@@ -5230,7 +5159,7 @@ static void sendConfigPage(const char *msg = "", bool lite = false) {
         if (otaChannelNow == OTA_CHANNEL_ALPHA) html += " selected";
         html += ">Alpha</option>"
                 "</select></label>";
-        html += "<p style='font-size:.82em;color:#888;margin:.1em 0 .5em'>"
+        html += "<p class='hint'>"
                 "<b>Stable</b> installs published releases only. <b>Alpha</b> also "
                 "takes prerelease builds cut from a development branch — earlier "
                 "access, and rougher. Alpha images are signed and verified exactly "
@@ -5257,7 +5186,7 @@ static void sendConfigPage(const char *msg = "", bool lite = false) {
             html += ">"; html += opt.label; html += "</option>";
         }
         html += "</select></label>";
-        html += "<p style='font-size:.82em;color:#888;margin:.1em 0 .5em'>"
+        html += "<p class='hint'>"
                 "When set, the device checks for a new release on this schedule and "
                 "installs it <b>without asking</b>, then reboots. Intended for nodes "
                 "left unattended; anything in progress on the device is lost at the "
@@ -5279,22 +5208,22 @@ static void sendConfigPage(const char *msg = "", bool lite = false) {
     {
         const bool slot    = nodeArchiveSlotExists();
         const bool canArch = slot && nodeArchiveAvailable();
-        section(html, lite, "Node Management", false);
-        html += "<p style='font-size:.82em;color:#888;margin:.1em 0 .5em'>"
+        section(html, lite, "Node Management", "nodes", "Clean up the node list.");
+        html += "<p class='hint'>"
                 "The device keeps the ";
         html += String(MAX_NODES);
         html += " most recently heard nodes. When that fills up, the "
                 "oldest non-favorite is dropped to make room — favorites are never "
                 "dropped.</p>";
 
-        html += "<label style='display:flex;align-items:center;gap:.5em'>"
+        html += "<label>"
                 "<input type='checkbox' name='node_archive' value='1'";
         if (gCfg->nodeArchiveEnabled) html += " checked";
         if (!canArch) html += " disabled";
-        html += " style='width:auto;margin:0'>"
+        html += ">"
                 "<span>Archive dropped nodes to SD card</span></label>";
 
-        html += "<p style='font-size:.82em;color:#888;margin:.3em 0 .6em'>";
+        html += "<p class='hint'>";
         if (!slot) {
             html += "Unavailable: this board has no SD card slot. Dropped nodes "
                     "are discarded.";
@@ -5313,14 +5242,14 @@ static void sendConfigPage(const char *msg = "", bool lite = false) {
         // availability rule, and the same reason for it -- an unchecked checkbox
         // is not submitted, so saving from a card-less device must not be read
         // as the user turning this off.
-        html += "<label style='display:flex;align-items:center;gap:.5em'>"
+        html += "<label>"
                 "<input type='checkbox' name='node_archive_show' value='1'";
         if (gCfg->nodeArchiveShow) html += " checked";
         if (!canArch) html += " disabled";
-        html += " style='width:auto;margin:0'>"
+        html += ">"
                 "<span>Show archived nodes on the Nodes screen</span></label>";
 
-        html += "<p style='font-size:.82em;color:#888;margin:.3em 0 .6em'>";
+        html += "<p class='hint'>";
         if (!slot) {
             html += "Unavailable: this board has no SD card slot.";
         } else if (!canArch) {
@@ -5346,10 +5275,10 @@ static void sendConfigPage(const char *msg = "", bool lite = false) {
         char rangeBuf[24];
         snprintf(rangeBuf, sizeof(rangeBuf), "%.2f", (double)shown);
 
-        html += "<label style='display:flex;align-items:center;gap:.5em;margin-top:.6em'>"
+        html += "<label>"
                 "<input type='checkbox' name='autofav' value='1'";
         if (gCfg->autoFavoriteEnabled) html += " checked";
-        html += " style='width:auto;margin:0'>"
+        html += ">"
                 "<span>Auto-favorite nearby nodes</span></label>";
 
         html += "<label>Auto-favorite radius (";
@@ -5362,7 +5291,7 @@ static void sendConfigPage(const char *msg = "", bool lite = false) {
         html += rangeBuf;
         html += "'></label>";
 
-        html += "<p style='font-size:.82em;color:#888;margin:.3em 0 .8em'>"
+        html += "<p class='hint'>"
                 "Any node reporting a position within this radius is favorited "
                 "automatically. Favorites sort to the top of the node and DM lists "
                 "and are never dropped when the node table fills up. This only ever "
@@ -5370,11 +5299,11 @@ static void sendConfigPage(const char *msg = "", bool lite = false) {
                 "un-favorited, so it can't undo one you set by hand. Requires a known "
                 "position for both your node and theirs.</p>";
 
-        html += "<p style='margin:.2em 0 1em'><a href='/nodes.csv'"
+        html += "<p><a href='/nodes.csv'"
                 " style='display:inline-block;padding:.4em 1.2em;background:#3b82f6;"
                 "color:#fff;border-radius:3px;text-decoration:none;font-size:.95em'>"
                 "&#11015; Export Node List (CSV)</a></p>"
-                "<p style='font-size:.82em;color:#888;margin:-.6em 0 1em'>"
+                "<p class='hint'>"
                 "Downloads every node currently known to the device, plus any "
                 "previously archived nodes if an archive exists. While wardriving "
                 "is on, the <code>mapLat</code>/<code>mapLon</code> columns also "
@@ -5385,13 +5314,13 @@ static void sendConfigPage(const char *msg = "", bool lite = false) {
         // ── Wardrive log ────────────────────────────────────────────────────
         {
             const bool wdOk = wardriveLogFilePath() && wardriveLogAvailable();
-            html += "<label style='display:flex;align-items:center;gap:.5em;margin-top:.6em'>"
+            html += "<label>"
                     "<input type='checkbox' name='wardrive_log' value='1'";
             if (gCfg->wardriveLogEnabled) html += " checked";
             if (!wdOk) html += " disabled";
-            html += " style='width:auto;margin:0'>"
+            html += ">"
                     "<span>Wardriving (log sightings with this device's GPS position)</span></label>";
-            html += "<p style='font-size:.82em;color:#888;margin:.3em 0 .6em'>";
+            html += "<p class='hint'>";
             if (!wardriveLogFilePath()) {
                 html += "Unavailable: this board has no file storage.";
             } else if (!wdOk) {
@@ -5415,16 +5344,16 @@ static void sendConfigPage(const char *msg = "", bool lite = false) {
                          (unsigned long)wardriveLogNodes(),
                          (unsigned long)wardriveLogSkippedNoFix(),
                          (unsigned long)wardriveLogDropped(),
-                         gpsHasFix() ? "fix" : "<b style='color:#c0392b'>NO FIX</b>",
+                         gpsHasFix() ? "fix" : "<b class='danger-text'>NO FIX</b>",
                          wardriveLogIsFull()
-                             ? "<br><b style='color:#c0392b'>Log full: nothing more is "
+                             ? "<br><b class='danger-text'>Log full: nothing more is "
                                "being written. Download it, then clear it.</b>"
                              : "");
                 html += st;
             }
             html += "</p>";
             if (wdOk) {
-                html += "<p style='margin:.2em 0 .4em'><a href='/wardrive.csv'"
+                html += "<p><a href='/wardrive.csv'"
                         " style='display:inline-block;padding:.4em 1.2em;background:#3b82f6;"
                         "color:#fff;border-radius:3px;text-decoration:none;font-size:.95em'>"
                         "&#11015; Download Wardrive Log (CSV)</a></p>"
@@ -5433,8 +5362,8 @@ static void sendConfigPage(const char *msg = "", bool lite = false) {
                         // </form> closed the Save form instead, leaving Save All
                         // outside any form, where it did nothing. So the button
                         // names its own form, which is emitted after Save's.
-                        "<p style='margin:0 0 1em'>"
-                        "<button type='submit' form='wdclear' style='background:#c0392b'>"
+                        "<p>"
+                        "<button type='submit' form='wdclear' class='btn-danger'>"
                         "Clear Wardrive Log</button></p>";
             }
         }
@@ -5444,14 +5373,14 @@ static void sendConfigPage(const char *msg = "", bool lite = false) {
     // Web Config Access. Last section on the page by design: it governs who can
     // reach this page rather than how the device behaves, so it sits after
     // everything someone actually came here to change.
-    section(html, lite, "Web Config Access", false);
-    html += "<label style='display:flex;align-items:center;gap:.5em'>"
+    section(html, lite, "Web Config Access", "access", "Who can open this page.");
+    html += "<label>"
             "<input type='checkbox' name='web_auth' value='1' id='web-auth-cb'"
             " onchange=\"document.getElementById('web-auth-creds').style.display="
             "this.checked?'':'none'\"";
     if (gCfg->webCfgAuthEnabled) html += " checked";
     html += "> Require login (authentication)</label>";
-    html += "<p class='gps-hint'>When disabled, the web config is reachable without a "
+    html += "<p class='hint'>When disabled, the web config is reachable without a "
             "username or password. Only leave this off on trusted networks.</p>";
     html += "<div id='web-auth-creds'";
     if (!gCfg->webCfgAuthEnabled) html += " style='display:none'";
@@ -5464,7 +5393,11 @@ static void sendConfigPage(const char *msg = "", bool lite = false) {
     sectionEnd(html, lite);
     sendChunk(html);
 
-    html += "<button type='submit' style='width:100%;margin-top:1.5em'>Save All</button></form>";
+    // The full page saves from the save bar (kAppJs), which appears once a
+    // field differs from what the page loaded with. Lite has no script, so it
+    // keeps a plain button at the end of the form.
+    if (lite) html += "<button type='submit'>Save All</button>";
+    html += "</form>";
     // The Clear Wardrive Log button above submits this, by its form attribute.
     // Empty and invisible when there is no log to clear.
     html += "<form id='wdclear' method='POST' action='/clear-wardrive'"
@@ -5472,7 +5405,10 @@ static void sendConfigPage(const char *msg = "", bool lite = false) {
     // A field the browser rejects stops the submit, and if it sits in a closed
     // section the browser cannot show why: Save just does nothing. Open the
     // section first so the message has somewhere to appear.
+    // Saving from the save bar while another tab is showing would leave the
+    // browser nowhere to point at, so bring Config back first.
     html += "<script>document.addEventListener('invalid',function(e){"
+            "if(window.switchTab&&document.body.getAttribute('data-tab')!=='config')switchTab('config');"
             "for(var d=e.target.parentNode;d;d=d.parentNode)"
             "if(d.tagName==='DETAILS')d.open=true;},true);</script>";
     sendChunk(html);
@@ -5484,7 +5420,7 @@ static void sendConfigPage(const char *msg = "", bool lite = false) {
         // of multi-KB contiguous allocation this mode cannot promise. Outside
         // the form above rather than inside it — a nested form would submit to
         // /save instead.
-        html += "<hr style='margin:1.4em 0;border:0;border-top:1px solid #3a4553'>"
+        html += "<hr style='margin:1.4em 0;border:0;border-top:1px solid var(--line)'>"
                 "<h3 style='margin:.2em 0 .4em'>Restore Config</h3>"
                 "<form method='POST' action='/import' enctype='multipart/form-data'"
                 " onsubmit=\"return confirm('This will replace your settings with "
@@ -5493,7 +5429,7 @@ static void sendConfigPage(const char *msg = "", bool lite = false) {
                 "<input type='file' name='f' accept='.yaml,.yml'></label>"
                 "<button type='submit' style='width:100%;margin-top:.6em'>"
                 "Upload &amp; Apply</button></form>"
-                "<p style='font-size:.82em;color:#888'>Applies the file and reboots. "
+                "<p class='hint'>Applies the file and reboots. "
                 "Files over 8 KB are rejected rather than partly applied. Export is "
                 "available once the device is on your WiFi.</p>";
 #if HAS_WEB_FILES
@@ -5533,29 +5469,29 @@ static void sendConfigPage(const char *msg = "", bool lite = false) {
     // ── Diagnostics / Utilities ───────────────────────────────
     // Collapsible, matching the config tab. These pass `false` rather than
     // `lite` because the lite page returns above and never reaches this tab.
-    section(html, false, "Diagnostics", false);
+    section(html, false, "Diagnostics", "u-diag");
     html +=
         "<form method='POST' action='/announce'>"
-        "<button type='submit' style='background:#e07b00'>"
+        "<button type='submit' class='btn'>"
         "&#128225; Send NODEINFO Broadcast</button>"
         "</form>"
-        "<p style='font-size:.82em;color:#888;margin:.3em 0 1em'>"
+        "<p class='hint'>"
         "Forces immediate re-announcement to the mesh (NODEINFO + position).</p>";
 
     html +=
         "<form method='POST' action='/telemetry'>"
-        "<button type='submit' style='background:#0f766e'>"
+        "<button type='submit' class='btn'>"
         "&#128202; Send Telemetry Now</button>"
         "</form>"
-        "<p style='font-size:.82em;color:#888;margin:.3em 0 1em'>"
+        "<p class='hint'>"
         "Forces immediate telemetry TX (device + environment when available).</p>";
 
     html +=
         "<form method='POST' action='/cs-check'>"
-        "<button type='submit' style='background:#6b4fa0'>"
+        "<button type='submit' class='btn'>"
         "&#128260; Check for Messages Now</button>"
         "</form>"
-        "<p style='font-size:.82em;color:#888;margin:.3em 0 1em'>"
+        "<p class='hint'>"
         "Asks the chat server for messages missed on this node's channels, "
         "or searches for one if none has been found yet. "
         "At most once every 5 minutes.";
@@ -5571,10 +5507,10 @@ static void sendConfigPage(const char *msg = "", bool lite = false) {
     // below it does, and only appears once there is something to delete.
     html +=
         "<form method='POST' action='/sd-scan'>"
-        "<button type='submit' style='background:#2563a8'>"
+        "<button type='submit' class='btn'>"
         "&#128269; Scan SD Card for Malware</button>"
         "</form>"
-        "<p style='font-size:.82em;color:#888;margin:.3em 0 1em'>"
+        "<p class='hint'>"
         "Looks through the card for Windows programs, scripts, shortcuts and "
         "autorun files &mdash; including a program wearing a harmless-looking "
         "name, which is caught by its header rather than its extension. None of "
@@ -5594,10 +5530,10 @@ static void sendConfigPage(const char *msg = "", bool lite = false) {
         html +=
             " file(s) the scan matched? Nothing else on the card is touched, and "
             "this cannot be undone.')\">"
-            "<button type='submit' style='background:#b03030'>"
+            "<button type='submit' class='btn-danger'>"
             "&#128465; Delete Matched Files</button>"
             "</form>"
-            "<p style='font-size:.82em;color:#888;margin:.3em 0 1em'>"
+            "<p class='hint'>"
             "Re-walks the card and deletes only what it still recognises &mdash; it "
             "is handed no list, so nothing here can be pointed at map tiles, chat "
             "history or a backup. Reformatting the card is still the only thing "
@@ -5613,17 +5549,17 @@ static void sendConfigPage(const char *msg = "", bool lite = false) {
     // Peers are added and proved here rather than from a node's menu: a node
     // menu offering "claim admin over this stranger" invites unauthorized admin
     // packets across the mesh and the broker.
-    section(html, false, "Remote Admin", true);
+    section(html, false, "Remote Admin", "u-admin");
     html +=
-        "<p style='font-size:.82em;color:#888;margin:.1em 0 .8em'>"
+        "<p class='hint'>"
         "Administer another Meshtastic node over LoRa or MQTT. The remote must "
         "carry this node's public key in its <code>security.admin_key</code> &mdash; "
         "copy it from the chip at the top of this page. Favourite nodes are "
         "probed once per boot, so anything that accepts us turns up here on its "
         "own; <em>Verify</em> asks again."
-        "<br><span style='color:#8ef2b8;font-weight:700'>(C)</span> confirmed &mdash; "
+        "<br><span style='color:var(--good);font-weight:700'>(C)</span> confirmed &mdash; "
         "the remote answered and accepts us. "
-        "<span style='color:#ffd181;font-weight:700'>(U)</span> unconfirmed &mdash; "
+        "<span style='color:var(--warn);font-weight:700'>(U)</span> unconfirmed &mdash; "
         "listed but not yet proved.</p>";
 
     // Above the table rather than in it. Verify asks one peer that is already
@@ -5632,8 +5568,8 @@ static void sendConfigPage(const char *msg = "", bool lite = false) {
     html +=
         "<p style='margin:.1em 0 .9em'>"
         "<button type='button' onclick='adminRescan(this)'>Scan favourites</button> "
-        "<span id='admin-rescan-msg' style='font-size:.82em;color:#888'></span>"
-        "<br><span style='font-size:.78em;color:#888'>"
+        "<span id='admin-rescan-msg' class='hint'></span>"
+        "<br><span class='hint'>"
         "Asks every favourite node with a public key whether it accepts "
         "administration from this device, one every few seconds. Results appear "
         "in the table as they arrive &mdash; reload to see them. "
@@ -5721,7 +5657,7 @@ static void sendConfigPage(const char *msg = "", bool lite = false) {
         }
 
         if (shown == 0) {
-            html += "<p style='font-size:.82em;color:#888'>"
+            html += "<p class='hint'>"
                     "Nothing to administer yet. Favourite a node that carries this "
                     "device's public key and it will be probed on the next boot.</p>";
         } else {
@@ -5742,57 +5678,57 @@ static void sendConfigPage(const char *msg = "", bool lite = false) {
     // center tile per positioned node at every zoom from 13 through the chosen
     // detail ceiling, deduplicates overlaps, and uploads the original PNGs.
     if (stateMapStorageReady()) {
-        section(html, false, "Maps Download", false);
+        section(html, false, "Maps Download", "u-maps");
         html +=
-            "<p style='font-size:.82em;color:#888;margin:.1em 0 .6em'>"
+            "<p class='hint'>"
             "Downloads offline map tiles centered on every positioned node in the database. "
             "Zoom 13 is always included. Higher detail adds every tile needed for a "
             "node-centered Locate viewport at each zoom through the selected maximum. "
             "Offline gaps between those node areas are expected; Locate "
             "fills and saves missing viewport tiles whenever internet access is available.</p>";
         html +=
-            "<div id='mapdl-status' style='font-size:.82em;color:#888;margin:.2em 0 .6em'>"
+            "<div id='mapdl-status' class='hint'>"
             "Checking maps stored on the device&hellip;</div>";
         html +=
             "<div style='display:flex;align-items:center;gap:.45em;margin:.1em 0 .15em'>"
             "<div id='mapdl-progress-wrap' role='progressbar' aria-label='Map download progress' "
             "aria-valuemin='0' aria-valuemax='100' aria-valuenow='0' "
-            "style='flex:1 1 auto;height:10px;border:1px solid #2a6f97;border-radius:999px;background:#e6eef4;overflow:hidden;margin:0'>"
-            "<div id='mapdl-progress-bar' style='height:100%;width:0%;background:linear-gradient(90deg,#2a6f97,#4ea3d1);transition:width .2s ease'></div>"
+            "style='flex:1 1 auto;height:10px;border:1px solid var(--line);border-radius:999px;background:var(--panel-3);overflow:hidden;margin:0'>"
+            "<div id='mapdl-progress-bar' style='height:100%;width:0%;background:var(--accent);transition:width .2s ease'></div>"
             "</div>"
             "<button type='button' id='mapdl-stop' title='Stop current download' aria-label='Stop current download' disabled "
-            "style='min-width:30px;height:24px;line-height:1;padding:0 .45em;background:#c0392b;color:#fff;border:0;border-radius:4px;font-weight:700;opacity:.6;cursor:default'>X</button>"
+            "class='btn-danger' style='margin:0;min-width:30px;height:24px;padding:0 .5em;opacity:.6;cursor:default'>X</button>"
             "</div>"
-            "<div id='mapdl-progress-text' style='font-size:.78em;color:#68788a;margin:0 0 .5em'>0%</div>";
+            "<div id='mapdl-progress-text' style='font-size:.78em;color:var(--dim);margin:0 0 .5em'>0%</div>";
         html +=
             "<div style='display:flex;flex-direction:column;align-items:flex-start;gap:.45em'>"
-            "<label style='font-size:.82em;color:#888;display:flex;align-items:center;gap:.35em'>"
+            "<label style='font-size:.82em;color:var(--dim);display:flex;align-items:center;gap:.35em'>"
             "Detail"
             "<select id='mapdl-level' style='margin:0'>"
             "<option value='13'>Roads (zoom 13 only)</option>"
             "<option value='16' selected>Streets (zooms 13-16)</option>"
             "<option value='19'>Buildings (zooms 13-19)</option>"
             "</select></label>"
-            "<button type='button' id='mapdl-btn' style='background:#2a6f97' disabled>"
+            "<button type='button' id='mapdl-btn' class='btn' disabled>"
             "&#128506; Download offline tiles for known nodes</button></div>"
-            "<div id='mapdl-warn' style='font-size:.8em;color:#9a4f00;margin:.45em 0 .15em;font-weight:600'>"
+            "<div id='mapdl-warn' style='font-size:.8em;color:var(--warn);margin:.45em 0 .15em;font-weight:600'>"
             "Detailed plans can take a very long time. Buildings may require up to 42 tile "
             "downloads per positioned node before overlap is removed. Keep this page open "
             "and the device connected for the entire run.</div>";
         html +=
             "<details id='mapdl-debug-wrap' style='margin:.55em 0 .8em'>"
-            "<summary style='font-size:.82em;color:#68788a;cursor:pointer'>"
+            "<summary style='font-size:.82em;color:var(--dim);cursor:pointer'>"
             "Map download debug (<span id='mapdl-debug-count'>0</span>)</summary>"
             "<textarea id='mapdl-debug' readonly spellcheck='false' "
             "style='box-sizing:border-box;width:100%;height:170px;margin:.45em 0 .35em;"
             "font:11px/1.35 monospace;white-space:pre;resize:vertical'></textarea>"
             "<div style='display:flex;align-items:center;gap:.4em;flex-wrap:wrap'>"
-            "<button type='button' id='mapdl-debug-copy' style='margin:0;background:#355f9b'>Copy report</button>"
-            "<button type='button' id='mapdl-debug-clear' style='margin:0;background:#68788a'>Clear</button>"
-            "<span id='mapdl-debug-copy-status' style='font-size:.78em;color:#68788a'></span>"
+            "<button type='button' id='mapdl-debug-copy' class='btn-2' style='margin:0'>Copy report</button>"
+            "<button type='button' id='mapdl-debug-clear' class='btn-2' style='margin:0'>Clear</button>"
+            "<span id='mapdl-debug-copy-status' class='hint'></span>"
             "</div></details>";
         html +=
-            "<p style='font-size:.82em;color:#888;margin:.4em 0 1em'>"
+            "<p class='hint'>"
             "Downloading writes to the card over the same SPI bus the radio uses, "
             "so expect the mesh to miss traffic while it runs. Tiles are based on "
             "OpenStreetMap data.</p>";
@@ -5801,7 +5737,7 @@ static void sendConfigPage(const char *msg = "", bool lite = false) {
     }
 #endif
 
-    section(html, false, "Debug Output", false);
+    section(html, false, "Debug Output", "u-debug");
     html +=
         "<form method='POST' action='/set-debug-monitor'>"
         "<label style='display:flex;align-items:center;gap:.5em'>"
@@ -5809,16 +5745,16 @@ static void sendConfigPage(const char *msg = "", bool lite = false) {
     if (monitorDebugEnabled()) html += " checked";
     html +=
         "> Enable serial debug output in pio device monitor</label>"
-        "<button type='submit' style='margin-top:.45em;background:#355f9b'>Apply Debug Flag</button>"
+        "<button type='submit' class='btn'>Apply Debug Flag</button>"
         "</form>"
-        "<p style='font-size:.82em;color:#888;margin:.3em 0 1em'>"
+        "<p class='hint'>"
         "When disabled, debug logs are suppressed from serial monitor output.</p>";
     sectionEnd(html, false);
     sendChunk(html);
 
-    section(html, false, "Software Update", false);
+    section(html, false, "Software Update", "u-update");
     html +=
-        "<p style='font-size:.82em;color:#888;margin:.3em 0 1em'>Current firmware: <b>";
+        "<p class='hint'>Current firmware: <b>";
     html += APP_VERSION;
     html +=
         "</b></p>";
@@ -5830,11 +5766,10 @@ static void sendConfigPage(const char *msg = "", bool lite = false) {
     sectionEnd(html, false);
     sendChunk(html);
 
-    section(html, false, "Backup &amp; Restore", false);
+    section(html, false, "Backup &amp; Restore", "u-backup");
     html +=
         "<p><a href='/export'"
-        " style='display:inline-block;padding:.4em 1.2em;background:#2a9d8f;"
-        "color:#fff;border-radius:3px;text-decoration:none;font-size:.95em'>"
+        " class='btn'>"
         "&#11015; Export Config</a></p>"
         "<form method='POST' action='/import' enctype='multipart/form-data'"
         " onsubmit=\"return confirm('This will replace your settings with the "
@@ -5849,13 +5784,12 @@ static void sendConfigPage(const char *msg = "", bool lite = false) {
     sendChunk(html);
 
     if (gOnScreenshotPng) {
-        section(html, false, "Display Capture", false);
+        section(html, false, "Display Capture", "u-capture");
         html +=
             "<p><a href='/screenshot'"
-            " style='display:inline-block;padding:.4em 1.2em;background:#3b82f6;"
-            "color:#fff;border-radius:3px;text-decoration:none;font-size:.95em'>"
+            " class='btn'>"
             "&#128247; Capture &amp; Download PNG</a></p>"
-            "<p style='font-size:.82em;color:#888;margin:.3em 0 1em'>"
+            "<p class='hint'>"
             "Captures the current on-device screen and downloads it as a PNG file.</p>";
         sectionEnd(html, false);
         sendChunk(html);
@@ -5864,12 +5798,12 @@ static void sendConfigPage(const char *msg = "", bool lite = false) {
 #if HAS_UI_COLOR_OPTIONS
     // Above the Danger Zone rather than inside it: it changes nothing but which
     // palette entry each node draws in, and nothing about it needs a confirm.
-    section(html, false, "Chat Colors", false);
+    section(html, false, "Chat Colors", "u-colors");
     html +=
         "<form method='POST' action='/reset-chat-colors'>"
         "<button type='submit'>&#127912; Reset Chat Colors</button>"
         "</form>"
-        "<p style='font-size:.82em;color:#888;margin:.3em 0 1em'>"
+        "<p class='hint'>"
         "Each node's chat color comes from its node ID, so two nodes can end up "
         "sharing one. This re-rolls every assignment at once &mdash; press again "
         "for another arrangement. Messages are not touched.</p>";
@@ -5879,12 +5813,11 @@ static void sendConfigPage(const char *msg = "", bool lite = false) {
 
     // Directly above the Danger Zone, which is where Clear Messages lives:
     // someone reading that button is exactly the person who wants this first.
-    section(html, false, "Messages", false);
+    section(html, false, "Messages", "u-messages");
     html += "<p style='margin:.2em 0 1em'><a href='/messages.csv'"
-            " style='display:inline-block;padding:.4em 1.2em;background:#3b82f6;"
-            "color:#fff;border-radius:3px;text-decoration:none;font-size:.95em'>"
+            " class='btn'>"
             "&#11015; Export Messages (CSV)</a></p>"
-            "<p style='font-size:.82em;color:#888;margin:-.6em 0 1em'>"
+            "<p class='hint'>"
             "Downloads every channel message and direct message the device still "
             "holds, one row each, with the channel or peer, timestamp, sender and "
             "delivery state. Long messages are joined back into one row. The file "
@@ -5899,40 +5832,40 @@ static void sendConfigPage(const char *msg = "", bool lite = false) {
     // other group. Collapsed like the rest, which also puts a deliberate click
     // in front of Factory Reset.
     html +=
-        "<details><summary style='color:#c0392b'>Danger Zone</summary>"
+        "<details><summary class='danger-text'>Danger Zone</summary>"
         "<form method='POST' action='/reboot'"
         " onsubmit=\"return confirm('This will restart the device. Continue?')\">"
-        "<button type='submit' style='background:#c0392b'>"
+        "<button type='submit' class='btn-danger'>"
         "Reboot Device</button>"
         "</form>"
-        "<p style='font-size:.82em;color:#888;margin:.3em 0 .6em'>"
+        "<p class='hint'>"
         "Restarts the firmware. Nothing is erased and no settings change &mdash; "
         "messages, nodes and configuration are all kept. The device is "
         "unreachable for a few seconds while it comes back.</p>"
         "<form method='POST' action='/clear-messages'"
         " onsubmit=\"return confirm('This will clear all stored channel and DM messages. Continue?')\">"
-        "<button type='submit' style='background:#c0392b'>"
+        "<button type='submit' class='btn-danger'>"
         "Clear Messages</button>"
         "</form>"
-        "<p style='font-size:.82em;color:#888;margin:.3em 0 .6em'>"
+        "<p class='hint'>"
         "Clears saved and in-memory chat/DM history without resetting device configuration.</p>"
         "<form method='POST' action='/clear-nodes'"
         " onsubmit=\"return confirm('This will clear all discovered nodes EXCEPT favorites, "
         "then reboot. Continue?')\">"
-        "<button type='submit' style='background:#c0392b'>"
+        "<button type='submit' class='btn-danger'>"
         "Clear Nodes (Keep Favorites)</button>"
         "</form>"
-        "<p style='font-size:.82em;color:#888;margin:.3em 0 .6em'>"
+        "<p class='hint'>"
         "Drops every non-favorited node from the persisted database and reboots. "
         "Favorited nodes are kept, with their names, keys and positions.</p>"
         "<form method='POST' action='/clear-nodes'"
         " onsubmit=\"return confirm('This will clear all discovered nodes INCLUDING favorites, "
         "then reboot. Continue?')\">"
         "<input type='hidden' name='all' value='1'>"
-        "<button type='submit' style='background:#c0392b'>"
+        "<button type='submit' class='btn-danger'>"
         "Clear Nodes (All)</button>"
         "</form>"
-        "<p style='font-size:.82em;color:#888;margin:.3em 0 .6em'>"
+        "<p class='hint'>"
         "Clears the entire persisted node database &mdash; favorites included &mdash; "
         "and reboots.</p>";
 
@@ -5945,10 +5878,10 @@ static void sendConfigPage(const char *msg = "", bool lite = false) {
             "<form method='POST' action='/clear-maps'"
             " onsubmit=\"return confirm('This will delete every offline map tile and any legacy map files. "
             "Maps Download can rebuild node-centered coverage, and Locate will refill online gaps. Continue?')\">"
-            "<button type='submit' style='background:#c0392b'>"
+            "<button type='submit' class='btn-danger'>"
             "Clear Maps</button>"
             "</form>"
-            "<p style='font-size:.82em;color:#888;margin:.3em 0 .6em'>"
+            "<p class='hint'>"
             "Deletes offline slippy tiles plus obsolete state/detail map files. Nothing else on "
             "the card is touched, and no node or message data is affected. Maps Download rebuilds "
             "the selected node-centered coverage; online Locate use fills additional gaps.</p>";
@@ -5958,16 +5891,16 @@ static void sendConfigPage(const char *msg = "", bool lite = false) {
     html +=
         "<form method='POST' action='/factory-reset'"
         " onsubmit=\"return confirm('This will erase ALL settings and reboot the device. Continue?')\">"
-        "<button type='submit' style='background:#c0392b'>"
+        "<button type='submit' class='btn-danger'>"
         "Factory Reset</button>"
         "</form>"
-        "<p style='font-size:.82em;color:#888;margin:.3em 0 1em'>"
+        "<p class='hint'>"
         "Erases all NVS configuration (node identity, channels, keys) and reboots."
         " The device will behave as if freshly flashed.</p>"
         "</details>";
 
     html += "</div></div><div class='tab-panel' id='tab-live'>";
-    html += "<h3 style='margin-top:1.2em'>Live RX/TX</h3>"
+    html += "<h3>Live RX/TX</h3>"
             "<p class='gps-hint'>Streams the Announcements feed from the device, similar to the on-device ANN view.</p>"
             "<div class='live-wrap'>"
             "<div class='live-toolbar'>"
@@ -5976,7 +5909,7 @@ static void sendConfigPage(const char *msg = "", bool lite = false) {
             "</div>"
             "<div id='live-feed' class='live-feed'></div>"
             "</div>"
-            "<h3 style='margin-top:1.2em'>Live Charts</h3>"
+            "<h3>Live Charts</h3>"
             "<p class='gps-hint'>Same data shown on-device under Live &rarr; Tools. Last 60 samples, newest on the right.</p>"
             "<div class='chart-wrap'>"
               "<div class='chart-box'>"
@@ -6004,7 +5937,7 @@ static void sendConfigPage(const char *msg = "", bool lite = false) {
     // nothing, and dropping it trims the page and the polling load.
 #if !defined(DEVICE_CARDPUTER_LORA_HAT)
     html += "</div><div class='tab-panel' id='tab-chat'>";
-    html += "<h3 style='margin-top:1.2em'>Chat</h3>";
+    html += "<h3>Chat</h3>";
     html += "<label style='display:inline-flex;align-items:center;gap:.4em;margin:.2em 0'>"
             "<input type='checkbox' id='chat-live' checked onchange='chatLiveToggle()' style='width:auto'>"
             " Live updates</label>";
@@ -6028,7 +5961,7 @@ static void sendConfigPage(const char *msg = "", bool lite = false) {
     html += "</div>";  // #chat-body
 #endif
     html += "</div><div class='tab-panel' id='tab-map'>";
-    html += "<h3 style='margin-top:1.2em'>Node Heatmap</h3>";
+    html += "<h3>Node Heatmap</h3>";
     html += "<p class='gps-hint'>Positioned nodes: ";
     snprintf(tmp, sizeof(tmp), "%d", mapPointCount);
     html += tmp;
@@ -6047,7 +5980,7 @@ static void sendConfigPage(const char *msg = "", bool lite = false) {
             "<div id='node-heatmap' class='map-canvas'></div>"
             "<div class='map-legend'><span>Drag to pan, scroll/pinch to zoom</span><span id='map-status'></span></div>"
             "</div>";
-    html += "<h3 style='margin-top:1em'>Nodes Seen</h3>";
+    html += "<h3>Nodes Seen</h3>";
     if (totalNodes > 0) {
         html += "<p class='gps-hint'>Select a node to see its details and location.</p>";
         html += "<select id='node-select' onchange='selectNode()'>";
@@ -6709,7 +6642,7 @@ static void sendConfigPage(const char *msg = "", bool lite = false) {
 #if HAS_VNC_HOST
         const String vncIp = WiFi.localIP().toString();
         html += "<div class='tab-panel' id='tab-remote'><div class='tab-pane-center'>"
-            "<h3 style='margin-top:1.2em'>Remote</h3>"
+            "<h3>Remote</h3>"
             "<label class='remote-toggle'><input type='checkbox' id='remote-enabled' onchange='remoteToggle()'";
         if (vncHostEnabled()) html += " checked";
         html += "><span>Enable VNC host</span></label>"
@@ -6734,6 +6667,47 @@ static void sendConfigPage(const char *msg = "", bool lite = false) {
             html += "</div>";
         }
 #endif
+        // Close the frame, then the phone tab bar, the two sheets and the save
+        // bar, all fixed to the viewport, then the shell script they use.
+        html += "</main></div>"
+                "<nav class='tabbar' aria-label='Pages'>"
+                "<a data-tab='config' href='#config' class='active'><svg viewBox='0 0 24 24'>"
+                "<circle cx='12' cy='12' r='3'/><path d='M12 2v3M12 19v3M2 12h3M19 12h3M4.9 4.9l2.1 2.1"
+                "M17 17l2.1 2.1M4.9 19.1L7 17M17 7l2.1-2.1'/></svg>Config</a>"
+                "<a data-tab='live' href='#live'><svg viewBox='0 0 24 24'><path d='M3 12h4l3-7 4 14 3-7h4'/>"
+                "</svg>Live</a>"
+#if !defined(DEVICE_CARDPUTER_LORA_HAT)
+                "<a data-tab='chat' href='#chat'><svg viewBox='0 0 24 24'><path d='M4 5h16v11H9l-5 4z'/>"
+                "</svg>Chat</a>"
+#endif
+                "<a data-tab='map' href='#map'><svg viewBox='0 0 24 24'><circle cx='12' cy='12' r='8'/>"
+                "<circle cx='12' cy='12' r='2'/></svg>Nodes</a>"
+                "<button type='button' onclick=\"appOpenSheet('sheet-more')\"><svg viewBox='0 0 24 24'>"
+                "<circle cx='5' cy='12' r='1.5'/><circle cx='12' cy='12' r='1.5'/><circle cx='19' cy='12' r='1.5'/>"
+                "</svg>More</button></nav>"
+                "<div class='scrim' id='scrim'></div>"
+                "<div class='sheet' id='sheet-secs'></div>"
+                "<div class='sheet' id='sheet-more'><a data-tab='utils' href='#utils'>Utilities</a>";
+#if HAS_VNC_HOST
+        html += "<a data-tab='remote' href='#remote'>Remote</a>";
+#endif
+#if HAS_WEB_FILES
+        if (gCfg && cfgWebFilesEnabled(*gCfg)) html += "<a data-tab='files' href='#files'>Files</a>";
+#endif
+        // The header's key chip does not fit a phone's header, and Remote Admin
+        // setup sends people to it, so the key is one tap away here instead.
+        if (havePubKey)
+            html += "<a href='#' data-copykey onclick=\"copyPubKey(document.getElementById('pubkey-chip'));"
+                    "this.textContent='Public key copied';return false\">Copy public key</a>";
+        if (gCfg && gCfg->webCfgAuthEnabled) html += "<a href='/logout'>Logout</a>";
+        html += "</div>"
+                "<div class='savebar' id='savebar'><span id='save-count'></span>"
+                "<button type='button' class='btn-2' id='save-discard'>Discard</button>"
+                "<button type='submit' form='cfg-form' class='btn'>Save and restart</button></div>"
+                "<script>";
+        sendChunk(html);
+        sendFlash(kAppJs);
+        html += "</script>";
 #if HAS_ADMIN_TERMINAL
         // Body level, outside every panel -- see kAdminModal.
         sendChunk(html);
@@ -7725,41 +7699,22 @@ static void sendConfigPage(const char *msg = "", bool lite = false) {
                             "document.body.removeChild(ta);"
                             "if(okc){done();}else{window.prompt('Public key (copy with Ctrl/Cmd+C):',text);}"
                         "}"
+                        // appTab() (kAppJs) marks the pane and every nav that
+                        // points at it; this adds what each tab starts or stops.
                         "function switchTab(tab){"
-                            "var isCfg=(tab==='config');"
-                            "var isUtil=(tab==='utils');"
+                            "if(!document.getElementById('tab-'+tab))tab='config';"
+                            "appTab(tab);"
                             "var isLive=(tab==='live');"
                             "var isMap=(tab==='map');"
-                            "document.getElementById('tab-config').classList.toggle('active',isCfg);"
-                            "document.getElementById('tab-utils').classList.toggle('active',isUtil);"
-                            "document.getElementById('tab-live').classList.toggle('active',isLive);"
-                            "document.getElementById('tab-map').classList.toggle('active',isMap);"
-                            "document.getElementById('tab-btn-config').classList.toggle('active',isCfg);"
-                            "document.getElementById('tab-btn-utils').classList.toggle('active',isUtil);"
-                            "document.getElementById('tab-btn-live').classList.toggle('active',isLive);"
-                            "document.getElementById('tab-btn-map').classList.toggle('active',isMap);"
                             "if(isLive)startLivePolling();else stopLivePolling();"
 #if HAS_VNC_HOST
-                            "var isRemote=(tab==='remote');"
-                            "document.getElementById('tab-remote').classList.toggle('active',isRemote);"
-                            "document.getElementById('tab-btn-remote').classList.toggle('active',isRemote);"
-                            "if(isRemote)startRemotePolling();else stopRemotePolling();"
+                            "if(tab==='remote')startRemotePolling();else stopRemotePolling();"
 #endif
 #if HAS_WEB_FILES
-                            // Only present while the device has the tab on.
-                            "var fp=document.getElementById('tab-files');"
-                            "if(fp){"
-                                "var isFiles=(tab==='files');"
-                                "fp.classList.toggle('active',isFiles);"
-                                "document.getElementById('tab-btn-files').classList.toggle('active',isFiles);"
-                                "if(isFiles)filesOpen();"
-                            "}"
+                            "if(tab==='files')filesOpen();"
 #endif
 #if !defined(DEVICE_CARDPUTER_LORA_HAT)
-                            "var isChat=(tab==='chat');"
-                            "document.getElementById('tab-chat').classList.toggle('active',isChat);"
-                            "document.getElementById('tab-btn-chat').classList.toggle('active',isChat);"
-                            "if(isChat)startChatPolling();else stopChatPolling();"
+                            "if(tab==='chat')startChatPolling();else stopChatPolling();"
 #endif
                             "if(isMap){"
                                 "ensureNodeMap();"
@@ -7891,9 +7846,9 @@ static void handlePostOnboard() {
 // ── Route handlers ────────────────────────────────────────────
 
 static void handleGetRoot() {
-    // Both radio modes serve a config page from "/": the full one in STA, web
-    // config lite in AP.
-    Serial.printf("[web] GET / (%s)\n", gApMode ? "lite" : "full");
+    // Both radio modes serve a config page from "/": the full one, or web
+    // config lite in AP mode on a board without the heap for it.
+    Serial.printf("[web] GET / (%s%s)\n", webCfgUseLite() ? "lite" : "full", gApMode ? ", AP" : "");
     handleGetConfig();
 }
 
@@ -10054,6 +10009,17 @@ static void handleImportDone() {
     }
 }
 
+// The full page's stylesheet. Cached for a year: the page links it as
+// /app.css?v=<hash of its bytes>, so any change is a new URL. No login, like the
+// favicon: it is the same bytes for everyone and the login page uses it.
+static void handleGetAppCss() {
+    server.sendHeader("Cache-Control", "public, max-age=31536000, immutable");
+    server.setContentLength(CONTENT_LENGTH_UNKNOWN);
+    server.send(200, "text/css", "");
+    sendFlash(kAppCss);
+    server.sendContent("");
+}
+
 static void handleGetFavicon() {
     // Cached hard: it is a fixed asset on a device whose whole job is to answer
     // a handful of requests without stalling, and re-serving it on every page
@@ -10741,6 +10707,7 @@ static void registerCommonRoutes() {
     onRoute("/chart-data",        HTTP_GET,  handleGetChartData);
     onRoute("/logout",            HTTP_GET,  handleGetLogout);
     onRoute("/favicon.ico",       HTTP_GET,  handleGetFavicon);
+    onRoute("/app.css",           HTTP_GET,  handleGetAppCss);
     onRoute("/announce",          HTTP_POST, handlePostAnnounce);
     onRoute("/telemetry",         HTTP_POST, handlePostTelemetry);
     onRoute("/cs-check",          HTTP_POST, handlePostChatServerCheck);
@@ -10894,7 +10861,7 @@ bool webCfgBegin(RhinoConfig *cfg, WebCfgSaveCb onSave,
 
     auto startApMode = [&](const char *modeTag, bool onboarding) {
         gOnboarding = onboarding;
-        gApMode     = true;   // "/" serves web config lite for this session
+        gApMode     = true;   // "/" serves lite here unless the board has PSRAM
         WiFi.disconnect(false);
         if (!ensureWifiMode(WIFI_AP, modeTag)) return false;
         delay(120);
@@ -10924,8 +10891,16 @@ bool webCfgBegin(RhinoConfig *cfg, WebCfgSaveCb onSave,
         IPAddress apIP = WiFi.softAPIP();
         apIP.toString().toCharArray(ipBuf, sizeof(ipBuf));
 
-        // Both AP paths serve web config lite; the full page is STA-only.
-        registerLiteRoutes();
+        // Both AP paths serve web config lite, except on boards with the heap
+        // for the full page; those also keep the quick WiFi setup form, which
+        // is how a device on its own AP gets onto a network.
+        if (webCfgUseLite()) {
+            registerLiteRoutes();
+        } else {
+            registerCommonRoutes();
+            onRoute("/setup",   HTTP_GET,  handleGetOnboard);
+            onRoute("/onboard", HTTP_POST, handlePostOnboard);
+        }
         // No delay(1) inside handleClient() when no client is waiting.
         // WebServer takes that delay on every single call, which — with
         // webCfgLoop() running once per main-loop pass — is a full FreeRTOS
