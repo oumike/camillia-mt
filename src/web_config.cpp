@@ -85,10 +85,10 @@ static uint32_t       gIdleTimeoutMs   = 0;     // 0 = never expire
 // fall back to the SoftAP; see fallBackToAp in webCfgBegin().
 static bool           gStartDeferred   = false;
 static bool           gIdleExpired     = false;
-// True while the server is serving the SoftAP variant ("web config lite"): the
-// Config tab only, no Utilities/Live/Chat/Nodes. AP mode has far less internal
-// heap to work with than STA, and the heavy tabs are what tip it over. This is
-// the page weight follows the radio mode.
+// True while the server is hosting its own SoftAP. On boards without PSRAM that
+// means web config lite (Config tab only): AP mode leaves them far less
+// internal heap than STA, and the heavy tabs are what tip it over. Boards with
+// PSRAM serve the full page here too; see apHasRoomForFullPage().
 static bool           gApMode          = false;
 // Set from the on-device WiFi picker's "AP" entry: start the SoftAP even when
 // credentials are saved, instead of joining the network.
@@ -115,7 +115,21 @@ static const bool     kLiteOnlyBoard   = false;
 #endif
 
 // True when the current response should be the lite page.
-static inline bool webCfgUseLite() { return gApMode || kLiteOnlyBoard; }
+// Whether AP mode can carry the full page. Measured on the T-Deck Plus with
+// every tab open: internal heap never fell below 65 KB free, largest block
+// 65.5 KB, where lite was sized for ~20 KB free and a 13 KB block. Boards
+// without PSRAM keep their chat buffers in that same internal heap (they free
+// them to start Wi-Fi at all), so they stay on lite.
+static bool apHasRoomForFullPage() {
+#if defined(BOARD_HAS_PSRAM)
+    return ESP.getPsramSize() > 0;
+#else
+    return false;
+#endif
+}
+static inline bool webCfgUseLite() {
+    return kLiteOnlyBoard || (gApMode && !apHasRoomForFullPage());
+}
 static char           ipBuf[16]        = "";
 static char           sessionToken[17] = "";   // hex token; empty = no session
 static RhinoConfig   *gCfg             = nullptr;
@@ -3806,6 +3820,13 @@ static void sendConfigPage(const char *msg = "", bool lite = false) {
 #endif
         html += "</nav><main class='app-main'>";
         if (msg[0]) { html += "<p class='notice'>"; appendAttr(html, msg); html += "</p>"; }
+        // The full page on the device's own AP: the browser has no internet, so
+        // say what that leaves out before someone wonders why the map is grey.
+        if (gApMode) {
+            html += "<p class='notice'>Connected to this device's own network. The node "
+                    "map, map downloads and update checks need the device on your WiFi. "
+                    "<a href='/setup'>Quick WiFi setup</a></p>";
+        }
         if (gWebBuffersReclaimed) {
             html += "<p class='notice-err'>";
             html += kChatPaused;
@@ -7825,9 +7846,9 @@ static void handlePostOnboard() {
 // ── Route handlers ────────────────────────────────────────────
 
 static void handleGetRoot() {
-    // Both radio modes serve a config page from "/": the full one in STA, web
-    // config lite in AP.
-    Serial.printf("[web] GET / (%s)\n", gApMode ? "lite" : "full");
+    // Both radio modes serve a config page from "/": the full one, or web
+    // config lite in AP mode on a board without the heap for it.
+    Serial.printf("[web] GET / (%s%s)\n", webCfgUseLite() ? "lite" : "full", gApMode ? ", AP" : "");
     handleGetConfig();
 }
 
@@ -10840,7 +10861,7 @@ bool webCfgBegin(RhinoConfig *cfg, WebCfgSaveCb onSave,
 
     auto startApMode = [&](const char *modeTag, bool onboarding) {
         gOnboarding = onboarding;
-        gApMode     = true;   // "/" serves web config lite for this session
+        gApMode     = true;   // "/" serves lite here unless the board has PSRAM
         WiFi.disconnect(false);
         if (!ensureWifiMode(WIFI_AP, modeTag)) return false;
         delay(120);
@@ -10870,8 +10891,16 @@ bool webCfgBegin(RhinoConfig *cfg, WebCfgSaveCb onSave,
         IPAddress apIP = WiFi.softAPIP();
         apIP.toString().toCharArray(ipBuf, sizeof(ipBuf));
 
-        // Both AP paths serve web config lite; the full page is STA-only.
-        registerLiteRoutes();
+        // Both AP paths serve web config lite, except on boards with the heap
+        // for the full page; those also keep the quick WiFi setup form, which
+        // is how a device on its own AP gets onto a network.
+        if (webCfgUseLite()) {
+            registerLiteRoutes();
+        } else {
+            registerCommonRoutes();
+            onRoute("/setup",   HTTP_GET,  handleGetOnboard);
+            onRoute("/onboard", HTTP_POST, handlePostOnboard);
+        }
         // No delay(1) inside handleClient() when no client is waiting.
         // WebServer takes that delay on every single call, which — with
         // webCfgLoop() running once per main-loop pass — is a full FreeRTOS
