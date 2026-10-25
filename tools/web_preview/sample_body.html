@@ -16,6 +16,8 @@
 <section class='cfg-sec' id='sec-device'><h2>Device</h2><p class='sec-desc'>Role, rebroadcasting and clock.</p>
 <div class='row2'><label>Role<select name='role'><option value='0' selected>CLIENT</option><option value='1'>CLIENT_MUTE</option></select></label><label>Rebroadcast<select name='rebroadcast'><option>ALL</option><option>LOCAL_ONLY</option></select></label></div>
 <label>Brightness<input name='brightness' type='range' min='0' max='255' value='180'></label>
+<input type='hidden' name='ui_theme_preset' id='themeInput' value='0'><button type='button' class='btn-2' id='pick-theme' onclick="document.getElementById('themeInput').value='3'">Pick theme 3 (preview test)</button>
+<div class='tb-back'><input type='radio' name='tbMode' value='0' checked><input type='radio' name='tbMode' value='1' id='tb-light'></div>
 </section>
 <section class='cfg-sec' id='sec-lora'><h2>LoRa Radio</h2><p class='sec-desc'>Must match the other nodes you want to hear.</p>
 <div class='row2'><label>Region<select name='region' id='sel-rgn'><option value='EU_868'>EU_868</option><option value='US'>US</option></select></label><label>Modem Preset<select id='sel-pst' name='modem_preset'><option>LongFast</option><option>MediumFast</option></select></label></div>

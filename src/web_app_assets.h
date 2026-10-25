@@ -269,4 +269,143 @@ button,.btn,.tabbar a{min-height:40px}
 )CSS";
 
 static const char kAppJs[] = R"JS(
+(function(){
+var W=window,D=document;
+function all(s,r){return Array.prototype.slice.call((r||D).querySelectorAll(s));}
+function byId(i){return D.getElementById(i);}
+function ss(v){try{if(v===undefined)return sessionStorage.getItem('wcLoc');
+if(v===null)sessionStorage.removeItem('wcLoc');else sessionStorage.setItem('wcLoc',v);}catch(e){}return null;}
+function setHash(h){if(location.hash!==h){try{history.replaceState(null,'',h);}catch(e){}}}
+var calm=W.matchMedia&&W.matchMedia('(prefers-reduced-motion: reduce)').matches;
+
+/* Tabs: the rail, the phone tab bar and the More sheet all carry data-tab. */
+W.appTab=function(tab){
+if(!byId('tab-'+tab))tab='config';
+D.body.setAttribute('data-tab',tab);
+all('a[data-tab],button[data-tab]').forEach(function(e){
+var on=e.getAttribute('data-tab')===tab;e.classList.toggle('active',on);
+if(on)e.setAttribute('aria-current','page');else e.removeAttribute('aria-current');});
+all('.tab-panel').forEach(function(p){p.classList.toggle('active',p.id==='tab-'+tab);});
+if(tab!=='config'||location.hash.indexOf('#config')!==0)setHash('#'+tab);
+};
+function go(tab){if(typeof W.switchTab==='function')W.switchTab(tab);else W.appTab(tab);}
+
+/* Sheets */
+W.appOpenSheet=function(id){var s=byId(id);if(!s)return;W.appCloseSheets();
+s.classList.add('open');var c=byId('scrim');if(c)c.classList.add('open');};
+W.appCloseSheets=function(){all('.sheet.open,.scrim.open').forEach(function(e){e.classList.remove('open');});};
+
+/* Section nav, built from the Config pane's sections. */
+function cfgSecs(){return all('#tab-config .cfg-sec');}
+function slugOf(sec){return sec.id.replace(/^sec-/,'');}
+W.appBuildSectionNav=function(){
+['rail-secs','sheet-secs'].forEach(function(id){var box=byId(id);if(!box)return;box.textContent='';
+cfgSecs().forEach(function(sec){var h=sec.querySelector('h2');var a=D.createElement('a');
+a.className='sec-link';a.href='#config/'+slugOf(sec);a.setAttribute('data-sec',slugOf(sec));
+a.textContent=h?h.textContent:slugOf(sec);box.appendChild(a);});});
+};
+function markHere(slug){
+all('.sec-link').forEach(function(a){a.classList.toggle('here',a.getAttribute('data-sec')===slug);});
+var sec=byId('sec-'+slug),cur=byId('sec-current'),h=sec&&sec.querySelector('h2');
+if(cur&&h)cur.textContent=h.textContent;
+}
+function showSec(slug,smooth){
+var sec=byId('sec-'+slug);if(!sec)return;
+if(D.body.getAttribute('data-tab')!=='config')go('config');
+sec.scrollIntoView({behavior:smooth&&!calm?'smooth':'auto',block:'start'});
+markHere(slug);setHash('#config/'+slug);
+}
+function spy(){
+if(!('IntersectionObserver' in W))return;
+var io=new IntersectionObserver(function(es){
+if(D.body.getAttribute('data-tab')!=='config')return;
+es.forEach(function(e){if(e.isIntersecting){var s=slugOf(e.target);markHere(s);setHash('#config/'+s);}});
+},{rootMargin:'0px 0px -70% 0px'});
+cfgSecs().forEach(function(s){io.observe(s);});
+}
+D.addEventListener('click',function(e){
+var a=e.target.closest&&e.target.closest('a.sec-link,a[data-tab]');
+if(!a)return;
+e.preventDefault();W.appCloseSheets();
+if(a.classList.contains('sec-link'))showSec(a.getAttribute('data-sec'),true);
+else{go(a.getAttribute('data-tab'));W.scrollTo(0,0);}
+});
+D.addEventListener('keydown',function(e){if(e.key==='Escape')W.appCloseSheets();});
+
+/* Where you were: the hash, or what the form stored before a save reloaded
+   the page at /. */
+W.appRestoreLocation=function(){
+var loc=ss()||location.hash||'';ss(null);
+var m=/^#([a-z]+)(?:\/([a-z0-9-]+))?/.exec(loc);
+if(!m){W.appTab('config');return;}
+go(m[1]);
+if(m[1]==='config'&&m[2])setTimeout(function(){showSec(m[2],false);},0);
+};
+
+/* Unsaved changes. Every named control in the save form is compared with its
+   value when the page finished loading. Hidden inputs count: the theme, font
+   and blink pickers keep their choice in one. The theme builder (.tb-back)
+   sits inside the form but is never saved with it. */
+var F=null,count=0;
+function tracked(el){
+if(!el.name||el.closest('.tb-back'))return false;
+var t=(el.type||'').toLowerCase();
+return t!=='file'&&t!=='submit'&&t!=='button'&&t!=='reset'&&t!=='image';
+}
+function snap(el){
+var t=(el.type||'').toLowerCase();
+if(t==='checkbox'||t==='radio')return el.checked?'1':'0';
+if(el.tagName==='SELECT')return String(el.selectedIndex);
+return el.value;
+}
+function defSnap(el){
+var t=(el.type||'').toLowerCase();
+if(t==='checkbox'||t==='radio')return el.defaultChecked?'1':'0';
+if(el.tagName==='SELECT'){for(var i=0;i<el.options.length;i++)if(el.options[i].defaultSelected)return String(i);return '0';}
+return el.defaultValue;
+}
+function controls(){return F?Array.prototype.filter.call(F.elements,tracked):[];}
+function recount(){
+if(!F)return;
+var dirty={};count=0;
+controls().forEach(function(el){
+if(el._wcBase===undefined)el._wcBase=defSnap(el);
+var ch=snap(el)!==el._wcBase;
+if(el.type!=='hidden')el.classList.toggle('changed',ch);
+if(ch){count++;var s=el.closest('.cfg-sec');if(s)dirty[slugOf(s)]=1;}
+});
+all('.sec-link').forEach(function(a){a.classList.toggle('dirty',!!dirty[a.getAttribute('data-sec')]);});
+var bar=byId('savebar'),n=byId('save-count');
+if(n)n.textContent=count===1?'1 unsaved change':count+' unsaved changes';
+if(bar)bar.classList.toggle('show',count>0);
+}
+W.appRebaseline=function(){controls().forEach(function(el){el._wcBase=snap(el);});recount();};
+W.appTrackForm=function(f){
+F=f;if(!F)return;
+W.appRebaseline();
+F.addEventListener('input',recount);F.addEventListener('change',recount);
+F.addEventListener('submit',function(e){if(e.defaultPrevented)return;count=0;ss(location.hash||'#config');});
+var d=byId('save-discard');
+if(d)d.addEventListener('click',function(){
+controls().forEach(function(el){if(snap(el)===el._wcBase)return;
+var t=(el.type||'').toLowerCase();
+if(t==='checkbox'||t==='radio')el.checked=el._wcBase==='1';
+else if(el.tagName==='SELECT')el.selectedIndex=+el._wcBase;
+else el.value=el._wcBase;
+el.dispatchEvent(new Event('change',{bubbles:true}));});
+recount();});
+D.addEventListener('click',function(){setTimeout(recount,0);});
+};
+W.addEventListener('beforeunload',function(e){if(count>0){e.preventDefault();e.returnValue='';}});
+
+D.addEventListener('DOMContentLoaded',function(){
+var c=byId('scrim');if(c)c.addEventListener('click',W.appCloseSheets);
+W.appBuildSectionNav();
+W.appRestoreLocation();
+spy();
+// One tick later, after the page's own DOMContentLoaded handlers have set
+// the values they fill in by script (region, preset, channel fields).
+setTimeout(function(){W.appTrackForm(byId('cfg-form'));},0);
+});
+})();
 )JS";
