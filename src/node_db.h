@@ -264,8 +264,8 @@ extern NodeDB Nodes;
 
 // ── Evicted-node archive (FIFO to SD) ────────────────────────────────────────
 // The node table is a fixed MAX_NODES ring: once full, upsert() evicts the
-// least-recently-heard entry to make room for a newly heard node (favorites and
-// named nodes sort ahead of recency, so they are evicted last). Rather than
+// least-recently-heard non-favorite to make room for a newly heard node (named
+// or not: a name earns a node its place in the list, not in the table). Rather than
 // losing that node, its full record is copied into a small RAM queue here and
 // appended to a CSV on the SD card.
 //

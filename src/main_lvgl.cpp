@@ -19357,6 +19357,16 @@ static constexpr uint32_t kBeaconsDimColor   = 0xA7C7FF;
 // aged out and came back should not be invisible to us for half a day.
 static constexpr uint32_t kNodeInfoReplyThrottleMs = 3600000UL;
 
+// Asking an unnamed node for its NodeInfo (maybeRequestUnknownNodeInfo()), as
+// Meshtastic does on hearing a node it has no user for (MeshService.cpp, "Heard
+// new node"). Unlike upstream it is bounded three ways, because every request is
+// a unicast flood and a busy mesh has many unnamed senders: per node, across all
+// nodes, and by distance and channel load.
+static constexpr uint32_t kAutoNodeInfoPerNodeMs = 1800000UL;   // 30 min
+static constexpr uint32_t kAutoNodeInfoGapMs     = 30000UL;     // any node
+static constexpr uint8_t  kAutoNodeInfoMaxHops   = 3;
+static constexpr float    kAutoNodeInfoMaxChUtil = 25.0f;       // Meshtastic's polite threshold
+
 #if FEATURE_DISCOVERY
 // One sweep per minute. Meshtastic's floor for an interactive, user-triggered
 // NodeInfo request (NodeInfoModule.cpp:168-172, the shorterTimeout path).
@@ -54102,6 +54112,38 @@ static const char *liveDestTag(uint32_t toNode) {
     return "U";
 }
 
+// Send our NodeInfo with want_response to a node we have heard but have no name
+// for, so it stops showing as !xxxxxxxx. Only for a packet our own keys opened
+// over RF from a node within kAutoNodeInfoMaxHops: an MQTT sighting may be a
+// continent away, and a sender with no hop_start gives no bound on the flood.
+static void maybeRequestUnknownNodeInfo(const MeshPacket &pkt) {
+    static uint32_t sLastAutoReqMs = 0;
+    if (!pkt.decrypted || (pkt.hdr.flags & 0x10)) return;
+    // A NodeInfo carries the name itself; an S&F replay is not its author on air.
+    if (pkt.portnum == NODEINFO_APP || pkt.portnum == STORE_FORWARD_APP) return;
+    const uint32_t from = pkt.hdr.from;
+    if (from == 0 || from == 0xFFFFFFFF || from == s_myNodeId || s_myNodeId == 0) return;
+
+    NodeEntry *e = Nodes.find(from);
+    if (!e || e->hasName) return;
+    if (!e->hasHops || e->hops > kAutoNodeInfoMaxHops) return;
+
+    const uint32_t now = millis();
+    if (e->lastSentInfoMs != 0 && (uint32_t)(now - e->lastSentInfoMs) < kAutoNodeInfoPerNodeMs) return;
+    if (sLastAutoReqMs != 0 && (uint32_t)(now - sLastAutoReqMs) < kAutoNodeInfoGapMs) return;
+    if (!Radio.isReady() || announceHeldForOnboarding() || discoveryRadioParked()) return;
+    if (Radio.channelUtilPercent() >= kAutoNodeInfoMaxChUtil) return;
+
+    // Stamped before sending, success or not: a failing send must not be
+    // retried on every packet the node sends.
+    sLastAutoReqMs = now;
+    e->lastSentInfoMs = now;
+    const bool ok = Channels.sendNodeInfo(s_myNodeId, s_cfg.nodeLong, s_cfg.nodeShort,
+                                          from, /*wantResponse=*/true, s_cfg.okToMqtt);
+    debugLogMessages("[nodedb] !%08X unnamed (%u hops) - NodeInfo request %s\n",
+                     (unsigned)from, (unsigned)e->hops, ok ? "sent" : "FAILED");
+}
+
 static void appendLiveRxSummary(const MeshPacket &pkt, int chanIdx, const char *portTag) {
     char timePrefix[12];
     char who[20];
@@ -55800,6 +55842,7 @@ static bool processMeshPacket(const MeshPacket &rxPkt) {
     }
     // After the update above, which creates the entry for a first contact.
     if (sig.markSigner) Nodes.markSigner(pkt.hdr.from);
+    maybeRequestUnknownNodeInfo(pkt);
 
     // Live SNR/RSSI sparkline samples (one per received packet).
     chartPushSample(s_snrHist, pkt.snr);
