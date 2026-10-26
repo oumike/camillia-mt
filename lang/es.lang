@@ -93,6 +93,8 @@
 (nothing)	(nada)
 (unknown)	(desconocido)
 (unnamed)	(sin nombre)
+, SD archive NOT cleared (no card)	, archivo SD NO borrado (sin tarjeta)
+, SD archive cleared	, archivo SD borrado
 , gusts %d	, ráfagas %d
 1 hour	1 hora
 12-hour	12 horas
@@ -120,6 +122,7 @@ Admin	Admin
 All	Todo
 All live traffic will be erased	Se borrará todo el tráfico en vivo
 All live traffic will be erased, including lines hidden by the filter	Se borrará todo el tráfico en vivo, incluidas las líneas ocultas por el filtro
+All nodes cleared%s - rebooting...	Todos los nodos borrados%s - reiniciando...
 Already %s.	Ya está en %s.
 Already on that preset	Ya estás en ese preajuste
 Analyzing terrain...	Analizando el terreno...
@@ -220,11 +223,14 @@ Choose WiFi: (none)	Elegir WiFi: (ninguno)
 Classic	Clásico
 Clear	Borrar
 Clear Messages	Borrar mensajes
+Clear Nodes	Borrar nodos
 Clear Nodes (All)	Borrar nodos (todos)
 Clear Nodes (Keep Favorites)	Borrar nodos (mantener favoritos)
 Clear by %dm at tightest	Despejado por %dm en el punto más justo
 Clear entire live feed?	¿Borrar todo el feed en vivo?
+Clear nodes and reboot?	¿Borrar nodos y reiniciar?
 Cleared %d nodes, kept %d favorites - rebooting...	%d nodos borrados, %d favoritos conservados - reiniciando...
+Cleared %d nodes, kept %d favorites%s - rebooting...	%d nodos borrados, %d favoritos conservados%s - reiniciando...
 Cleared (%d report(s)) - rebuilding from traffic	Borrado (%d informe(s)): reconstruyendo con el tráfico
 Clock Format: %s	Formato de hora: %s
 Clock set from web config	Hora ajustada desde la configuración web
@@ -359,6 +365,10 @@ Import Config	Importar configuración
 Import FAILED (no file?)	Importación FALLIDA (¿no hay archivo?)
 Import failed - enter a name	Falló la importación - escribe un nombre
 Imported OK - rebooting...	Importado correctamente - reiniciando...
+Include (A)rchived (SD card)	Incluir archivados (A) (SD)
+Include (F)avorites	Incluir favoritos (F)
+Include archived (SD card)	Incluir archivados (tarjeta SD)
+Include favorites	Incluir favoritos
 Indigo	Índigo
 Info	Info
 Install now? The device reboots to update.	¿Instalar ahora? El dispositivo se reinicia para actualizar.

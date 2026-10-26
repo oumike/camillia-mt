@@ -5849,25 +5849,27 @@ static void sendConfigPage(const char *msg = "", bool lite = false) {
         "</form>"
         "<p class='hint'>"
         "Clears saved and in-memory chat/DM history without resetting device configuration.</p>"
+        // One form, as on the device: the two boxes widen the clear, and
+        // the confirm names what the ticked ones add.
         "<form method='POST' action='/clear-nodes'"
-        " onsubmit=\"return confirm('This will clear all discovered nodes EXCEPT favorites, "
-        "then reboot. Continue?')\">"
+        " onsubmit=\"var f=this.favorites.checked,a=this.archive&&this.archive.checked;"
+        "return confirm('This will clear all discovered nodes'+(f?' INCLUDING favorites':"
+        "' except favorites')+(a?' and every archived node on the SD card':'')+"
+        "', then reboot. Continue?')\">"
+        "<label><input type='checkbox' name='favorites' value='1'> Include favorites</label>";
+    if (nodeArchiveSlotExists()) {
+        html += "<label><input type='checkbox' name='archive' value='1'>"
+                " Include archived nodes (SD card)</label>";
+    }
+    html +=
         "<button type='submit' class='btn-danger'>"
-        "Clear Nodes (Keep Favorites)</button>"
+        "Clear Nodes</button>"
         "</form>"
         "<p class='hint'>"
         "Drops every non-favorited node from the persisted database and reboots. "
-        "Favorited nodes are kept, with their names, keys and positions.</p>"
-        "<form method='POST' action='/clear-nodes'"
-        " onsubmit=\"return confirm('This will clear all discovered nodes INCLUDING favorites, "
-        "then reboot. Continue?')\">"
-        "<input type='hidden' name='all' value='1'>"
-        "<button type='submit' class='btn-danger'>"
-        "Clear Nodes (All)</button>"
-        "</form>"
-        "<p class='hint'>"
-        "Clears the entire persisted node database &mdash; favorites included &mdash; "
-        "and reboots.</p>";
+        "Favorited nodes are kept, with their names, keys and positions, unless "
+        "<b>Include favorites</b> is ticked. <b>Include archived nodes</b> also deletes "
+        "the archive of dropped nodes on the SD card.</p>";
 
 #if HAS_STATE_MAPS
     // Only where there is a cache to clear. Hidden on the same terms as the
@@ -9476,17 +9478,14 @@ static void handlePostSdRepair() {
 
 // Delete the on-SD node-database files. Legacy paths: nothing in this firmware
 // writes them any more, but a card carrying them from an older build would
-// otherwise resurrect nodes that were just cleared. The eviction archive
-// (nodeArchiveFilePath()) is deliberately left alone — it is a historical log
-// the user opted into, not live node state.
-static void clearNodeDbFilesOnSd() {
+// otherwise resurrect nodes that were just cleared. The eviction archive goes
+// too only when asked for (Clear Nodes' "Include archived nodes" box), as on
+// the device. Returns true when the archive was cleared.
+static bool clearNodeDbFilesOnSd(bool includeArchive) {
 #if HAS_FILE_STORAGE
-    if (!sdBegin()) return;
+    if (!sdBegin()) return false;
 
-    // Matches the device's Clear Nodes (All): the evicted-node archive is part
-    // of the node database, so a whole-table wipe takes it too. The
-    // keep-favorites path below does not call this at all.
-    nodeArchiveClear();
+    const bool archiveCleared = includeArchive && nodeArchiveClear();
 
     const char *nodeFiles[] = {
         "/camillia/nodes.db",
@@ -9513,36 +9512,52 @@ static void clearNodeDbFilesOnSd() {
         nodesDir.close();
         storageFs().rmdir("/camillia/nodes");
     }
+    return archiveCleared;
+#else
+    (void)includeArchive;
+    return false;
 #endif
 }
 
-// One route, two behaviors, selected by the "all" field that only the
-// clear-everything form posts. Wiping favorites is the branch that has to ask
-// for itself: anything arriving without that field — an older bookmark, a script
-// written against the single-button version of this route — gets the variant
-// that keeps them, which is the recoverable mistake of the two.
-//
-// The destructive half now also clears the SD copies, matching what the
-// on-device Clear Nodes (All) action has always done; until now a web clear left
-// them behind.
+// The archive alone, for a clear that keeps favorites: the legacy files above
+// are whole-table snapshots and would take the favorites with them.
+static bool clearNodeArchiveFileOnSd() {
+#if HAS_FILE_STORAGE
+    return sdBegin() && nodeArchiveClear();
+#else
+    return false;
+#endif
+}
+
+// Mirrors the device's Clear Nodes confirmation: "favorites" and "archive" each
+// widen the clear, and each has to ask for itself, so a post carrying neither —
+// an older bookmark, a script — gets the recoverable variant. "all" is what the
+// old Clear Nodes (All) button posted, and still means both.
 static void handlePostClearNodes() {
     if (!isLoggedIn()) { redirect("/login"); return; }
 
-    if (server.hasArg("all")) {
-        Nodes.clearPersisted();
-        clearNodeDbFilesOnSd();
-        scheduleReboot(200);
-        redirectHomeWithFlash("Node database cleared. Rebooting now...");
-        return;
-    }
+    const bool all      = server.hasArg("all");
+    const bool inclFavs = all || server.hasArg("favorites");
+    const bool inclArch = (all || server.hasArg("archive")) && nodeArchiveSlotExists();
+    bool archiveCleared = false;
 
-    const int removed = Nodes.clearNonFavorites();
-    const int kept = Nodes.count();
-    // No SD deletion here: those files are whole-table snapshots and would take
-    // the favorites with them. Same call the device action makes.
-    char msg[96];
-    snprintf(msg, sizeof(msg),
-             "Cleared %d nodes, kept %d favorites. Rebooting now...", removed, kept);
+    char msg[128];
+    if (inclFavs) {
+        Nodes.clearPersisted();
+        archiveCleared = clearNodeDbFilesOnSd(inclArch);
+        snprintf(msg, sizeof(msg), "Node database cleared%s. Rebooting now...",
+                 !inclArch ? "" : archiveCleared ? ", SD archive included"
+                                                 : "; SD archive NOT cleared (no card)");
+    } else {
+        const int removed = Nodes.clearNonFavorites();
+        // Not clearNodeDbFilesOnSd(): its legacy files are whole-table
+        // snapshots and would take the favorites with them.
+        if (inclArch) archiveCleared = clearNodeArchiveFileOnSd();
+        snprintf(msg, sizeof(msg), "Cleared %d nodes, kept %d favorites%s. Rebooting now...",
+                 removed, Nodes.count(),
+                 !inclArch ? "" : archiveCleared ? ", SD archive cleared"
+                                                 : "; SD archive NOT cleared (no card)");
+    }
     scheduleReboot(200);
     redirectHomeWithFlash(msg);
 }
@@ -9597,7 +9612,7 @@ static void handlePostFactoryReset() {
     nvs_flash_init();
     Nodes.clearPersisted();
 
-    clearNodeDbFilesOnSd();
+    clearNodeDbFilesOnSd(/*includeArchive=*/true);
 
     // Delete saved DM conversations from SD card (if supported on this board)
 #if HAS_FILE_STORAGE

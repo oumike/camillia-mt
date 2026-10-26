@@ -83,6 +83,8 @@
 (nothing)	(niets)
 (unknown)	(onbekend)
 (unnamed)	(naamloos)
+, SD archive NOT cleared (no card)	, SD-archief NIET gewist (geen kaart)
+, SD archive cleared	, SD-archief gewist
 , gusts %d	, windstoten %d
 1 hour	1 uur
 12-hour	12-uurs
@@ -108,6 +110,7 @@ Actions	Acties
 All	Alles
 All live traffic will be erased	Al het live verkeer wordt gewist
 All live traffic will be erased, including lines hidden by the filter	Al het live verkeer wordt gewist, ook regels die het filter verbergt
+All nodes cleared%s - rebooting...	Alle nodes gewist%s - herstarten...
 Already %s.	Al %s.
 Already on that preset	Al op die preset
 Analyzing terrain...	Terrein analyseren...
@@ -205,11 +208,14 @@ Choose WiFi: (none)	Kies wifi: (geen)
 Classic	Klassiek
 Clear	Wissen
 Clear Messages	Berichten wissen
+Clear Nodes	Nodes wissen
 Clear Nodes (All)	Nodes wissen (alle)
 Clear Nodes (Keep Favorites)	Nodes wissen (favorieten houden)
 Clear by %dm at tightest	%dm vrij op het krapste punt
 Clear entire live feed?	Hele live-feed wissen?
+Clear nodes and reboot?	Nodes wissen en herstarten?
 Cleared %d nodes, kept %d favorites - rebooting...	%d nodes gewist, %d favorieten gehouden - herstarten...
+Cleared %d nodes, kept %d favorites%s - rebooting...	%d nodes gewist, %d favorieten behouden%s - herstarten...
 Cleared (%d report(s)) - rebuilding from traffic	Gewist (%d rapport(en)) - opnieuw opbouwen uit verkeer
 Clock Format: %s	Klokformaat: %s
 Clock set from web config	Klok ingesteld via webconfiguratie
@@ -339,6 +345,10 @@ Import Config	Configuratie importeren
 Import FAILED (no file?)	Import MISLUKT (geen bestand?)
 Import failed - enter a name	Import mislukt - voer een naam in
 Imported OK - rebooting...	Import OK - herstarten...
+Include (A)rchived (SD card)	Gearchiveerde meenemen (A) (SD)
+Include (F)avorites	Favorieten meenemen (F)
+Include archived (SD card)	Gearchiveerde meenemen (SD-kaart)
+Include favorites	Favorieten meenemen
 Install now? The device reboots to update.	Nu installeren? Het apparaat herstart om bij te werken.
 Invalid base64 key	Ongeldige base64-sleutel
 Invalid date/time	Ongeldige datum/tijd

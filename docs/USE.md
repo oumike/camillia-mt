@@ -717,7 +717,7 @@ neighbor report.
   Clearing is not destructive and does not touch the Nodes screen: stored
   neighbor reports really are dropped, but the rest is hidden by a timestamp,
   not deleted. Node records, names and last-heard times are all untouched —
-  discarding those is Config → Clear Nodes (Keep Favorites) or Clear Nodes (All).
+  discarding those is Config → Clear Nodes.
 - Press S to save a snapshot, on boards with an SD card (T-Deck and T-Lora
   Pager). Writes `/camillia/discovery-YYYYMMDD-HHMMSS.json` — timestamped, so
   saves never overwrite each other, and suffixed `-2`, `-3`… if two land in the
@@ -953,7 +953,7 @@ reset actions. Announcing to the mesh has moved to Live → Tools → Announce.
   not count as a tap and never runs anything. On the other touch builds a tap
   moves the highlight and Enter still runs it
 - Keyboard builds: I opens/focuses the info panel within Config
-- Import, both Clear Nodes rows, and Factory Reset require a second Enter
+- Import, Clear Nodes, and Factory Reset require a second Enter
   confirmation
 - **Space filters the rows**. Press
   Space to arm the filter, then type to narrow the list; the header shows
@@ -1884,9 +1884,9 @@ The device keeps a fixed number of the most recently heard nodes: **250 on every
 board except the Cardputer, which holds 50**. When that fills up, the **least
 recently heard non-favorite** is dropped to make room — **favorited nodes are
 never dropped, however old they are**. The only things that drop a favorite are
-the two deliberate wipes: Clear Nodes (All) and Factory Reset. Clear Nodes (Keep
-Favorites) exists precisely so you can flush a table full of stale mesh nodes
-without losing the ones you pinned.
+the two deliberate wipes: Clear Nodes with *Include favorites* ticked, and
+Factory Reset. Left unticked, Clear Nodes flushes a table full of stale mesh
+nodes without losing the ones you pinned.
 
 **Why the Cardputer holds fewer.** It is the only board here with no PSRAM, so
 its node table competes with Wi-Fi, the LVGL pool and the web-config page for the
@@ -1910,18 +1910,22 @@ node the device currently knows about plus any previously archived nodes. A
 
 ### Clearing the node database
 
-Both the Config screen and Web Config's Danger Zone offer two variants:
+**Clear Nodes**, on the Config screen and in Web Config's Danger Zone, drops
+every non-favorited node. Favorites survive with their names, keys, positions
+and favorite flag, and are still there after a power cycle. Its confirmation
+has two options, both unticked each time it opens:
 
-- **Clear Nodes (Keep Favorites)** — drops every non-favorited node. Favorites
-  survive with their names, keys, positions and favorite flag, and are still
-  there after a power cycle. The device reports what happened, e.g.
-  `Cleared 214 nodes, kept 6 favorites`.
-- **Clear Nodes (All)** — empties the table completely, favorites included.
+- **Include favorites** — empties the table completely, favorites included.
+- **Include archived** — also deletes the archived-node CSV above. Only on
+  boards with an SD slot.
 
-Both reboot afterwards. Neither touches DM transcripts (that is Clear Messages)
-or the archived-node CSV above, which is a historical log rather than live node
-state. Under Discovery, stored neighbor reports are dropped by either variant;
-the mesh rebuilds that graph from the next round of broadcasts.
+On a keyboard, F and A toggle them; on a touch screen, tap them. The device
+reports what happened, e.g. `Cleared 214 nodes, kept 6 favorites, SD archive
+cleared`, and says so if the archive was asked for but no card was there.
+
+It reboots afterwards and never touches DM transcripts (that is Clear Messages).
+Under Discovery, stored neighbor reports are dropped too; the mesh rebuilds that
+graph from the next round of broadcasts.
 
 ### Mesh beacons
 
@@ -2392,8 +2396,8 @@ The top-right corner of a node's detail panel has a **Favorite** /
 own Nodes → Actions → Favorite sets, saved to NVS on the spot — and the page
 updates in place: the label flips, the *(favorite)* tag appears or disappears,
 and the node moves to its new side of the divider without a reload. Favorited
-nodes are never evicted when the table fills and survive *Clear Nodes (Keep
-Favorites)*.
+nodes are never evicted when the table fills and survive *Clear Nodes* unless
+*Include favorites* is ticked.
 
 One caveat if **Auto-favorite nearby nodes** is on: it re-favorites any node
 reporting a position inside the radius, so unfavoriting one that is still in

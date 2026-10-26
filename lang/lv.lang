@@ -87,6 +87,8 @@
 (nothing)	(nekas)
 (unknown)	(nezināms)
 (unnamed)	(bez nosaukuma)
+, SD archive NOT cleared (no card)	, SD arhīvs NAV notīrīts (nav kartes)
+, SD archive cleared	, SD arhīvs notīrīts
 , gusts %d	, brāzmas %d
 1 hour	1 stunda
 12-hour	12 stundu
@@ -113,6 +115,7 @@ Actions	Darbības
 All	Visi
 All live traffic will be erased	Visa tiešraides datplūsma tiks dzēsta
 All live traffic will be erased, including lines hidden by the filter	Visa tiešraides datplūsma tiks dzēsta, arī filtra paslēptās rindas
+All nodes cleared%s - rebooting...	Visi mezgli notīrīti%s - restartē...
 Already %s.	Jau %s.
 Already on that preset	Jau uz šī priekšiestatījuma
 Analyzing terrain...	Analizē reljefu...
@@ -209,11 +212,14 @@ Choose WiFi: (none)	Izvēlēties WiFi: (nav)
 Classic	Klasisks
 Clear	Notīrīt
 Clear Messages	Notīrīt ziņas
+Clear Nodes	Notīrīt mezglus
 Clear Nodes (All)	Notīrīt mezglus (visus)
 Clear Nodes (Keep Favorites)	Notīrīt mezglus (paturēt izlasi)
 Clear by %dm at tightest	Brīvs %dm šaurākajā vietā
 Clear entire live feed?	Notīrīt visu tiešraides plūsmu?
+Clear nodes and reboot?	Notīrīt mezglus un restartēt?
 Cleared %d nodes, kept %d favorites - rebooting...	Notīrīti %d mezgli, paturēti %d izlases - restartē...
+Cleared %d nodes, kept %d favorites%s - rebooting...	Notīrīti %d mezgli, paturēti %d izlases%s - restartē...
 Cleared (%d report(s)) - rebuilding from traffic	Notīrīts (%d atskaites) - atjauno no datplūsmas
 Clock Format: %s	Pulksteņa formāts: %s
 Clock set from web config	Pulkstenis iestatīts no tīmekļa iestatījumiem
@@ -348,6 +354,10 @@ Import Config	Importēt iestatījumus
 Import FAILED (no file?)	Imports NEIZDEVĀS (nav faila?)
 Import failed - enter a name	Imports neizdevās - ievadiet vārdu
 Imported OK - rebooting...	Imports OK - restartē...
+Include (A)rchived (SD card)	Iekļaut arhivētos (A) (SD)
+Include (F)avorites	Iekļaut izlasi (F)
+Include archived (SD card)	Iekļaut arhivētos (SD karte)
+Include favorites	Iekļaut izlasi
 Install now? The device reboots to update.	Instalēt tagad? Ierīce atjaunināšanai restartēsies.
 Invalid base64 key	Nederīga base64 atslēga
 Invalid date/time	Nederīgs datums/laiks

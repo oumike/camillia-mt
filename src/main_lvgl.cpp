@@ -1750,6 +1750,13 @@ static int          s_cfgConfirmFnArg = 0;
 static char         s_cfgConfirmText[96] = {0};
 static uint32_t s_cfgConfirmMs = 0;
 static uint32_t s_cfgLastActivateMs = 0;
+// The Clear Nodes confirmation's two options. Both start unticked every time
+// the dialog opens, so the answer that needs no thought is the recoverable one:
+// favorites and the SD archive survive unless asked for by name.
+static bool      s_clearNodesInclFavs    = false;
+static bool      s_clearNodesInclArchive = false;
+static lv_obj_t *s_clearNodesFavsCheck   = nullptr;
+static lv_obj_t *s_clearNodesArchCheck   = nullptr;
 static uint32_t s_cfgLastScrollMs = 0;
 static uint32_t s_cfgEnterLockUntilMs = 0;
 static bool s_cfgAwaitEnterRelease = false;
@@ -3184,7 +3191,8 @@ static int nodesMapRenderTiles(float lat, float lon, int x0, int y0, int w, int 
                                int &markerX, int &markerY,
                                int detailLodTarget = 1);
 static void sdRmDirRecursive(const char *path);
-static bool clearNodeDbOnSd();
+static bool clearNodeDbOnSd(bool includeArchive = true);
+static bool clearNodeArchiveOnSd();
 
 // camillia chat server client (defined with the mesh TX helpers). The Config
 // screen, the Nodes action menu and the web config call these.
@@ -3769,7 +3777,6 @@ enum CfgActionId {
     CFG_ACTION_CLEAR_MSGS,
     CFG_ACTION_ARCHIVE_NODES,
     CFG_ACTION_SHOW_ARCHIVED,
-    CFG_ACTION_CLEAR_NODES_KEEP_FAVS,
     CFG_ACTION_CLEAR_NODES,
     CFG_ACTION_FACTORY_RESET,
 #if HAS_SD_MALWARE_SCAN
@@ -5900,11 +5907,8 @@ static const char *cfgActionLabel(int actionId, char *buf, size_t bufLen) {
                      s_cfg.nodeArchiveShow ? TR("On") : TR("Off"),
                      (s_cfg.nodeArchiveShow && !nodeArchiveAvailable()) ? TR(" (no card)") : "");
             break;
-        case CFG_ACTION_CLEAR_NODES_KEEP_FAVS:
-            snprintf(buf, bufLen, "%s", TR("Clear Nodes (Keep Favorites)"));
-            break;
         case CFG_ACTION_CLEAR_NODES:
-            snprintf(buf, bufLen, "%s", TR("Clear Nodes (All)"));
+            snprintf(buf, bufLen, "%s", TR("Clear Nodes"));
             break;
         case CFG_ACTION_FACTORY_RESET:
             snprintf(buf, bufLen, "%s", TR("Factory Reset"));
@@ -5993,7 +5997,6 @@ static bool cfgActionNeedsConfirm(int actionId) {
         || actionId == CFG_ACTION_IMPORT
         || actionId == CFG_ACTION_OTA_UPDATE
     || actionId == CFG_ACTION_CLEAR_MSGS
-        || actionId == CFG_ACTION_CLEAR_NODES_KEEP_FAVS
         || actionId == CFG_ACTION_CLEAR_NODES
         || actionId == CFG_ACTION_FACTORY_RESET;
 }
@@ -6018,6 +6021,11 @@ static bool cfgActionConfirmSentence(int actionId, char *buf, size_t bufLen) {
             // arrive as a surprise after the one question the user was asked.
             snprintf(buf, bufLen, TR("Turn MQTT Bridge %s and reboot?"),
                      s_cfg.mqttEnabled ? TR("off") : TR("on"));
+            return true;
+        case CFG_ACTION_CLEAR_NODES:
+            // The dialog carries the two options under this, so the sentence
+            // names only what is always true.
+            snprintf(buf, bufLen, "%s", TR("Clear nodes and reboot?"));
             return true;
         default:
             return false;
@@ -15094,9 +15102,8 @@ static void initCfgActions() {
     s_cfgActions[s_cfgActionCount++] = CFG_ACTION_ARCHIVE_NODES;
     s_cfgActions[s_cfgActionCount++] = CFG_ACTION_SHOW_ARCHIVED;
 #endif
-    // Mildest first: keeping the pinned contacts is the common case, and the
-    // total wipe sits below it.
-    s_cfgActions[s_cfgActionCount++] = CFG_ACTION_CLEAR_NODES_KEEP_FAVS;
+    // One row; its confirmation carries the "include favorites" and "include
+    // archived" options (cfgClearNodesAddOptions()).
     s_cfgActions[s_cfgActionCount++] = CFG_ACTION_CLEAR_NODES;
 // Every real SD-card target gets firmware-side config transfer. Preserve the
 // Mesh Deck's existing internal-flash transfer path; Heltec remains excluded.
@@ -30309,16 +30316,28 @@ static void sdRmDirRecursive(const char *path) {
 #endif
 }
 
+// The evicted-node archive alone, for a Clear Nodes that keeps favorites but
+// was asked to take the archive: unlike clearNodeDbOnSd() it leaves the legacy
+// whole-table snapshots, which hold the favorites too. True when it was cleared.
+static bool clearNodeArchiveOnSd() {
+#if HAS_FILE_STORAGE
+    return sdBegin() && nodeArchiveClear();
+#else
+    return false;
+#endif
+}
+
 // Returns true when the evicted-node archive was cleared along with the legacy
-// snapshots. False means there was nothing to clear or no card to clear it from,
-// which callers use only to word their status line — never as a failure.
-static bool clearNodeDbOnSd() {
+// snapshots. False means it was not asked for, or there was nothing to clear or
+// no card to clear it from, which callers use only to word their status line —
+// never as a failure.
+static bool clearNodeDbOnSd(bool includeArchive) {
 #if HAS_FILE_STORAGE
     if (!sdBegin()) return false;
-    // The archive is this firmware's only live node file on the card, so it goes
-    // with the whole-table wipe. Deliberately not part of the keep-favorites
-    // path: that one leaves SD alone entirely (see its note).
-    const bool archiveCleared = nodeArchiveClear();
+    // The archive is this firmware's only live node file on the card. Factory
+    // Reset always takes it; Clear Nodes only when its "include archived" box
+    // is ticked.
+    const bool archiveCleared = includeArchive && nodeArchiveClear();
 
     const char *nodeFiles[] = {
         "/camillia/nodes.db",
@@ -30338,6 +30357,7 @@ static bool clearNodeDbOnSd() {
     }
     return archiveCleared;
 #else
+    LV_UNUSED(includeArchive);
     return false;
 #endif
 }
@@ -44275,24 +44295,6 @@ static void performCfgAction(int actionId) {
             refreshChatView(true);
             break;
 
-        case CFG_ACTION_CLEAR_NODES_KEEP_FAVS: {
-            if (s_cfgDebugLog) Serial.println("[lvgl-cfg] exec CLEAR_NODES_KEEP_FAVS");
-            const int removed = Nodes.clearNonFavorites();
-            const int kept = Nodes.count();
-            // Deliberately *not* clearNodeDbOnSd(): those paths are whole-table
-            // snapshots, so deleting them wholesale would take the favorites
-            // with them. Nothing in this firmware writes them any more (they are
-            // legacy files cleaned up on a total wipe), so there is also nothing
-            // to re-export here — only the all-variant below still deletes them.
-            snprintf(s_cfgStatus, sizeof(s_cfgStatus),
-                     TR("Cleared %d nodes, kept %d favorites - rebooting..."), removed, kept);
-            refreshCfgModal();
-            delay(1000);
-            flushPersistentState();   // settings and transcripts must land before we go
-            ESP.restart();
-            break;
-        }
-
 #if HAS_SPELLCHECK
         case CFG_ACTION_SPELL_CHECK:
             if (s_cfgDebugLog) Serial.println("[lvgl-cfg] exec SPELL_CHECK");
@@ -44346,15 +44348,38 @@ static void performCfgAction(int actionId) {
             break;
 
         case CFG_ACTION_CLEAR_NODES: {
-            if (s_cfgDebugLog) Serial.println("[lvgl-cfg] exec CLEAR_NODES");
-            Nodes.clearPersisted();
-            // Reported separately rather than assumed: with no card in the slot
-            // the archive is still out there on a card somewhere, and claiming
-            // to have cleared it would be a lie the user acts on.
-            const bool archiveCleared = clearNodeDbOnSd();
-            snprintf(s_cfgStatus, sizeof(s_cfgStatus),
-                     archiveCleared ? TR("Nodes and SD archive cleared - rebooting...")
-                                    : TR("Node DB cleared - rebooting..."));
+            // Options as the confirmation left them (cfgClearNodesAddOptions()).
+            const bool inclFavs = s_clearNodesInclFavs;
+            const bool inclArch = s_clearNodesInclArchive && nodeArchiveSlotExists();
+            if (s_cfgDebugLog) {
+                Serial.printf("[lvgl-cfg] exec CLEAR_NODES favs=%d archive=%d\n",
+                              inclFavs ? 1 : 0, inclArch ? 1 : 0);
+            }
+            int removed = 0;
+            bool archiveCleared = false;
+            if (inclFavs) {
+                Nodes.clearPersisted();
+                archiveCleared = clearNodeDbOnSd(inclArch);
+            } else {
+                removed = Nodes.clearNonFavorites();
+                // Not clearNodeDbOnSd(): its legacy files are whole-table
+                // snapshots, so deleting them would take the favorites too.
+                if (inclArch) archiveCleared = clearNodeArchiveOnSd();
+            }
+            // Reported rather than assumed: with no card in the slot the archive
+            // is still out there on a card somewhere, and claiming to have
+            // cleared it would be a lie the user acts on.
+            const char *archNote = !inclArch      ? ""
+                                 : archiveCleared ? TR(", SD archive cleared")
+                                                  : TR(", SD archive NOT cleared (no card)");
+            if (inclFavs) {
+                snprintf(s_cfgStatus, sizeof(s_cfgStatus), TR("All nodes cleared%s - rebooting..."),
+                         archNote);
+            } else {
+                snprintf(s_cfgStatus, sizeof(s_cfgStatus),
+                         TR("Cleared %d nodes, kept %d favorites%s - rebooting..."),
+                         removed, Nodes.count(), archNote);
+            }
             refreshCfgModal();
             delay(1000);
             flushPersistentState();   // settings and transcripts must land before we go
@@ -44411,6 +44436,10 @@ static void closeCfgConfirmModal() {
     s_cfgConfirmFn = nullptr;
     s_cfgConfirmFnArg = 0;
     s_cfgConfirmText[0] = '\0';
+    // Gone with the dialog. The two flags are left for performCfgAction(),
+    // which runs after this close on Yes; the next open resets them.
+    s_clearNodesFavsCheck = nullptr;
+    s_clearNodesArchCheck = nullptr;
 }
 
 // Yes: run the pending action. No/cancel: just close the dialog, returning to
@@ -44457,6 +44486,67 @@ static void onCfgConfirmNoPressed(lv_event_t *e) {
     cfgConfirmReject();
 }
 
+// Clear Nodes options. The flags are the truth; the boxes mirror them, whether
+// the change came from a tap (the box already flipped itself) or from F/A.
+static void cfgClearNodesSyncChecks() {
+    if (lvObjValid(s_clearNodesFavsCheck)) {
+        if (s_clearNodesInclFavs) lv_obj_add_state(s_clearNodesFavsCheck, LV_STATE_CHECKED);
+        else lv_obj_remove_state(s_clearNodesFavsCheck, LV_STATE_CHECKED);
+    }
+    if (lvObjValid(s_clearNodesArchCheck)) {
+        if (s_clearNodesInclArchive) lv_obj_add_state(s_clearNodesArchCheck, LV_STATE_CHECKED);
+        else lv_obj_remove_state(s_clearNodesArchCheck, LV_STATE_CHECKED);
+    }
+}
+
+static void onClearNodesCheckChanged(lv_event_t *e) {
+    lv_obj_t *cb = lv_event_get_target_obj(e);
+    const bool on = lv_obj_has_state(cb, LV_STATE_CHECKED);
+    if (cb == s_clearNodesFavsCheck)      s_clearNodesInclFavs = on;
+    else if (cb == s_clearNodesArchCheck) s_clearNodesInclArchive = on;
+}
+
+// F and A answer for the boxes on keyboard boards, the way Y and N answer for
+// the buttons. True when the key was one of them.
+static bool cfgClearNodesOptionKey(char k) {
+    if (s_cfgConfirmPendingAction != CFG_ACTION_CLEAR_NODES) return false;
+    if ((k == 'f' || k == 'F') && s_clearNodesFavsCheck) {
+        s_clearNodesInclFavs = !s_clearNodesInclFavs;
+    } else if ((k == 'a' || k == 'A') && s_clearNodesArchCheck) {
+        s_clearNodesInclArchive = !s_clearNodesInclArchive;
+    } else {
+        return false;
+    }
+    cfgClearNodesSyncChecks();
+    return true;
+}
+
+static void cfgClearNodesAddOptions(lv_obj_t *parent, lv_color_t textColor) {
+    auto addCheck = [&](const char *label) {
+        lv_obj_t *cb = lv_checkbox_create(parent);
+        lv_obj_set_width(cb, lv_pct(100));
+        lv_checkbox_set_text(cb, label);
+        lv_obj_set_style_text_font(cb, &lv_font_montserrat_12, 0);
+        lv_obj_set_style_text_color(cb, textColor, 0);
+        lv_obj_add_event_cb(cb, onClearNodesCheckChanged, LV_EVENT_VALUE_CHANGED, nullptr);
+        return cb;
+    };
+#if UI_TOUCH_ONLY_PROFILE
+    s_clearNodesFavsCheck = addCheck(TR("Include favorites"));
+#else
+    s_clearNodesFavsCheck = addCheck(TR("Include (F)avorites"));
+#endif
+    // Only where there is a card slot: elsewhere there is no archive to clear.
+    if (nodeArchiveSlotExists()) {
+#if UI_TOUCH_ONLY_PROFILE
+        s_clearNodesArchCheck = addCheck(TR("Include archived (SD card)"));
+#else
+        s_clearNodesArchCheck = addCheck(TR("Include (A)rchived (SD card)"));
+#endif
+    }
+    cfgClearNodesSyncChecks();
+}
+
 static void openCfgConfirmModal(int actionId, const char *text,
                                 CfgConfirmFn fn, int fnArg,
                                 const char *altLabel, CfgConfirmFn altFn) {
@@ -44464,6 +44554,8 @@ static void openCfgConfirmModal(int actionId, const char *text,
     s_cfgConfirmPendingAction = actionId;
     s_cfgConfirmFn = fn;
     s_cfgConfirmFnArg = fnArg;
+    s_clearNodesInclFavs = false;
+    s_clearNodesInclArchive = false;
 
     s_cfgConfirmAltFn = (altLabel && altLabel[0]) ? altFn : nullptr;
     s_cfgConfirmAltKey = 0;
@@ -44590,6 +44682,10 @@ static void openCfgConfirmModal(int actionId, const char *text,
         lv_label_set_text(q, actionText);
     } else {
         lv_label_set_text_fmt(q, TR("Action: %s"), actionText);
+    }
+
+    if (actionId == CFG_ACTION_CLEAR_NODES) {
+        cfgClearNodesAddOptions(s_cfgConfirmModal, titleTextColor);
     }
 
     lv_obj_t *btnRow = lv_obj_create(s_cfgConfirmModal);
@@ -47100,6 +47196,7 @@ static void pumpKeyboardInput() {
                 scrollListClamped(s_cfgConfirmScroll, -18);
                 continue;
             }
+            if (cfgClearNodesOptionKey(k)) continue;
             if (s_cfgConfirmAltFn && s_cfgConfirmAltKey
                 && tolower((unsigned char)k) == s_cfgConfirmAltKey) {
                 cfgConfirmAlt();

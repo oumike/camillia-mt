@@ -87,6 +87,8 @@
 (nothing)	(nič)
 (unknown)	(neznano)
 (unnamed)	(brez naziva)
+, SD archive NOT cleared (no card)	, arhiv SD NI počiščen (ni kartice)
+, SD archive cleared	, arhiv SD počiščen
 , gusts %d	, sunki %d
 1 hour	1 ura
 12-hour	12-urni
@@ -113,6 +115,7 @@ Actions	Dejanja
 All	Vse
 All live traffic will be erased	Ves promet v živo bo izbrisan
 All live traffic will be erased, including lines hidden by the filter	Ves promet v živo bo izbrisan, tudi vrstice, ki jih skrije filter
+All nodes cleared%s - rebooting...	Vsa vozlišča počiščena%s - ponovni zagon...
 Already %s.	Že %s.
 Already on that preset	Že na tej prednastavitvi
 Analyzing terrain...	Analiziram teren...
@@ -210,11 +213,14 @@ Choose WiFi: (none)	Izberi WiFi: (brez)
 Classic	Klasično
 Clear	Počisti
 Clear Messages	Počisti sporočila
+Clear Nodes	Počisti vozlišča
 Clear Nodes (All)	Počisti vozlišča (vsa)
 Clear Nodes (Keep Favorites)	Počisti vozlišča (obdrži priljubljena)
 Clear by %dm at tightest	Prosto %dm na najožjem mestu
 Clear entire live feed?	Počistim celoten prikaz v živo?
+Clear nodes and reboot?	Počistim vozlišča in ponovno zaženem?
 Cleared %d nodes, kept %d favorites - rebooting...	Počiščenih %d vozlišč, ohranjenih %d priljubljenih - vnovični zagon...
+Cleared %d nodes, kept %d favorites%s - rebooting...	Počiščenih vozlišč: %d, ohranjenih priljubljenih: %d%s - ponovni zagon...
 Cleared (%d report(s)) - rebuilding from traffic	Počiščeno (%d poročil) - obnova iz prometa
 Clock Format: %s	Oblika ure: %s
 Clock set from web config	Ura nastavljena iz spletnih nastavitev
@@ -347,6 +353,10 @@ Import Config	Uvozi nastavitve
 Import FAILED (no file?)	Uvoz NI USPEL (ni datoteke?)
 Import failed - enter a name	Uvoz ni uspel - vnesite ime
 Imported OK - rebooting...	Uvoz OK - vnovični zagon...
+Include (A)rchived (SD card)	Vključi arhivirane (A) (SD)
+Include (F)avorites	Vključi priljubljene (F)
+Include archived (SD card)	Vključi arhivirane (kartica SD)
+Include favorites	Vključi priljubljene
 Install now? The device reboots to update.	Namestim zdaj? Naprava se bo za posodobitev znova zagnala.
 Invalid base64 key	Neveljaven ključ base64
 Invalid date/time	Neveljaven datum/čas

@@ -87,6 +87,8 @@
 (nothing)	(hiçbir şey)
 (unknown)	(bilinmiyor)
 (unnamed)	(adsız)
+, SD archive NOT cleared (no card)	, SD arşivi TEMİZLENMEDİ (kart yok)
+, SD archive cleared	, SD arşivi temizlendi
 , gusts %d	, esinti %d
 1 hour	1 saat
 12-hour	12 saat
@@ -113,6 +115,7 @@ Actions	Eylemler
 All	Tümü
 All live traffic will be erased	Tüm canlı trafik silinecek
 All live traffic will be erased, including lines hidden by the filter	Filtrenin gizlediği satırlar dahil tüm canlı trafik silinecek
+All nodes cleared%s - rebooting...	Tüm düğümler temizlendi%s - yeniden başlatılıyor...
 Already %s.	Zaten %s.
 Already on that preset	Zaten o ön ayarda
 Analyzing terrain...	Arazi analiz ediliyor...
@@ -210,11 +213,14 @@ Choose WiFi: (none)	WiFi seç: (yok)
 Classic	Klasik
 Clear	Temizle
 Clear Messages	Mesajları temizle
+Clear Nodes	Düğümleri temizle
 Clear Nodes (All)	Düğümleri temizle (tümü)
 Clear Nodes (Keep Favorites)	Düğümleri temizle (favoriler kalsın)
 Clear by %dm at tightest	En dar noktada %dm açıklık
 Clear entire live feed?	Tüm canlı akış temizlensin mi?
+Clear nodes and reboot?	Düğümler temizlensin ve yeniden başlatılsın mı?
 Cleared %d nodes, kept %d favorites - rebooting...	%d düğüm silindi, %d favori tutuldu - yeniden başlatılıyor...
+Cleared %d nodes, kept %d favorites%s - rebooting...	%d düğüm temizlendi, %d favori tutuldu%s - yeniden başlatılıyor...
 Cleared (%d report(s)) - rebuilding from traffic	Temizlendi (%d rapor) - trafikten yeniden oluşturuluyor
 Clock Format: %s	Saat biçimi: %s
 Clock set from web config	Saat web yapılandırmasından ayarlandı
@@ -349,6 +355,10 @@ Import Config	Yapılandırmayı içe aktar
 Import FAILED (no file?)	İçe aktarma BAŞARISIZ (dosya yok mu?)
 Import failed - enter a name	İçe aktarma başarısız - bir ad girin
 Imported OK - rebooting...	İçe aktarma tamam - yeniden başlatılıyor...
+Include (A)rchived (SD card)	Arşivlenenler dahil (A) (SD)
+Include (F)avorites	Favoriler dahil (F)
+Include archived (SD card)	Arşivlenenler dahil (SD kart)
+Include favorites	Favoriler dahil
 Indigo	Çivit
 Info	Bilgi
 Install now? The device reboots to update.	Şimdi kurulsun mu? Cihaz güncellemek için yeniden başlar.

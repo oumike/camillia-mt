@@ -86,6 +86,8 @@
 (nothing)	(nic)
 (unknown)	(nieznany)
 (unnamed)	(bez nazwy)
+, SD archive NOT cleared (no card)	, archiwum SD NIE wyczyszczone (brak karty)
+, SD archive cleared	, archiwum SD wyczyszczone
 , gusts %d	, porywy %d
 1 hour	1 godzina
 12-hour	12-godzinny
@@ -112,6 +114,7 @@ Actions	Akcje
 All	Wszystko
 All live traffic will be erased	Cały ruch na żywo zostanie usunięty
 All live traffic will be erased, including lines hidden by the filter	Cały ruch na żywo zostanie usunięty, także linie ukryte przez filtr
+All nodes cleared%s - rebooting...	Wszystkie węzły wyczyszczone%s - restart...
 Already %s.	Już ustawiono %s.
 Already on that preset	Ten preset jest już ustawiony
 Analyzing terrain...	Analiza terenu...
@@ -209,11 +212,14 @@ Choose WiFi: (none)	Wybierz WiFi: (brak)
 Classic	Klasyczny
 Clear	Wyczyść
 Clear Messages	Wyczyść wiadomości
+Clear Nodes	Wyczyść węzły
 Clear Nodes (All)	Wyczyść węzły (wszystkie)
 Clear Nodes (Keep Favorites)	Wyczyść węzły (zachowaj ulubione)
 Clear by %dm at tightest	Zapas %dm w najciaśniejszym miejscu
 Clear entire live feed?	Wyczyścić cały strumień na żywo?
+Clear nodes and reboot?	Wyczyścić węzły i uruchomić ponownie?
 Cleared %d nodes, kept %d favorites - rebooting...	Usunięto %d węzłów, zachowano %d ulubionych - ponowne uruchamianie...
+Cleared %d nodes, kept %d favorites%s - rebooting...	Wyczyszczono węzły: %d, zachowano ulubione: %d%s - restart...
 Cleared (%d report(s)) - rebuilding from traffic	Wyczyszczono (%d raport.) - odbudowa z ruchu
 Clock Format: %s	Format zegara: %s
 Clock set from web config	Zegar ustawiony z konfiguracji web
@@ -348,6 +354,10 @@ Import Config	Importuj konfigurację
 Import FAILED (no file?)	Import NIEUDANY (brak pliku?)
 Import failed - enter a name	Import nieudany - wpisz nazwę
 Imported OK - rebooting...	Import OK - ponowne uruchamianie...
+Include (A)rchived (SD card)	Uwzględnij archiwalne (A) (SD)
+Include (F)avorites	Uwzględnij ulubione (F)
+Include archived (SD card)	Uwzględnij archiwalne (karta SD)
+Include favorites	Uwzględnij ulubione
 Indigo	Indygo
 Install now? The device reboots to update.	Zainstalować teraz? Urządzenie uruchomi się ponownie, aby zaktualizować.
 Invalid base64 key	Nieprawidłowy klucz base64

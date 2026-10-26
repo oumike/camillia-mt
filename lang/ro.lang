@@ -85,6 +85,8 @@
 (nothing)	(nimic)
 (unknown)	(necunoscut)
 (unnamed)	(fără nume)
+, SD archive NOT cleared (no card)	, arhiva SD NU a fost ștearsă (fără card)
+, SD archive cleared	, arhiva SD ștearsă
 , gusts %d	, rafale %d
 1 hour	1 oră
 12-hour	12 ore
@@ -111,6 +113,7 @@ Actions	Acțiuni
 All	Tot
 All live traffic will be erased	Tot traficul live va fi șters
 All live traffic will be erased, including lines hidden by the filter	Tot traficul live va fi șters, inclusiv liniile ascunse de filtru
+All nodes cleared%s - rebooting...	Toate nodurile șterse%s - repornire...
 Already %s.	Deja %s.
 Already on that preset	Deja pe această presetare
 Analyzing terrain...	Se analizează terenul...
@@ -208,11 +211,14 @@ Choose WiFi: (none)	Alege WiFi: (niciuna)
 Classic	Clasic
 Clear	Șterge
 Clear Messages	Șterge mesajele
+Clear Nodes	Șterge nodurile
 Clear Nodes (All)	Șterge nodurile (toate)
 Clear Nodes (Keep Favorites)	Șterge nodurile (păstrează favoritele)
 Clear by %dm at tightest	Liber cu %dm în punctul cel mai strâmt
 Clear entire live feed?	Ștergi tot fluxul live?
+Clear nodes and reboot?	Ștergi nodurile și repornești?
 Cleared %d nodes, kept %d favorites - rebooting...	%d noduri șterse, %d favorite păstrate - repornire...
+Cleared %d nodes, kept %d favorites%s - rebooting...	%d noduri șterse, %d favorite păstrate%s - repornire...
 Cleared (%d report(s)) - rebuilding from traffic	Șters (%d raport(e)) - se reconstruiește din trafic
 Clock Format: %s	Format oră: %s
 Clock set from web config	Ora setată din config web
@@ -346,6 +352,10 @@ Import Config	Importă config
 Import FAILED (no file?)	Import EȘUAT (lipsește fișierul?)
 Import failed - enter a name	Import eșuat - introdu un nume
 Imported OK - rebooting...	Importat cu succes - repornire...
+Include (A)rchived (SD card)	Include arhivatele (A) (SD)
+Include (F)avorites	Include favoritele (F)
+Include archived (SD card)	Include arhivatele (card SD)
+Include favorites	Include favoritele
 Install now? The device reboots to update.	Instalezi acum? Dispozitivul repornește pentru actualizare.
 Invalid base64 key	Cheie base64 invalidă
 Invalid date/time	Dată/oră invalidă
