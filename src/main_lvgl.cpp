@@ -1750,6 +1750,13 @@ static int          s_cfgConfirmFnArg = 0;
 static char         s_cfgConfirmText[96] = {0};
 static uint32_t s_cfgConfirmMs = 0;
 static uint32_t s_cfgLastActivateMs = 0;
+// The Clear Nodes confirmation's two options. Both start unticked every time
+// the dialog opens, so the answer that needs no thought is the recoverable one:
+// favorites and the SD archive survive unless asked for by name.
+static bool      s_clearNodesInclFavs    = false;
+static bool      s_clearNodesInclArchive = false;
+static lv_obj_t *s_clearNodesFavsCheck   = nullptr;
+static lv_obj_t *s_clearNodesArchCheck   = nullptr;
 static uint32_t s_cfgLastScrollMs = 0;
 static uint32_t s_cfgEnterLockUntilMs = 0;
 static bool s_cfgAwaitEnterRelease = false;
@@ -3184,7 +3191,8 @@ static int nodesMapRenderTiles(float lat, float lon, int x0, int y0, int w, int 
                                int &markerX, int &markerY,
                                int detailLodTarget = 1);
 static void sdRmDirRecursive(const char *path);
-static bool clearNodeDbOnSd();
+static bool clearNodeDbOnSd(bool includeArchive = true);
+static bool clearNodeArchiveOnSd();
 
 // camillia chat server client (defined with the mesh TX helpers). The Config
 // screen, the Nodes action menu and the web config call these.
@@ -3769,7 +3777,6 @@ enum CfgActionId {
     CFG_ACTION_CLEAR_MSGS,
     CFG_ACTION_ARCHIVE_NODES,
     CFG_ACTION_SHOW_ARCHIVED,
-    CFG_ACTION_CLEAR_NODES_KEEP_FAVS,
     CFG_ACTION_CLEAR_NODES,
     CFG_ACTION_FACTORY_RESET,
 #if HAS_SD_MALWARE_SCAN
@@ -5900,11 +5907,8 @@ static const char *cfgActionLabel(int actionId, char *buf, size_t bufLen) {
                      s_cfg.nodeArchiveShow ? TR("On") : TR("Off"),
                      (s_cfg.nodeArchiveShow && !nodeArchiveAvailable()) ? TR(" (no card)") : "");
             break;
-        case CFG_ACTION_CLEAR_NODES_KEEP_FAVS:
-            snprintf(buf, bufLen, "%s", TR("Clear Nodes (Keep Favorites)"));
-            break;
         case CFG_ACTION_CLEAR_NODES:
-            snprintf(buf, bufLen, "%s", TR("Clear Nodes (All)"));
+            snprintf(buf, bufLen, "%s", TR("Clear Nodes"));
             break;
         case CFG_ACTION_FACTORY_RESET:
             snprintf(buf, bufLen, "%s", TR("Factory Reset"));
@@ -5993,7 +5997,6 @@ static bool cfgActionNeedsConfirm(int actionId) {
         || actionId == CFG_ACTION_IMPORT
         || actionId == CFG_ACTION_OTA_UPDATE
     || actionId == CFG_ACTION_CLEAR_MSGS
-        || actionId == CFG_ACTION_CLEAR_NODES_KEEP_FAVS
         || actionId == CFG_ACTION_CLEAR_NODES
         || actionId == CFG_ACTION_FACTORY_RESET;
 }
@@ -6018,6 +6021,11 @@ static bool cfgActionConfirmSentence(int actionId, char *buf, size_t bufLen) {
             // arrive as a surprise after the one question the user was asked.
             snprintf(buf, bufLen, TR("Turn MQTT Bridge %s and reboot?"),
                      s_cfg.mqttEnabled ? TR("off") : TR("on"));
+            return true;
+        case CFG_ACTION_CLEAR_NODES:
+            // The dialog carries the two options under this, so the sentence
+            // names only what is always true.
+            snprintf(buf, bufLen, "%s", TR("Clear nodes and reboot?"));
             return true;
         default:
             return false;
@@ -15094,9 +15102,8 @@ static void initCfgActions() {
     s_cfgActions[s_cfgActionCount++] = CFG_ACTION_ARCHIVE_NODES;
     s_cfgActions[s_cfgActionCount++] = CFG_ACTION_SHOW_ARCHIVED;
 #endif
-    // Mildest first: keeping the pinned contacts is the common case, and the
-    // total wipe sits below it.
-    s_cfgActions[s_cfgActionCount++] = CFG_ACTION_CLEAR_NODES_KEEP_FAVS;
+    // One row; its confirmation carries the "include favorites" and "include
+    // archived" options (cfgClearNodesAddOptions()).
     s_cfgActions[s_cfgActionCount++] = CFG_ACTION_CLEAR_NODES;
 // Every real SD-card target gets firmware-side config transfer. Preserve the
 // Mesh Deck's existing internal-flash transfer path; Heltec remains excluded.
@@ -19356,6 +19363,16 @@ static constexpr uint32_t kBeaconsDimColor   = 0xA7C7FF;
 // divergence — our node table is far smaller and evicts sooner, so a peer that
 // aged out and came back should not be invisible to us for half a day.
 static constexpr uint32_t kNodeInfoReplyThrottleMs = 3600000UL;
+
+// Asking an unnamed node for its NodeInfo (maybeRequestUnknownNodeInfo()), as
+// Meshtastic does on hearing a node it has no user for (MeshService.cpp, "Heard
+// new node"). Unlike upstream it is bounded three ways, because every request is
+// a unicast flood and a busy mesh has many unnamed senders: per node, across all
+// nodes, and by distance and channel load.
+static constexpr uint32_t kAutoNodeInfoPerNodeMs = 1800000UL;   // 30 min
+static constexpr uint32_t kAutoNodeInfoGapMs     = 30000UL;     // any node
+static constexpr uint8_t  kAutoNodeInfoMaxHops   = 3;
+static constexpr float    kAutoNodeInfoMaxChUtil = 25.0f;       // Meshtastic's polite threshold
 
 #if FEATURE_DISCOVERY
 // One sweep per minute. Meshtastic's floor for an interactive, user-triggered
@@ -30299,16 +30316,28 @@ static void sdRmDirRecursive(const char *path) {
 #endif
 }
 
+// The evicted-node archive alone, for a Clear Nodes that keeps favorites but
+// was asked to take the archive: unlike clearNodeDbOnSd() it leaves the legacy
+// whole-table snapshots, which hold the favorites too. True when it was cleared.
+static bool clearNodeArchiveOnSd() {
+#if HAS_FILE_STORAGE
+    return sdBegin() && nodeArchiveClear();
+#else
+    return false;
+#endif
+}
+
 // Returns true when the evicted-node archive was cleared along with the legacy
-// snapshots. False means there was nothing to clear or no card to clear it from,
-// which callers use only to word their status line — never as a failure.
-static bool clearNodeDbOnSd() {
+// snapshots. False means it was not asked for, or there was nothing to clear or
+// no card to clear it from, which callers use only to word their status line —
+// never as a failure.
+static bool clearNodeDbOnSd(bool includeArchive) {
 #if HAS_FILE_STORAGE
     if (!sdBegin()) return false;
-    // The archive is this firmware's only live node file on the card, so it goes
-    // with the whole-table wipe. Deliberately not part of the keep-favorites
-    // path: that one leaves SD alone entirely (see its note).
-    const bool archiveCleared = nodeArchiveClear();
+    // The archive is this firmware's only live node file on the card. Factory
+    // Reset always takes it; Clear Nodes only when its "include archived" box
+    // is ticked.
+    const bool archiveCleared = includeArchive && nodeArchiveClear();
 
     const char *nodeFiles[] = {
         "/camillia/nodes.db",
@@ -30328,6 +30357,7 @@ static bool clearNodeDbOnSd() {
     }
     return archiveCleared;
 #else
+    LV_UNUSED(includeArchive);
     return false;
 #endif
 }
@@ -44265,24 +44295,6 @@ static void performCfgAction(int actionId) {
             refreshChatView(true);
             break;
 
-        case CFG_ACTION_CLEAR_NODES_KEEP_FAVS: {
-            if (s_cfgDebugLog) Serial.println("[lvgl-cfg] exec CLEAR_NODES_KEEP_FAVS");
-            const int removed = Nodes.clearNonFavorites();
-            const int kept = Nodes.count();
-            // Deliberately *not* clearNodeDbOnSd(): those paths are whole-table
-            // snapshots, so deleting them wholesale would take the favorites
-            // with them. Nothing in this firmware writes them any more (they are
-            // legacy files cleaned up on a total wipe), so there is also nothing
-            // to re-export here — only the all-variant below still deletes them.
-            snprintf(s_cfgStatus, sizeof(s_cfgStatus),
-                     TR("Cleared %d nodes, kept %d favorites - rebooting..."), removed, kept);
-            refreshCfgModal();
-            delay(1000);
-            flushPersistentState();   // settings and transcripts must land before we go
-            ESP.restart();
-            break;
-        }
-
 #if HAS_SPELLCHECK
         case CFG_ACTION_SPELL_CHECK:
             if (s_cfgDebugLog) Serial.println("[lvgl-cfg] exec SPELL_CHECK");
@@ -44336,15 +44348,38 @@ static void performCfgAction(int actionId) {
             break;
 
         case CFG_ACTION_CLEAR_NODES: {
-            if (s_cfgDebugLog) Serial.println("[lvgl-cfg] exec CLEAR_NODES");
-            Nodes.clearPersisted();
-            // Reported separately rather than assumed: with no card in the slot
-            // the archive is still out there on a card somewhere, and claiming
-            // to have cleared it would be a lie the user acts on.
-            const bool archiveCleared = clearNodeDbOnSd();
-            snprintf(s_cfgStatus, sizeof(s_cfgStatus),
-                     archiveCleared ? TR("Nodes and SD archive cleared - rebooting...")
-                                    : TR("Node DB cleared - rebooting..."));
+            // Options as the confirmation left them (cfgClearNodesAddOptions()).
+            const bool inclFavs = s_clearNodesInclFavs;
+            const bool inclArch = s_clearNodesInclArchive && nodeArchiveSlotExists();
+            if (s_cfgDebugLog) {
+                Serial.printf("[lvgl-cfg] exec CLEAR_NODES favs=%d archive=%d\n",
+                              inclFavs ? 1 : 0, inclArch ? 1 : 0);
+            }
+            int removed = 0;
+            bool archiveCleared = false;
+            if (inclFavs) {
+                Nodes.clearPersisted();
+                archiveCleared = clearNodeDbOnSd(inclArch);
+            } else {
+                removed = Nodes.clearNonFavorites();
+                // Not clearNodeDbOnSd(): its legacy files are whole-table
+                // snapshots, so deleting them would take the favorites too.
+                if (inclArch) archiveCleared = clearNodeArchiveOnSd();
+            }
+            // Reported rather than assumed: with no card in the slot the archive
+            // is still out there on a card somewhere, and claiming to have
+            // cleared it would be a lie the user acts on.
+            const char *archNote = !inclArch      ? ""
+                                 : archiveCleared ? TR(", SD archive cleared")
+                                                  : TR(", SD archive NOT cleared (no card)");
+            if (inclFavs) {
+                snprintf(s_cfgStatus, sizeof(s_cfgStatus), TR("All nodes cleared%s - rebooting..."),
+                         archNote);
+            } else {
+                snprintf(s_cfgStatus, sizeof(s_cfgStatus),
+                         TR("Cleared %d nodes, kept %d favorites%s - rebooting..."),
+                         removed, Nodes.count(), archNote);
+            }
             refreshCfgModal();
             delay(1000);
             flushPersistentState();   // settings and transcripts must land before we go
@@ -44401,6 +44436,10 @@ static void closeCfgConfirmModal() {
     s_cfgConfirmFn = nullptr;
     s_cfgConfirmFnArg = 0;
     s_cfgConfirmText[0] = '\0';
+    // Gone with the dialog. The two flags are left for performCfgAction(),
+    // which runs after this close on Yes; the next open resets them.
+    s_clearNodesFavsCheck = nullptr;
+    s_clearNodesArchCheck = nullptr;
 }
 
 // Yes: run the pending action. No/cancel: just close the dialog, returning to
@@ -44447,6 +44486,67 @@ static void onCfgConfirmNoPressed(lv_event_t *e) {
     cfgConfirmReject();
 }
 
+// Clear Nodes options. The flags are the truth; the boxes mirror them, whether
+// the change came from a tap (the box already flipped itself) or from F/A.
+static void cfgClearNodesSyncChecks() {
+    if (lvObjValid(s_clearNodesFavsCheck)) {
+        if (s_clearNodesInclFavs) lv_obj_add_state(s_clearNodesFavsCheck, LV_STATE_CHECKED);
+        else lv_obj_remove_state(s_clearNodesFavsCheck, LV_STATE_CHECKED);
+    }
+    if (lvObjValid(s_clearNodesArchCheck)) {
+        if (s_clearNodesInclArchive) lv_obj_add_state(s_clearNodesArchCheck, LV_STATE_CHECKED);
+        else lv_obj_remove_state(s_clearNodesArchCheck, LV_STATE_CHECKED);
+    }
+}
+
+static void onClearNodesCheckChanged(lv_event_t *e) {
+    lv_obj_t *cb = lv_event_get_target_obj(e);
+    const bool on = lv_obj_has_state(cb, LV_STATE_CHECKED);
+    if (cb == s_clearNodesFavsCheck)      s_clearNodesInclFavs = on;
+    else if (cb == s_clearNodesArchCheck) s_clearNodesInclArchive = on;
+}
+
+// F and A answer for the boxes on keyboard boards, the way Y and N answer for
+// the buttons. True when the key was one of them.
+static bool cfgClearNodesOptionKey(char k) {
+    if (s_cfgConfirmPendingAction != CFG_ACTION_CLEAR_NODES) return false;
+    if ((k == 'f' || k == 'F') && s_clearNodesFavsCheck) {
+        s_clearNodesInclFavs = !s_clearNodesInclFavs;
+    } else if ((k == 'a' || k == 'A') && s_clearNodesArchCheck) {
+        s_clearNodesInclArchive = !s_clearNodesInclArchive;
+    } else {
+        return false;
+    }
+    cfgClearNodesSyncChecks();
+    return true;
+}
+
+static void cfgClearNodesAddOptions(lv_obj_t *parent, lv_color_t textColor) {
+    auto addCheck = [&](const char *label) {
+        lv_obj_t *cb = lv_checkbox_create(parent);
+        lv_obj_set_width(cb, lv_pct(100));
+        lv_checkbox_set_text(cb, label);
+        lv_obj_set_style_text_font(cb, &lv_font_montserrat_12, 0);
+        lv_obj_set_style_text_color(cb, textColor, 0);
+        lv_obj_add_event_cb(cb, onClearNodesCheckChanged, LV_EVENT_VALUE_CHANGED, nullptr);
+        return cb;
+    };
+#if UI_TOUCH_ONLY_PROFILE
+    s_clearNodesFavsCheck = addCheck(TR("Include favorites"));
+#else
+    s_clearNodesFavsCheck = addCheck(TR("Include (F)avorites"));
+#endif
+    // Only where there is a card slot: elsewhere there is no archive to clear.
+    if (nodeArchiveSlotExists()) {
+#if UI_TOUCH_ONLY_PROFILE
+        s_clearNodesArchCheck = addCheck(TR("Include archived (SD card)"));
+#else
+        s_clearNodesArchCheck = addCheck(TR("Include (A)rchived (SD card)"));
+#endif
+    }
+    cfgClearNodesSyncChecks();
+}
+
 static void openCfgConfirmModal(int actionId, const char *text,
                                 CfgConfirmFn fn, int fnArg,
                                 const char *altLabel, CfgConfirmFn altFn) {
@@ -44454,6 +44554,8 @@ static void openCfgConfirmModal(int actionId, const char *text,
     s_cfgConfirmPendingAction = actionId;
     s_cfgConfirmFn = fn;
     s_cfgConfirmFnArg = fnArg;
+    s_clearNodesInclFavs = false;
+    s_clearNodesInclArchive = false;
 
     s_cfgConfirmAltFn = (altLabel && altLabel[0]) ? altFn : nullptr;
     s_cfgConfirmAltKey = 0;
@@ -44580,6 +44682,10 @@ static void openCfgConfirmModal(int actionId, const char *text,
         lv_label_set_text(q, actionText);
     } else {
         lv_label_set_text_fmt(q, TR("Action: %s"), actionText);
+    }
+
+    if (actionId == CFG_ACTION_CLEAR_NODES) {
+        cfgClearNodesAddOptions(s_cfgConfirmModal, titleTextColor);
     }
 
     lv_obj_t *btnRow = lv_obj_create(s_cfgConfirmModal);
@@ -47090,6 +47196,7 @@ static void pumpKeyboardInput() {
                 scrollListClamped(s_cfgConfirmScroll, -18);
                 continue;
             }
+            if (cfgClearNodesOptionKey(k)) continue;
             if (s_cfgConfirmAltFn && s_cfgConfirmAltKey
                 && tolower((unsigned char)k) == s_cfgConfirmAltKey) {
                 cfgConfirmAlt();
@@ -48474,7 +48581,7 @@ static void pumpKeyboardInput() {
         }
 
 #if defined(DEVICE_TLORA_PAGER_TFT) || defined(DEVICE_M9) || defined(DEVICE_MESH_DECK) \
-    || defined(DEVICE_TDISPLAY_P4)
+    || defined(DEVICE_TDISPLAY_P4) || (defined(DEVICE_TDECK) && HAS_TRACKBALL)
         // Steps the caret through the message being typed.
         //
         // It sits ahead of the per-screen handlers because compose is reachable
@@ -48501,7 +48608,27 @@ static void pumpKeyboardInput() {
                 continue;
             }
 #endif
-#if defined(DEVICE_M9) || defined(DEVICE_MESH_DECK) || defined(DEVICE_TDISPLAY_P4)
+#if defined(DEVICE_M9) || defined(DEVICE_MESH_DECK) || defined(DEVICE_TDISPLAY_P4) \
+    || defined(DEVICE_TDECK)
+#if HAS_SCROLL_INVERT
+            // T-Deck: the trackball rolls the caret the way the ball moves, so
+            // the list-scroll invert applied where trackball input enters the
+            // pipeline is undone here. j/k are typed letters in compose and
+            // never arrive as these keys.
+            if (fromTrackball && s_cfg.invertScroll) {
+                if (k == KEY_SCROLL_UP)      k = KEY_SCROLL_DN;
+                else if (k == KEY_SCROLL_DN) k = KEY_SCROLL_UP;
+            }
+#endif
+#if defined(DEVICE_TDECK)
+            // A trackball rarely rolls dead level, so in the one-line box a
+            // stray vertical tick would throw the caret to an end. Only a
+            // wrapping box has lines to step between.
+            if ((k == KEY_SCROLL_UP || k == KEY_SCROLL_DN)
+                && lv_textarea_get_one_line(s_composeInput)) {
+                continue;
+            }
+#endif
             // D-pad: Left/Right by a character, Up/Down by a display line. The
             // compose box is multi-line on both boards
             // (lv_textarea_set_one_line(false)), which is what makes the
@@ -54102,6 +54229,38 @@ static const char *liveDestTag(uint32_t toNode) {
     return "U";
 }
 
+// Send our NodeInfo with want_response to a node we have heard but have no name
+// for, so it stops showing as !xxxxxxxx. Only for a packet our own keys opened
+// over RF from a node within kAutoNodeInfoMaxHops: an MQTT sighting may be a
+// continent away, and a sender with no hop_start gives no bound on the flood.
+static void maybeRequestUnknownNodeInfo(const MeshPacket &pkt) {
+    static uint32_t sLastAutoReqMs = 0;
+    if (!pkt.decrypted || (pkt.hdr.flags & 0x10)) return;
+    // A NodeInfo carries the name itself; an S&F replay is not its author on air.
+    if (pkt.portnum == NODEINFO_APP || pkt.portnum == STORE_FORWARD_APP) return;
+    const uint32_t from = pkt.hdr.from;
+    if (from == 0 || from == 0xFFFFFFFF || from == s_myNodeId || s_myNodeId == 0) return;
+
+    NodeEntry *e = Nodes.find(from);
+    if (!e || e->hasName) return;
+    if (!e->hasHops || e->hops > kAutoNodeInfoMaxHops) return;
+
+    const uint32_t now = millis();
+    if (e->lastSentInfoMs != 0 && (uint32_t)(now - e->lastSentInfoMs) < kAutoNodeInfoPerNodeMs) return;
+    if (sLastAutoReqMs != 0 && (uint32_t)(now - sLastAutoReqMs) < kAutoNodeInfoGapMs) return;
+    if (!Radio.isReady() || announceHeldForOnboarding() || discoveryRadioParked()) return;
+    if (Radio.channelUtilPercent() >= kAutoNodeInfoMaxChUtil) return;
+
+    // Stamped before sending, success or not: a failing send must not be
+    // retried on every packet the node sends.
+    sLastAutoReqMs = now;
+    e->lastSentInfoMs = now;
+    const bool ok = Channels.sendNodeInfo(s_myNodeId, s_cfg.nodeLong, s_cfg.nodeShort,
+                                          from, /*wantResponse=*/true, s_cfg.okToMqtt);
+    debugLogMessages("[nodedb] !%08X unnamed (%u hops) - NodeInfo request %s\n",
+                     (unsigned)from, (unsigned)e->hops, ok ? "sent" : "FAILED");
+}
+
 static void appendLiveRxSummary(const MeshPacket &pkt, int chanIdx, const char *portTag) {
     char timePrefix[12];
     char who[20];
@@ -55800,6 +55959,7 @@ static bool processMeshPacket(const MeshPacket &rxPkt) {
     }
     // After the update above, which creates the entry for a first contact.
     if (sig.markSigner) Nodes.markSigner(pkt.hdr.from);
+    maybeRequestUnknownNodeInfo(pkt);
 
     // Live SNR/RSSI sparkline samples (one per received packet).
     chartPushSample(s_snrHist, pkt.snr);

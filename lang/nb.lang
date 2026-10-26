@@ -85,6 +85,8 @@
 (nothing)	(ingenting)
 (unknown)	(ukjent)
 (unnamed)	(uten navn)
+, SD archive NOT cleared (no card)	, SD-arkiv IKKE tømt (intet kort)
+, SD archive cleared	, SD-arkiv tømt
 , gusts %d	, vindkast %d
 1 hour	1 time
 12-hour	12-timers
@@ -111,6 +113,7 @@ Actions	Handlinger
 All	Alle
 All live traffic will be erased	All live-trafikk slettes
 All live traffic will be erased, including lines hidden by the filter	All live-trafikk slettes, også linjer som filteret skjuler
+All nodes cleared%s - rebooting...	Alle noder tømt%s - starter på nytt...
 Already %s.	Allerede %s.
 Already on that preset	Allerede på den forhåndsinnstillingen
 Analyzing terrain...	Analyserer terrenget...
@@ -206,11 +209,14 @@ Choose WiFi: (none)	Velg WiFi: (ingen)
 Classic	Klassisk
 Clear	Tøm
 Clear Messages	Tøm meldinger
+Clear Nodes	Tøm noder
 Clear Nodes (All)	Tøm noder (alle)
 Clear Nodes (Keep Favorites)	Tøm noder (behold favoritter)
 Clear by %dm at tightest	Klarer med %dm på det trangeste
 Clear entire live feed?	Tømme hele live-strømmen?
+Clear nodes and reboot?	Tømme noder og starte på nytt?
 Cleared %d nodes, kept %d favorites - rebooting...	%d noder slettet, %d favoritter beholdt - starter på nytt...
+Cleared %d nodes, kept %d favorites%s - rebooting...	%d noder tømt, %d favoritter beholdt%s - starter på nytt...
 Cleared (%d report(s)) - rebuilding from traffic	Tømt (%d rapport(er)) - bygges opp fra trafikken
 Clock Format: %s	Klokkeformat: %s
 Clock set from web config	Klokken stilt fra webkonfigurasjonen
@@ -342,6 +348,10 @@ Import Config	Importer konfigurasjon
 Import FAILED (no file?)	Import MISLYKTES (ingen fil?)
 Import failed - enter a name	Import mislyktes - skriv inn et navn
 Imported OK - rebooting...	Import OK - starter på nytt...
+Include (A)rchived (SD card)	Ta med arkiverte (A) (SD)
+Include (F)avorites	Ta med favoritter (F)
+Include archived (SD card)	Ta med arkiverte (SD-kort)
+Include favorites	Ta med favoritter
 Install now? The device reboots to update.	Installere nå? Enheten starter på nytt for å oppdatere.
 Invalid base64 key	Ugyldig base64-nøkkel
 Invalid date/time	Ugyldig dato/klokkeslett

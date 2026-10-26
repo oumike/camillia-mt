@@ -87,6 +87,8 @@
 (nothing)	(nic)
 (unknown)	(neznámý)
 (unnamed)	(bez názvu)
+, SD archive NOT cleared (no card)	, archiv na SD NEVYMAZÁN (chybí karta)
+, SD archive cleared	, archiv na SD vymazán
 , gusts %d	, nárazy %d
 1 hour	1 hodina
 12-hour	12hodinový
@@ -113,6 +115,7 @@ Actions	Akce
 All	Vše
 All live traffic will be erased	Veškerý živý provoz bude smazán
 All live traffic will be erased, including lines hidden by the filter	Veškerý živý provoz bude smazán, včetně řádků skrytých filtrem
+All nodes cleared%s - rebooting...	Všechny uzly vymazány%s - restart...
 Already %s.	Již %s.
 Already on that preset	Tento preset už je nastaven
 Analyzing terrain...	Analyzuji terén...
@@ -210,11 +213,14 @@ Choose WiFi: (none)	Vybrat WiFi: (žádná)
 Classic	Klasický
 Clear	Vymazat
 Clear Messages	Vymazat zprávy
+Clear Nodes	Vymazat uzly
 Clear Nodes (All)	Vymazat uzly (vše)
 Clear Nodes (Keep Favorites)	Vymazat uzly (ponechat oblíbené)
 Clear by %dm at tightest	Volno %dm v nejužším místě
 Clear entire live feed?	Vymazat celý živý přehled?
+Clear nodes and reboot?	Vymazat uzly a restartovat?
 Cleared %d nodes, kept %d favorites - rebooting...	Smazáno %d uzlů, ponecháno %d oblíbených - restartuji...
+Cleared %d nodes, kept %d favorites%s - rebooting...	Vymazáno uzlů: %d, ponecháno oblíbených: %d%s - restart...
 Cleared (%d report(s)) - rebuilding from traffic	Vymazáno (%d hlášení) - obnova z provozu
 Clock Format: %s	Formát času: %s
 Clock set from web config	Hodiny nastaveny z webové konfigurace
@@ -349,6 +355,10 @@ Import Config	Importovat konfiguraci
 Import FAILED (no file?)	Import SELHAL (chybí soubor?)
 Import failed - enter a name	Import selhal - zadejte jméno
 Imported OK - rebooting...	Import OK - restartuji...
+Include (A)rchived (SD card)	Včetně archivovaných (A) (SD)
+Include (F)avorites	Včetně oblíbených (F)
+Include archived (SD card)	Včetně archivovaných (SD karta)
+Include favorites	Včetně oblíbených
 Indigo	Indigová
 Install now? The device reboots to update.	Nainstalovat hned? Zařízení se kvůli aktualizaci restartuje.
 Invalid base64 key	Neplatný klíč base64

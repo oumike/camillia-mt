@@ -87,6 +87,8 @@
 (nothing)	(ništa)
 (unknown)	(nepoznato)
 (unnamed)	(bez naziva)
+, SD archive NOT cleared (no card)	, SD arhiva NIJE obrisana (nema kartice)
+, SD archive cleared	, SD arhiva obrisana
 , gusts %d	, udari %d
 1 hour	1 sat
 12-hour	12-satni
@@ -113,6 +115,7 @@ Actions	Radnje
 All	Sve
 All live traffic will be erased	Sav promet uživo bit će izbrisan
 All live traffic will be erased, including lines hidden by the filter	Sav promet uživo bit će izbrisan, uključujući retke skrivene filtrom
+All nodes cleared%s - rebooting...	Svi čvorovi obrisani%s - ponovno pokretanje...
 Already %s.	Već %s.
 Already on that preset	Već na tom predlošku
 Analyzing terrain...	Analiziram teren...
@@ -210,11 +213,14 @@ Choose WiFi: (none)	Odaberi WiFi: (nijedan)
 Classic	Klasično
 Clear	Očisti
 Clear Messages	Očisti poruke
+Clear Nodes	Obriši čvorove
 Clear Nodes (All)	Očisti čvorove (sve)
 Clear Nodes (Keep Favorites)	Očisti čvorove (zadrži favorite)
 Clear by %dm at tightest	Slobodno %dm na najužem mjestu
 Clear entire live feed?	Očistiti cijeli prikaz uživo?
+Clear nodes and reboot?	Obrisati čvorove i ponovno pokrenuti?
 Cleared %d nodes, kept %d favorites - rebooting...	Očišćeno %d čvorova, zadržano %d favorita - ponovno pokretanje...
+Cleared %d nodes, kept %d favorites%s - rebooting...	Obrisano čvorova: %d, zadržano favorita: %d%s - ponovno pokretanje...
 Cleared (%d report(s)) - rebuilding from traffic	Očišćeno (%d izvješće(a)) - ponovna izgradnja iz prometa
 Clock Format: %s	Format sata: %s
 Clock set from web config	Sat postavljen iz web postavki
@@ -349,6 +355,10 @@ Import Config	Uvezi postavke
 Import FAILED (no file?)	Uvoz NIJE USPIO (nema datoteke?)
 Import failed - enter a name	Uvoz nije uspio - unesite ime
 Imported OK - rebooting...	Uvoz OK - ponovno pokretanje...
+Include (A)rchived (SD card)	Uključi arhivirane (A) (SD)
+Include (F)avorites	Uključi favorite (F)
+Include archived (SD card)	Uključi arhivirane (SD kartica)
+Include favorites	Uključi favorite
 Install now? The device reboots to update.	Instalirati sada? Uređaj se ponovno pokreće radi ažuriranja.
 Invalid base64 key	Neispravan base64 ključ
 Invalid date/time	Neispravan datum/vrijeme

@@ -87,6 +87,8 @@
 (nothing)	(mitte midagi)
 (unknown)	(tundmatu)
 (unnamed)	(nimetu)
+, SD archive NOT cleared (no card)	, SD-arhiivi EI tühjendatud (kaarti pole)
+, SD archive cleared	, SD-arhiiv tühjendatud
 , gusts %d	, puhanguid %d
 1 hour	1 tund
 12-hour	12-tunnine
@@ -113,6 +115,7 @@ Actions	Toimingud
 All	Kõik
 All live traffic will be erased	Kogu reaalajas liiklus kustutatakse
 All live traffic will be erased, including lines hidden by the filter	Kogu reaalajas liiklus kustutatakse, ka filtri peidetud read
+All nodes cleared%s - rebooting...	Kõik sõlmed tühjendatud%s - taaskäivitus...
 Already %s.	Juba %s.
 Already on that preset	Juba sellel eelseadistusel
 Analyzing terrain...	Analüüsin maastikku...
@@ -209,11 +212,14 @@ Choose WiFi: (none)	Vali WiFi: (puudub)
 Classic	Klassikaline
 Clear	Tühjenda
 Clear Messages	Tühjenda sõnumid
+Clear Nodes	Tühjenda sõlmed
 Clear Nodes (All)	Tühjenda sõlmed (kõik)
 Clear Nodes (Keep Favorites)	Tühjenda sõlmed (jäta lemmikud)
 Clear by %dm at tightest	Vaba %dm kõige kitsamas kohas
 Clear entire live feed?	Kas tühjendada kogu reaalajas voog?
+Clear nodes and reboot?	Tühjendada sõlmed ja taaskäivitada?
 Cleared %d nodes, kept %d favorites - rebooting...	Tühjendatud %d sõlme, alles %d lemmikut - taaskäivitan...
+Cleared %d nodes, kept %d favorites%s - rebooting...	%d sõlme tühjendatud, %d lemmikut alles%s - taaskäivitus...
 Cleared (%d report(s)) - rebuilding from traffic	Tühjendatud (%d aruannet) - taastan liiklusest
 Clock Format: %s	Kella vorming: %s
 Clock set from web config	Kell seatud veebiseadetest
@@ -346,6 +352,10 @@ Import Config	Impordi seaded
 Import FAILED (no file?)	Import EBAÕNNESTUS (faili pole?)
 Import failed - enter a name	Import ebaõnnestus - sisestage nimi
 Imported OK - rebooting...	Import OK - taaskäivitan...
+Include (A)rchived (SD card)	Kaasa arhiveeritud (A) (SD)
+Include (F)avorites	Kaasa lemmikud (F)
+Include archived (SD card)	Kaasa arhiveeritud (SD-kaart)
+Include favorites	Kaasa lemmikud
 Install now? The device reboots to update.	Kas paigaldada kohe? Seade taaskäivitub uuendamiseks.
 Invalid base64 key	Vigane base64 võti
 Invalid date/time	Vigane kuupäev/kellaaeg

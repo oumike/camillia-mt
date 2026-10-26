@@ -87,6 +87,8 @@
 (nothing)	(semmi)
 (unknown)	(ismeretlen)
 (unnamed)	(névtelen)
+, SD archive NOT cleared (no card)	, SD archívum NINCS törölve (nincs kártya)
+, SD archive cleared	, SD archívum törölve
 , gusts %d	, széllökés %d
 1 hour	1 óra
 12-hour	12 órás
@@ -113,6 +115,7 @@ Actions	Műveletek
 All	Mind
 All live traffic will be erased	Az összes élő forgalom törlődik
 All live traffic will be erased, including lines hidden by the filter	Az összes élő forgalom törlődik, a szűrő által elrejtett sorokkal együtt
+All nodes cleared%s - rebooting...	Minden csomópont törölve%s - újraindítás...
 Already %s.	Már %s.
 Already on that preset	Már ezen az előbeállításon van
 Analyzing terrain...	Terep elemzése...
@@ -209,11 +212,14 @@ Choose WiFi: (none)	WiFi kiválasztása: (nincs)
 Classic	Klasszikus
 Clear	Törlés
 Clear Messages	Üzenetek törlése
+Clear Nodes	Csomópontok törlése
 Clear Nodes (All)	Csomópontok törlése (mind)
 Clear Nodes (Keep Favorites)	Csomópontok törlése (kedvencek maradnak)
 Clear by %dm at tightest	%dm szabad a legszűkebb ponton
 Clear entire live feed?	Törlöd a teljes élő hírfolyamot?
+Clear nodes and reboot?	Törli a csomópontokat és újraindít?
 Cleared %d nodes, kept %d favorites - rebooting...	%d csomópont törölve, %d kedvenc megtartva - újraindítás...
+Cleared %d nodes, kept %d favorites%s - rebooting...	%d csomópont törölve, %d kedvenc megtartva%s - újraindítás...
 Cleared (%d report(s)) - rebuilding from traffic	Törölve (%d jelentés) - újraépítés a forgalomból
 Clock Format: %s	Időformátum: %s
 Clock set from web config	Óra beállítva a webes beállításokból
@@ -348,6 +354,10 @@ Import Config	Beállítások importálása
 Import FAILED (no file?)	Az import SIKERTELEN (nincs fájl?)
 Import failed - enter a name	Sikertelen import - adj meg egy nevet
 Imported OK - rebooting...	Import OK - újraindítás...
+Include (A)rchived (SD card)	Archiváltakkal együtt (A) (SD)
+Include (F)avorites	Kedvencekkel együtt (F)
+Include archived (SD card)	Archiváltakkal együtt (SD kártya)
+Include favorites	Kedvencekkel együtt
 Indigo	Indigó
 Info	Infó
 Install now? The device reboots to update.	Telepíted most? Az eszköz a frissítéshez újraindul.

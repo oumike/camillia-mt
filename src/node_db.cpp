@@ -1055,13 +1055,23 @@ NodeEntry *NodeDB::upsert(uint32_t nodeId) {
 
     uint32_t evictedId = 0;
     if (_count >= MAX_NODES) {
-        _sort();
-        // Favorites are never evicted, however stale. _sort() places them first,
-        // so the tail is normally already a non-favorite; scanning back only
-        // does real work when favorites fill the end of the table.
+        // Evict the least-recently-heard node. Favorites are never evicted,
+        // however stale. Deliberately not the display order (_sort()), which
+        // ranks named nodes above recency: evicting from its tail meant a stale
+        // named node outlived every newcomer, so on a full table new arrivals
+        // only ever displaced each other before their NodeInfo could land.
+        // lastHeardMs == 0 (loaded from NVS, not heard this boot) is oldest of
+        // all; among equals an unnamed node goes before a named one.
         int victim = -1;
-        for (int i = _count - 1; i >= 0; i--) {
-            if (!_nodes[i].favorite) { victim = i; break; }
+        for (int i = 0; i < _count; i++) {
+            const NodeEntry &c = _nodes[i];
+            if (c.favorite) continue;
+            if (victim < 0) { victim = i; continue; }
+            const NodeEntry &v = _nodes[victim];
+            if (c.lastHeardMs < v.lastHeardMs
+                || (c.lastHeardMs == v.lastHeardMs && v.hasName && !c.hasName)) {
+                victim = i;
+            }
         }
         if (victim < 0) {
             // Every slot is favorited: there is genuinely no room, and taking

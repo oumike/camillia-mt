@@ -86,6 +86,8 @@
 (nothing)	(nieko)
 (unknown)	(nežinomas)
 (unnamed)	(be pavadinimo)
+, SD archive NOT cleared (no card)	, SD archyvas NEIŠVALYTAS (nėra kortelės)
+, SD archive cleared	, SD archyvas išvalytas
 , gusts %d	, gūsiai %d
 1 hour	1 valanda
 12-hour	12 valandų
@@ -112,6 +114,7 @@ Actions	Veiksmai
 All	Visi
 All live traffic will be erased	Visas tiesioginis srautas bus ištrintas
 All live traffic will be erased, including lines hidden by the filter	Visas tiesioginis srautas bus ištrintas, įskaitant filtro paslėptas eilutes
+All nodes cleared%s - rebooting...	Visi mazgai išvalyti%s - paleidžiama iš naujo...
 Already %s.	Jau %s.
 Already on that preset	Jau toje išankstinėje nuostatoje
 Analyzing terrain...	Analizuojamas reljefas...
@@ -209,11 +212,14 @@ Choose WiFi: (none)	Pasirinkti WiFi: (nėra)
 Classic	Klasikinis
 Clear	Išvalyti
 Clear Messages	Išvalyti žinutes
+Clear Nodes	Išvalyti mazgus
 Clear Nodes (All)	Išvalyti mazgus (visus)
 Clear Nodes (Keep Favorites)	Išvalyti mazgus (palikti mėgstamus)
 Clear by %dm at tightest	Laisva %dm siauriausioje vietoje
 Clear entire live feed?	Išvalyti visą tiesioginį srautą?
+Clear nodes and reboot?	Išvalyti mazgus ir paleisti iš naujo?
 Cleared %d nodes, kept %d favorites - rebooting...	Išvalyta %d mazgų, palikta %d mėgstamų - paleidžiama iš naujo...
+Cleared %d nodes, kept %d favorites%s - rebooting...	Išvalyta mazgų: %d, palikta mėgstamų: %d%s - paleidžiama iš naujo...
 Cleared (%d report(s)) - rebuilding from traffic	Išvalyta (%d ataskaitos) - atkuriama iš srauto
 Clock Format: %s	Laikrodžio formatas: %s
 Clock set from web config	Laikrodis nustatytas iš žiniatinklio nustatymų
@@ -348,6 +354,10 @@ Import Config	Importuoti nustatymus
 Import FAILED (no file?)	Importuoti NEPAVYKO (nėra failo?)
 Import failed - enter a name	Importuoti nepavyko - įveskite vardą
 Imported OK - rebooting...	Importuota - paleidžiama iš naujo...
+Include (A)rchived (SD card)	Įtraukti archyvuotus (A) (SD)
+Include (F)avorites	Įtraukti mėgstamus (F)
+Include archived (SD card)	Įtraukti archyvuotus (SD kortelė)
+Include favorites	Įtraukti mėgstamus
 Install now? The device reboots to update.	Įdiegti dabar? Įrenginys bus paleistas iš naujo atnaujinimui.
 Invalid base64 key	Neteisingas base64 raktas
 Invalid date/time	Neteisinga data/laikas

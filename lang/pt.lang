@@ -86,6 +86,8 @@
 (nothing)	(nada)
 (unknown)	(desconhecido)
 (unnamed)	(sem nome)
+, SD archive NOT cleared (no card)	, arquivo SD NÃO limpo (sem cartão)
+, SD archive cleared	, arquivo SD limpo
 , gusts %d	, rajadas %d
 1 hour	1 hora
 12-hour	12 horas
@@ -112,6 +114,7 @@ Actions	Ações
 All	Todos
 All live traffic will be erased	Todo o tráfego ao vivo será apagado
 All live traffic will be erased, including lines hidden by the filter	Todo o tráfego ao vivo será apagado, inclusive as linhas ocultas pelo filtro
+All nodes cleared%s - rebooting...	Todos os nós limpos%s - reiniciando...
 Already %s.	Já está em %s.
 Already on that preset	Já está nesse preset
 Analyzing terrain...	Analisando o terreno...
@@ -209,11 +212,14 @@ Choose WiFi: (none)	Escolher WiFi: (nenhum)
 Classic	Clássico
 Clear	Limpar
 Clear Messages	Limpar mensagens
+Clear Nodes	Limpar nós
 Clear Nodes (All)	Limpar nós (todos)
 Clear Nodes (Keep Favorites)	Limpar nós (manter favoritos)
 Clear by %dm at tightest	Livre por %dm no ponto mais apertado
 Clear entire live feed?	Limpar todo o feed ao vivo?
+Clear nodes and reboot?	Limpar nós e reiniciar?
 Cleared %d nodes, kept %d favorites - rebooting...	%d nós removidos, %d favoritos mantidos - reiniciando...
+Cleared %d nodes, kept %d favorites%s - rebooting...	%d nós limpos, %d favoritos mantidos%s - reiniciando...
 Cleared (%d report(s)) - rebuilding from traffic	Limpo (%d relatório(s)) - reconstruindo pelo tráfego
 Clock Format: %s	Formato do relógio: %s
 Clock set from web config	Relógio ajustado pela config web
@@ -346,6 +352,10 @@ Import Config	Importar configuração
 Import FAILED (no file?)	FALHA na importação (sem arquivo?)
 Import failed - enter a name	Falha na importação - digite um nome
 Imported OK - rebooting...	Importado - reiniciando...
+Include (A)rchived (SD card)	Incluir arquivados (A) (SD)
+Include (F)avorites	Incluir favoritos (F)
+Include archived (SD card)	Incluir arquivados (cartão SD)
+Include favorites	Incluir favoritos
 Indigo	Índigo
 Install now? The device reboots to update.	Instalar agora? O dispositivo reinicia para atualizar.
 Invalid base64 key	Chave base64 inválida

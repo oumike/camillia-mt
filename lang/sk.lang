@@ -87,6 +87,8 @@
 (nothing)	(nič)
 (unknown)	(neznámy)
 (unnamed)	(bez názvu)
+, SD archive NOT cleared (no card)	, archív na SD NEVYMAZANÝ (chýba karta)
+, SD archive cleared	, archív na SD vymazaný
 , gusts %d	, nárazy %d
 1 hour	1 hodina
 12-hour	12-hodinový
@@ -113,6 +115,7 @@ Actions	Akcie
 All	Všetko
 All live traffic will be erased	Celá živá prevádzka bude vymazaná
 All live traffic will be erased, including lines hidden by the filter	Celá živá prevádzka bude vymazaná vrátane riadkov skrytých filtrom
+All nodes cleared%s - rebooting...	Všetky uzly vymazané%s - reštart...
 Already %s.	Už %s.
 Already on that preset	Tento preset už je nastavený
 Analyzing terrain...	Analyzujem terén...
@@ -210,11 +213,14 @@ Choose WiFi: (none)	Vybrať WiFi: (žiadna)
 Classic	Klasický
 Clear	Vymazať
 Clear Messages	Vymazať správy
+Clear Nodes	Vymazať uzly
 Clear Nodes (All)	Vymazať uzly (všetky)
 Clear Nodes (Keep Favorites)	Vymazať uzly (ponechať obľúbené)
 Clear by %dm at tightest	Voľno %dm v najužšom mieste
 Clear entire live feed?	Vymazať celý živý prehľad?
+Clear nodes and reboot?	Vymazať uzly a reštartovať?
 Cleared %d nodes, kept %d favorites - rebooting...	Vymazaných %d uzlov, ponechaných %d obľúbených - reštartujem...
+Cleared %d nodes, kept %d favorites%s - rebooting...	Vymazaných uzlov: %d, ponechaných obľúbených: %d%s - reštart...
 Cleared (%d report(s)) - rebuilding from traffic	Vymazané (%d hlásení) - obnova z prevádzky
 Clock Format: %s	Formát času: %s
 Clock set from web config	Hodiny nastavené z webovej konfigurácie
@@ -347,6 +353,10 @@ Import Config	Importovať konfiguráciu
 Import FAILED (no file?)	Import ZLYHAL (chýba súbor?)
 Import failed - enter a name	Import zlyhal - zadajte meno
 Imported OK - rebooting...	Import OK - reštartujem...
+Include (A)rchived (SD card)	Vrátane archivovaných (A) (SD)
+Include (F)avorites	Vrátane obľúbených (F)
+Include archived (SD card)	Vrátane archivovaných (SD karta)
+Include favorites	Vrátane obľúbených
 Indigo	Indigová
 Install now? The device reboots to update.	Nainštalovať teraz? Zariadenie sa kvôli aktualizácii reštartuje.
 Invalid base64 key	Neplatný kľúč base64

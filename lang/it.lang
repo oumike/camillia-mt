@@ -84,6 +84,8 @@
 (nothing)	(niente)
 (unknown)	(sconosciuto)
 (unnamed)	(senza nome)
+, SD archive NOT cleared (no card)	, archivio SD NON cancellato (nessuna scheda)
+, SD archive cleared	, archivio SD cancellato
 , gusts %d	, raffiche %d
 1 hour	1 ora
 12-hour	12 ore
@@ -110,6 +112,7 @@ Actions	Azioni
 All	Tutto
 All live traffic will be erased	Tutto il traffico live sarà cancellato
 All live traffic will be erased, including lines hidden by the filter	Tutto il traffico live sarà cancellato, comprese le righe nascoste dal filtro
+All nodes cleared%s - rebooting...	Tutti i nodi cancellati%s - riavvio...
 Already %s.	Già %s.
 Already on that preset	Già su quel preset
 Analyzing terrain...	Analisi del terreno...
@@ -206,11 +209,14 @@ Choose WiFi: (none)	Scegli WiFi: (nessuna)
 Classic	Classico
 Clear	Cancella
 Clear Messages	Cancella messaggi
+Clear Nodes	Cancella nodi
 Clear Nodes (All)	Cancella nodi (tutti)
 Clear Nodes (Keep Favorites)	Cancella nodi (tieni preferiti)
 Clear by %dm at tightest	Libero di %dm nel punto più stretto
 Clear entire live feed?	Cancellare tutto il feed live?
+Clear nodes and reboot?	Cancellare i nodi e riavviare?
 Cleared %d nodes, kept %d favorites - rebooting...	%d nodi cancellati, %d preferiti tenuti - riavvio...
+Cleared %d nodes, kept %d favorites%s - rebooting...	%d nodi cancellati, %d preferiti mantenuti%s - riavvio...
 Cleared (%d report(s)) - rebuilding from traffic	Cancellato (%d rapporto/i): ricostruzione dal traffico
 Clock Format: %s	Formato ora: %s
 Clock set from web config	Ora impostata dalla config web
@@ -344,6 +350,10 @@ Import Config	Importa config
 Import FAILED (no file?)	Importazione FALLITA (manca il file?)
 Import failed - enter a name	Importazione fallita - inserisci un nome
 Imported OK - rebooting...	Importato - riavvio...
+Include (A)rchived (SD card)	Includi archiviati (A) (SD)
+Include (F)avorites	Includi preferiti (F)
+Include archived (SD card)	Includi archiviati (scheda SD)
+Include favorites	Includi preferiti
 Indigo	Indaco
 Install now? The device reboots to update.	Installare ora? Il dispositivo si riavvia per aggiornare.
 Invalid base64 key	Chiave base64 non valida

@@ -85,6 +85,8 @@
 (nothing)	(intet)
 (unknown)	(ukendt)
 (unnamed)	(unavngivet)
+, SD archive NOT cleared (no card)	, SD-arkiv IKKE ryddet (intet kort)
+, SD archive cleared	, SD-arkiv ryddet
 , gusts %d	, vindstød %d
 1 hour	1 time
 12-hour	12-timers
@@ -111,6 +113,7 @@ Actions	Handlinger
 All	Alle
 All live traffic will be erased	Al live-trafik slettes
 All live traffic will be erased, including lines hidden by the filter	Al live-trafik slettes, også linjer som filteret skjuler
+All nodes cleared%s - rebooting...	Alle noder ryddet%s - genstarter...
 Already %s.	Allerede %s.
 Already on that preset	Allerede på det forvalg
 Analyzing terrain...	Analyserer terrænet...
@@ -207,11 +210,14 @@ Choose WiFi: (none)	Vælg WiFi: (intet)
 Classic	Klassisk
 Clear	Ryd
 Clear Messages	Ryd beskeder
+Clear Nodes	Ryd noder
 Clear Nodes (All)	Ryd noder (alle)
 Clear Nodes (Keep Favorites)	Ryd noder (behold favoritter)
 Clear by %dm at tightest	Fri med %dm på det snævreste sted
 Clear entire live feed?	Rydde hele live-strømmen?
+Clear nodes and reboot?	Ryd noder og genstart?
 Cleared %d nodes, kept %d favorites - rebooting...	%d noder ryddet, %d favoritter beholdt - genstarter...
+Cleared %d nodes, kept %d favorites%s - rebooting...	%d noder ryddet, %d favoritter beholdt%s - genstarter...
 Cleared (%d report(s)) - rebuilding from traffic	Ryddet (%d rapport(er)) - genopbygges fra trafikken
 Clock Format: %s	Urformat: %s
 Clock set from web config	Uret indstillet fra webkonfigurationen
@@ -343,6 +349,10 @@ Import Config	Importér konfiguration
 Import FAILED (no file?)	Import MISLYKKEDES (ingen fil?)
 Import failed - enter a name	Import mislykkedes - indtast et navn
 Imported OK - rebooting...	Import OK - genstarter...
+Include (A)rchived (SD card)	Medtag arkiverede (A) (SD)
+Include (F)avorites	Medtag favoritter (F)
+Include archived (SD card)	Medtag arkiverede (SD-kort)
+Include favorites	Medtag favoritter
 Install now? The device reboots to update.	Installér nu? Enheden genstarter for at opdatere.
 Invalid base64 key	Ugyldig base64-nøgle
 Invalid date/time	Ugyldig dato/tid

@@ -84,6 +84,8 @@
 (nothing)	(rien)
 (unknown)	(inconnu)
 (unnamed)	(sans nom)
+, SD archive NOT cleared (no card)	, archive SD NON effacée (pas de carte)
+, SD archive cleared	, archive SD effacée
 , gusts %d	, rafales %d
 1 hour	1 heure
 12-hour	12 heures
@@ -110,6 +112,7 @@ Actions	Actions
 All	Tout
 All live traffic will be erased	Tout le trafic en direct sera effacé
 All live traffic will be erased, including lines hidden by the filter	Tout le trafic en direct sera effacé, y compris les lignes masquées par le filtre
+All nodes cleared%s - rebooting...	Tous les nœuds effacés%s - redémarrage...
 Already %s.	Déjà %s.
 Already on that preset	Déjà sur ce préréglage
 Analyzing terrain...	Analyse du terrain...
@@ -207,11 +210,14 @@ Choose WiFi: (none)	Choisir le WiFi : (aucun)
 Classic	Classique
 Clear	Effacer
 Clear Messages	Effacer les messages
+Clear Nodes	Effacer les nœuds
 Clear Nodes (All)	Effacer les nœuds (tous)
 Clear Nodes (Keep Favorites)	Effacer les nœuds (garder les favoris)
 Clear by %dm at tightest	Dégagé de %dm au plus serré
 Clear entire live feed?	Effacer tout le flux en direct ?
+Clear nodes and reboot?	Effacer les nœuds et redémarrer ?
 Cleared %d nodes, kept %d favorites - rebooting...	%d nœuds effacés, %d favoris gardés - redémarrage...
+Cleared %d nodes, kept %d favorites%s - rebooting...	%d nœuds effacés, %d favoris gardés%s - redémarrage...
 Cleared (%d report(s)) - rebuilding from traffic	Effacé (%d rapport(s)) - reconstruction depuis le trafic
 Clock Format: %s	Format de l'heure : %s
 Clock set from web config	Heure réglée depuis la config web
@@ -347,6 +353,10 @@ Import Config	Importer la config
 Import FAILED (no file?)	Import ÉCHOUÉ (pas de fichier ?)
 Import failed - enter a name	Échec de l'import - saisissez un nom
 Imported OK - rebooting...	Import réussi - redémarrage...
+Include (A)rchived (SD card)	Inclure les archivés (A) (SD)
+Include (F)avorites	Inclure les favoris (F)
+Include archived (SD card)	Inclure les archivés (carte SD)
+Include favorites	Inclure les favoris
 Info	Infos
 Install now? The device reboots to update.	Installer maintenant ? L'appareil redémarre pour la mise à jour.
 Invalid base64 key	Clé base64 invalide

@@ -87,6 +87,8 @@
 (nothing)	(ei mitään)
 (unknown)	(tuntematon)
 (unnamed)	(nimetön)
+, SD archive NOT cleared (no card)	, SD-arkistoa EI tyhjennetty (ei korttia)
+, SD archive cleared	, SD-arkisto tyhjennetty
 , gusts %d	, puuskat %d
 1 hour	1 tunti
 12-hour	12 tunnin
@@ -113,6 +115,7 @@ Actions	Toiminnot
 All	Kaikki
 All live traffic will be erased	Kaikki live-liikenne poistetaan
 All live traffic will be erased, including lines hidden by the filter	Kaikki live-liikenne poistetaan, myös suodattimen piilottamat rivit
+All nodes cleared%s - rebooting...	Kaikki solmut tyhjennetty%s - käynnistetään uudelleen...
 Already %s.	Jo %s.
 Already on that preset	Jo tällä esiasetuksella
 Analyzing terrain...	Analysoidaan maastoa...
@@ -210,11 +213,14 @@ Choose WiFi: (none)	Valitse WiFi: (ei mitään)
 Classic	Klassinen
 Clear	Tyhjennä
 Clear Messages	Tyhjennä viestit
+Clear Nodes	Tyhjennä solmut
 Clear Nodes (All)	Tyhjennä solmut (kaikki)
 Clear Nodes (Keep Favorites)	Tyhjennä solmut (säilytä suosikit)
 Clear by %dm at tightest	Vapaata %dm ahtaimmassa kohdassa
 Clear entire live feed?	Tyhjennetäänkö koko live-syöte?
+Clear nodes and reboot?	Tyhjennetäänkö solmut ja käynnistetään uudelleen?
 Cleared %d nodes, kept %d favorites - rebooting...	%d solmua poistettu, %d suosikkia säilytetty - käynnistetään uudelleen...
+Cleared %d nodes, kept %d favorites%s - rebooting...	%d solmua tyhjennetty, %d suosikkia säilytetty%s - käynnistetään uudelleen...
 Cleared (%d report(s)) - rebuilding from traffic	Tyhjennetty (%d raportti(a)) - rakennetaan uudelleen liikenteestä
 Clock Format: %s	Kellon muoto: %s
 Clock set from web config	Kello asetettu web-asetuksista
@@ -349,6 +355,10 @@ Import Config	Tuo asetukset
 Import FAILED (no file?)	Tuonti EPÄONNISTUI (ei tiedostoa?)
 Import failed - enter a name	Tuonti epäonnistui - anna nimi
 Imported OK - rebooting...	Tuonti OK - käynnistetään uudelleen...
+Include (A)rchived (SD card)	Myös arkistoidut (A) (SD)
+Include (F)avorites	Myös suosikit (F)
+Include archived (SD card)	Myös arkistoidut (SD-kortti)
+Include favorites	Myös suosikit
 Info	Tiedot
 Install now? The device reboots to update.	Asennetaanko nyt? Laite käynnistyy uudelleen päivittääkseen.
 Invalid base64 key	Virheellinen base64-avain

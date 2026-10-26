@@ -84,6 +84,8 @@
 (nothing)	(inget)
 (unknown)	(okänd)
 (unnamed)	(namnlös)
+, SD archive NOT cleared (no card)	, SD-arkiv INTE rensat (inget kort)
+, SD archive cleared	, SD-arkiv rensat
 , gusts %d	, byar %d
 1 hour	1 timme
 12-hour	12-timmars
@@ -110,6 +112,7 @@ Actions	Åtgärder
 All	Alla
 All live traffic will be erased	All live-trafik raderas
 All live traffic will be erased, including lines hidden by the filter	All live-trafik raderas, även rader som filtret döljer
+All nodes cleared%s - rebooting...	Alla noder rensade%s - startar om...
 Already %s.	Redan %s.
 Already on that preset	Redan på den förinställningen
 Analyzing terrain...	Analyserar terrängen...
@@ -206,11 +209,14 @@ Choose WiFi: (none)	Välj WiFi: (inget)
 Classic	Klassisk
 Clear	Rensa
 Clear Messages	Rensa meddelanden
+Clear Nodes	Rensa noder
 Clear Nodes (All)	Rensa noder (alla)
 Clear Nodes (Keep Favorites)	Rensa noder (behåll favoriter)
 Clear by %dm at tightest	Fritt med %dm vid trängsta punkten
 Clear entire live feed?	Rensa hela live-flödet?
+Clear nodes and reboot?	Rensa noder och starta om?
 Cleared %d nodes, kept %d favorites - rebooting...	%d noder rensade, %d favoriter behållna - startar om...
+Cleared %d nodes, kept %d favorites%s - rebooting...	%d noder rensade, %d favoriter behållna%s - startar om...
 Cleared (%d report(s)) - rebuilding from traffic	Rensat (%d rapport(er)) - byggs upp från trafiken
 Clock Format: %s	Klockformat: %s
 Clock set from web config	Klockan ställd från webbkonfigurationen
@@ -342,6 +348,10 @@ Import Config	Importera konfiguration
 Import FAILED (no file?)	Import MISSLYCKADES (ingen fil?)
 Import failed - enter a name	Import misslyckades - ange ett namn
 Imported OK - rebooting...	Import OK - startar om...
+Include (A)rchived (SD card)	Ta med arkiverade (A) (SD)
+Include (F)avorites	Ta med favoriter (F)
+Include archived (SD card)	Ta med arkiverade (SD-kort)
+Include favorites	Ta med favoriter
 Install now? The device reboots to update.	Installera nu? Enheten startar om för att uppdatera.
 Invalid base64 key	Ogiltig base64-nyckel
 Invalid date/time	Ogiltigt datum/tid

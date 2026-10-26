@@ -86,6 +86,8 @@
 (nothing)	(nichts)
 (unknown)	(unbekannt)
 (unnamed)	(unbenannt)
+, SD archive NOT cleared (no card)	, SD-Archiv NICHT gelöscht (keine Karte)
+, SD archive cleared	, SD-Archiv gelöscht
 , gusts %d	, Böen %d
 1 hour	1 Stunde
 12-hour	12 Stunden
@@ -112,6 +114,7 @@ Actions	Aktionen
 All	Alle
 All live traffic will be erased	Der gesamte Live-Verkehr wird gelöscht
 All live traffic will be erased, including lines hidden by the filter	Der gesamte Live-Verkehr wird gelöscht, auch vom Filter ausgeblendete Zeilen
+All nodes cleared%s - rebooting...	Alle Knoten gelöscht%s - Neustart...
 Already %s.	Bereits %s.
 Already on that preset	Bereits auf diesem Preset
 Analyzing terrain...	Gelände wird analysiert...
@@ -204,11 +207,14 @@ Choose WiFi: (none)	WLAN wählen: (keins)
 Classic	Klassisch
 Clear	Leeren
 Clear Messages	Nachrichten löschen
+Clear Nodes	Knoten löschen
 Clear Nodes (All)	Knoten löschen (alle)
 Clear Nodes (Keep Favorites)	Knoten löschen (Favoriten behalten)
 Clear by %dm at tightest	Frei um %dm an der engsten Stelle
 Clear entire live feed?	Gesamten Live-Feed leeren?
+Clear nodes and reboot?	Knoten löschen und neu starten?
 Cleared %d nodes, kept %d favorites - rebooting...	%d Knoten gelöscht, %d Favoriten behalten - Neustart...
+Cleared %d nodes, kept %d favorites%s - rebooting...	%d Knoten gelöscht, %d Favoriten behalten%s - Neustart...
 Cleared (%d report(s)) - rebuilding from traffic	Geleert (%d Bericht(e)) - Neuaufbau aus dem Verkehr
 Clock Format: %s	Uhrformat: %s
 Clock set from web config	Uhr über Web-Konfiguration gestellt
@@ -335,6 +341,10 @@ Import Config	Konfiguration importieren
 Import FAILED (no file?)	Import FEHLGESCHLAGEN (keine Datei?)
 Import failed - enter a name	Import fehlgeschlagen - Namen eingeben
 Imported OK - rebooting...	Import OK - Neustart...
+Include (A)rchived (SD card)	Archivierte einbeziehen (A) (SD)
+Include (F)avorites	Favoriten einbeziehen (F)
+Include archived (SD card)	Archivierte einbeziehen (SD-Karte)
+Include favorites	Favoriten einbeziehen
 Install now? The device reboots to update.	Jetzt installieren? Das Gerät startet zum Aktualisieren neu.
 Invalid base64 key	Ungültiger base64-Schlüssel
 Invalid date/time	Ungültiges Datum/Uhrzeit
