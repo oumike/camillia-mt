@@ -61,7 +61,10 @@ path = os.path.join(env.subst("$PROJECT_LIBDEPS_DIR"), env.subst("$PIOENV"),
 
 # PlatformIO runs a clean target in its own SCons pass, before it installs
 # dependencies; the build pass that follows does not carry the clean target.
-clean_only = any(t in ("clean", "cleanall", "fullclean") for t in COMMAND_LINE_TARGETS)
+# The clean arrives as SCons' --clean plus FULLCLEAN=0/1, not as a target name
+# (see patch_pubsubclient_topiclen.py), so ask the builder.
+clean_only = env.IsCleanTarget() or any(
+    t in ("clean", "cleanall", "fullclean") for t in COMMAND_LINE_TARGETS)
 
 if not os.path.isfile(path):
     if clean_only:

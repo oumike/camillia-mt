@@ -102,7 +102,12 @@ if os.path.isdir(libdeps):
 
 # PlatformIO runs a clean target in its own SCons pass, before it installs
 # dependencies; the build pass that follows does not carry the clean target.
-clean_only = any(t in ("clean", "cleanall", "fullclean") for t in COMMAND_LINE_TARGETS)
+# The clean does not arrive as a target name: PlatformIO turns clean/fullclean
+# into SCons' --clean plus FULLCLEAN=0/1 (platform/_run.py), so ask the builder,
+# as builder/main.py does. A fullclean also deletes libdeps, so the next one
+# finds nothing here -- which is how this used to fail `release.sh --dist-only`.
+clean_only = env.IsCleanTarget() or any(
+    t in ("clean", "cleanall", "fullclean") for t in COMMAND_LINE_TARGETS)
 
 if not sources:
     if clean_only:
