@@ -48484,7 +48484,7 @@ static void pumpKeyboardInput() {
         }
 
 #if defined(DEVICE_TLORA_PAGER_TFT) || defined(DEVICE_M9) || defined(DEVICE_MESH_DECK) \
-    || defined(DEVICE_TDISPLAY_P4)
+    || defined(DEVICE_TDISPLAY_P4) || (defined(DEVICE_TDECK) && HAS_TRACKBALL)
         // Steps the caret through the message being typed.
         //
         // It sits ahead of the per-screen handlers because compose is reachable
@@ -48511,7 +48511,27 @@ static void pumpKeyboardInput() {
                 continue;
             }
 #endif
-#if defined(DEVICE_M9) || defined(DEVICE_MESH_DECK) || defined(DEVICE_TDISPLAY_P4)
+#if defined(DEVICE_M9) || defined(DEVICE_MESH_DECK) || defined(DEVICE_TDISPLAY_P4) \
+    || defined(DEVICE_TDECK)
+#if HAS_SCROLL_INVERT
+            // T-Deck: the trackball rolls the caret the way the ball moves, so
+            // the list-scroll invert applied where trackball input enters the
+            // pipeline is undone here. j/k are typed letters in compose and
+            // never arrive as these keys.
+            if (fromTrackball && s_cfg.invertScroll) {
+                if (k == KEY_SCROLL_UP)      k = KEY_SCROLL_DN;
+                else if (k == KEY_SCROLL_DN) k = KEY_SCROLL_UP;
+            }
+#endif
+#if defined(DEVICE_TDECK)
+            // A trackball rarely rolls dead level, so in the one-line box a
+            // stray vertical tick would throw the caret to an end. Only a
+            // wrapping box has lines to step between.
+            if ((k == KEY_SCROLL_UP || k == KEY_SCROLL_DN)
+                && lv_textarea_get_one_line(s_composeInput)) {
+                continue;
+            }
+#endif
             // D-pad: Left/Right by a character, Up/Down by a display line. The
             // compose box is multi-line on both boards
             // (lv_textarea_set_one_line(false)), which is what makes the
