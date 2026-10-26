@@ -14356,11 +14356,16 @@ static void openComposePrompt(uint32_t replyPacketId,
     }
     lv_obj_set_width(s_composeInput, lv_pct(100));
     lv_obj_set_style_text_font(s_composeInput, emojiFont(&lv_font_montserrat_14), 0);
-    if (composeDocked) {
+    // A physical keyboard means no on-screen one below (see the end of this
+    // function), so an undocked modal -- full height -- has nothing to fill its
+    // lower half. The Mesh Deck with its keyboard attached: the message box was
+    // a single 44 px line with empty panel under it.
+    const bool composeFillsModal = !composeDocked && keyboardAttached();
+    if (composeDocked || composeFillsModal) {
         // Wrapping, several lines tall, so a message reads as you write it
         // rather than scrolling sideways out of a single line. Four in
-        // portrait, where the panel has the room; two in landscape (the P4
-        // only), where the half-height keyboard leaves about that much.
+        // portrait, where the panel has the room; two in landscape (the P4),
+        // where the half-height keyboard leaves about that much.
         // Measured from the face, with explicit padding rather than the
         // theme's, so the box is exactly that many lines. With the keyboard
         // expansion on there is no on-screen keyboard below (see the end of
@@ -14369,10 +14374,17 @@ static void openComposePrompt(uint32_t replyPacketId,
                                                            : (uiPortrait() ? 4 : 2);
         const lv_coord_t composePad = 4;
         lv_obj_set_style_pad_all(s_composeInput, composePad, 0);
-        lv_obj_set_height(s_composeInput,
-                          lv_font_get_line_height(emojiFont(&lv_font_montserrat_14))
-                              * composeLines
-                          + 2 * composePad + 2);   // + 1 px border each side
+        const lv_coord_t composeLinesH =
+            lv_font_get_line_height(emojiFont(&lv_font_montserrat_14)) * composeLines
+            + 2 * composePad + 2;   // + 1 px border each side
+        if (composeFillsModal) {
+            // Grows into the whole modal between the title and the buttons;
+            // the line count is only its floor.
+            lv_obj_set_style_min_height(s_composeInput, composeLinesH, 0);
+            lv_obj_set_flex_grow(s_composeInput, 1);
+        } else {
+            lv_obj_set_height(s_composeInput, composeLinesH);
+        }
         lv_textarea_set_one_line(s_composeInput, false);
         // A wrapping box would take the keyboard's Enter as a line break. In
         // the one-line box every other touch board uses, the textarea drops
