@@ -789,7 +789,7 @@ Up/Down = Select   Space = Compose   Enter = Focus   D = Delete	Su/Giù = Scegli
 Up/Down/J/K = Scroll   %s = Close	Su/Giù/J/K = Scorri   %s = Chiudi
 Up/Down/J/K = Scroll   Bksp = Close	Su/Giù/J/K = Scorri   Bksp = Chiudi
 Up/Down=Change  Enter=Save  %s=Cancel	Su/Giù=Cambia  Enter=Salva  %s=Annulla
-Up/Down=Select  Left/Right=Change  Enter=Save  %s=Cancel	Su/Giù=Scegli  Sinistra/Destra=Cambia  Enter=Salva  %s=Annulla
+Up/Down=Select  Left/Right=Change  Space=Toggle  Enter=Save  %s=Cancel	Su/Giù=Scegli  Sinistra/Destra=Cambia  Space=Spunta  Enter=Salva  %s=Annulla
 Update	Aggiornamento
 Update check failed: %s	Controllo aggiornamenti fallito: %s
 Update check needs WiFi connected	Il controllo aggiornamenti richiede il WiFi connesso

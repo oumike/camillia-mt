@@ -797,7 +797,7 @@ Up/Down = Select   Space = Compose   Enter = Focus   D = Delete	Yukarı/Aşağı
 Up/Down/J/K = Scroll   %s = Close	Yukarı/Aşağı/J/K = Kaydır   %s = Kapat
 Up/Down/J/K = Scroll   Bksp = Close	Yukarı/Aşağı/J/K = Kaydır   Bksp = Kapat
 Up/Down=Change  Enter=Save  %s=Cancel	Yukarı/Aşağı=Değiştir  Enter=Kaydet  %s=İptal
-Up/Down=Select  Left/Right=Change  Enter=Save  %s=Cancel	Yukarı/Aşağı=Seç  Sol/Sağ=Değiştir  Enter=Kaydet  %s=İptal
+Up/Down=Select  Left/Right=Change  Space=Toggle  Enter=Save  %s=Cancel	Yukarı/Aşağı=Seç  Sol/Sağ=Değiştir  Space=Değiştir  Enter=Kaydet  %s=İptal
 Update	Güncelleme
 Update check failed: %s	Güncelleme denetimi başarısız: %s
 Update check needs WiFi connected	Güncelleme denetimi için WiFi bağlı olmalı

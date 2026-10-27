@@ -796,7 +796,7 @@ Up/Down = Select   Space = Compose   Enter = Focus   D = Delete	Ylös/Alas = Val
 Up/Down/J/K = Scroll   %s = Close	Ylös/Alas/J/K = Vieritä   %s = Sulje
 Up/Down/J/K = Scroll   Bksp = Close	Ylös/Alas/J/K = Vieritä   Bksp = Sulje
 Up/Down=Change  Enter=Save  %s=Cancel	Ylös/Alas=Muuta  Enter=Tallenna  %s=Peruuta
-Up/Down=Select  Left/Right=Change  Enter=Save  %s=Cancel	Ylös/Alas=Valitse  Vasen/Oikea=Muuta  Enter=Tallenna  %s=Peruuta
+Up/Down=Select  Left/Right=Change  Space=Toggle  Enter=Save  %s=Cancel	Ylös/Alas=Valitse  Vasen/Oikea=Muuta  Space=Vaihda  Enter=Tallenna  %s=Peruuta
 Update	Päivitys
 Update check failed: %s	Päivitystarkistus epäonnistui: %s
 Update check needs WiFi connected	Päivitystarkistus vaatii yhdistetyn WiFin

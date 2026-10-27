@@ -796,7 +796,7 @@ Up/Down = Select   Space = Compose   Enter = Focus   D = Delete	Aukštyn/Žemyn 
 Up/Down/J/K = Scroll   %s = Close	Aukštyn/Žemyn/J/K = Slinkti   %s = Uždaryti
 Up/Down/J/K = Scroll   Bksp = Close	Aukštyn/Žemyn/J/K = Slinkti   Bksp = Uždaryti
 Up/Down=Change  Enter=Save  %s=Cancel	Aukštyn/Žemyn=Keisti  Enter=Įrašyti  %s=Atšaukti
-Up/Down=Select  Left/Right=Change  Enter=Save  %s=Cancel	Aukštyn/Žemyn=Pasirinkti  Kairėn/Dešinėn=Keisti  Enter=Įrašyti  %s=Atšaukti
+Up/Down=Select  Left/Right=Change  Space=Toggle  Enter=Save  %s=Cancel	Aukštyn/Žemyn=Pasirinkti  Kairėn/Dešinėn=Keisti  Space=Perjungti  Enter=Įrašyti  %s=Atšaukti
 Update	Atnaujinimas
 Update check failed: %s	Atnaujinimo patikra nepavyko: %s
 Update check needs WiFi connected	Atnaujinimo patikrai reikia prijungto WiFi

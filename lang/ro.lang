@@ -791,7 +791,7 @@ Up/Down = Select   Space = Compose   Enter = Focus   D = Delete	Sus/Jos = Alege 
 Up/Down/J/K = Scroll   %s = Close	Sus/Jos/J/K = Derulare   %s = Închide
 Up/Down/J/K = Scroll   Bksp = Close	Sus/Jos/J/K = Derulare   Bksp = Închide
 Up/Down=Change  Enter=Save  %s=Cancel	Sus/Jos=Schimbă  Enter=Salvează  %s=Anulează
-Up/Down=Select  Left/Right=Change  Enter=Save  %s=Cancel	Sus/Jos=Alege  Stânga/Dreapta=Schimbă  Enter=Salvează  %s=Anulare
+Up/Down=Select  Left/Right=Change  Space=Toggle  Enter=Save  %s=Cancel	Sus/Jos=Alege  Stânga/Dreapta=Schimbă  Space=Bifează  Enter=Salvează  %s=Anulare
 Update	Actualizare
 Update check failed: %s	Verificarea actualizării a eșuat: %s
 Update check needs WiFi connected	Verificarea actualizărilor necesită WiFi conectat

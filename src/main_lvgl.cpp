@@ -17209,29 +17209,37 @@ static void openCfgSliderModal(const CfgSliderPicker *spec, int startIdx) {
                             LV_EVENT_VALUE_CHANGED, nullptr);
     }
 
+    // Space toggles the checkbox on every keyboard, so the hint says so wherever
+    // there is one: always on keyboard builds, and on touch builds while a
+    // keyboard is attached -- the same rule as the Clear Nodes options.
+#if UI_TOUCH_ONLY_PROFILE
+    if (hasCheck && keyboardAttached())
+#endif
+    {
+        lv_obj_t *hint = lv_label_create(s_cfgSliderModal);
+        lv_obj_set_width(hint, lv_pct(100));
+        lv_obj_set_style_text_font(hint, &lv_font_montserrat_10, 0);
+        lv_obj_set_style_text_color(hint, lv_color_hex(0xA7C7FF), 0);
+        lv_obj_set_style_text_align(hint, LV_TEXT_ALIGN_CENTER, 0);
+        if (hasCheck) {
+#if defined(DEVICE_M9)
+            lv_label_set_text_fmt(hint,
+                                  TR("Up/Down=Select  Left/Right=Change  Space=Toggle  Enter=Save  %s=Cancel"),
+                                  modalCloseKeyLabel());
+#else
+            lv_label_set_text_fmt(hint, TR("Move=Adjust  Space=Toggle  Enter=Save  %s=Cancel"),
+                                  modalCloseKeyLabel());
+#endif
+        } else {
+            lv_label_set_text_fmt(hint, TR("Move=Adjust  Enter=Save  %s=Cancel"), modalCloseKeyLabel());
+        }
+        lv_label_set_long_mode(hint, LV_LABEL_LONG_WRAP);
+    }
 #if UI_TOUCH_ONLY_PROFILE
     appendHeltecCancelSaveRow(
         s_cfgSliderModal,
         [](lv_event_t *e) { LV_UNUSED(e); cancelCfgSliderAndRefresh(); },
         [](lv_event_t *e) { LV_UNUSED(e); applyCfgSlider(); });
-#else
-    lv_obj_t *hint = lv_label_create(s_cfgSliderModal);
-    lv_obj_set_width(hint, lv_pct(100));
-    lv_obj_set_style_text_font(hint, &lv_font_montserrat_10, 0);
-    lv_obj_set_style_text_color(hint, lv_color_hex(0xA7C7FF), 0);
-    lv_obj_set_style_text_align(hint, LV_TEXT_ALIGN_CENTER, 0);
-    if (hasCheck) {
-#if defined(DEVICE_M9)
-        lv_label_set_text_fmt(hint, TR("Up/Down=Select  Left/Right=Change  Enter=Save  %s=Cancel"),
-                              modalCloseKeyLabel());
-#else
-        lv_label_set_text_fmt(hint, TR("Move=Adjust  Space=Toggle  Enter=Save  %s=Cancel"),
-                              modalCloseKeyLabel());
-#endif
-    } else {
-        lv_label_set_text_fmt(hint, TR("Move=Adjust  Enter=Save  %s=Cancel"), modalCloseKeyLabel());
-    }
-    lv_label_set_long_mode(hint, LV_LABEL_LONG_WRAP);
 #endif
 
     cfgSliderShow(startIdx);

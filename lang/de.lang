@@ -763,7 +763,7 @@ Up/Down = Select   Space = Compose   Enter = Focus   D = Delete	Hoch/Runter = W�
 Up/Down/J/K = Scroll   %s = Close	Hoch/Runter/J/K = Blättern   %s = Schließen
 Up/Down/J/K = Scroll   Bksp = Close	Hoch/Runter/J/K = Blättern   Bksp = Schließen
 Up/Down=Change  Enter=Save  %s=Cancel	Hoch/Runter=Ändern  Enter=Speichern  %s=Abbrechen
-Up/Down=Select  Left/Right=Change  Enter=Save  %s=Cancel	Hoch/Runter=Wählen  Links/Rechts=Ändern  Enter=Speichern  %s=Abbrechen
+Up/Down=Select  Left/Right=Change  Space=Toggle  Enter=Save  %s=Cancel	Hoch/Runter=Wählen  Links/Rechts=Ändern  Space=Umschalten  Enter=Speichern  %s=Abbrechen
 Update check failed: %s	Updateprüfung fehlgeschlagen: %s
 Update check needs WiFi connected	Updateprüfung braucht verbundenes WLAN
 Update check needs WiFi on	Updateprüfung braucht eingeschaltetes WLAN
