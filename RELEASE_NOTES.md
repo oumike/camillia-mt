@@ -1,2 +1,5 @@
 ### Changed
-- The Clear Nodes dialog can now be worked from the keys: Up/Down moves a highlight between the "favorites" and "archived" options, and Space ticks or unticks the highlighted one. That's the D-pad on the ThinkNode M9, the wheel on the T-Lora Pager, and `;` / `.` on the Cardputer. F and A still toggle the options directly, a hint line shows the keys, and touch-only boards show the highlight only when a keyboard is attached.
+- Save while scanning and Save while discovering: on the Elecrow ThinkNode M9, the on-screen hint now shows that Space ticks or unticks the checkbox.
+- Save while scanning and Save while discovering: on the Attaky Mesh Deck, Heltec V4 and other touch boards, the keyboard hint, including Space to tick or untick the checkbox, now appears above Cancel/Save when a keyboard is attached.
+
+Pull request: #132
