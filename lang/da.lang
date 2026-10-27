@@ -780,7 +780,7 @@ Up/Down = Select   Space = Compose   Enter = Focus   D = Delete	Op/Ned = Vælg  
 Up/Down/J/K = Scroll   %s = Close	Op/Ned/J/K = Rul   %s = Luk
 Up/Down/J/K = Scroll   Bksp = Close	Op/Ned/J/K = Rul   Bksp = Luk
 Up/Down=Change  Enter=Save  %s=Cancel	Op/Ned=Skift  Enter=Gem  %s=Annullér
-Up/Down=Select  Left/Right=Change  Enter=Save  %s=Cancel	Op/Ned=Vælg  Venstre/Højre=Skift  Enter=Gem  %s=Annullér
+Up/Down=Select  Left/Right=Change  Space=Toggle  Enter=Save  %s=Cancel	Op/Ned=Vælg  Venstre/Højre=Skift  Space=Skift  Enter=Gem  %s=Annullér
 Update	Opdatering
 Update check failed: %s	Opdateringstjek mislykkedes: %s
 Update check needs WiFi connected	Opdateringstjek kræver forbundet WiFi

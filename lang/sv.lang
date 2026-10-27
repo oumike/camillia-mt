@@ -782,7 +782,7 @@ Up/Down = Select   Space = Compose   Enter = Focus   D = Delete	Upp/Ner = Välj 
 Up/Down/J/K = Scroll   %s = Close	Upp/Ner/J/K = Rulla   %s = Stäng
 Up/Down/J/K = Scroll   Bksp = Close	Upp/Ner/J/K = Rulla   Bksp = Stäng
 Up/Down=Change  Enter=Save  %s=Cancel	Upp/Ner=Ändra  Enter=Spara  %s=Avbryt
-Up/Down=Select  Left/Right=Change  Enter=Save  %s=Cancel	Upp/Ner=Välj  Vänster/Höger=Ändra  Enter=Spara  %s=Avbryt
+Up/Down=Select  Left/Right=Change  Space=Toggle  Enter=Save  %s=Cancel	Upp/Ner=Välj  Vänster/Höger=Ändra  Space=Växla  Enter=Spara  %s=Avbryt
 Update	Uppdatering
 Update check failed: %s	Uppdateringskontroll misslyckades: %s
 Update check needs WiFi connected	Uppdateringskontroll kräver anslutet WiFi

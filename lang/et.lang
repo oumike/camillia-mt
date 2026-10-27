@@ -794,7 +794,7 @@ Up/Down = Select   Space = Compose   Enter = Focus   D = Delete	Üles/Alla = Val
 Up/Down/J/K = Scroll   %s = Close	Üles/Alla/J/K = Keri   %s = Sulge
 Up/Down/J/K = Scroll   Bksp = Close	Üles/Alla/J/K = Keri   Bksp = Sulge
 Up/Down=Change  Enter=Save  %s=Cancel	Üles/Alla=Muuda  Enter=Salvesta  %s=Tühista
-Up/Down=Select  Left/Right=Change  Enter=Save  %s=Cancel	Üles/Alla=Vali  Vasak/Parem=Muuda  Enter=Salvesta  %s=Tühista
+Up/Down=Select  Left/Right=Change  Space=Toggle  Enter=Save  %s=Cancel	Üles/Alla=Vali  Vasak/Parem=Muuda  Space=Lülita  Enter=Salvesta  %s=Tühista
 Update	Uuendus
 Update check failed: %s	Uuenduse kontroll ebaõnnestus: %s
 Update check needs WiFi connected	Uuenduse kontrolliks on vaja ühendatud WiFi-t

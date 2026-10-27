@@ -726,7 +726,8 @@ neighbor report.
   rather than a made-up date. The JSON carries every group the screen draws
   plus the raw neighbor reports, so the graph can be rebuilt from the file.
 - **Save while discovering** (Sweep/Scan Settings, under the duration; off by
-  default, and Space toggles it on keyboard boards) saves the run as it goes
+  default, and Space toggles it whenever there is a keyboard, including one
+  attached to a touch board) saves the run as it goes
   instead of waiting for S. The run gets one file of its own, named the same
   way, rewritten as results change (at most every 5 seconds) and once more when
   the run ends — finished, cancelled or cut short — so what was heard is on the
@@ -872,7 +873,8 @@ sweep.
 - Press **W** (on Heltec, the **Scan** button in the header). **MQTT Scan
   Settings** asks how long to listen — 1 minute to 6 hours, opening on whatever
   you used last — and, on boards with an SD card or internal file storage, offers
-  **Save while scanning**. Space toggles the box on keyboard builds; Enter starts
+  **Save while scanning**. Space toggles the box whenever there is a keyboard,
+  including one attached to a touch board; Enter starts
 - Starting a scan restarts the count, so the result covers exactly that window.
   The status line counts towards it, such as `12 chans  400 msgs  5m/1h`, with
   `saving` added while a file is being written

@@ -792,7 +792,7 @@ Up/Down = Select   Space = Compose   Enter = Focus   D = Delete	Cima/Baixo = Sel
 Up/Down/J/K = Scroll   %s = Close	Cima/Baixo/J/K = Rolar   %s = Fechar
 Up/Down/J/K = Scroll   Bksp = Close	Cima/Baixo/J/K = Rolar   Bksp = Fechar
 Up/Down=Change  Enter=Save  %s=Cancel	Cima/Baixo=Mudar  Enter=Salvar  %s=Cancelar
-Up/Down=Select  Left/Right=Change  Enter=Save  %s=Cancel	Cima/Baixo=Selecionar  Esq/Dir=Mudar  Enter=Salvar  %s=Cancelar
+Up/Down=Select  Left/Right=Change  Space=Toggle  Enter=Save  %s=Cancel	Cima/Baixo=Selecionar  Esq/Dir=Mudar  Space=Alternar  Enter=Salvar  %s=Cancelar
 Update	Atualização
 Update check failed: %s	Falha ao verificar atualização: %s
 Update check needs WiFi connected	Verificar atualizações requer WiFi conectado

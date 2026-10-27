@@ -792,7 +792,7 @@ Up/Down = Select   Space = Compose   Enter = Focus   D = Delete	Hore/Dole = Vybr
 Up/Down/J/K = Scroll   %s = Close	Hore/Dole/J/K = Posun   %s = Zavrieť
 Up/Down/J/K = Scroll   Bksp = Close	Hore/Dole/J/K = Posun   Bksp = Zavrieť
 Up/Down=Change  Enter=Save  %s=Cancel	Hore/Dole=Zmeniť  Enter=Uložiť  %s=Zrušiť
-Up/Down=Select  Left/Right=Change  Enter=Save  %s=Cancel	Hore/Dole=Vybrať  Vľavo/Vpravo=Zmeniť  Enter=Uložiť  %s=Zrušiť
+Up/Down=Select  Left/Right=Change  Space=Toggle  Enter=Save  %s=Cancel	Hore/Dole=Vybrať  Vľavo/Vpravo=Zmeniť  Space=Prepnúť  Enter=Uložiť  %s=Zrušiť
 Update	Aktualizácia
 Update check failed: %s	Kontrola aktualizácie zlyhala: %s
 Update check needs WiFi connected	Kontrola aktualizácie vyžaduje pripojenú WiFi

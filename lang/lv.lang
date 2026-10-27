@@ -796,7 +796,7 @@ Up/Down = Select   Space = Compose   Enter = Focus   D = Delete	Augšup/Lejup = 
 Up/Down/J/K = Scroll   %s = Close	Augšup/Lejup/J/K = Ritināt   %s = Aizvērt
 Up/Down/J/K = Scroll   Bksp = Close	Augšup/Lejup/J/K = Ritināt   Bksp = Aizvērt
 Up/Down=Change  Enter=Save  %s=Cancel	Augšup/Lejup=Mainīt  Enter=Saglabāt  %s=Atcelt
-Up/Down=Select  Left/Right=Change  Enter=Save  %s=Cancel	Augšup/Lejup=Izvēlēties  Pa kreisi/Pa labi=Mainīt  Enter=Saglabāt  %s=Atcelt
+Up/Down=Select  Left/Right=Change  Space=Toggle  Enter=Save  %s=Cancel	Augšup/Lejup=Izvēlēties  Pa kreisi/Pa labi=Mainīt  Space=Pārslēgt  Enter=Saglabāt  %s=Atcelt
 Update	Atjauninājums
 Update check failed: %s	Atjauninājuma pārbaude neizdevās: %s
 Update check needs WiFi connected	Atjauninājuma pārbaudei vajadzīgs savienots WiFi

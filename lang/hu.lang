@@ -797,7 +797,7 @@ Up/Down = Select   Space = Compose   Enter = Focus   D = Delete	Fel/Le = Kivála
 Up/Down/J/K = Scroll   %s = Close	Fel/Le/J/K = Görgetés   %s = Bezárás
 Up/Down/J/K = Scroll   Bksp = Close	Fel/Le/J/K = Görgetés   Bksp = Bezárás
 Up/Down=Change  Enter=Save  %s=Cancel	Fel/Le=Módosítás  Enter=Mentés  %s=Mégse
-Up/Down=Select  Left/Right=Change  Enter=Save  %s=Cancel	Fel/Le=Kiválasztás  Balra/Jobbra=Módosítás  Enter=Mentés  %s=Mégse
+Up/Down=Select  Left/Right=Change  Space=Toggle  Enter=Save  %s=Cancel	Fel/Le=Kiválasztás  Balra/Jobbra=Módosítás  Space=Váltás  Enter=Mentés  %s=Mégse
 Update	Frissítés
 Update check failed: %s	A frissítés keresése sikertelen: %s
 Update check needs WiFi connected	A frissítés kereséséhez csatlakoztatott WiFi kell
