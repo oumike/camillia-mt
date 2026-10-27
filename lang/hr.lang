@@ -471,6 +471,7 @@ Move • Enter=Send • %s=Close	Pomak • Enter=Pošalji • %s=Zatvori
 Move=Adjust  Enter=Save  %s=Cancel	Pomak=Podesi  Enter=Spremi  %s=Odustani
 Move=Adjust  Space=Toggle  Enter=Save  %s=Cancel	Pomak=Podesi  Space=Prebaci  Enter=Spremi  %s=Odustani
 Move=Preview  Enter=OK  %s=Cancel	Pomak=Pregled  Enter=OK  %s=Odustani
+Move=Select  Space=Toggle	Pomak=Odaberi  Space=Prebaci
 My Message Color	Boja mojih poruka
 My Message Color: %s	Boja mojih poruka: %s
 My Message Color: %s (unchanged)	Boja mojih poruka: %s (bez promjene)

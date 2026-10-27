@@ -461,6 +461,7 @@ Move • Enter=Send • %s=Close	Flyt • Enter=Send • %s=Luk
 Move=Adjust  Enter=Save  %s=Cancel	Flyt=Justér  Enter=Gem  %s=Annullér
 Move=Adjust  Space=Toggle  Enter=Save  %s=Cancel	Flyt=Justér  Space=Skift  Enter=Gem  %s=Annullér
 Move=Preview  Enter=OK  %s=Cancel	Flyt=Forhåndsvis  Enter=OK  %s=Annullér
+Move=Select  Space=Toggle	Flyt=Vælg  Space=Skift
 My Message Color	Farve på mine beskeder
 My Message Color: %s	Farve på mine beskeder: %s
 My Message Color: %s (unchanged)	Farve på mine beskeder: %s (uændret)

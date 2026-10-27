@@ -1757,6 +1757,10 @@ static bool      s_clearNodesInclFavs    = false;
 static bool      s_clearNodesInclArchive = false;
 static lv_obj_t *s_clearNodesFavsCheck   = nullptr;
 static lv_obj_t *s_clearNodesArchCheck   = nullptr;
+// Which box Space toggles: 0 favorites, 1 archived. Moved by the board's
+// up/down (M9 d-pad, Pager wheel, Cardputer ; and .), which in this dialog
+// steps between the boxes instead of scrolling the one-line question.
+static int       s_clearNodesFocus       = 0;
 static uint32_t s_cfgLastScrollMs = 0;
 static uint32_t s_cfgEnterLockUntilMs = 0;
 static bool s_cfgAwaitEnterRelease = false;
@@ -44501,13 +44505,27 @@ static void onCfgConfirmNoPressed(lv_event_t *e) {
 // Clear Nodes options. The flags are the truth; the boxes mirror them, whether
 // the change came from a tap (the box already flipped itself) or from F/A.
 static void cfgClearNodesSyncChecks() {
-    if (lvObjValid(s_clearNodesFavsCheck)) {
-        if (s_clearNodesInclFavs) lv_obj_add_state(s_clearNodesFavsCheck, LV_STATE_CHECKED);
-        else lv_obj_remove_state(s_clearNodesFavsCheck, LV_STATE_CHECKED);
-    }
-    if (lvObjValid(s_clearNodesArchCheck)) {
-        if (s_clearNodesInclArchive) lv_obj_add_state(s_clearNodesArchCheck, LV_STATE_CHECKED);
-        else lv_obj_remove_state(s_clearNodesArchCheck, LV_STATE_CHECKED);
+    // The focus ring is for key input. A touch-only board shows it only with
+    // a keyboard attached; tapping a box needs no cursor.
+#if UI_TOUCH_ONLY_PROFILE
+    const bool showFocus = keyboardAttached();
+#else
+    const bool showFocus = true;
+#endif
+    lv_obj_t *const boxes[2] = { s_clearNodesFavsCheck, s_clearNodesArchCheck };
+    const bool on[2] = { s_clearNodesInclFavs, s_clearNodesInclArchive };
+    for (int i = 0; i < 2; i++) {
+        if (!lvObjValid(boxes[i])) continue;
+        if (on[i]) lv_obj_add_state(boxes[i], LV_STATE_CHECKED);
+        else lv_obj_remove_state(boxes[i], LV_STATE_CHECKED);
+        const bool focused = showFocus && i == s_clearNodesFocus;
+        lv_obj_set_style_outline_width(boxes[i], focused ? 2 : 0, 0);
+        lv_obj_set_style_outline_pad(boxes[i], 2, 0);
+#if defined(DEVICE_TDECK_PRO)
+        lv_obj_set_style_outline_color(boxes[i], lv_color_make(0, 0, 0), 0);   // e-paper
+#else
+        lv_obj_set_style_outline_color(boxes[i], lv_color_hex(0xFFC34D), 0);
+#endif
     }
 }
 
@@ -44518,14 +44536,25 @@ static void onClearNodesCheckChanged(lv_event_t *e) {
     else if (cb == s_clearNodesArchCheck) s_clearNodesInclArchive = on;
 }
 
-// F and A answer for the boxes on keyboard boards, the way Y and N answer for
-// the buttons. True when the key was one of them.
+// Keys for the boxes: up/down (and left/right, which the M9 and the arrow
+// keyboards send) move the focus, wrapping; Space toggles the focused box; F
+// and A toggle theirs directly, the way Y and N answer for the buttons. True
+// when the key was one of these.
 static bool cfgClearNodesOptionKey(char k) {
     if (s_cfgConfirmPendingAction != CFG_ACTION_CLEAR_NODES) return false;
-    if ((k == 'f' || k == 'F') && s_clearNodesFavsCheck) {
+    const int count = s_clearNodesArchCheck ? 2 : 1;
+    if (k == KEY_SCROLL_UP || k == KEY_SCROLL_DN || k == KEY_PREV_CHAN || k == KEY_NEXT_CHAN) {
+        const int step = (k == KEY_SCROLL_UP || k == KEY_PREV_CHAN) ? -1 : 1;
+        s_clearNodesFocus = (s_clearNodesFocus + step + count) % count;
+    } else if (k == ' ') {
+        if (s_clearNodesFocus == 0) s_clearNodesInclFavs = !s_clearNodesInclFavs;
+        else                        s_clearNodesInclArchive = !s_clearNodesInclArchive;
+    } else if ((k == 'f' || k == 'F') && s_clearNodesFavsCheck) {
         s_clearNodesInclFavs = !s_clearNodesInclFavs;
+        s_clearNodesFocus = 0;
     } else if ((k == 'a' || k == 'A') && s_clearNodesArchCheck) {
         s_clearNodesInclArchive = !s_clearNodesInclArchive;
+        s_clearNodesFocus = 1;
     } else {
         return false;
     }
@@ -44556,6 +44585,18 @@ static void cfgClearNodesAddOptions(lv_obj_t *parent, lv_color_t textColor) {
         s_clearNodesArchCheck = addCheck(TR("Include (A)rchived (SD card)"));
 #endif
     }
+#if UI_TOUCH_ONLY_PROFILE
+    if (keyboardAttached())
+#endif
+    {
+        lv_obj_t *hint = lv_label_create(parent);
+        lv_obj_set_width(hint, lv_pct(100));
+        lv_obj_set_style_text_font(hint, &lv_font_montserrat_10, 0);
+        lv_obj_set_style_text_color(hint, textColor, 0);
+        lv_obj_set_style_text_align(hint, LV_TEXT_ALIGN_CENTER, 0);
+        lv_label_set_long_mode(hint, LV_LABEL_LONG_WRAP);
+        lv_label_set_text(hint, TR("Move=Select  Space=Toggle"));
+    }
     cfgClearNodesSyncChecks();
 }
 
@@ -44568,6 +44609,7 @@ static void openCfgConfirmModal(int actionId, const char *text,
     s_cfgConfirmFnArg = fnArg;
     s_clearNodesInclFavs = false;
     s_clearNodesInclArchive = false;
+    s_clearNodesFocus = 0;
 
     s_cfgConfirmAltFn = (altLabel && altLabel[0]) ? altFn : nullptr;
     s_cfgConfirmAltKey = 0;
@@ -47200,6 +47242,9 @@ static void pumpKeyboardInput() {
             // KEY_SCROLL_UP/DN by remapJkUiKey() further up, so naming the
             // tokens covers the d-pad, the arrows and the letters at once --
             // the same set the release-notes reader takes.
+            // Clear Nodes first: its question is one line with nothing to
+            // scroll, so up/down step between its two checkboxes instead.
+            if (cfgClearNodesOptionKey(k)) continue;
             if (k == KEY_SCROLL_UP || k == KEY_PAGE_UP || k == KEY_PREV_CHAN) {
                 scrollListClamped(s_cfgConfirmScroll, 18);
                 continue;
@@ -47208,7 +47253,6 @@ static void pumpKeyboardInput() {
                 scrollListClamped(s_cfgConfirmScroll, -18);
                 continue;
             }
-            if (cfgClearNodesOptionKey(k)) continue;
             if (s_cfgConfirmAltFn && s_cfgConfirmAltKey
                 && tolower((unsigned char)k) == s_cfgConfirmAltKey) {
                 cfgConfirmAlt();

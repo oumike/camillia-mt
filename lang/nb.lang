@@ -461,6 +461,7 @@ Move • Enter=Send • %s=Close	Flytt • Enter=Send • %s=Lukk
 Move=Adjust  Enter=Save  %s=Cancel	Flytt=Juster  Enter=Lagre  %s=Avbryt
 Move=Adjust  Space=Toggle  Enter=Save  %s=Cancel	Flytt=Juster  Space=Veksle  Enter=Lagre  %s=Avbryt
 Move=Preview  Enter=OK  %s=Cancel	Flytt=Forhåndsvis  Enter=OK  %s=Avbryt
+Move=Select  Space=Toggle	Flytt=Velg  Space=Veksle
 My Message Color	Farge på mine meldinger
 My Message Color: %s	Farge på mine meldinger: %s
 My Message Color: %s (unchanged)	Farge på mine meldinger: %s (uendret)

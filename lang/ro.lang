@@ -464,6 +464,7 @@ Move • Enter=Send • %s=Close	Mută • Enter=Trimite • %s=Închide
 Move=Adjust  Enter=Save  %s=Cancel	Mută=Reglează  Enter=Salvează  %s=Anulare
 Move=Adjust  Space=Toggle  Enter=Save  %s=Cancel	Mută=Reglează  Space=Bifează  Enter=Salvează  %s=Anulare
 Move=Preview  Enter=OK  %s=Cancel	Mută=Previzualizare  Enter=OK  %s=Anulare
+Move=Select  Space=Toggle	Mută=Alege  Space=Bifează
 My Message Color	Culoarea mesajelor mele
 My Message Color: %s	Culoarea mesajelor mele: %s
 My Message Color: %s (unchanged)	Culoarea mesajelor mele: %s (neschimbată)

@@ -470,6 +470,7 @@ Move • Enter=Send • %s=Close	Pārvietot • Enter=Sūtīt • %s=Aizvērt
 Move=Adjust  Enter=Save  %s=Cancel	Pārvietot=Regulēt  Enter=Saglabāt  %s=Atcelt
 Move=Adjust  Space=Toggle  Enter=Save  %s=Cancel	Pārvietot=Regulēt  Space=Pārslēgt  Enter=Saglabāt  %s=Atcelt
 Move=Preview  Enter=OK  %s=Cancel	Pārvietot=Priekšskatīt  Enter=OK  %s=Atcelt
+Move=Select  Space=Toggle	Pārvietot=Izvēlēties  Space=Pārslēgt
 My Message Color	Manu ziņu krāsa
 My Message Color: %s	Manu ziņu krāsa: %s
 My Message Color: %s (unchanged)	Manu ziņu krāsa: %s (nemainīta)

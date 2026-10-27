@@ -471,6 +471,7 @@ Move • Enter=Send • %s=Close	Taşı • Enter=Gönder • %s=Kapat
 Move=Adjust  Enter=Save  %s=Cancel	Taşı=Ayarla  Enter=Kaydet  %s=İptal
 Move=Adjust  Space=Toggle  Enter=Save  %s=Cancel	Taşı=Ayarla  Space=Değiştir  Enter=Kaydet  %s=İptal
 Move=Preview  Enter=OK  %s=Cancel	Taşı=Önizle  Enter=Tamam  %s=İptal
+Move=Select  Space=Toggle	Taşı=Seç  Space=Değiştir
 My Message Color	Mesajlarımın rengi
 My Message Color: %s	Mesajlarımın rengi: %s
 My Message Color: %s (unchanged)	Mesajlarımın rengi: %s (değişmedi)

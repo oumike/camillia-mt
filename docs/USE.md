@@ -1919,7 +1919,7 @@ has two options, both unticked each time it opens:
 - **Include archived** — also deletes the archived-node CSV above. Only on
   boards with an SD slot.
 
-On a keyboard, F and A toggle them; on a touch screen, tap them. The device
+Up/Down (the M9's D-pad, the Pager's wheel, `;` and `.` on the Cardputer) moves the highlight between them and Space ticks or unticks the highlighted one; F and A toggle them directly. On a touch screen, tap them. The device
 reports what happened, e.g. `Cleared 214 nodes, kept 6 favorites, SD archive
 cleared`, and says so if the archive was asked for but no card was there.
 

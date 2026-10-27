@@ -471,6 +471,7 @@ Move • Enter=Send • %s=Close	Mozgatás • Enter=Küldés • %s=Bezárás
 Move=Adjust  Enter=Save  %s=Cancel	Mozgatás=Állítás  Enter=Mentés  %s=Mégse
 Move=Adjust  Space=Toggle  Enter=Save  %s=Cancel	Mozgatás=Állítás  Space=Váltás  Enter=Mentés  %s=Mégse
 Move=Preview  Enter=OK  %s=Cancel	Mozgatás=Előnézet  Enter=OK  %s=Mégse
+Move=Select  Space=Toggle	Mozgatás=Kijelölés  Space=Váltás
 My Message Color	Üzeneteim színe
 My Message Color: %s	Üzeneteim színe: %s
 My Message Color: %s (unchanged)	Üzeneteim színe: %s (változatlan)

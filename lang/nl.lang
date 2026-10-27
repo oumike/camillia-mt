@@ -459,6 +459,7 @@ Move • Enter=Send • %s=Close	Bewegen • Enter=Verzenden • %s=Sluiten
 Move=Adjust  Enter=Save  %s=Cancel	Bewegen=Instellen  Enter=Opslaan  %s=Annuleren
 Move=Adjust  Space=Toggle  Enter=Save  %s=Cancel	Bewegen=Instellen  Space=Wisselen  Enter=Opslaan  %s=Annuleren
 Move=Preview  Enter=OK  %s=Cancel	Bewegen=Voorbeeld  Enter=OK  %s=Annuleren
+Move=Select  Space=Toggle	Bewegen=Kiezen  Space=Wisselen
 My Message Color	Kleur van mijn berichten
 My Message Color: %s	Kleur van mijn berichten: %s
 My Message Color: %s (unchanged)	Kleur van mijn berichten: %s (ongewijzigd)

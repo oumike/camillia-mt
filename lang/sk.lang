@@ -470,6 +470,7 @@ Move • Enter=Send • %s=Close	Pohyb • Enter=Odoslať • %s=Zavrieť
 Move=Adjust  Enter=Save  %s=Cancel	Pohyb=Nastaviť  Enter=Uložiť  %s=Zrušiť
 Move=Adjust  Space=Toggle  Enter=Save  %s=Cancel	Pohyb=Nastaviť  Space=Prepnúť  Enter=Uložiť  %s=Zrušiť
 Move=Preview  Enter=OK  %s=Cancel	Pohyb=Náhľad  Enter=OK  %s=Zrušiť
+Move=Select  Space=Toggle	Pohyb=Vybrať  Space=Prepnúť
 My Message Color	Farba mojich správ
 My Message Color: %s	Farba mojich správ: %s
 My Message Color: %s (unchanged)	Farba mojich správ: %s (bez zmeny)

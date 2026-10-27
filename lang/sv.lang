@@ -461,6 +461,7 @@ Move • Enter=Send • %s=Close	Flytta • Enter=Skicka • %s=Stäng
 Move=Adjust  Enter=Save  %s=Cancel	Flytta=Justera  Enter=Spara  %s=Avbryt
 Move=Adjust  Space=Toggle  Enter=Save  %s=Cancel	Flytta=Justera  Space=Växla  Enter=Spara  %s=Avbryt
 Move=Preview  Enter=OK  %s=Cancel	Flytta=Förhandsvisa  Enter=OK  %s=Avbryt
+Move=Select  Space=Toggle	Flytta=Välj  Space=Växla
 My Message Color	Färg på mina meddelanden
 My Message Color: %s	Färg på mina meddelanden: %s
 My Message Color: %s (unchanged)	Färg på mina meddelanden: %s (oförändrad)

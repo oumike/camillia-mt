@@ -451,6 +451,7 @@ Move • Enter=Send • %s=Close	Bewegen • Enter=Senden • %s=Schließen
 Move=Adjust  Enter=Save  %s=Cancel	Bewegen=Einstellen  Enter=Speichern  %s=Abbrechen
 Move=Adjust  Space=Toggle  Enter=Save  %s=Cancel	Bewegen=Einstellen  Space=Umschalten  Enter=Speichern  %s=Abbrechen
 Move=Preview  Enter=OK  %s=Cancel	Bewegen=Vorschau  Enter=OK  %s=Abbrechen
+Move=Select  Space=Toggle	Bewegen=Wählen  Space=Umschalten
 My Message Color	Meine Nachrichtenfarbe
 My Message Color: %s	Meine Nachrichtenfarbe: %s
 My Message Color: %s (unchanged)	Meine Nachrichtenfarbe: %s (unverändert)

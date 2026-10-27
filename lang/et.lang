@@ -468,6 +468,7 @@ Move • Enter=Send • %s=Close	Liiguta • Enter=Saada • %s=Sulge
 Move=Adjust  Enter=Save  %s=Cancel	Liiguta=Reguleeri  Enter=Salvesta  %s=Tühista
 Move=Adjust  Space=Toggle  Enter=Save  %s=Cancel	Liiguta=Reguleeri  Space=Lülita  Enter=Salvesta  %s=Tühista
 Move=Preview  Enter=OK  %s=Cancel	Liiguta=Eelvaade  Enter=OK  %s=Tühista
+Move=Select  Space=Toggle	Liiguta=Vali  Space=Lülita
 My Message Color	Minu sõnumite värv
 My Message Color: %s	Minu sõnumite värv: %s
 My Message Color: %s (unchanged)	Minu sõnumite värv: %s (muutmata)

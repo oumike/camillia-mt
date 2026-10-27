@@ -469,6 +469,7 @@ Move • Enter=Send • %s=Close	Premik • Enter=Pošlji • %s=Zapri
 Move=Adjust  Enter=Save  %s=Cancel	Premik=Nastavi  Enter=Shrani  %s=Prekliči
 Move=Adjust  Space=Toggle  Enter=Save  %s=Cancel	Premik=Nastavi  Space=Preklopi  Enter=Shrani  %s=Prekliči
 Move=Preview  Enter=OK  %s=Cancel	Premik=Predogled  Enter=OK  %s=Prekliči
+Move=Select  Space=Toggle	Premik=Izberi  Space=Preklopi
 My Message Color	Barva mojih sporočil
 My Message Color: %s	Barva mojih sporočil: %s
 My Message Color: %s (unchanged)	Barva mojih sporočil: %s (nespremenjeno)

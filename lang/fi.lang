@@ -470,6 +470,7 @@ Move • Enter=Send • %s=Close	Siirrä • Enter=Lähetä • %s=Sulje
 Move=Adjust  Enter=Save  %s=Cancel	Siirrä=Säädä  Enter=Tallenna  %s=Peruuta
 Move=Adjust  Space=Toggle  Enter=Save  %s=Cancel	Siirrä=Säädä  Space=Vaihda  Enter=Tallenna  %s=Peruuta
 Move=Preview  Enter=OK  %s=Cancel	Siirrä=Esikatselu  Enter=OK  %s=Peruuta
+Move=Select  Space=Toggle	Siirrä=Valitse  Space=Vaihda
 My Message Color	Viestieni väri
 My Message Color: %s	Viestieni väri: %s
 My Message Color: %s (unchanged)	Viestieni väri: %s (ennallaan)

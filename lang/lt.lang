@@ -470,6 +470,7 @@ Move • Enter=Send • %s=Close	Judinti • Enter=Siųsti • %s=Uždaryti
 Move=Adjust  Enter=Save  %s=Cancel	Judinti=Reguliuoti  Enter=Įrašyti  %s=Atšaukti
 Move=Adjust  Space=Toggle  Enter=Save  %s=Cancel	Judinti=Reguliuoti  Space=Perjungti  Enter=Įrašyti  %s=Atšaukti
 Move=Preview  Enter=OK  %s=Cancel	Judinti=Peržiūra  Enter=OK  %s=Atšaukti
+Move=Select  Space=Toggle	Judinti=Pasirinkti  Space=Perjungti
 My Message Color	Mano žinučių spalva
 My Message Color: %s	Mano žinučių spalva: %s
 My Message Color: %s (unchanged)	Mano žinučių spalva: %s (nepakeista)

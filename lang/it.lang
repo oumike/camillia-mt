@@ -466,6 +466,7 @@ Move • Enter=Send • %s=Close	Sposta • Enter=Invia • %s=Chiudi
 Move=Adjust  Enter=Save  %s=Cancel	Sposta=Regola  Enter=Salva  %s=Annulla
 Move=Adjust  Space=Toggle  Enter=Save  %s=Cancel	Sposta=Regola  Space=Spunta  Enter=Salva  %s=Annulla
 Move=Preview  Enter=OK  %s=Cancel	Sposta=Anteprima  Enter=OK  %s=Annulla
+Move=Select  Space=Toggle	Sposta=Scegli  Space=Spunta
 My Message Color	Colore dei miei messaggi
 My Message Color: %s	Colore dei miei messaggi: %s
 My Message Color: %s (unchanged)	Colore dei miei messaggi: %s (invariato)
