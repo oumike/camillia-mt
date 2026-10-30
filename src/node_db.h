@@ -3,6 +3,7 @@
 #include <Arduino.h>
 #include "mesh_proto.h"
 #include "key_pin.h"
+#include "node_name_cache.h"
 
 struct NodeEntry {
     uint32_t nodeId;          // 0 = empty slot
@@ -26,6 +27,12 @@ struct NodeEntry {
     // apart. RAM only, like everything below it.
     bool     hasHops;
     uint32_t lastHeardMs;
+    // Where this node stood in the recency-ordered id index loaded at boot
+    // (0 = most recently heard before the reboot). RAM only, and read only
+    // while lastHeardMs is still 0: it is what lets a full table evict the
+    // nodes that were already stale before power-off rather than any loaded
+    // node at random. See node_evict.h.
+    uint16_t staleRank;
     bool     hasPosition;
     bool     hasTelemetry;
     bool     hasDeviceTelemetry;
@@ -248,6 +255,9 @@ private:
     // true so the first getByRank() after boot sorts the loaded table.
     bool      _sortDirty = true;
     KeyPinTable _keyPins;
+    // Names of evicted nodes, restored when they are heard again (see
+    // node_name_cache.h). Storage is allocated in init().
+    NodeNameCache _names;
 #if FEATURE_DISCOVERY
     NeighborReport _neighbors[MAX_NEIGHBOR_REPORTS] = {};
     // A report is dropped at 2x the reporter's own advertised interval, the
@@ -257,7 +267,7 @@ private:
 #endif
     void      _sort();
     void      _save(uint32_t nodeId);   // write one node blob to NVS
-    void      _saveIds();               // rewrite the nodeId index in NVS
+    void      _saveIds();               // rewrite the nodeId index in NVS, most recent first
 };
 
 extern NodeDB Nodes;
