@@ -1,4 +1,5 @@
 #include "node_db.h"
+#include "node_evict.h"
 #include "utf8_utils.h"
 #include "config_io.h"   // sdBegin()
 #include "gps.h"         // own fix for the wardriving heard-position stamp
@@ -123,12 +124,42 @@ static void nodeKey(char *buf, uint32_t id) {
     snprintf(buf, 12, "n_%08x", id);
 }
 
+// Marks "ids" as saved most-recently-heard first. Older builds wrote it in
+// insertion order, which says nothing about recency, so an index without the
+// mark is loaded with no ranking at all rather than a misleading one.
+static const char *kIdsOrderKey = "idsOrd";
+static bool s_idsOrderMarked = false;
+
+// Names of evicted nodes. PSRAM holds enough to cover a mesh several times the
+// size of the table; without it the cache is small, but still catches the
+// node that drops out and comes straight back.
+#if defined(BOARD_HAS_PSRAM) && BOARD_HAS_PSRAM
+static const int kNameCachePsram = 1024;   // ~52 KB of PSRAM
+#endif
+static const int kNameCacheInternal = 32;  // ~1.7 KB of DRAM
+
+static NodeIdentity *allocNameCache(int &capacity) {
+#if defined(BOARD_HAS_PSRAM) && BOARD_HAS_PSRAM
+    capacity = kNameCachePsram;
+    void *p = heap_caps_malloc(sizeof(NodeIdentity) * (size_t)capacity,
+                               MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    if (p) return (NodeIdentity *)p;
+#endif
+    capacity = kNameCacheInternal;
+    return (NodeIdentity *)malloc(sizeof(NodeIdentity) * (size_t)capacity);
+}
+
 // ── Init ──────────────────────────────────────────────────────
 
 void NodeDB::init() {
     memset(_nodes, 0, sizeof(_nodes));
     _count = 0;
     _sortDirty = true;
+
+    static NodeIdentity *nameSlots = nullptr;
+    static int nameCap = 0;
+    if (!nameSlots) nameSlots = allocNameCache(nameCap);
+    _names.begin(nameSlots, nameSlots ? nameCap : 0);
 
     // Load persisted nodes directly into the array (bypasses save to avoid
     // triggering NVS writes during boot). Open read-write so first boot can
@@ -139,6 +170,7 @@ void NodeDB::init() {
     memset(ids, 0, sizeof(ids));
     bool staleIds = false;
     int n = (int)(p.getBytes("ids", ids, sizeof(ids)) / sizeof(uint32_t));
+    s_idsOrderMarked = p.isKey(kIdsOrderKey) && p.getUChar(kIdsOrderKey, 0) == 1;
     for (int i = 0; i < n && _count < MAX_NODES; i++) {
         char key[12]; nodeKey(key, ids[i]);
         if (!p.isKey(key)) {
@@ -193,6 +225,9 @@ void NodeDB::init() {
         }
         e->hasTelemetry = e->hasDeviceTelemetry || e->hasEnvironmentTelemetry;
         e->lastHeardMs  = 0;  // unknown after reboot
+        // Position in the saved index, which is most recent first. An unmarked
+        // index (older build) ranks everything equal: see kIdsOrderKey.
+        e->staleRank    = s_idsOrderMarked ? (uint16_t)i : 0;
         e->lastPosMs    = 0;  // unknown after reboot
         e->lastPersistMs = 0;
     }
@@ -252,22 +287,51 @@ void NodeDB::_save(uint32_t nodeId) {
     }
 }
 
+static NodeEvictKey evictKey(const NodeEntry &e) {
+    NodeEvictKey k;
+    k.lastHeardMs = e.lastHeardMs;
+    k.staleRank = e.staleRank;
+    k.hasName = e.hasName;
+    return k;
+}
+
 void NodeDB::_saveIds() {
     // Static, not stack: at MAX_NODES=250 this is 1 KB, and _saveIds() runs from
     // upsert() on the packet path — 1/8th of the Arduino loop task's 8 KB stack.
     static uint32_t ids[MAX_NODES];
-    int n = 0;
-    for (int i = 0; i < _count; i++)
-        if (_nodes[i].nodeId) ids[n++] = _nodes[i].nodeId;
+    static int16_t  order[MAX_NODES];
     if (!nodePersistCanWrite()) return;
+
+    // Most recently heard first, by the same rule eviction uses, so the next
+    // boot can tell the nodes that were active at power-off from the ones that
+    // were already stale (NodeEntry::staleRank). Insertion sort: the table is
+    // small, mostly in order already, and this runs only when a node is added
+    // or removed.
+    const uint32_t now = millis();
+    int n = 0;
+    for (int i = 0; i < _count; i++) {
+        if (!_nodes[i].nodeId) continue;
+        const NodeEvictKey ki = evictKey(_nodes[i]);
+        int j = n++;
+        while (j > 0 && nodeEvictBefore(evictKey(_nodes[order[j - 1]]), ki, now)) {
+            order[j] = order[j - 1];
+            j--;
+        }
+        order[j] = (int16_t)i;
+    }
+    for (int i = 0; i < n; i++) ids[i] = _nodes[order[i]].nodeId;
+
     Preferences p;
     if (!p.begin("nodes", false)) return;
     size_t wanted = n * sizeof(uint32_t);
     size_t wrote = p.putBytes("ids", ids, wanted);
-    p.end();
     if (wrote != wanted) {
         nodePersistMarkWriteFailure("ids", wanted, wrote);
+    } else if (!s_idsOrderMarked) {
+        // Once per boot at most: after the first ordered write it is set.
+        s_idsOrderMarked = p.putUChar(kIdsOrderKey, 1) == 1;
     }
+    p.end();
 }
 
 bool NodeDB::releaseNvsForSettings() {
@@ -289,6 +353,7 @@ bool NodeDB::releaseNvsForSettings() {
     // stops it before it can crowd settings out again.
     p.clear();
     p.end();
+    s_idsOrderMarked = false;   // the mark went with the index
     const size_t after = nvsFreeEntries();
     Serial.printf("[nodedb] cleared persisted node cache to free NVS for settings "
                   "(%u -> %u entries free)\n", (unsigned)before, (unsigned)after);
@@ -308,6 +373,8 @@ void NodeDB::clearPersisted() {
     memset(_neighbors, 0, sizeof(_neighbors));
 #endif
     _keyPins.clear();
+    _names.clear();
+    s_idsOrderMarked = false;   // p.clear() took the mark with it
     _count = 0;
     _sortDirty = true;
 }
@@ -346,6 +413,9 @@ int NodeDB::clearNonFavorites() {
     }
     if (nvsOpen) p.end();
     if (!removed) return 0;
+    // Favorites are never evicted, so every name held for an evicted node
+    // belongs to one of the nodes the user just asked to be rid of.
+    _names.clear();
 
     memset(&_nodes[kept], 0, sizeof(_nodes[0]) * (size_t)(_count - kept));
     _count = kept;
@@ -395,6 +465,7 @@ bool NodeDB::remove(uint32_t nodeId) {
     _sortDirty = true;
     _keyPins.drop(nodeId);
     _keyPins.takeEvicted(nodeId, nullptr);
+    _names.forget(nodeId);
 
     // The surviving blobs were not touched, so only the index needs rewriting —
     // and if persistence is currently refusing writes, a stale index listing an
@@ -1055,21 +1126,20 @@ NodeEntry *NodeDB::upsert(uint32_t nodeId) {
 
     uint32_t evictedId = 0;
     if (_count >= MAX_NODES) {
-        // Evict the least-recently-heard node. Favorites are never evicted,
-        // however stale. Deliberately not the display order (_sort()), which
-        // ranks named nodes above recency: evicting from its tail meant a stale
-        // named node outlived every newcomer, so on a full table new arrivals
-        // only ever displaced each other before their NodeInfo could land.
-        // lastHeardMs == 0 (loaded from NVS, not heard this boot) is oldest of
-        // all; among equals an unnamed node goes before a named one.
+        // Evict the least-recently-heard node (node_evict.h has the rule).
+        // Favorites are never evicted, however stale. Deliberately not the
+        // display order (_sort()), which ranks named nodes above recency:
+        // evicting from its tail meant a stale named node outlived every
+        // newcomer, so on a full table new arrivals only ever displaced each
+        // other before their NodeInfo could land. The evicted node's name is
+        // kept below, so recency alone can decide without costing names.
+        const uint32_t now = millis();
         int victim = -1;
         for (int i = 0; i < _count; i++) {
             const NodeEntry &c = _nodes[i];
             if (c.favorite) continue;
-            if (victim < 0) { victim = i; continue; }
-            const NodeEntry &v = _nodes[victim];
-            if (c.lastHeardMs < v.lastHeardMs
-                || (c.lastHeardMs == v.lastHeardMs && v.hasName && !c.hasName)) {
+            if (victim < 0
+                || nodeEvictBefore(evictKey(c), evictKey(_nodes[victim]), now)) {
                 victim = i;
             }
         }
@@ -1085,6 +1155,10 @@ NodeEntry *NodeDB::upsert(uint32_t nodeId) {
         // Keep its pinned key in RAM too: flooding fake IDs to push a node out
         // must not let its next NodeInfo be trusted as a first key.
         if (_nodes[victim].hasPubKey) _keyPins.rememberEvicted(evictedId, _nodes[victim].pubKey);
+        // And its name, so it is not back to !xxxxxxxx when it is heard again.
+        if (_nodes[victim].hasName) {
+            _names.remember(evictedId, _nodes[victim].shortName, _nodes[victim].longName);
+        }
         // Delete the evicted node's blob from NVS
         char evKey[12]; nodeKey(evKey, evictedId);
         Preferences p; p.begin("nodes", false); p.remove(evKey); p.end();
@@ -1101,6 +1175,20 @@ NodeEntry *NodeDB::upsert(uint32_t nodeId) {
     _keyPins.drop(nodeId);
     snprintf(e->shortName, sizeof(e->shortName), "%04X", nodeId & 0xFFFF);
     snprintf(e->longName,  sizeof(e->longName),  "!%08x", nodeId);
+    // A node coming back after an eviction gets its name back now rather than
+    // at its next NodeInfo, which can be hours away. A NodeInfo that does
+    // arrive still overwrites it, so a rename is picked up as before.
+    NodeIdentity known;
+    if (_names.take(nodeId, known)) {
+        if (known.shortName[0]) {
+            utf8util::copyTruncate(e->shortName, sizeof(e->shortName), known.shortName);
+        }
+        if (known.longName[0]) {
+            utf8util::copyTruncate(e->longName, sizeof(e->longName), known.longName);
+        }
+        e->hasName = true;
+        e->nameFromCache = true;
+    }
     // A new node landed in the table (appended, or written over an evicted
     // slot). Either way the ordering the last sort produced no longer holds.
     _sortDirty = true;
@@ -1302,6 +1390,9 @@ bool NodeDB::updateUser(uint32_t nodeId, const UserInfo &u) {
     if (!e) return false;   // table full of favorites
     bool changed = false;
     bool raised = false;
+    // A NodeInfo for this record has now been heard, whether or not it changes
+    // the name a cache restore put there.
+    e->nameFromCache = false;
     if (u.longName[0] && strncmp(e->longName, u.longName, sizeof(e->longName) - 1) != 0) {
         utf8util::copyTruncate(e->longName, sizeof(e->longName), u.longName);
         e->hasName = true;

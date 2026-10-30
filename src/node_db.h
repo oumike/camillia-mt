@@ -3,6 +3,7 @@
 #include <Arduino.h>
 #include "mesh_proto.h"
 #include "key_pin.h"
+#include "node_name_cache.h"
 
 struct NodeEntry {
     uint32_t nodeId;          // 0 = empty slot
@@ -26,11 +27,23 @@ struct NodeEntry {
     // apart. RAM only, like everything below it.
     bool     hasHops;
     uint32_t lastHeardMs;
+    // Where this node stood in the recency-ordered id index loaded at boot
+    // (0 = most recently heard before the reboot). RAM only, and read only
+    // while lastHeardMs is still 0: it is what lets a full table evict the
+    // nodes that were already stale before power-off rather than any loaded
+    // node at random. See node_evict.h.
+    uint16_t staleRank;
     bool     hasPosition;
     bool     hasTelemetry;
     bool     hasDeviceTelemetry;
     bool     hasEnvironmentTelemetry;
     bool     hasName;         // true once a real NODEINFO name has been received
+    // The name came back from NodeNameCache on re-entry, not from a NodeInfo
+    // heard for this record: the key, hardware model and role are still
+    // missing, so the node is still worth asking for its NodeInfo. Cleared by
+    // the next NodeInfo. RAM only (the blob flags byte is full), so after a
+    // reboot such a node counts as named.
+    bool     nameFromCache;
     bool     favorite;        // pinned by user; sorted to top in node and DM lists
     int      chanIdx;         // channel last heard on
     uint8_t  chanHash;        // raw on-air channel hash last heard from this node
@@ -248,6 +261,9 @@ private:
     // true so the first getByRank() after boot sorts the loaded table.
     bool      _sortDirty = true;
     KeyPinTable _keyPins;
+    // Names of evicted nodes, restored when they are heard again (see
+    // node_name_cache.h). Storage is allocated in init().
+    NodeNameCache _names;
 #if FEATURE_DISCOVERY
     NeighborReport _neighbors[MAX_NEIGHBOR_REPORTS] = {};
     // A report is dropped at 2x the reporter's own advertised interval, the
@@ -257,7 +273,7 @@ private:
 #endif
     void      _sort();
     void      _save(uint32_t nodeId);   // write one node blob to NVS
-    void      _saveIds();               // rewrite the nodeId index in NVS
+    void      _saveIds();               // rewrite the nodeId index in NVS, most recent first
 };
 
 extern NodeDB Nodes;
