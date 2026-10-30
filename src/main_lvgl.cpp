@@ -16011,10 +16011,11 @@ static void onCfgActionRowPressed(lv_event_t *e) {
     s_cfgSelection = idx;
     s_cfgConfirmAction = -1;
     s_cfgConfirmMs = 0;
-#if UI_TOUCH_ONLY_PROFILE
-    // Touch-only build: a tap is the whole gesture, so it selects the row and
-    // runs it. Every other build has an Enter key for the second half, and
-    // leaves the tap as a way to move the highlight without committing.
+#if HAS_TOUCH
+    // A tap is the whole gesture, so it selects the row and runs it -- on the
+    // keyboard boards with a panel too (T-Deck, T-Deck Pro): a tap that only
+    // moved the highlight left the finger needing Enter to finish the job.
+    // Enter still runs the highlighted row there, as it always has.
     //
     // A drag does not reach here. LVGL only sends LV_EVENT_CLICKED when the
     // press did not turn into a scroll, so flicking the list past a row still
