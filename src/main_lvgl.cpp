@@ -54306,7 +54306,9 @@ static void maybeRequestUnknownNodeInfo(const MeshPacket &pkt) {
     if (from == 0 || from == 0xFFFFFFFF || from == s_myNodeId || s_myNodeId == 0) return;
 
     NodeEntry *e = Nodes.find(from);
-    if (!e || e->hasName) return;
+    // A name restored after an eviction still lacks the key and the rest of the
+    // NodeInfo, so it is asked for like an unnamed node.
+    if (!e || (e->hasName && !e->nameFromCache)) return;
     if (!e->hasHops || e->hops > kAutoNodeInfoMaxHops) return;
 
     const uint32_t now = millis();

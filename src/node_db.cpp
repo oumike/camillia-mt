@@ -1187,6 +1187,7 @@ NodeEntry *NodeDB::upsert(uint32_t nodeId) {
             utf8util::copyTruncate(e->longName, sizeof(e->longName), known.longName);
         }
         e->hasName = true;
+        e->nameFromCache = true;
     }
     // A new node landed in the table (appended, or written over an evicted
     // slot). Either way the ordering the last sort produced no longer holds.
@@ -1389,6 +1390,9 @@ bool NodeDB::updateUser(uint32_t nodeId, const UserInfo &u) {
     if (!e) return false;   // table full of favorites
     bool changed = false;
     bool raised = false;
+    // A NodeInfo for this record has now been heard, whether or not it changes
+    // the name a cache restore put there.
+    e->nameFromCache = false;
     if (u.longName[0] && strncmp(e->longName, u.longName, sizeof(e->longName) - 1) != 0) {
         utf8util::copyTruncate(e->longName, sizeof(e->longName), u.longName);
         e->hasName = true;

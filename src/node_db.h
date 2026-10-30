@@ -38,6 +38,12 @@ struct NodeEntry {
     bool     hasDeviceTelemetry;
     bool     hasEnvironmentTelemetry;
     bool     hasName;         // true once a real NODEINFO name has been received
+    // The name came back from NodeNameCache on re-entry, not from a NodeInfo
+    // heard for this record: the key, hardware model and role are still
+    // missing, so the node is still worth asking for its NodeInfo. Cleared by
+    // the next NodeInfo. RAM only (the blob flags byte is full), so after a
+    // reboot such a node counts as named.
+    bool     nameFromCache;
     bool     favorite;        // pinned by user; sorted to top in node and DM lists
     int      chanIdx;         // channel last heard on
     uint8_t  chanHash;        // raw on-air channel hash last heard from this node
