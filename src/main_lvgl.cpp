@@ -2432,79 +2432,72 @@ static inline void lvObjDeleteSafe(lv_obj_t *&obj) {
     obj = nullptr;
 }
 
-// ── New-message blink ────────────────────────────────────────────────────────
-// A received message blinks -- its text fades between full and dim -- until the
-// user has had its conversation in front of them and then moved somewhere else
-// (serviceFreshMarks() clears it then). The chat and DM views register the row
-// object of each fresh message as they build it, and one timer pulses them all.
-// text_opa is inherited, so setting it on the row reaches every label inside a
-// bubble or IRC row without each style knowing about it. Paper never blinks:
-// every pulse would be a panel refresh. How long it lasts, or whether it happens
-// at all, is the Message Blink setting (cfgChatBlinkSecs()).
-struct ChatBlinkSet {
-    lv_obj_t *objs[48];
-    int       count;
-    uint32_t  owner;   // the channel index / DM peer the rows were built for
+// ── New-message dots ─────────────────────────────────────────────────────────
+// A received message carries a small dot in the theme accent until its
+// conversation counts as read (serviceFreshMarks()): between the time and the
+// sender in the classic and IRC styles, beside the bubble in the bubble styles.
+// The chat and DM views register each dot as they build it, and reading the
+// conversation clears the lot without a rebuild. Three kinds, one per style:
+//  - IRC: an object in a slot every row reserves, so text keeps one column;
+//    cleared by going transparent, which keeps the slot.
+//  - Bubbles: an object beside the bubble; cleared by hiding it, which moves
+//    the bubble back into line with the rest.
+//  - Classic: a span in the line's span group; cleared by emptying it.
+// Messages never blink: the dot is the whole cue.
+enum FreshDotKind : uint8_t { FRESH_DOT_SLOT, FRESH_DOT_OBJ, FRESH_DOT_SPAN };
+struct FreshDotSet {
+    lv_obj_t    *objs[48];    // the dot, or for FRESH_DOT_SPAN the span group
+    lv_span_t   *spans[48];
+    FreshDotKind kinds[48];
+    int          count;
+    uint32_t     owner;   // the channel index / DM peer the rows were built for
 };
-static ChatBlinkSet s_chatBlink = {};
-static ChatBlinkSet s_dmBlink = {};
-static bool s_chatBlinkDim = false;
-static constexpr lv_opa_t kChatBlinkDimOpa = LV_OPA_40;
-static constexpr uint32_t kChatBlinkPeriodMs = 600;
+static FreshDotSet s_chatDots = {};
+static FreshDotSet s_dmDots = {};
 
-static void chatBlinkApply(ChatBlinkSet &set, lv_opa_t opa) {
-    for (int i = 0; i < set.count; i++) {
-        if (lvObjValid(set.objs[i])) lv_obj_set_style_text_opa(set.objs[i], opa, 0);
-    }
+// Room for one more. A row is only given a dot it can register, since an
+// unregistered one would outlive the conversation being read.
+static inline bool freshDotRoom(const FreshDotSet &set) {
+    return set.count < (int)(sizeof(set.objs) / sizeof(set.objs[0]));
 }
 
-static void chatBlinkTick(lv_timer_t *) {
-    if (s_chatBlink.count == 0 && s_dmBlink.count == 0) {
-        s_chatBlinkDim = false;
-        return;
-    }
-    // Switched Off (on the device or from the web page) with rows mid-blink:
-    // they go steady now rather than blinking on until their time is up.
-    if (cfgChatBlinkSecs(s_cfg) == 0) {
-        chatBlinkApply(s_chatBlink, LV_OPA_COVER);
-        chatBlinkApply(s_dmBlink, LV_OPA_COVER);
-        s_chatBlink.count = 0;
-        s_dmBlink.count = 0;
-        s_chatBlinkDim = false;
-        return;
-    }
-    s_chatBlinkDim = !s_chatBlinkDim;
-    const lv_opa_t opa = s_chatBlinkDim ? kChatBlinkDimOpa : LV_OPA_COVER;
-    chatBlinkApply(s_chatBlink, opa);
-    chatBlinkApply(s_dmBlink, opa);
+static void freshDotTrack(FreshDotSet &set, lv_obj_t *obj, FreshDotKind kind,
+                          lv_span_t *span = nullptr) {
+    if (!obj || !freshDotRoom(set)) return;
+    set.objs[set.count] = obj;
+    set.spans[set.count] = span;
+    set.kinds[set.count] = kind;
+    set.count++;
 }
 
 // The view is about to delete the rows it registered and build new ones for
 // `owner`.
-static inline void chatBlinkForget(ChatBlinkSet &set, uint32_t owner) {
+static inline void freshDotsForget(FreshDotSet &set, uint32_t owner) {
     set.count = 0;
     set.owner = owner;
 }
 
-// `owner` was left: if the rows on screen are still its rows (the view may
-// already have rebuilt for the next conversation), they go back to steady.
-static void chatBlinkStop(ChatBlinkSet &set, uint32_t owner) {
+// `owner` was read: if the rows on screen are still its rows (the view may
+// already have rebuilt for the next conversation), their dots go.
+static void freshDotsClear(FreshDotSet &set, uint32_t owner) {
     if (set.owner != owner) return;
-    chatBlinkApply(set, LV_OPA_COVER);
+    for (int i = 0; i < set.count; i++) {
+        lv_obj_t *o = set.objs[i];
+        if (!lvObjValid(o)) continue;
+        switch (set.kinds[i]) {
+            case FRESH_DOT_SLOT:
+                lv_obj_set_style_bg_opa(o, LV_OPA_TRANSP, 0);
+                break;
+            case FRESH_DOT_OBJ:
+                lv_obj_add_flag(o, LV_OBJ_FLAG_HIDDEN);
+                break;
+            case FRESH_DOT_SPAN:
+                lv_spangroup_set_span_text(o, set.spans[i], "");
+                lv_spangroup_refresh(o);
+                break;
+        }
+    }
     set.count = 0;
-}
-
-static void chatBlinkTrack(ChatBlinkSet &set, lv_obj_t *row, bool fresh) {
-#if defined(DEVICE_TDECK_PRO)
-    (void)set; (void)row; (void)fresh;
-#else
-    if (!fresh || !row || set.count >= (int)(sizeof(set.objs) / sizeof(set.objs[0]))) return;
-    if (cfgChatBlinkSecs(s_cfg) == 0) return;   // Message Blink: Off
-    static lv_timer_t *timer = nullptr;
-    if (!timer) timer = lv_timer_create(chatBlinkTick, kChatBlinkPeriodMs, nullptr);
-    set.objs[set.count++] = row;
-    if (s_chatBlinkDim) lv_obj_set_style_text_opa(row, kChatBlinkDimOpa, 0);
-#endif
 }
 
 // Scrolls a list vertically by dy, clamped to the remaining scroll range so the
@@ -2585,7 +2578,7 @@ static lv_obj_t *buildScreenHeader(lv_obj_t *modal, const char *text);
 static void layoutScreenHeader(ScreenHeader &h);
 static void labelSingleLine(lv_obj_t *label);
 static void screenHeaderSetTitle(lv_obj_t *title, const char *text);
-#if UI_TOUCH_ONLY_PROFILE
+#if UI_TOUCH_ONLY_PROFILE || UI_CFG_SECTIONS
 static lv_obj_t *buildSecondaryHeader(lv_obj_t *modal);
 static lv_obj_t *secondaryHeaderBtn(lv_obj_t *row, const char *text, lv_event_cb_t cb);
 #endif
@@ -2871,7 +2864,8 @@ static const char *chatStripPrefix(const char *line);
 static const lv_font_t *chatAckMarkerFont(const lv_font_t *chatFont);
 static void chatSetAckedLineText(lv_obj_t *sg, const char *line, const lv_font_t *chatFont);
 static void chatSetLineSpans(lv_obj_t *sg, const char *line, const lv_font_t *chatFont,
-                             bool ackMark, const lv_font_t *nameFont);
+                             bool ackMark, const lv_font_t *nameFont,
+                             lv_span_t **outFreshDot = nullptr);
 static void chatBubbleBeginRender(lv_obj_t *list);
 static inline void stylePaperMessageRow(lv_obj_t *row) {
 #if defined(DEVICE_TDECK_PRO)
@@ -2887,7 +2881,8 @@ static void chatMakeBubble(lv_obj_t *list, uint32_t sender, bool isMe,
                            DisplayLine::AckState ackState,
                            uint32_t replyPacketId, bool isSelected,
                            lv_obj_t **outLast, lv_obj_t **outSelected,
-                           lv_event_cb_t onPressed);
+                           lv_event_cb_t onPressed,
+                           lv_obj_t **outFreshDot = nullptr);
 static void chatMakeIrcRow(lv_obj_t *list, const lv_font_t *font,
                            uint32_t sender, bool isMe,
                            const char *timeText, const char *nameText,
@@ -2895,7 +2890,8 @@ static void chatMakeIrcRow(lv_obj_t *list, const lv_font_t *font,
                            DisplayLine::AckState ackState,
                            uint32_t replyPacketId, bool isSelected,
                            lv_obj_t **outLast, lv_obj_t **outSelected,
-                           lv_event_cb_t onPressed);
+                           lv_event_cb_t onPressed,
+                           lv_obj_t **outFreshDot = nullptr);
 
 // Per-row helper text under an option's name in the CFG picker modals. The
 // Cardputer's 240x135 panel can't spare the ~13px per row it costs — three
@@ -3716,9 +3712,6 @@ enum CfgActionId {
     CFG_ACTION_CHAT_STYLE,
     CFG_ACTION_CHAT_NAMES,
     CFG_ACTION_CHAT_COLORS,
-    #if HAS_CHAT_BLINK
-    CFG_ACTION_CHAT_BLINK,
-    #endif
     CFG_ACTION_FONT_SIZE,
     CFG_ACTION_ORIENTATION,
     CFG_ACTION_LANGUAGE,       // UI language (issue #99)
@@ -3800,6 +3793,192 @@ enum CfgActionId {
 // reach even this. Adding an action now grows the array with it, which is the
 // property the old number could not have.
 static int s_cfgActions[CFG_ACTION__COUNT] = {};
+
+#if UI_CFG_SECTIONS
+// ── Config sections (touch builds) ──────────────────────────────────────────
+// Config opens on a grid of these, two to a row, and a tap lists one section's
+// rows. The sections follow the runs initCfgActions() already lays the list out
+// in, so the order inside each is the order the full list has. A section with
+// no rows on this board is left off the grid.
+enum CfgSectionId : int8_t {
+    CFG_SEC_RADIO = 0,
+    CFG_SEC_CONNECT,
+    CFG_SEC_LOCATION,
+    CFG_SEC_CHANNELS,
+    CFG_SEC_DISPLAY,
+    CFG_SEC_CHAT,
+    CFG_SEC_SOUND,
+    CFG_SEC_MESH,
+    CFG_SEC_DEVICE,
+    CFG_SEC_DATA,
+    CFG_SEC__COUNT,
+};
+
+struct CfgSectionInfo {
+    const char *icon;
+    const char *name;   // English key; translated where it is drawn
+};
+
+static const CfgSectionInfo kCfgSections[CFG_SEC__COUNT] = {
+    { LV_SYMBOL_HOME,      TR_NOOP("Radio & Identity") },
+    { LV_SYMBOL_WIFI,      TR_NOOP("Connections") },
+    { LV_SYMBOL_GPS,       TR_NOOP("Location") },
+    { LV_SYMBOL_EYE_CLOSE, TR_NOOP("Channels & Security") },
+    { LV_SYMBOL_IMAGE,     TR_NOOP("Display") },
+    { LV_SYMBOL_ENVELOPE,  TR_NOOP("Chat") },
+    { LV_SYMBOL_BELL,      TR_NOOP("Sound & Alerts") },
+    { LV_SYMBOL_LOOP,      TR_NOOP("Mesh Services") },
+    { LV_SYMBOL_SETTINGS,  TR_NOOP("Device & Firmware") },
+    { LV_SYMBOL_TRASH,     TR_NOOP("Data & Reset") },
+};
+
+// The open section, or -1 for the grid. Kept while Config is up, so a picker
+// that closes lands back in the section it was opened from; openCfgModal()
+// starts at the grid again.
+static int s_cfgSection = -1;
+// The grid's sections present on this board, in order, and the one the
+// keyboard highlight is on.
+static int8_t s_cfgGridSections[CFG_SEC__COUNT] = {};
+static int s_cfgGridCount = 0;
+static int s_cfgGridSelection = 0;
+// "‹ Back" in the secondary header: shown inside a section, hidden on the grid.
+static lv_obj_t *s_cfgBackBtn = nullptr;
+// "Info" beside it on touch-only builds: the other way round, on the grid only.
+// It is about the device as a whole, not about the section's rows.
+static lv_obj_t *s_cfgInfoBtn = nullptr;
+
+// Which section a row is listed under. The cases carry the same #if guards as
+// CfgActionId, since an action a build leaves out has no enumerator to name.
+static int cfgActionSection(int actionId) {
+    switch (actionId) {
+        case CFG_ACTION_NODE_NAME:
+        case CFG_ACTION_PRESET:
+        case CFG_ACTION_COMMUNITY_PRESET:
+#if defined(DEVICE_TDISPLAY_P4)
+        case CFG_ACTION_ANTENNA:
+#endif
+            return CFG_SEC_RADIO;
+
+        case CFG_ACTION_WIFI_TOGGLE:
+        case CFG_ACTION_CHOOSE_WIFI:
+        case CFG_ACTION_WEBCFG:
+#if HAS_VNC_HOST
+        case CFG_ACTION_VNC_HOST:
+#endif
+#if HAS_WEB_FILES
+        case CFG_ACTION_WEB_FILES:
+#endif
+#if HAS_BLE_KEYBOARD
+        case CFG_ACTION_BLE_KBD_TOGGLE:
+        case CFG_ACTION_BLE_KBD_PAIR:
+#endif
+        case CFG_ACTION_MQTT_TOGGLE:
+            return CFG_SEC_CONNECT;
+
+        case CFG_ACTION_GPS_TOGGLE:
+#if HAS_FILE_STORAGE
+        case CFG_ACTION_WARDRIVE:
+#endif
+        case CFG_ACTION_SHARE_LOCATION:
+        case CFG_ACTION_POSITION_PRECISION:
+            return CFG_SEC_LOCATION;
+
+        case CFG_ACTION_CHANNEL_CFG:
+        case CFG_ACTION_SIG_POLICY:
+            return CFG_SEC_CHANNELS;
+
+        case CFG_ACTION_THEME:
+        case CFG_ACTION_FONT_SIZE:
+        case CFG_ACTION_BRIGHTNESS:
+#if HAS_KB_BACKLIGHT_LEVEL
+        case CFG_ACTION_KB_BACKLIGHT_LEVEL:
+#endif
+#if HAS_KB_LIGHT_TIMEOUT
+        case CFG_ACTION_KB_LIGHT_TIMEOUT:
+#endif
+#if HAS_NAV_BAR_TOGGLE
+        case CFG_ACTION_NAV_BAR:
+#endif
+#if HAS_NAV_ALIGN_SETTING
+        case CFG_ACTION_NAV_ALIGN:
+#endif
+        case CFG_ACTION_SCREEN_TIMEOUT:
+#if FEATURE_LOCK_SCREEN
+        case CFG_ACTION_LOCK_SCREEN:
+        case CFG_ACTION_LOCK_SCREEN_OFF:
+#endif
+        case CFG_ACTION_ORIENTATION:
+        case CFG_ACTION_LANGUAGE:
+#if HAS_SPELLCHECK
+        case CFG_ACTION_SPELL_CHECK:
+#endif
+#if HAS_SCROLL_INVERT
+        case CFG_ACTION_INVERT_SCROLL:
+#endif
+            return CFG_SEC_DISPLAY;
+
+        case CFG_ACTION_CHAT_STYLE:
+        case CFG_ACTION_CHAT_NAMES:
+        case CFG_ACTION_CHAT_COLORS:
+        case CFG_ACTION_OWNER_COLOR:
+        case CFG_ACTION_RESET_CHAT_COLORS:
+            return CFG_SEC_CHAT;
+
+#if HAS_VOLUME_CONTROL
+        case CFG_ACTION_VOLUME:
+#endif
+        case CFG_ACTION_SPLASH_MELODY:
+        case CFG_ACTION_MSG_ALERT:
+#if defined(DEVICE_MESH_DECK)
+        case CFG_ACTION_NOTIFY_LED_CHANNEL_COLOR:
+        case CFG_ACTION_NOTIFY_LED_DM_COLOR:
+#endif
+#if HAS_KB_BLINK
+        case CFG_ACTION_KB_BLINK:
+        case CFG_ACTION_KB_BLINK_CHAN_FLASHES:
+        case CFG_ACTION_KB_BLINK_DM_FLASHES:
+#endif
+#if HAS_LIGHT_NOTIFY
+        case CFG_ACTION_NOTIFY_LIGHT_TIMEOUT:
+#endif
+            return CFG_SEC_SOUND;
+
+        case CFG_ACTION_NEIGHBOR_INFO:
+        case CFG_ACTION_MESH_BEACON:
+        case CFG_ACTION_CS_MODE:
+        case CFG_ACTION_CS_SERVER:
+        case CFG_ACTION_CS_CHECK:
+            return CFG_SEC_MESH;
+
+        case CFG_ACTION_CLEAR_MSGS:
+        case CFG_ACTION_ARCHIVE_NODES:
+        case CFG_ACTION_SHOW_ARCHIVED:
+        case CFG_ACTION_CLEAR_NODES:
+        case CFG_ACTION_EXPORT:
+        case CFG_ACTION_IMPORT:
+        case CFG_ACTION_FACTORY_RESET:
+#if HAS_SD_MALWARE_SCAN
+        case CFG_ACTION_SD_SCAN:
+#endif
+            return CFG_SEC_DATA;
+
+        // Time and date, clock format, units, battery display and calibration,
+        // and the firmware rows. Also where an action added without a case
+        // lands, so it shows up somewhere rather than nowhere.
+        default:
+            return CFG_SEC_DEVICE;
+    }
+}
+
+// The grid is up: no section open, and no filter armed (a filter searches every
+// row, so it shows them as one list whatever section is open).
+static inline bool cfgGridShown() {
+    return s_cfgSection < 0 && !s_cfgFilterOpen;
+}
+static void refreshCfgGridSelection();
+static void cfgOpenSection(int sec);
+static void cfgShowGrid();
+#endif
 
 struct UiThemePresetLite {
     uint8_t theme;
@@ -5703,13 +5882,6 @@ static const char *cfgActionLabel(int actionId, char *buf, size_t bufLen) {
             snprintf(buf, bufLen, TR("Chat Colors: %s"),
                      s_cfg.chatColorsEnabled ? TR("On") : TR("Off"));
             break;
-        #if HAS_CHAT_BLINK
-        case CFG_ACTION_CHAT_BLINK: {
-            const uint8_t secs = cfgChatBlinkSecs(s_cfg);
-            if (secs == 0) snprintf(buf, bufLen, TR("Message Blink: %s"), TR("Off"));
-            else snprintf(buf, bufLen, TR("Message Blink: %u sec"), (unsigned)secs);
-        } break;
-        #endif
         case CFG_ACTION_FONT_SIZE:
             snprintf(buf, bufLen, TR("Font Size: %s"), fontSizeName(s_cfg.fontSize));
             break;
@@ -6051,6 +6223,19 @@ static void cfgDebugSelection(const char *tag, int actionId) {
 // before they get here, so wrapping once covers all of them. The list is long
 // enough that walking it end to end to reach the last item is the common case.
 static void cfgMoveSelection(int delta, const char *tag) {
+#if UI_CFG_SECTIONS
+    // On the grid the same inputs walk the section buttons, left to right and
+    // then down, which is the order they read in.
+    if (cfgGridShown()) {
+        if (s_cfgGridCount <= 0) return;
+        int next = (s_cfgGridSelection + delta) % s_cfgGridCount;
+        if (next < 0) next += s_cfgGridCount;
+        s_cfgGridSelection = next;
+        s_cfgLastScrollMs = millis();
+        refreshCfgGridSelection();
+        return;
+    }
+#endif
     if (s_cfgActionCount <= 0) return;
     int next = s_cfgSelection + delta;
     // Modulo rather than a clamp: past the last item lands on the first.
@@ -14988,10 +15173,6 @@ static void initCfgActions() {
     s_cfgActions[s_cfgActionCount++] = CFG_ACTION_OWNER_COLOR;
     s_cfgActions[s_cfgActionCount++] = CFG_ACTION_RESET_CHAT_COLORS;
 #endif
-#if HAS_CHAT_BLINK
-    // With the other rows about how chat looks: it is how a new message looks.
-    s_cfgActions[s_cfgActionCount++] = CFG_ACTION_CHAT_BLINK;
-#endif
     // Font Size scales the chat and DM text in every style, so every build gets
     // it — the Cardputer arguably most of all.
     s_cfgActions[s_cfgActionCount++] = CFG_ACTION_FONT_SIZE;
@@ -15164,6 +15345,27 @@ static void initCfgActions() {
         }
         s_cfgActionCount = kept;
     }
+#if UI_CFG_SECTIONS
+    else {
+        // The grid lists the sections this build has rows for, read off the
+        // full list before it is narrowed to the open one.
+        bool present[CFG_SEC__COUNT] = {};
+        for (int i = 0; i < s_cfgActionCount; i++) present[cfgActionSection(s_cfgActions[i])] = true;
+        s_cfgGridCount = 0;
+        for (int sec = 0; sec < CFG_SEC__COUNT; sec++) {
+            if (present[sec]) s_cfgGridSections[s_cfgGridCount++] = (int8_t)sec;
+        }
+        if (s_cfgGridSelection >= s_cfgGridCount) s_cfgGridSelection = 0;
+
+        if (s_cfgSection >= 0 && !s_cfgFilterOpen) {
+            int kept = 0;
+            for (int i = 0; i < s_cfgActionCount; i++) {
+                if (cfgActionSection(s_cfgActions[i]) == s_cfgSection) s_cfgActions[kept++] = s_cfgActions[i];
+            }
+            s_cfgActionCount = kept;
+        }
+    }
+#endif
 }
 
 static void refreshCfgPanelFocusStyles() {
@@ -15454,6 +15656,10 @@ static int s_cfgPaintedSelection = -1;
 
 static void refreshCfgSelection() {
     if (!s_cfgActionList) return;
+#if UI_CFG_SECTIONS
+    // The grid's buttons are not rows, however many of them there are.
+    if (cfgGridShown()) return;
+#endif
     const int rows = (int)lv_obj_get_child_cnt(s_cfgActionList);
     // Out of step with the model — the list has not been built for the current
     // action set. Nothing to repaint; the next full refresh will do it.
@@ -15492,6 +15698,141 @@ static void refreshCfgSelection() {
     if (selectedRowObj) lv_obj_scroll_to_view(selectedRowObj, LV_ANIM_OFF);
 }
 
+#if UI_CFG_SECTIONS
+static void cfgStyleGridBtn(lv_obj_t *btn, bool selected) {
+    if (!btn) return;
+    lv_obj_t *lbl = lv_obj_get_child(btn, 0);
+#if defined(DEVICE_TDECK_PRO)
+    // Black on white, as the rows are on this panel: the highlight is a
+    // heavier frame rather than a fill.
+    lv_obj_set_style_bg_opa(btn, LV_OPA_TRANSP, 0);
+    lv_obj_set_style_border_width(btn, selected ? 3 : 1, 0);
+    lv_obj_set_style_border_color(btn, lv_color_make(0, 0, 0), 0);
+    lv_obj_set_style_outline_width(btn, 0, 0);
+    if (lbl) lv_obj_set_style_text_color(lbl, lv_color_make(0, 0, 0), 0);
+    return;
+#endif
+    if (selected) {
+        // The rows' highlight, so a button and a row picked by the keyboard
+        // look the same.
+        cfgStyleRow(btn, 0, false, true);
+        if (lbl) lv_obj_set_style_text_color(lbl, cfgContrastColorFor565(s_ui.selectBg), 0);
+        return;
+    }
+    lv_obj_set_style_bg_color(btn, lv_color_hex(0x16386F), 0);
+    lv_obj_set_style_bg_opa(btn, LV_OPA_70, 0);
+    lv_obj_set_style_border_width(btn, 1, 0);
+    lv_obj_set_style_border_color(btn, lv_color_hex(0x335D9D), 0);
+    lv_obj_set_style_outline_width(btn, 0, 0);
+    lv_obj_set_style_outline_opa(btn, LV_OPA_TRANSP, 0);
+    if (lbl) lv_obj_set_style_text_color(lbl, lv_color_hex(0xD9E8FF), 0);
+}
+
+static void refreshCfgGridSelection() {
+    if (!s_cfgActionList || !cfgGridShown()) return;
+    const int n = (int)lv_obj_get_child_cnt(s_cfgActionList);
+    if (n != s_cfgGridCount) return;   // not the grid's buttons
+    lv_obj_t *selectedBtn = nullptr;
+    for (int i = 0; i < n; i++) {
+        lv_obj_t *btn = lv_obj_get_child(s_cfgActionList, i);
+        cfgStyleGridBtn(btn, i == s_cfgGridSelection);
+        if (i == s_cfgGridSelection) selectedBtn = btn;
+    }
+    if (selectedBtn) lv_obj_scroll_to_view(selectedBtn, LV_ANIM_OFF);
+}
+
+// Deferred: the click arrives on a grid button, and opening the section
+// rebuilds the list that button lives in.
+static void cfgOpenSectionAsync(void *arg) {
+    if (!s_cfgModal) return;
+    cfgOpenSection((int)(intptr_t)arg);
+}
+
+static void onCfgSectionBtnClicked(lv_event_t *e) {
+    const int idx = (int)(intptr_t)lv_event_get_user_data(e);
+    if (idx < 0 || idx >= s_cfgGridCount) return;
+    s_cfgGridSelection = idx;
+    lv_async_call(cfgOpenSectionAsync, (void *)(intptr_t)s_cfgGridSections[idx]);
+}
+
+static void cfgShowGridAsync(void *) {
+    if (!s_cfgModal) return;
+    cfgShowGrid();
+}
+
+static void onCfgBackPressed(lv_event_t *e) {
+    LV_UNUSED(e);
+    lv_async_call(cfgShowGridAsync, nullptr);
+}
+
+static void cfgOpenSection(int sec) {
+    if (sec < 0 || sec >= CFG_SEC__COUNT) return;
+    s_cfgSection = sec;
+    s_cfgSelection = 0;
+    s_cfgConfirmAction = -1;
+    s_cfgConfirmMs = 0;
+    s_cfgPaintedSelection = -1;
+    initCfgActions();
+    refreshCfgModal();
+    // A long section may have been scrolled before; start at its top.
+    if (s_cfgActionList) lv_obj_scroll_to_y(s_cfgActionList, 0, LV_ANIM_OFF);
+}
+
+static void cfgShowGrid() {
+    const int left = s_cfgSection;
+    s_cfgSection = -1;
+    s_cfgConfirmAction = -1;
+    s_cfgConfirmMs = 0;
+    initCfgActions();
+    // Back on the button of the section just left, so the keyboard picks up
+    // where it was.
+    for (int i = 0; i < s_cfgGridCount; i++) {
+        if (s_cfgGridSections[i] == left) { s_cfgGridSelection = i; break; }
+    }
+    refreshCfgModal();
+}
+
+// The grid itself: one button per section, two to a row, in the list's place.
+static void buildCfgGrid() {
+#if defined(DEVICE_TDISPLAY_P4) || defined(DEVICE_CROWPANEL)
+    const lv_font_t *font = &lv_font_montserrat_16;
+    const int btnH = 72;
+#else
+    const lv_font_t *font = &lv_font_montserrat_14;
+    const int btnH = 52;
+#endif
+    lv_obj_set_flex_flow(s_cfgActionList, LV_FLEX_FLOW_ROW_WRAP);
+    lv_obj_set_flex_align(s_cfgActionList, LV_FLEX_ALIGN_SPACE_EVENLY,
+                          LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_START);
+    lv_obj_set_style_pad_all(s_cfgActionList, 4, 0);
+    lv_obj_set_style_pad_row(s_cfgActionList, 4, 0);
+
+    for (int i = 0; i < s_cfgGridCount; i++) {
+        const CfgSectionInfo &info = kCfgSections[s_cfgGridSections[i]];
+        lv_obj_t *btn = lv_btn_create(s_cfgActionList);
+        // Just under half: SPACE_EVENLY shares out what is left between and
+        // around the pair, and two at 50% would wrap one to a row.
+        lv_obj_set_size(btn, lv_pct(47), btnH);
+        lv_obj_set_style_radius(btn, 6, 0);
+        lv_obj_set_style_shadow_width(btn, 0, 0);
+        lv_obj_set_style_pad_all(btn, 4, 0);
+        lv_obj_add_event_cb(btn, onCfgSectionBtnClicked, LV_EVENT_CLICKED, (void *)(intptr_t)i);
+
+        lv_obj_t *lbl = lv_label_create(btn);
+        lv_obj_set_width(lbl, lv_pct(100));
+        lv_obj_set_style_text_font(lbl, font, 0);
+        lv_obj_set_style_text_align(lbl, LV_TEXT_ALIGN_CENTER, 0);
+        lv_label_set_long_mode(lbl, LV_LABEL_LONG_WRAP);
+        char text[64];
+        snprintf(text, sizeof(text), "%s\n%s", info.icon, TR(info.name));
+        lv_label_set_text(lbl, text);
+        lv_obj_center(lbl);
+
+        cfgStyleGridBtn(btn, i == s_cfgGridSelection);
+    }
+}
+#endif
+
 static void refreshCfgModal() {
 #if defined(DEVICE_TLORA_PAGER_TFT)
     if (!s_cfgModal || !s_cfgActionList || !s_cfgInfoList || !s_cfgHeaderStatus) return;
@@ -15519,10 +15860,38 @@ static void refreshCfgModal() {
         snprintf(headerText, sizeof(headerText), "%s %s", TR("Configuration"), filterText);
         screenHeaderSetTitle(s_cfgHeaderStatus, headerText);
     } else {
+#if UI_CFG_SECTIONS
+        // Inside a section its name is the title; the grid is "Configuration".
+        screenHeaderSetTitle(s_cfgHeaderStatus,
+                             (s_cfgSection >= 0) ? TR(kCfgSections[s_cfgSection].name)
+                                                 : TR("Configuration"));
+#else
         screenHeaderSetTitle(s_cfgHeaderStatus, TR("Configuration"));
+#endif
     }
 
     lv_obj_clean(s_cfgActionList);
+#if UI_CFG_SECTIONS
+    if (lvObjValid(s_cfgBackBtn)) {
+        if (cfgGridShown()) lv_obj_add_flag(s_cfgBackBtn, LV_OBJ_FLAG_HIDDEN);
+        else                lv_obj_clear_flag(s_cfgBackBtn, LV_OBJ_FLAG_HIDDEN);
+    }
+    if (lvObjValid(s_cfgInfoBtn)) {
+        if (cfgGridShown()) lv_obj_clear_flag(s_cfgInfoBtn, LV_OBJ_FLAG_HIDDEN);
+        else                lv_obj_add_flag(s_cfgInfoBtn, LV_OBJ_FLAG_HIDDEN);
+    }
+    s_cfgPaintedSelection = -1;
+    if (cfgGridShown()) {
+        buildCfgGrid();
+        return;
+    }
+    // A list again: undo what buildCfgGrid() set on the same container.
+    lv_obj_set_flex_flow(s_cfgActionList, LV_FLEX_FLOW_COLUMN);
+    lv_obj_set_flex_align(s_cfgActionList, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_START);
+    lv_obj_set_style_pad_all(s_cfgActionList, 0, 0);
+    lv_obj_set_style_pad_row(s_cfgActionList, 1, 0);
+    lv_obj_set_style_pad_right(s_cfgActionList, 2, 0);
+#endif
 #if defined(DEVICE_TLORA_PAGER_TFT)
     lv_obj_clean(s_cfgInfoList);
     refreshCfgPanelFocusStyles();
@@ -17247,48 +17616,6 @@ static void openCfgSliderModal(const CfgSliderPicker *spec, int startIdx) {
     if (hasCheck) refreshCfgSliderFocus();
 #endif
 }
-
-#if HAS_CHAT_BLINK
-// ── Message blink ────────────────────────────────────────────────────────────
-// Stop 0 is Off, stop n is n * kChatBlinkStepS seconds, up to kChatBlinkMaxS.
-
-static const char *cfgChatBlinkLabelFor(int idx) {
-    static char buf[24];
-    if (idx <= 0) return TR("Off");
-    snprintf(buf, sizeof(buf), TR("%u sec"), (unsigned)(idx * kChatBlinkStepS));
-    return buf;
-}
-
-static void cfgChatBlinkApply(int idx) {
-    s_cfg.chatBlinkSecs = cfgCoerceChatBlink((long)idx * kChatBlinkStepS);
-    persistConfigToPrefs();
-    const uint8_t secs = cfgChatBlinkSecs(s_cfg);
-    if (secs == 0) {
-        snprintf(s_cfgStatus, sizeof(s_cfgStatus), "%s", TR("New messages do not blink"));
-    } else {
-        snprintf(s_cfgStatus, sizeof(s_cfgStatus), TR("New messages blink for %u sec"),
-                 (unsigned)secs);
-    }
-    // Off stops anything blinking at the next tick (chatBlinkTick()); turning it
-    // on needs the view rebuilt so its new rows register.
-    s_lastRenderedChannel = -1;
-    s_lastRenderedCount = -1;
-    refreshChatView(true);
-}
-
-static void openCfgChatBlinkModal() {
-    const int startIdx = cfgChatBlinkSecs(s_cfg) / kChatBlinkStepS;
-    static const CfgSliderPicker kSpec = {
-        TR_NOOP("Message Blink"),
-        kChatBlinkMaxS / kChatBlinkStepS + 1,
-        cfgChatBlinkLabelFor,
-        cfgChatBlinkApply,
-        TR_NOOP("off"),
-        TR_NOOP("60 sec"),
-    };
-    openCfgSliderModal(&kSpec, startIdx);
-}
-#endif  // HAS_CHAT_BLINK
 
 // ── Location precision ───────────────────────────────────────────────────────
 
@@ -24343,6 +24670,10 @@ static void closeCfgModal() {
     s_cfgActionList = nullptr;
     s_cfgInfoList = nullptr;
     s_cfgHeaderStatus = nullptr;
+#if UI_CFG_SECTIONS
+    s_cfgBackBtn = nullptr;
+    s_cfgInfoBtn = nullptr;
+#endif
     s_cfgPaintedSelection = -1;   // rows are gone; nothing carries the highlight
     s_cfgAwaitEnterRelease = false;
     s_cfgInfoPanelFocused = false;
@@ -26408,7 +26739,7 @@ static void closeDmModal() {
     clearNavBarStatusIcons();
     closeDmNodePicker();
     closeDmDeleteConfirm();
-    chatBlinkForget(s_dmBlink, 0);
+    freshDotsForget(s_dmDots, 0);
     lvObjDeleteSafe(s_dmModal);
     s_dmConvPanel = nullptr;
     s_dmConvList = nullptr;
@@ -41104,7 +41435,7 @@ static void refreshDmModal(bool force) {
     // them between rebuilds to scroll the selection into view (dmDrawerSlide()).
     memset(s_dmConvRows, 0, sizeof(s_dmConvRows));
     lv_obj_clean(s_dmConvList);
-    chatBlinkForget(s_dmBlink, openDmPeerNodeId());
+    freshDotsForget(s_dmDots, openDmPeerNodeId());
     lv_obj_clean(s_dmMsgList);
 
     const lv_font_t *dmListFont = kMainScreenFont;
@@ -41304,6 +41635,8 @@ static void refreshDmModal(bool force) {
             // IRC style: the channel view's rows. Unlike bubbles, each one is
             // named, the peer included -- left-aligned rows have nothing else
             // to say which side of the conversation a line came from.
+            const bool freshDot = dl->fresh && freshDotRoom(s_dmDots);
+            lv_obj_t *dot = nullptr;
             if (s_cfg.chatStyle == CHAT_STYLE_IRC) {
                 const bool isMe = dmLineIsFromMe(dl->text);
                 const uint32_t who = isMe ? s_myNodeId : selected->nodeId;
@@ -41314,8 +41647,9 @@ static void refreshDmModal(bool force) {
                 chatMakeIrcRow(s_dmMsgList, dmMsgFont, who, isMe,
                                dmTimeBuf, dmName, chatStripPrefix(dl->text),
                                dmAckToDisplayAck(dl->ack),
-                               0, false, &lastMsgObj, nullptr, nullptr);
-                chatBlinkTrack(s_dmBlink, lastMsgObj, dl->fresh);
+                               0, false, &lastMsgObj, nullptr, nullptr,
+                               freshDot ? &dot : nullptr);
+                freshDotTrack(s_dmDots, dot, FRESH_DOT_SLOT);
                 continue;
             }
 
@@ -41342,8 +41676,9 @@ static void refreshDmModal(bool force) {
                                false,
                                &lastMsgObj,
                                nullptr,
-                               nullptr);
-                chatBlinkTrack(s_dmBlink, lastMsgObj, dl->fresh);
+                               nullptr,
+                               freshDot ? &dot : nullptr);
+                freshDotTrack(s_dmDots, dot, FRESH_DOT_OBJ);
                 continue;
             }
 
@@ -41357,17 +41692,15 @@ static void refreshDmModal(bool force) {
             // Every line on the T-Deck Pro, for the bold sender tag.
             const bool spanLine = true;
 #else
-            const bool spanLine = ackedLine;
+            // And a new message, for its dot.
+            const bool spanLine = ackedLine || freshDot;
 #endif
             lv_obj_t *msg = spanLine ? lv_spangroup_create(s_dmMsgList)
                                      : lv_label_create(s_dmMsgList);
-#if defined(DEVICE_TDECK_PRO)
             // A span group is clickable by default, a label is not; DM lines
             // have no press handler, so keep them inert as labels were.
-            lv_obj_remove_flag(msg, LV_OBJ_FLAG_CLICKABLE);
-#endif
+            if (spanLine) lv_obj_remove_flag(msg, LV_OBJ_FLAG_CLICKABLE);
             lastMsgObj = msg;
-            chatBlinkTrack(s_dmBlink, msg, dl->fresh);
             lv_obj_set_width(msg, lv_pct(100));
             lv_obj_set_style_text_font(msg, dmMsgFont, 0);
             lv_obj_set_style_pad_left(msg, 2, 0);
@@ -41406,15 +41739,19 @@ static void refreshDmModal(bool force) {
 #if !defined(DEVICE_TDECK_PRO)
             lv_obj_set_style_bg_opa(msg, LV_OPA_TRANSP, 0);
 #endif
+            lv_span_t *dotSpan = nullptr;
 #if defined(DEVICE_TDECK_PRO)
-            chatSetLineSpans(msg, dl->text, dmMsgFont, ackedLine, chatNameFont(dmMsgFont));
+            chatSetLineSpans(msg, dl->text, dmMsgFont, ackedLine, chatNameFont(dmMsgFont),
+                             freshDot ? &dotSpan : nullptr);
 #else
-            if (ackedLine) {
-                chatSetAckedLineText(msg, dl->text, dmMsgFont);
+            if (spanLine) {
+                chatSetLineSpans(msg, dl->text, dmMsgFont, ackedLine, nullptr,
+                                 freshDot ? &dotSpan : nullptr);
             } else {
                 setLabelTextEmojiSafe(msg, dl->text);
             }
 #endif
+            if (dotSpan) freshDotTrack(s_dmDots, msg, FRESH_DOT_SPAN, dotSpan);
         }
 
         // Last in the thread so it sits under the newest message, where the
@@ -42878,6 +43215,13 @@ static void openCfgModal() {
     // when this screen closed.
     if (s_liveToolsModal) closeLiveToolsModal();
 
+#if UI_CFG_SECTIONS
+    // Every way into Config starts at the grid; see s_cfgSection.
+    s_cfgSection = -1;
+    s_cfgGridSelection = 0;
+    s_cfgBackBtn = nullptr;
+    s_cfgInfoBtn = nullptr;
+#endif
     initCfgActions();
     s_cfgSelection = 0;
     s_cfgStatus[0] = '\0';
@@ -42920,8 +43264,24 @@ static void openCfgModal() {
     // the secondary header under it, as Nodes' Filter is.
     s_cfgHeaderStatus = buildScreenHeader(s_cfgModal, TR("Configuration"));
 
+#if UI_CFG_SECTIONS || UI_TOUCH_ONLY_PROFILE
+    lv_obj_t *cfgSubHeader = buildSecondaryHeader(s_cfgModal);
+#endif
+#if UI_CFG_SECTIONS
+    // First, so it sits at the left where a way back is looked for. Hidden on
+    // the grid by refreshCfgModal().
+    {
+        char backText[32];
+        snprintf(backText, sizeof(backText), LV_SYMBOL_LEFT " %s", TR("Back"));
+        s_cfgBackBtn = secondaryHeaderBtn(cfgSubHeader, backText, onCfgBackPressed);
+        lv_obj_add_flag(s_cfgBackBtn, LV_OBJ_FLAG_HIDDEN);
+    }
+#endif
 #if UI_TOUCH_ONLY_PROFILE
-    secondaryHeaderBtn(buildSecondaryHeader(s_cfgModal), TR("Info"), onCfgHeaderInfoPressed);
+#if UI_CFG_SECTIONS
+    s_cfgInfoBtn =
+#endif
+    secondaryHeaderBtn(cfgSubHeader, TR("Info"), onCfgHeaderInfoPressed);
 #endif
 
 #if defined(DEVICE_TLORA_PAGER_TFT)
@@ -43855,14 +44215,6 @@ static void performCfgAction(int actionId) {
             refreshChatView(true);
             break;
 
-#if HAS_CHAT_BLINK
-        // A slider, like the light timeouts: Off at one end, a minute at the other.
-        case CFG_ACTION_CHAT_BLINK:
-            if (s_cfgDebugLog) Serial.println("[lvgl-cfg] exec CHAT_BLINK");
-            showActionPopup = false;   // the picker is the feedback
-            openCfgChatBlinkModal();
-            break;
-#endif
 
         case CFG_ACTION_FONT_SIZE:
             if (s_cfgDebugLog) Serial.println("[lvgl-cfg] exec FONT_SIZE");
@@ -48451,6 +48803,14 @@ static void pumpKeyboardInput() {
                 cfgApplyFilter();
                 continue;
             }
+#if UI_CFG_SECTIONS
+            // Inside a section the close key goes back to the grid; on the grid
+            // it closes Config as it always has.
+            if (isModalCloseKey(k) && s_cfgSection >= 0) {
+                cfgShowGrid();
+                continue;
+            }
+#endif
             if (isModalCloseKey(k)) {
                 closeCfgModal();
                 continue;
@@ -48516,6 +48876,18 @@ static void pumpKeyboardInput() {
                 cfgMoveSelection(invertScrollNav ? -1 : 1, "scroll-dn");
                 continue;
             }
+#if UI_CFG_SECTIONS
+            if (k == KEY_ENTER && cfgGridShown()) {
+                if (s_cfgGridCount > 0) {
+                    // Held like a row's Enter below, so the repeat of this press
+                    // does not run the first row of the section it opens.
+                    s_cfgAwaitEnterRelease = true;
+                    s_cfgEnterLockUntilMs = millis() + 400UL;
+                    cfgOpenSection(s_cfgGridSections[s_cfgGridSelection]);
+                }
+                return;
+            }
+#endif
             if (k == KEY_ENTER) {
                 uint32_t now = millis();
                 if ((uint32_t)(now - s_cfgLastScrollMs) < 180) {
@@ -53630,7 +54002,7 @@ static void screenHeaderSetTitle(lv_obj_t *title, const char *text) {
     }
 }
 
-#if UI_TOUCH_ONLY_PROFILE
+#if UI_TOUCH_ONLY_PROFILE || UI_CFG_SECTIONS
 // The secondary header: the row under a screen header that holds the screen's
 // own actions (Nodes' Filter, Config's Info), packed from the left. They used
 // to share the header with the title; the header's right end now carries the
@@ -57558,6 +57930,33 @@ static bool chatFindNameTag(const char *line, size_t *from, size_t *to) {
     return false;
 }
 
+// The new-message dot's colour: the theme accent, black on paper.
+static lv_color_t freshDotColor() {
+#if defined(DEVICE_TDECK_PRO)
+    return lv_color_make(0, 0, 0);
+#else
+    return lvColorFrom565(s_ui.accent);
+#endif
+}
+
+// A third of the line, so it reads as a mark beside the text and not a glyph.
+static int freshDotSize(const lv_font_t *font) {
+    const int lh = font ? (int)font->line_height : 14;
+    return constrain(lh / 3, 5, 12);
+}
+
+static lv_obj_t *makeFreshDot(lv_obj_t *parent, int d) {
+    lv_obj_t *dot = lv_obj_create(parent);
+    lv_obj_remove_style_all(dot);
+    lv_obj_clear_flag(dot, LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_clear_flag(dot, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_set_size(dot, d, d);
+    lv_obj_set_style_radius(dot, LV_RADIUS_CIRCLE, 0);
+    lv_obj_set_style_bg_color(dot, freshDotColor(), 0);
+    lv_obj_set_style_bg_opa(dot, LV_OPA_COVER, 0);
+    return dot;
+}
+
 static void chatAddLineSpan(lv_obj_t *sg, const char *text, size_t n, const lv_font_t *font) {
     if (n == 0) return;
     char buf[512];
@@ -57574,9 +57973,13 @@ static void chatAddLineSpan(lv_obj_t *sg, const char *text, size_t n, const lv_f
 // the sender tag in nameFont when one is given (the T-Deck Pro's bold names). A
 // span group rather than a label, because a label draws in one face. The spans
 // set no colour of their own, so the whole line, marker included, takes the
-// group's.
+// group's -- except the new-message dot, when outFreshDot asks for one: it goes
+// between the clock and the sender tag, in the accent, and *outFreshDot is the
+// span (null on a line with no tag to put it in front of).
 static void chatSetLineSpans(lv_obj_t *sg, const char *line, const lv_font_t *chatFont,
-                             bool ackMark, const lv_font_t *nameFont) {
+                             bool ackMark, const lv_font_t *nameFont,
+                             lv_span_t **outFreshDot) {
+    if (outFreshDot) *outFreshDot = nullptr;
     if (!sg) return;
     // Folded before the split, so the offsets are measured in the bytes drawn.
     // The clock is ASCII and the fold leaves it where it was.
@@ -57600,8 +58003,18 @@ static void chatSetLineSpans(lv_obj_t *sg, const char *line, const lv_font_t *ch
         lv_spangroup_set_span_text(sg, mark, markText);
     }
     size_t nameFrom = 0, nameTo = 0;
-    if (nameFont && chatFindNameTag(text, &nameFrom, &nameTo) && nameFrom >= pos) {
+    if ((nameFont || outFreshDot) && chatFindNameTag(text, &nameFrom, &nameTo)
+        && nameFrom >= pos) {
         chatAddLineSpan(sg, text + pos, nameFrom - pos, nullptr);
+        if (outFreshDot) {
+            lv_span_t *dot = lv_spangroup_add_span(sg);
+            lv_style_set_text_color(lv_span_get_style(dot), freshDotColor());
+            // One space either side, counting one the clock already ends in.
+            const bool spaceBefore = nameFrom > 0 && text[nameFrom - 1] == ' ';
+            lv_spangroup_set_span_text(sg, dot, spaceBefore ? LV_SYMBOL_BULLET " "
+                                                            : " " LV_SYMBOL_BULLET " ");
+            *outFreshDot = dot;
+        }
         chatAddLineSpan(sg, text + nameFrom, nameTo - nameFrom, nameFont);
         pos = nameTo;
     }
@@ -57610,7 +58023,7 @@ static void chatSetLineSpans(lv_obj_t *sg, const char *line, const lv_font_t *ch
 }
 
 static void chatSetAckedLineText(lv_obj_t *sg, const char *line, const lv_font_t *chatFont) {
-    chatSetLineSpans(sg, line, chatFont, true, nullptr);
+    chatSetLineSpans(sg, line, chatFont, true, nullptr, nullptr);
 }
 
 // Joins the icon and clock into the bubble's leading meta field, in the same
@@ -57773,7 +58186,8 @@ static void chatMakeBubble(lv_obj_t *list, uint32_t sender, bool isMe,
                            DisplayLine::AckState ackState,
                            uint32_t replyPacketId, bool isSelected,
                            lv_obj_t **outLast, lv_obj_t **outSelected,
-                           lv_event_cb_t onPressed) {
+                           lv_event_cb_t onPressed,
+                           lv_obj_t **outFreshDot) {
     lv_obj_t *rowW = lv_obj_create(list);
     lv_obj_remove_style_all(rowW);
     lv_obj_set_width(rowW, lv_pct(100));
@@ -57784,6 +58198,18 @@ static void chatMakeBubble(lv_obj_t *list, uint32_t sender, bool isMe,
     lv_obj_set_flex_align(rowW, isMe ? LV_FLEX_ALIGN_END : LV_FLEX_ALIGN_START,
                           LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_START);
     stylePaperMessageRow(rowW);
+
+    // New message: the dot to the bubble's left, centred on it. Ours are never
+    // new, so it is always on the left-aligned side.
+    if (outFreshDot) {
+        *outFreshDot = nullptr;
+        if (!isMe) {
+            lv_obj_set_flex_align(rowW, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_CENTER,
+                                  LV_FLEX_ALIGN_CENTER);
+            lv_obj_set_style_pad_column(rowW, 3, 0);
+            *outFreshDot = makeFreshDot(rowW, freshDotSize(scaledChatFont(kChannelChatFont)));
+        }
+    }
 
 #if !defined(DEVICE_TDECK_PRO)
     uint16_t bg565;
@@ -57978,7 +58404,8 @@ static void chatMakeIrcRow(lv_obj_t *list, const lv_font_t *font,
                            DisplayLine::AckState ackState,
                            uint32_t replyPacketId, bool isSelected,
                            lv_obj_t **outLast, lv_obj_t **outSelected,
-                           lv_event_cb_t onPressed) {
+                           lv_event_cb_t onPressed,
+                           lv_obj_t **outFreshDot) {
     if (!list || !font) return;
     const bool lightUi = (s_cfg.uiMode == UI_MODE_LIGHT);
 
@@ -58092,9 +58519,18 @@ static void chatMakeIrcRow(lv_obj_t *list, const lv_font_t *font,
     lv_obj_set_width(timeLbl, timeW);
     lv_label_set_text(timeLbl, (timeText && timeText[0]) ? timeText : "");
 
+    // The new-message dot's slot, between the time and the sender. Every row
+    // has one, so the text starts at the same x with a dot or without; only a
+    // new message's is filled. Pushed down to sit on the first line's middle.
+    const int dotD = freshDotSize(font);
+    lv_obj_t *dot = makeFreshDot(row, dotD);
+    lv_obj_set_style_margin_top(dot, max(0, ((int)font->line_height - dotD) / 2), 0);
+    if (outFreshDot) *outFreshDot = dot;
+    else lv_obj_set_style_bg_opa(dot, LV_OPA_TRANSP, 0);
+
     // A fixed width is what makes a span group wrap; left at content width it
     // grows to one long line instead.
-    lv_coord_t textW = s_chatBubbleListW - padL - padR - timeW - gap;
+    lv_coord_t textW = s_chatBubbleListW - padL - padR - timeW - gap - dotD - gap;
     if (textW < 24) textW = 24;
     lv_obj_t *sg = lv_spangroup_create(row);
     // Unlike a label, a span group is clickable by default, so it took every
@@ -58277,22 +58713,28 @@ static void refreshChatViewBubbles(const DisplayLine *const *rows, int rowCount,
             // there is. chatSenderLabel() is what the lock screen names them with.
             char ircName[48] = "";
             if (sender != 0 && !isMe) chatSenderLabel(sender, ircName, sizeof(ircName));
+            const bool freshDot = rows[i]->fresh && freshDotRoom(s_chatDots);
+            lv_obj_t *dot = nullptr;
             chatMakeIrcRow(s_chatList, scaledChatFont(kChannelChatFont),
                            sender, isMe, timeBuf, ircName, body,
                            rows[i]->ack, replyPacketId, isSelected,
-                           lastMsgObj, selectedMsgObj, onChatMessagePressed);
-            if (lastMsgObj) chatBlinkTrack(s_chatBlink, *lastMsgObj, rows[i]->fresh);
+                           lastMsgObj, selectedMsgObj, onChatMessagePressed,
+                           freshDot ? &dot : nullptr);
+            freshDotTrack(s_chatDots, dot, FRESH_DOT_SLOT);
             if (anchorHere && lastMsgObj) *anchorObj = *lastMsgObj;
             continue;
         }
 
         chatComposeBubbleMeta(iconBuf, timeBuf, metaBuf, sizeof(metaBuf));
+        const bool freshDot = rows[i]->fresh && freshDotRoom(s_chatDots);
+        lv_obj_t *dot = nullptr;
         chatMakeBubble(s_chatList, sender, isMe, metaBuf, nameTag, body,
                        rows[i]->ack,
                        replyPacketId, isSelected,
                        lastMsgObj, selectedMsgObj,
-                       onChatMessagePressed);
-        if (lastMsgObj) chatBlinkTrack(s_chatBlink, *lastMsgObj, rows[i]->fresh);
+                       onChatMessagePressed,
+                       freshDot ? &dot : nullptr);
+        freshDotTrack(s_chatDots, dot, FRESH_DOT_OBJ);
         if (anchorHere && lastMsgObj) *anchorObj = *lastMsgObj;
     }
 }
@@ -58442,7 +58884,7 @@ static void refreshChatView(bool force) {
                                || (lv_obj_get_scroll_bottom(s_chatList) <= 6);
     const int32_t prevScrollY = channelChanged ? 0 : lv_obj_get_scroll_y(s_chatList);
 
-    chatBlinkForget(s_chatBlink, (uint32_t)s_activeChannel);
+    freshDotsForget(s_chatDots, (uint32_t)s_activeChannel);
     lv_obj_clean(s_chatList);
     lv_obj_t *lastMsgObj = nullptr;
     lv_obj_t *selectedMsgObj = nullptr;
@@ -58578,15 +59020,18 @@ static void refreshChatView(bool force) {
                 const bool ackedLine = rows[i]->packetId
                     && (rows[i]->ack == DisplayLine::ACKED
                         || rows[i]->ack == DisplayLine::ACKED_RELAY);
+                // A new message is a span group as well, for its dot -- one with
+                // a packet id, which is what a tap on a span group selects by.
+                const bool freshDot = rows[i]->fresh && rows[i]->packetId != 0
+                                      && freshDotRoom(s_chatDots);
 #if defined(DEVICE_TDECK_PRO)
                 const bool spanLine = ackedLine || rows[i]->packetId != 0;
 #else
-                const bool spanLine = ackedLine;
+                const bool spanLine = ackedLine || freshDot;
 #endif
                 lv_obj_t *msg = spanLine ? lv_spangroup_create(s_chatList)
                                          : lv_label_create(s_chatList);
                 lastMsgObj = msg;
-                chatBlinkTrack(s_chatBlink, msg, rows[i]->fresh);
                 if (anchorHere) anchorObj = msg;
                 lv_obj_set_width(msg, lv_pct(100));
                 lv_obj_set_style_text_font(msg, scaledChatFont(kChannelChatFont), 0);
@@ -58646,12 +59091,16 @@ static void refreshChatView(bool force) {
 
                 lv_obj_set_style_text_color(msg, tftColorToLv(textColor565), 0);
                 if (spanLine) {
+                    lv_span_t *dot = nullptr;
 #if defined(DEVICE_TDECK_PRO)
                     chatSetLineSpans(msg, merged, scaledChatFont(kChannelChatFont), ackedLine,
-                                     chatNameFont(scaledChatFont(kChannelChatFont)));
+                                     chatNameFont(scaledChatFont(kChannelChatFont)),
+                                     freshDot ? &dot : nullptr);
 #else
-                    chatSetAckedLineText(msg, merged, scaledChatFont(kChannelChatFont));
+                    chatSetLineSpans(msg, merged, scaledChatFont(kChannelChatFont), ackedLine,
+                                     nullptr, freshDot ? &dot : nullptr);
 #endif
+                    if (dot) freshDotTrack(s_chatDots, msg, FRESH_DOT_SPAN, dot);
                 } else {
                     setLabelTextEmojiSafe(msg, merged);
                 }
@@ -60083,14 +60532,19 @@ static void closeAllModalsForRebuild() {
     closeHomeDashboard();
 #endif
 
-    // Rows registered for blinking live in the old tree.
-    s_chatBlink.count = 0;
-    s_dmBlink.count = 0;
+    // Registered dots live in the old tree.
+    s_chatDots.count = 0;
+    s_dmDots.count = 0;
 }
 
 static void rebuildUiForThemeChange(bool reopenCfg) {
     int preservedChannel = constrain(s_activeChannel, 0, MESH_CHANNELS - 1);
     int preservedCfgSelection = s_cfgSelection;
+#if UI_CFG_SECTIONS
+    // A theme or font change rebuilds the UI from inside a section; come back
+    // to that section, not the grid.
+    const int preservedCfgSection = s_cfgSection;
+#endif
 
     for (lv_indev_t *indev = lv_indev_get_next(nullptr); indev;
          indev = lv_indev_get_next(indev)) {
@@ -60145,6 +60599,12 @@ static void rebuildUiForThemeChange(bool reopenCfg) {
 
     if (reopenCfg) {
         openCfgModal();
+#if UI_CFG_SECTIONS
+        if (preservedCfgSection >= 0) {
+            s_cfgSection = preservedCfgSection;
+            initCfgActions();
+        }
+#endif
         if (s_cfgActionCount > 0) {
             s_cfgSelection = constrain(preservedCfgSelection, 0, s_cfgActionCount - 1);
         }
@@ -62853,13 +63313,11 @@ static bool chatPanelInFront() {
     return true;
 }
 
-// How long a conversation's new messages blink once it is in front of the user:
-// the Message Blink setting. A message arriving meanwhile starts the count
-// again. With the blink Off the marks still clear after the default 15 s, since
-// that is also when the channel list stops flagging the conversation.
+// How long a conversation has to be in front of the user before its new
+// messages count as read and their dots go. A message arriving meanwhile starts
+// the count again. Also when the channel list stops flagging the conversation.
 static uint32_t freshSeenMs() {
-    const uint32_t secs = cfgChatBlinkSecs(s_cfg);
-    return (secs ? secs : 15u) * 1000u;
+    return 15000u;
 }
 
 // Tracks how long one conversation has been in front since its last new
@@ -62881,7 +63339,7 @@ struct FreshSeenTimer {
     }
 };
 
-// New messages stay marked (and blinking) until the user has had their
+// New messages stay marked (with their dots) until the user has had their
 // conversation in front of them for freshSeenMs(), or has left it sooner:
 // another channel, another screen, or the display going to sleep. Watching what
 // is in front each pass catches every way of leaving without hooking each one.
@@ -62902,15 +63360,15 @@ static void serviceFreshMarks() {
     }
     if (s_prevChan >= 0 && s_prevChan != chan) {
         Channels.clearFresh(s_prevChan);
-        chatBlinkStop(s_chatBlink, (uint32_t)s_prevChan);
+        freshDotsClear(s_chatDots, (uint32_t)s_prevChan);
     }
     if (s_prevPeer != 0 && s_prevPeer != peer) {
         DMs.clearFresh(s_prevPeer);
-        chatBlinkStop(s_dmBlink, s_prevPeer);
+        freshDotsClear(s_dmDots, s_prevPeer);
     }
     if (chan >= 0 && s_chanSeen.expired(chan == s_prevChan, Channels.freshSeq(chan), now)) {
         Channels.clearFresh(chan);
-        chatBlinkStop(s_chatBlink, (uint32_t)chan);
+        freshDotsClear(s_chatDots, (uint32_t)chan);
         if (s_channelNeedsAttention[chan]) {
             s_channelNeedsAttention[chan] = false;
             refreshChannelGlow(true);
@@ -62918,7 +63376,7 @@ static void serviceFreshMarks() {
     }
     if (peer != 0 && s_peerSeen.expired(peer == s_prevPeer, DMs.freshSeq(peer), now)) {
         DMs.clearFresh(peer);
-        chatBlinkStop(s_dmBlink, peer);
+        freshDotsClear(s_dmDots, peer);
     }
     s_prevChan = chan;
     s_prevPeer = peer;

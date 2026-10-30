@@ -645,6 +645,16 @@
 #define MY_NAV_BAR_ENABLED 0
 #endif
 
+// Config opens on a two-column grid of section buttons (Radio & Identity,
+// Connections, Display, ...) and a tap lists that section's rows, on every
+// board with a touch panel: one long list is a lot of flicking to find a row
+// on glass. Builds without touch keep the single list their keys walk.
+#if HAS_TOUCH
+#define UI_CFG_SECTIONS 1
+#else
+#define UI_CFG_SECTIONS 0
+#endif
+
 // A notification LED that blinks while messages are unread. Only the Mesh Deck
 // has one wired (RGB cathodes on expander 0x59 P10..P12, driven by
 // meshDeckServiceLed). Gate the setting on this so it is absent, not inert,
@@ -807,16 +817,6 @@
 // until the message is read. Defaulting to anything else would silently change
 // what a device in the field does the moment it takes an update.
 #define MY_NOTIFY_LIGHT_TIMEOUT_S 0
-// How long a new message blinks in the chat and DM views once its conversation
-// is in front of the user, in seconds; 0 = it does not blink. 15 is what every
-// build before this setting did. The T-Deck Pro's paper never blinks (each
-// pulse would be a panel refresh), so it has no row for this.
-#define MY_CHAT_BLINK_S 15
-#if defined(DEVICE_TDECK_PRO)
-#define HAS_CHAT_BLINK 0
-#else
-#define HAS_CHAT_BLINK 1
-#endif
 #define MY_DEBUG_MONITOR    0
 #define MY_DBG_ACKS         MY_DEBUG_MONITOR
 #define MY_DBG_MESSAGES     MY_DEBUG_MONITOR
