@@ -16,6 +16,7 @@
 #include <unistd.h>
 
 uint8_t myPubKey[32];
+uint8_t myPrivKey[32];
 uint8_t myDeviceRole;
 void debugLogMessages(const char *, ...) {}
 uint32_t xeddsaSignerNodeId() { return 0; }

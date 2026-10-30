@@ -34,8 +34,10 @@ has_env() {
 # Every [env:NAME] in platformio.ini, in file order. Read from the file rather
 # than from the list of device flags below so a newly added environment is
 # covered by --just-build the day it lands, without touching this script.
+# Except native, which is the host unit tests (`pio test -e native`), not a
+# firmware build.
 all_envs() {
-	sed -n 's/^\[env:\(.*\)\]$/\1/p' platformio.ini
+	sed -n 's/^\[env:\(.*\)\]$/\1/p' platformio.ini | grep -vx native
 }
 
 # Human label for an env, for the --just-build summary. Falls back to the env

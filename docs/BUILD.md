@@ -372,6 +372,20 @@ pio device monitor
 Add `-e <env>` to use that environment's baud rate, or `--port` / `--baud` to set
 them by hand. Exit with `Ctrl+C`.
 
+### Unit tests
+
+```
+pio test -e native
+```
+
+Runs the host unit tests on your computer; no device needed. The tests cover
+Arduino-free logic (protocols, signing policy, node eviction, spell, and so on)
+and live in `tests/test_*.cpp`. `bash tests/run.sh` runs the same tests with the
+system compiler and stricter warnings (`-Werror`), without PlatformIO. A new
+test needs a wrapper in `tests/native/test_<name>/test_main.cpp` (copy an
+existing one) so `pio test` runs it too; `tests/run.sh` fails without one.
+Add `-f test_<name>` to run one test.
+
 ### Helper script (macOS and Linux only)
 
 `scripts/build-upload-monitor.sh` builds, uploads and opens the monitor in one go:
