@@ -72,6 +72,9 @@ def main() -> int:
         if not section.startswith("env:"):
             continue
         env = section[4:]
+        # The host unit tests ([env:native]): no device, no flash, no image.
+        if ini.get(section, "platform", fallback="").startswith("native"):
+            continue
         binary = os.path.join(ROOT, ".pio", "build", env, "firmware.bin")
         if not os.path.isfile(binary):
             missing.append(env)
