@@ -25511,16 +25511,34 @@ static void navChatApplyInk(lv_obj_t *label, bool lit) {
     navCellApplyInk(label, lit);
 }
 
+// A registered label empties its own slot as it is deleted. lv_obj_is_valid()
+// alone cannot tell: a bar that went with a closed modal frees its labels, LVGL
+// hands the same address to whatever is built next, and the stale slot then
+// passes as valid. The blink went on painting that object's parent -- the home
+// dashboard's SNR/RSSI card, once -- amber twice a second.
+static void onNavIconDeleted(lv_event_t *e) {
+    lv_obj_t *label = lv_event_get_target_obj(e);
+    for (int i = 0; i < kNavDmIconSlots; i++) {
+        if (s_navChatIcons[i] == label) s_navChatIcons[i] = nullptr;
+        if (s_navDmIcons[i] == label)   s_navDmIcons[i] = nullptr;
+    }
+}
+
+static void navIconStore(lv_obj_t **slot, lv_obj_t *label) {
+    *slot = label;
+    lv_obj_add_event_cb(label, onNavIconDeleted, LV_EVENT_DELETE, nullptr);
+}
+
 static void navChatIconRegister(lv_obj_t *label) {
     for (int i = 0; i < kNavDmIconSlots; i++) {
         if (s_navChatIcons[i] == label) { navChatApplyInk(label, s_navChatLit); return; }
         if (!s_navChatIcons[i] || !lv_obj_is_valid(s_navChatIcons[i])) {
-            s_navChatIcons[i] = label;
+            navIconStore(&s_navChatIcons[i], label);
             navChatApplyInk(label, s_navChatLit);
             return;
         }
     }
-    s_navChatIcons[0] = label;   // all live: the oldest gives way
+    navIconStore(&s_navChatIcons[0], label);   // all live: the oldest gives way
     navChatApplyInk(label, s_navChatLit);
 }
 
@@ -25528,12 +25546,12 @@ static void navDmIconRegister(lv_obj_t *label) {
     for (int i = 0; i < kNavDmIconSlots; i++) {
         if (s_navDmIcons[i] == label) { navDmApplyInk(label, s_navDmLit); return; }
         if (!s_navDmIcons[i] || !lv_obj_is_valid(s_navDmIcons[i])) {
-            s_navDmIcons[i] = label;
+            navIconStore(&s_navDmIcons[i], label);
             navDmApplyInk(label, s_navDmLit);
             return;
         }
     }
-    s_navDmIcons[0] = label;   // all live: the oldest gives way
+    navIconStore(&s_navDmIcons[0], label);   // all live: the oldest gives way
     navDmApplyInk(label, s_navDmLit);
 }
 #endif  // UI_TOUCH_NAV_BAR
