@@ -11,6 +11,7 @@
 // job.
 #include <Arduino.h>
 #include <FS.h>
+#include <type_traits>
 // Must come before the backend tests below: those macros are defined by the
 // board header this pulls in.
 #include "config.h"
@@ -45,6 +46,30 @@ bool storageBegin();
 
 // True once the backend is mounted.
 bool storageMounted();
+
+// Runs `fn` on the task that does the card's writes, and returns once it has
+// run. Callers keep their blocking semantics; only the core changes.
+//
+// T-Display P4 only; everywhere else this is a plain inline call. The P4's
+// panel is fed from PSRAM by DMA that stops after every frame until an
+// interrupt on the core that started the display (core 1, the Arduino loop's)
+// re-arms it. An SD_MMC transaction masks interrupts on the core issuing it, so
+// a write from the loop -- many small ones, for a FAT save -- makes frames late
+// and the AMOLED shows the gap as a whole-screen blue flash. wadamesh measured
+// this on the same board (ALLFATHER-BV/wadamesh#167): the same saves issued
+// from core 0 did not flash. The writer is pinned there, and the card is
+// mounted from it as well, so the SDMMC completion interrupt is on core 0 too
+// rather than a cross-core wakeup away from every transfer.
+//
+// The writer is created on first use. That is storageBegin() during setup(),
+// before any other task touches storage, so creation cannot race.
+void storageCallOnWriter(void (*fn)(void *), void *arg);
+
+template <typename F>
+inline void storageOnWriter(F &&fn) {
+    using Fn = typename std::remove_reference<F>::type;
+    storageCallOnWriter([](void *p) { (*static_cast<Fn *>(p))(); }, &fn);
+}
 
 // Human-readable backend name for diagnostics and UI ("SD card", "internal
 // flash"), so a message can say where a file actually went.

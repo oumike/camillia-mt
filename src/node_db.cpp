@@ -1,5 +1,6 @@
 #include "node_db.h"
 #include "node_evict.h"
+#include "relay_policy.h"
 #include "utf8_utils.h"
 #include "config_io.h"   // sdBegin()
 #include "gps.h"         // own fix for the wardriving heard-position stamp
@@ -491,6 +492,26 @@ NodeEntry *NodeDB::find(uint32_t nodeId) {
     return nullptr;
 }
 
+bool NodeDB::isFavorite(uint32_t nodeId) const {
+    for (int i = 0; i < _count; i++)
+        if (_nodes[i].nodeId == nodeId) return _nodes[i].favorite;
+    return false;
+}
+
+const NodeEntry *NodeDB::resolveRelayByte(uint8_t lastByte, uint32_t selfId) const {
+    const NodeEntry *match = nullptr;
+    for (int i = 0; i < _count; i++) {
+        const NodeEntry &e = _nodes[i];
+        if (e.nodeId == 0 || e.nodeId == selfId || (uint8_t)(e.nodeId & 0xFF) != lastByte) continue;
+        const bool direct = e.hasHops && e.hops == 0;
+        const bool router = e.hasRole && relay::isRouterRole(e.role);
+        if (!direct && !e.favorite && !router) continue;
+        if (match) return nullptr;   // two plausible relays share the byte
+        match = &e;
+    }
+    return match;
+}
+
 // ── Node CSV schema ──────────────────────────────────────────────────────────
 // Shared by the SD archive writer and the web CSV export (see node_db.h). Built
 // on every board, including those with no SD slot, because the export works
@@ -687,8 +708,15 @@ static void archiveDiscardAll() {
     s_archHead = s_archTail = 0;
 }
 
+static void nodeArchiveFlushNow();
+
 void nodeArchiveFlush() {
     if (s_archCount <= 0) return;
+    // See storageCallOnWriter(): off the display's core on the T-Display P4.
+    storageOnWriter([] { nodeArchiveFlushNow(); });
+}
+
+static void nodeArchiveFlushNow() {
     if (!s_archEnabled) { archiveDiscardAll(); return; }
 
     const uint32_t nowMs = millis();
@@ -1091,8 +1119,12 @@ bool nodeArchiveClear() {
     nodeArchiveIndexClear();
 
     if (!sdCardMounted()) return false;
-    if (!storageFs().exists(kArchivePath)) return true;   // already gone
-    const bool removed = storageFs().remove(kArchivePath);
+    bool existed = false, removed = false;
+    storageOnWriter([&] {
+        existed = storageFs().exists(kArchivePath);
+        if (existed) removed = storageFs().remove(kArchivePath);
+    });
+    if (!existed) return true;   // already gone
     Serial.printf("[nodedb] archive clear: %s\n", removed ? "removed" : "REMOVE FAILED");
     return removed;
 }
@@ -1393,6 +1425,8 @@ bool NodeDB::updateUser(uint32_t nodeId, const UserInfo &u) {
     // A NodeInfo for this record has now been heard, whether or not it changes
     // the name a cache restore put there.
     e->nameFromCache = false;
+    e->role = u.role;
+    e->hasRole = true;
     if (u.longName[0] && strncmp(e->longName, u.longName, sizeof(e->longName) - 1) != 0) {
         utf8util::copyTruncate(e->longName, sizeof(e->longName), u.longName);
         e->hasName = true;
