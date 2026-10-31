@@ -187,8 +187,15 @@ static const char *kHeader =
     "epoch,utc,nodeId,shortName,longName,rssi,snr,hops,portnum,chanIdx,"
     "lat,lon,altM,sats,hdop,speedKmh,nodeLat,nodeLon";
 
+static void wardriveLogFlushNow();
+
 void wardriveLogFlush() {
     if (s_qCount <= 0) return;
+    // See storageCallOnWriter(): off the display's core on the T-Display P4.
+    storageOnWriter([] { wardriveLogFlushNow(); });
+}
+
+static void wardriveLogFlushNow() {
     if (!s_enabled) { discardAll(); return; }
 
     const uint32_t nowMs = millis();

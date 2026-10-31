@@ -708,8 +708,15 @@ static void archiveDiscardAll() {
     s_archHead = s_archTail = 0;
 }
 
+static void nodeArchiveFlushNow();
+
 void nodeArchiveFlush() {
     if (s_archCount <= 0) return;
+    // See storageCallOnWriter(): off the display's core on the T-Display P4.
+    storageOnWriter([] { nodeArchiveFlushNow(); });
+}
+
+static void nodeArchiveFlushNow() {
     if (!s_archEnabled) { archiveDiscardAll(); return; }
 
     const uint32_t nowMs = millis();
@@ -1112,8 +1119,12 @@ bool nodeArchiveClear() {
     nodeArchiveIndexClear();
 
     if (!sdCardMounted()) return false;
-    if (!storageFs().exists(kArchivePath)) return true;   // already gone
-    const bool removed = storageFs().remove(kArchivePath);
+    bool existed = false, removed = false;
+    storageOnWriter([&] {
+        existed = storageFs().exists(kArchivePath);
+        if (existed) removed = storageFs().remove(kArchivePath);
+    });
+    if (!existed) return true;   // already gone
     Serial.printf("[nodedb] archive clear: %s\n", removed ? "removed" : "REMOVE FAILED");
     return removed;
 }

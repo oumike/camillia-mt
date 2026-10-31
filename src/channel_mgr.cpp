@@ -127,18 +127,20 @@ void ChannelMgr::clearAllMessages(bool clearPersisted) {
     memset(_dirtySinceMs, 0, sizeof(_dirtySinceMs));
     memset(_dirtyTouchedMs, 0, sizeof(_dirtyTouchedMs));
 
-    for (int chanIdx = 0; chanIdx < MESH_CHANNELS; chanIdx++) {
-        char path[48];
-        channelPersistPath(chanIdx, path, sizeof(path));
-        if (storageFs().exists(path)) storageFs().remove(path);
-        // Staged snapshots too, or loadPersisted()'s recovery would restore one
-        // of them on the next boot after a wipe.
-        channelPersistTmpPath(chanIdx, path, sizeof(path));
-        if (storageFs().exists(path)) storageFs().remove(path);
-    }
-    if (storageFs().exists(kChanPersistDir)) {
-        (void)storageFs().rmdir(kChanPersistDir);
-    }
+    storageOnWriter([] {
+        for (int chanIdx = 0; chanIdx < MESH_CHANNELS; chanIdx++) {
+            char path[48];
+            channelPersistPath(chanIdx, path, sizeof(path));
+            if (storageFs().exists(path)) storageFs().remove(path);
+            // Staged snapshots too, or loadPersisted()'s recovery would restore
+            // one of them on the next boot after a wipe.
+            channelPersistTmpPath(chanIdx, path, sizeof(path));
+            if (storageFs().exists(path)) storageFs().remove(path);
+        }
+        if (storageFs().exists(kChanPersistDir)) {
+            (void)storageFs().rmdir(kChanPersistDir);
+        }
+    });
     _persistDirReady = false;
 #else
     (void)clearPersisted;
@@ -423,6 +425,16 @@ void ChannelMgr::beginPersistence() {
 void ChannelMgr::_persistChannel(int chanIdx, const Channel &ch) {
 #if HAS_FILE_STORAGE
     if (!ch.lines) return;
+    // See storageCallOnWriter(): off the display's core on the T-Display P4.
+    storageOnWriter([&] { _persistChannelNow(chanIdx, ch); });
+#else
+    (void)chanIdx;
+    (void)ch;
+#endif
+}
+
+void ChannelMgr::_persistChannelNow(int chanIdx, const Channel &ch) {
+#if HAS_FILE_STORAGE
     if (!_persistDirReady) {
         (void)storageFs().mkdir("/camillia");
         (void)storageFs().mkdir(kChanPersistDir);
