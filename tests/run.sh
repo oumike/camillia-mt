@@ -21,6 +21,12 @@ trap 'rm -rf "$OUT"' EXIT
 fail=0
 for t in test_*.cpp; do
     name="${t%.cpp}"
+    # `pio test -e native` runs each test through its wrapper in native/; one
+    # without a wrapper would pass here and silently never run there.
+    if [ ! -f "native/$name/test_main.cpp" ]; then
+        echo "$name: no native/$name/test_main.cpp for pio test -e native"
+        fail=1
+    fi
     srcs=("$t")
 
     mod="../src/${name#test_}.cpp"

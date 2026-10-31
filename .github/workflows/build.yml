@@ -99,6 +99,11 @@ jobs:
       - name: Install PlatformIO
         run: pip install platformio esptool
 
+      # The same host tests as the Host tests job, through PlatformIO's runner,
+      # so `pio test -e native` keeps working. Seconds; before the long builds.
+      - name: Unit tests (pio test -e native)
+        run: pio test -e native
+
       # Translation coverage (issue #99). Fails only on a translation whose
       # printf placeholders differ from its English -- the device would refuse
       # it and show English, so it is a bug in the .lang file. Missing and

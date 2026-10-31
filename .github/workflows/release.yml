@@ -123,6 +123,17 @@ jobs:
         # quietly change the layout of a published factory image.
         run: pip install platformio 'esptool==4.11.0'
 
+      # The host unit tests, both ways build.yml runs them: tests/run.sh with
+      # -Werror, then the same tests through PlatformIO's runner. Seconds, and
+      # before the signing key is on disk, so a failing test stops the release
+      # before anything is built or signed.
+      - name: Unit tests
+        env:
+          CXX: clang++
+        run: |
+          bash tests/run.sh
+          pio test -e native
+
       - name: Install device frameworks
         # release.sh checks for boot_app0.bin during preflight, before it builds
         # anything, and that file only exists once the Arduino ESP32 framework

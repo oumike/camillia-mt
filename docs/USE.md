@@ -2303,19 +2303,17 @@ Unlike Chat Style, this applies **without a reboot**: bubble views re-render
 immediately, and new classic-chat lines use the chosen style going forward. The
 Web Config **Chat Names** dropdown offers the same two choices.
 
-### Message blink
+### New-message dots
 
-A newly received message blinks in the chat and DM views until its conversation
-has been on screen for a while, or until you leave it. Config's **Message
-Blink** action opens a slider that sets how long: **Off**, or 5 to 60 seconds in
-5-second steps. The default is 15 seconds, which is what every build did before
-this setting existed. Off means new messages never blink; the channel list still
-stops flagging a conversation after 15 seconds on screen.
+A newly received message carries a small dot in the theme's accent colour in the
+chat and DM views. In the Classic and IRC styles it sits between the time and
+the sender's name; in Bubbles and Outline it sits to the left of the bubble,
+centred on it. The dots go once the conversation counts as read: when it has
+been on screen for 15 seconds, or when you leave it. That is also when the
+channel list stops flagging it.
 
-It applies immediately, with no reboot. Switching it off stops anything already
-blinking. On the web page, **Message Blink** opens the same slider in a modal,
-with Save and Cancel. The T-Deck Pro has no such row, because its e-paper never
-blinks.
+Messages themselves never blink. Notification lights (the keyboard blink, the
+notification LED) are separate settings and work as before.
 
 ### Brightness
 
