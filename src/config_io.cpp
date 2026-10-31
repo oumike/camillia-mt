@@ -573,9 +573,10 @@ static bool ensureSdMounted() {
 // ── Role / rebroadcast name tables ───────────────────────────
 static const char *kRoleNames[] = {
     "CLIENT", "CLIENT_MUTE", "ROUTER", "ROUTER_CLIENT", "REPEATER",
-    "TRACKER", "SENSOR", "TAK", "CLIENT_HIDDEN", "LOST_AND_FOUND", "TAK_TRACKER"
+    "TRACKER", "SENSOR", "TAK", "CLIENT_HIDDEN", "LOST_AND_FOUND", "TAK_TRACKER",
+    "ROUTER_LATE", "CLIENT_BASE"
 };
-static const int kNumRoles = 11;
+static const int kNumRoles = 13;
 
 static const char *kRebroadNames[] = {
     "ALL", "ALL_SKIP_DECODING", "LOCAL_ONLY", "KNOWN_ONLY", "CORE_PORTNUMS_ONLY"
