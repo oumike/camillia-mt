@@ -7163,8 +7163,9 @@ static void sendConfigPage(const char *msg = "", bool lite = false) {
                             "else{nodeHeatLayer.addTo(nodeMap);nodeHeatOn=true;if(hb){hb.textContent='Heat: On';hb.classList.add('active');}}"
                         "}"
                         // The picked node: its card in #node-info, and the map
-                        // centred on it with a pin. The dropdown, a search match
-                        // and a marker on the map all end up here.
+                        // centred on it, marked the way search matches are (see
+                        // nodeMatchMarker()). The dropdown, a search match and a
+                        // marker on the map all end up here.
                         "var nodePinMarker=null;"
                         "function selectNode(){"
                             "var sel=document.getElementById('node-select');"
@@ -7182,7 +7183,8 @@ static void sendConfigPage(const char *msg = "", bool lite = false) {
                             "var ll=nodeLoc(v);"
                             "if(!nodeMap)return;"
                             "if(!ll){setMapStatus('No position for '+(sel.options[sel.selectedIndex]||{}).textContent);return;}"
-                            "nodePinMarker=L.marker(ll,{zIndexOffset:1000}).addTo(nodeMap);"
+                            "nodePinMarker=nodeMatchMarker(ll,(sel.options[sel.selectedIndex]||{}).textContent||'',v).addTo(nodeMap);"
+                            "nodePinMarker.bringToFront();"
                             "nodeMap.setView(ll,Math.max(nodeMap.getZoom()||0,13));"
                             "setMapStatus((sel.options[sel.selectedIndex]||{}).textContent||'');"
                         "}"
@@ -7315,6 +7317,14 @@ static void sendConfigPage(const char *msg = "", bool lite = false) {
                         // Marks the positioned matches on the map, over the heat
                         // layer; null clears them. fit: frame them.
                         "var nodeSearchLayer=null;"
+                        // The blue marker for a node found or picked: a click on
+                        // it picks it.
+                        "function nodeMatchMarker(ll,label,v){"
+                            "var mk=L.circleMarker(ll,{radius:8,weight:2,color:'#ffffff',fillColor:'#3fa9f5',fillOpacity:0.95});"
+                            "mk.bindTooltip(label);"
+                            "mk.on('click',function(){nodePick(v);});"
+                            "return mk;"
+                        "}"
                         "function renderNodeSearchMap(list,fit){"
                             "if(!list){"
                                 "if(nodeSearchLayer&&nodeMap){nodeMap.removeLayer(nodeSearchLayer);nodeSearchLayer=null;}"
@@ -7326,15 +7336,12 @@ static void sendConfigPage(const char *msg = "", bool lite = false) {
                             "if(!nodeMap)return;"
                             "if(nodeSearchLayer)nodeSearchLayer.clearLayers();"
                             "else nodeSearchLayer=L.featureGroup().addTo(nodeMap);"
-                            "var i,o,ll,mk,n=0;"
+                            "var i,o,ll,n=0;"
                             "for(i=0;i<list.length;i++){"
                                 "o=list[i];"
                                 "ll=nodeLoc(o.value);"
                                 "if(!ll)continue;"
-                                "mk=L.circleMarker(ll,{radius:8,weight:2,color:'#ffffff',fillColor:'#3fa9f5',fillOpacity:0.95});"
-                                "mk.bindTooltip(o.textContent);"
-                                "mk.on('click',(function(v){return function(){nodePick(v);};})(o.value));"
-                                "mk.addTo(nodeSearchLayer);"
+                                "nodeMatchMarker(ll,o.textContent,o.value).addTo(nodeSearchLayer);"
                                 "n++;"
                             "}"
                             "setMapStatus(n?(n+' match'+(n===1?'':'es')+' on the map'):'No matching node has a position');"

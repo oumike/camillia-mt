@@ -2450,7 +2450,7 @@ finds `!1a2b3c4d`.
   fit them.
 - Picking a node works the same from every place: the dropdown, a match in the
   list, or a blue marker on the map. Its details fill the panel above the map,
-  and the map centres on it with a pin. A node with no position gets the panel
+  and the map centres on it with the same blue marker the search uses. A node with no position gets the panel
   only, and the map's status line says so.
 - When only one node matches, it is shown straight away. Enter shows the first
   match, and Esc clears the search.
