@@ -3801,9 +3801,9 @@ enum CfgActionId {
 static int s_cfgActions[CFG_ACTION__COUNT] = {};
 
 #if UI_CFG_SECTIONS
-// ── Config sections (touch builds) ──────────────────────────────────────────
-// Config opens on a grid of these, two to a row, and a tap lists one section's
-// rows. The sections follow the runs initCfgActions() already lays the list out
+// ── Config sections ─────────────────────────────────────────────────────────
+// Config opens on a grid of these, two or three to a row, and a tap or Enter
+// lists one section's rows. The sections follow the runs initCfgActions() already lays the list out
 // in, so the order inside each is the order the full list has. A section with
 // no rows on this board is left off the grid.
 enum CfgSectionId : int8_t {
@@ -15801,15 +15801,30 @@ static void cfgShowGrid() {
     refreshCfgModal();
 }
 
-// The grid itself: one button per section, two to a row, in the list's place.
+// The grid itself: one button per section, in the list's place. Three to a
+// row on a screen at least 600 px wide (the CrowPanel 5.0, the P4 in
+// landscape), two below that.
 static void buildCfgGrid() {
 #if defined(DEVICE_TDISPLAY_P4) || defined(DEVICE_CROWPANEL)
     const lv_font_t *font = &lv_font_montserrat_16;
     const int btnH = 72;
+    const int btnPad = 4;
+#elif defined(DEVICE_CARDPUTER_LORA_HAT) || defined(DEVICE_TLORA_PAGER_TFT)
+    // 135 px of height on the Cardputer, and the Pager's list is the left 58%
+    // of a 222 px-tall screen: a smaller font, so a wrapped name still fits.
+    const lv_font_t *font = &lv_font_montserrat_12;
+    const int btnH = 44;
+    const int btnPad = 2;
 #else
     const lv_font_t *font = &lv_font_montserrat_14;
     const int btnH = 52;
+    const int btnPad = 4;
 #endif
+    const int cols = (lv_disp_get_hor_res(NULL) >= 600) ? 3 : 2;
+    // Just under 1/cols: SPACE_EVENLY shares out what is left between and
+    // around the buttons, and exact fractions would wrap one to the next row.
+    const int btnPct = (cols == 3) ? 31 : 47;
+
     lv_obj_set_flex_flow(s_cfgActionList, LV_FLEX_FLOW_ROW_WRAP);
     lv_obj_set_flex_align(s_cfgActionList, LV_FLEX_ALIGN_SPACE_EVENLY,
                           LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_START);
@@ -15819,12 +15834,10 @@ static void buildCfgGrid() {
     for (int i = 0; i < s_cfgGridCount; i++) {
         const CfgSectionInfo &info = kCfgSections[s_cfgGridSections[i]];
         lv_obj_t *btn = lv_btn_create(s_cfgActionList);
-        // Just under half: SPACE_EVENLY shares out what is left between and
-        // around the pair, and two at 50% would wrap one to a row.
-        lv_obj_set_size(btn, lv_pct(47), btnH);
+        lv_obj_set_size(btn, lv_pct(btnPct), btnH);
         lv_obj_set_style_radius(btn, 6, 0);
         lv_obj_set_style_shadow_width(btn, 0, 0);
-        lv_obj_set_style_pad_all(btn, 4, 0);
+        lv_obj_set_style_pad_all(btn, btnPad, 0);
         lv_obj_add_event_cb(btn, onCfgSectionBtnClicked, LV_EVENT_CLICKED, (void *)(intptr_t)i);
 
         lv_obj_t *lbl = lv_label_create(btn);
@@ -15838,6 +15851,45 @@ static void buildCfgGrid() {
         lv_obj_center(lbl);
 
         cfgStyleGridBtn(btn, i == s_cfgGridSelection);
+    }
+}
+#endif
+
+#if defined(DEVICE_TLORA_PAGER_TFT)
+// The Pager's always-on Device Info panel, right of the rows or the grid.
+static void fillCfgPagerInfo() {
+    const lv_font_t *cfgRowFont = &lv_font_montserrat_12;
+    const int cfgPadTop = 3;
+    const int cfgPadBottom = 3;
+    char info[kDeviceInfoMaxLines][96] = {};
+    int infoCount = buildDeviceInfoLines(info, kDeviceInfoMaxLines);
+
+    lv_obj_t *infoHeader = lv_label_create(s_cfgInfoList);
+    lv_obj_set_width(infoHeader, lv_pct(100));
+    lv_obj_set_style_text_font(infoHeader, &lv_font_montserrat_12, 0);
+    lv_obj_set_style_text_color(infoHeader, lv_color_hex(0xBFD6FF), 0);
+    lv_obj_set_style_bg_color(infoHeader, lv_color_hex(0x123266), 0);
+    lv_obj_set_style_bg_opa(infoHeader, LV_OPA_70, 0);
+    lv_obj_set_style_pad_left(infoHeader, 4, 0);
+    lv_obj_set_style_pad_right(infoHeader, 4, 0);
+    lv_obj_set_style_pad_top(infoHeader, 3, 0);
+    lv_obj_set_style_pad_bottom(infoHeader, 3, 0);
+    lv_label_set_long_mode(infoHeader, LV_LABEL_LONG_DOT);
+    lv_label_set_text(infoHeader, TR("Device Info"));
+
+    for (int i = 0; i < infoCount; i++) {
+        lv_obj_t *row = lv_label_create(s_cfgInfoList);
+        lv_obj_set_width(row, lv_pct(100));
+        lv_obj_set_style_text_font(row, cfgRowFont, 0);
+        lv_obj_set_style_text_color(row, lv_color_hex(0xD9E8FF), 0);
+        lv_obj_set_style_bg_opa(row, (i & 1) ? LV_OPA_30 : LV_OPA_10, 0);
+        lv_obj_set_style_bg_color(row, lv_color_hex(0x123266), 0);
+        lv_obj_set_style_pad_left(row, 4, 0);
+        lv_obj_set_style_pad_right(row, 4, 0);
+        lv_obj_set_style_pad_top(row, cfgPadTop, 0);
+        lv_obj_set_style_pad_bottom(row, cfgPadBottom, 0);
+        lv_label_set_long_mode(row, LV_LABEL_LONG_DOT);
+        lv_label_set_text(row, info[i]);
     }
 }
 #endif
@@ -15889,9 +15941,16 @@ static void refreshCfgModal() {
         if (cfgGridShown()) lv_obj_clear_flag(s_cfgInfoBtn, LV_OBJ_FLAG_HIDDEN);
         else                lv_obj_add_flag(s_cfgInfoBtn, LV_OBJ_FLAG_HIDDEN);
     }
+#if defined(DEVICE_TLORA_PAGER_TFT)
+    lv_obj_clean(s_cfgInfoList);
+    refreshCfgPanelFocusStyles();
+#endif
     s_cfgPaintedSelection = -1;
     if (cfgGridShown()) {
         buildCfgGrid();
+#if defined(DEVICE_TLORA_PAGER_TFT)
+        fillCfgPagerInfo();
+#endif
         return;
     }
     // A list again: undo what buildCfgGrid() set on the same container.
@@ -15900,10 +15959,6 @@ static void refreshCfgModal() {
     lv_obj_set_style_pad_all(s_cfgActionList, 0, 0);
     lv_obj_set_style_pad_row(s_cfgActionList, 1, 0);
     lv_obj_set_style_pad_right(s_cfgActionList, 2, 0);
-#endif
-#if defined(DEVICE_TLORA_PAGER_TFT)
-    lv_obj_clean(s_cfgInfoList);
-    refreshCfgPanelFocusStyles();
 #endif
     lv_obj_t *selectedRowObj = nullptr;
 
@@ -15981,36 +16036,7 @@ static void refreshCfgModal() {
     }
 
 #if defined(DEVICE_TLORA_PAGER_TFT)
-    char info[kDeviceInfoMaxLines][96] = {};
-    int infoCount = buildDeviceInfoLines(info, kDeviceInfoMaxLines);
-
-    lv_obj_t *infoHeader = lv_label_create(s_cfgInfoList);
-    lv_obj_set_width(infoHeader, lv_pct(100));
-    lv_obj_set_style_text_font(infoHeader, &lv_font_montserrat_12, 0);
-    lv_obj_set_style_text_color(infoHeader, lv_color_hex(0xBFD6FF), 0);
-    lv_obj_set_style_bg_color(infoHeader, lv_color_hex(0x123266), 0);
-    lv_obj_set_style_bg_opa(infoHeader, LV_OPA_70, 0);
-    lv_obj_set_style_pad_left(infoHeader, 4, 0);
-    lv_obj_set_style_pad_right(infoHeader, 4, 0);
-    lv_obj_set_style_pad_top(infoHeader, 3, 0);
-    lv_obj_set_style_pad_bottom(infoHeader, 3, 0);
-    lv_label_set_long_mode(infoHeader, LV_LABEL_LONG_DOT);
-    lv_label_set_text(infoHeader, TR("Device Info"));
-
-    for (int i = 0; i < infoCount; i++) {
-        lv_obj_t *row = lv_label_create(s_cfgInfoList);
-        lv_obj_set_width(row, lv_pct(100));
-        lv_obj_set_style_text_font(row, cfgRowFont, 0);
-        lv_obj_set_style_text_color(row, lv_color_hex(0xD9E8FF), 0);
-        lv_obj_set_style_bg_opa(row, (i & 1) ? LV_OPA_30 : LV_OPA_10, 0);
-        lv_obj_set_style_bg_color(row, lv_color_hex(0x123266), 0);
-        lv_obj_set_style_pad_left(row, 4, 0);
-        lv_obj_set_style_pad_right(row, 4, 0);
-        lv_obj_set_style_pad_top(row, cfgPadTop, 0);
-        lv_obj_set_style_pad_bottom(row, cfgPadBottom, 0);
-        lv_label_set_long_mode(row, LV_LABEL_LONG_DOT);
-        lv_label_set_text(row, info[i]);
-    }
+    fillCfgPagerInfo();
 #endif
 }
 
