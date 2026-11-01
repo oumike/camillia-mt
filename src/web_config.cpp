@@ -5919,6 +5919,16 @@ static void sendConfigPage(const char *msg = "", bool lite = false) {
     snprintf(tmp, sizeof(tmp), "%d", totalNodes);
     html += tmp;
     html += ". Heat intensity increases where multiple nodes overlap.</p>";
+    if (totalNodes > 0) {
+        // Narrows the Nodes Seen list as you type, lists the matches here and
+        // marks the positioned ones on the map below. A match is a button: it
+        // opens that node's card on the map, at its position.
+        html += "<input type='search' id='node-search' autocomplete='off' spellcheck='false' "
+                "placeholder='Search nodes by name or ID' "
+                "oninput='renderNodeOptions()' onkeydown='nodeSearchKey(event)'>";
+        html += "<p class='gps-hint' id='node-search-count' style='margin:.25em 0 0'></p>";
+        html += "<div id='node-search-results' class='node-results' style='display:none'></div>";
+    }
     html += "<div class='map-controls'>"
             "<button type='button' id='map-fit-btn' class='map-mini-btn' onclick='fitNodeMap()'>Fit Nodes</button>"
             "<button type='button' class='map-mini-btn' onclick='worldNodeMap()'>World View</button>"
@@ -5933,11 +5943,6 @@ static void sendConfigPage(const char *msg = "", bool lite = false) {
     html += "<h3>Nodes Seen</h3>";
     if (totalNodes > 0) {
         html += "<p class='gps-hint'>Select a node to see its details and location.</p>";
-        // Filters the list below as you type; Enter picks the first match.
-        html += "<input type='search' id='node-search' autocomplete='off' spellcheck='false' "
-                "placeholder='Search by name or node ID' "
-                "oninput='renderNodeOptions()' onkeydown='nodeSearchKey(event)'>";
-        html += "<p class='gps-hint' id='node-search-count' style='margin:.2em 0'></p>";
         html += "<select id='node-select' onchange='selectNode()'>";
         html += "<option value=''>-- select a node --</option>";
         sendChunk(html);            // flush before streaming the option list
@@ -7246,7 +7251,9 @@ static void sendConfigPage(const char *msg = "", bool lite = false) {
                             "var t=(o.textContent+' '+(o.getAttribute('data-nid')||'')).toLowerCase();"
                             "return t.indexOf(q)>=0||t.indexOf(q.replace(/^!/,''))>=0;"
                         "}"
-                        "function renderNodeOptions(){"
+                        // keepView: a re-sort after a favorite toggle, which must
+                        // not move the map or re-pick a node under the user.
+                        "function renderNodeOptions(keepView){"
                             "var sel=document.getElementById('node-select');"
                             "if(!sel)return;"
                             "var box=document.getElementById('node-search');"
@@ -7269,18 +7276,108 @@ static void sendConfigPage(const char *msg = "", bool lite = false) {
                                 "sel.appendChild(NODE_DIV);"
                             "}"
                             "for(i=0;i<rest.length;i++)sel.appendChild(rest[i]);"
-                            "var hits=favs.length+rest.length;"
+                            "var list=favs.concat(rest);"
                             "var cnt=document.getElementById('node-search-count');"
-                            "if(cnt)cnt.textContent=!q?'':(hits?(hits+' of '+all.length+' nodes'):'No nodes match');"
+                            "if(cnt)cnt.textContent=!q?'':(list.length?(list.length+' of '+all.length+' nodes match'):'No nodes match');"
                             "sel.value=keep;"
                             "if(sel.value!==keep)sel.value='';"   // the selected node was filtered out
+                            "renderNodeResults(q?list:[]);"
+                            "renderNodeSearchMap(q?list:null,!keepView);"
                             // One match: show it, so a typed id or name is all it takes.
-                            "if(q&&hits===1){"
-                                "var only=favs.length?favs[0]:rest[0];"
-                                "if(sel.value!==only.value){sel.value=only.value;selectNode();}"
-                            "}"
+                            "if(q&&list.length===1&&!keepView&&sel.value!==list[0].value)nodePick(list[0].value,true);"
                         "}"
-                        "function resortNodeOptions(){renderNodeOptions();}"
+                        "function resortNodeOptions(){renderNodeOptions(true);}"
+                        // A node's position, from its detail panel; null when it
+                        // has none.
+                        "function nodeLoc(v){"
+                            "var d=document.getElementById('nd-'+v);"
+                            "if(!d||d.getAttribute('data-loc')!=='1')return null;"
+                            "var la=parseFloat(d.getAttribute('data-lat')),lo=parseFloat(d.getAttribute('data-lon'));"
+                            "return(isFinite(la)&&isFinite(lo))?[la,lo]:null;"
+                        "}"
+                        // The matches, one button each, under the search box.
+                        "function renderNodeResults(list){"
+                            "var box=document.getElementById('node-search-results');"
+                            "if(!box)return;"
+                            "box.innerHTML='';"
+                            "if(!list.length){box.style.display='none';return;}"
+                            "var max=Math.min(list.length,100),sel=document.getElementById('node-select'),i,o,b,nm,id;"
+                            "for(i=0;i<max;i++){"
+                                "o=list[i];"
+                                "b=document.createElement('button');"
+                                "b.type='button';"
+                                "b.setAttribute('data-v',o.value);"
+                                "if(sel&&sel.value===o.value)b.classList.add('active');"
+                                "nm=document.createElement('span');"
+                                "nm.textContent=o.textContent;"
+                                "id=document.createElement('span');"
+                                "id.className='nr-id';"
+                                "id.textContent=(o.getAttribute('data-nid')||'')+(nodeLoc(o.value)?'':' \\u00b7 no position');"
+                                "b.appendChild(nm);"
+                                "b.appendChild(id);"
+                                "b.onclick=function(){nodePick(this.getAttribute('data-v'));};"
+                                "box.appendChild(b);"
+                            "}"
+                            "if(list.length>max){"
+                                "var more=document.createElement('div');"
+                                "more.className='nr-more';"
+                                "more.textContent=(list.length-max)+' more \\u2014 keep typing to narrow the search';"
+                                "box.appendChild(more);"
+                            "}"
+                            "box.style.display='';"
+                        "}"
+                        // Marks the positioned matches on the map, over the heat
+                        // layer; null clears them. fit: frame them.
+                        "var nodeSearchLayer=null;"
+                        "function renderNodeSearchMap(list,fit){"
+                            "if(!list){"
+                                "if(nodeSearchLayer&&nodeMap){nodeMap.removeLayer(nodeSearchLayer);nodeSearchLayer=null;}"
+                                "if(nodeMap&&nodeMarkerLayer){var n0=nodeMarkerLayer.getLayers().length;"
+                                    "setMapStatus(n0?(n0+' positioned node'+(n0===1?'':'s')):'No node positions yet');}"
+                                "return;"
+                            "}"
+                            "ensureNodeMap();"
+                            "if(!nodeMap)return;"
+                            "if(nodeSearchLayer)nodeSearchLayer.clearLayers();"
+                            "else nodeSearchLayer=L.featureGroup().addTo(nodeMap);"
+                            "var i,o,ll,mk,n=0;"
+                            "for(i=0;i<list.length;i++){"
+                                "o=list[i];"
+                                "ll=nodeLoc(o.value);"
+                                "if(!ll)continue;"
+                                "mk=L.circleMarker(ll,{radius:8,weight:2,color:'#ffffff',fillColor:'#3fa9f5',fillOpacity:0.95});"
+                                "mk.bindTooltip(o.textContent);"
+                                "mk.on('click',(function(v){return function(){nodePick(v);};})(o.value));"
+                                "mk.addTo(nodeSearchLayer);"
+                                "n++;"
+                            "}"
+                            "setMapStatus(n?(n+' match'+(n===1?'':'es')+' on the map'):'No matching node has a position');"
+                            "if(fit&&n)nodeMap.fitBounds(nodeSearchLayer.getBounds(),{padding:[24,24],maxZoom:13});"
+                        "}"
+                        // Shows one node: its card in the dropdown's panel below,
+                        // and on the map, centred on it with the same card in a
+                        // popup. A node with no position has only the panel, so
+                        // the page goes there instead -- unless this is the lone
+                        // match while typing, which must not scroll the box away.
+                        "function nodePick(v,typing){"
+                            "var sel=document.getElementById('node-select');"
+                            "if(!sel)return;"
+                            "sel.value=v;"
+                            "selectNode();"
+                            "var btns=document.querySelectorAll('#node-search-results button'),i;"
+                            "for(i=0;i<btns.length;i++)btns[i].classList.toggle('active',btns[i].getAttribute('data-v')===v);"
+                            "var d=document.getElementById('nd-'+v),ll=nodeLoc(v);"
+                            "ensureNodeMap();"
+                            "if(!d||!ll||!nodeMap){"
+                                "if(d&&!ll)setMapStatus('No position for '+(sel.options[sel.selectedIndex]||{}).textContent);"
+                                "var info=document.getElementById('node-info');"
+                                "if(info&&!typing)info.scrollIntoView({behavior:'smooth',block:'start'});"
+                                "return;"
+                            "}"
+                            "nodeMap.setView(ll,Math.max(nodeMap.getZoom()||0,13));"
+                            "L.popup({maxWidth:340,autoPanPadding:[20,20]}).setLatLng(ll)"
+                                ".setContent('<div class=\"node-pop\">'+d.innerHTML+'</div>').openOn(nodeMap);"
+                        "}"
                         "function nodeSearchKey(e){"
                             "if(e.key==='Escape'){e.target.value='';renderNodeOptions();return;}"
                             "if(e.key!=='Enter')return;"
@@ -7290,7 +7387,7 @@ static void sendConfigPage(const char *msg = "", bool lite = false) {
                             "for(i=1;i<sel.options.length;i++){"
                                 "o=sel.options[i];"
                                 "if(o.disabled)continue;"
-                                "if(sel.value!==o.value){sel.value=o.value;selectNode();}"
+                                "nodePick(o.value);"
                                 "return;"
                             "}"
                         "}"

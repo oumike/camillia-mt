@@ -2440,11 +2440,20 @@ separated from the rest by a dashed divider, and a favorite's detail panel reads
 device's own Nodes screen uses. Lite has no Nodes tab, so this is everywhere the
 full page is served — every board except the Cardputer.
 
-The search box above the dropdown narrows it as you type. It matches the short
-name, the long name and the node ID, with or without the leading `!`, so
-`1a2b` finds `!1a2b3c4d`. The line under the box says how many nodes match.
-When only one is left it is shown straight away, Enter shows the first match,
-and Esc clears the search.
+The search box at the top of the Nodes tab, above the map, finds nodes as you
+type. It matches the short name, the long name and the node ID, with or without
+the leading `!`, so `1a2b` finds `!1a2b3c4d`.
+
+- The matches are listed under the box, with how many there are. Matches
+  without a position say *no position*.
+- The ones with a position are marked on the map in blue, and the map zooms to
+  fit them.
+- Click a match, in the list or on the map, to centre the map on it and open
+  its details in a popup there. The same details fill the panel under the
+  dropdown, which sits under the map and narrows to the matches too. A node with
+  no position scrolls the page down to that panel instead.
+- When only one node matches, it is shown straight away. Enter shows the first
+  match, and Esc clears the search.
 
 The top-right corner of a node's detail panel has a **Favorite** /
 **Unfavorite** button. It takes effect immediately — the same flag the device's

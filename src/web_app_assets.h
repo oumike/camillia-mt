@@ -128,7 +128,7 @@ scroll-margin-top:calc(var(--hd) + 56px)}
 /* Fields: a label wraps its control. A text-plus-control label is a row on
    wide screens (the text node is the first grid cell) and stacks on narrow. */
 label{display:block;margin:.55em 0 .15em;font-size:.92em}
-input[type=text],input[type=number],input[type=password],input[type=email],input[type=url],select,textarea{
+input[type=text],input[type=number],input[type=password],input[type=email],input[type=url],input[type=search],select,textarea{
 width:100%;margin-top:.2em;padding:.5em .6em;font:inherit;font-size:.95em;color:var(--text);background:var(--input);
 border:1px solid var(--line);border-radius:8px}
 option{background:var(--panel-2);color:var(--text)}
@@ -205,6 +205,16 @@ border:1px solid var(--line);font-weight:400}
 .map-wrap,.live-wrap{margin-top:.6em;border:1px solid var(--line);border-radius:12px;background:var(--panel);padding:.6em}
 .map-canvas{display:block;width:100%;height:340px;border-radius:8px;overflow:hidden;background:#08141f}
 .map-controls{display:flex;gap:.45em;flex-wrap:wrap;margin:.15em 0 .45em}
+/* Nodes tab search: the matches, listed under the box. */
+.node-results{margin:.35em 0 .5em;max-height:15em;overflow-y:auto;border:1px solid var(--line);border-radius:8px;background:var(--panel)}
+.node-results button{display:flex;width:100%;justify-content:space-between;align-items:baseline;gap:.6em;margin:0;
+padding:.45em .7em;border:0;border-bottom:1px solid var(--line);border-radius:0;background:transparent;color:var(--text);
+text-align:left;font-size:.92em;cursor:pointer}
+.node-results button:last-child{border-bottom:0}
+.node-results button:hover,.node-results button.active{background:var(--panel-2)}
+.node-results .nr-id{color:var(--dim);font-family:monospace;font-size:.9em;white-space:nowrap}
+.node-results .nr-more{padding:.45em .7em;color:var(--dim);font-size:.85em}
+.node-pop{max-height:260px;overflow-y:auto}
 .map-mini-btn{margin:0;padding:.35em .8em;font-size:.82em;background:var(--panel-2);color:var(--text);border-color:var(--line);border-radius:999px}
 .map-mini-right{margin-left:auto}
 .map-mini-btn.active{background:var(--accent);color:var(--on-accent);border-color:var(--accent)}
