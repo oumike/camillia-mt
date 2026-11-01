@@ -15,3 +15,12 @@
 - T-Display P4: the whole screen should flash blue less often while chat and DM history, the node archive or the wardrive log are being saved or deleted, and when the SD card is mounted.
 
 Pull request: #136
+
+
+### Update (v6.3.1)
+### Changed
+- Config now opens on a grid of sections on every board, including boards without a touch screen: Radio & Identity, Connections, Location, Channels & Security, Display, Chat, Sound & Alerts, Mesh Services, Device & Firmware, and Data & Reset. Move between sections with Up/Down and press Enter to open one. The close key goes back to the grid, and pressing it on the grid closes Config. Sections with nothing to show on your board are hidden.
+- On screens at least 600 px wide, the Config grid shows three columns instead of two. This applies to the CrowPanel 5.0 and to the T-Display P4 in landscape.
+- The Config filter searches the rows of every section at once, whether you start it from the grid or from inside a section.
+- The section buttons use a smaller font on the M5Stack Cardputer and T-Lora Pager TFT, so long section names fit.
+- On the T-Lora Pager TFT, the Device Info panel stays next to the Config grid as well as next to a section's rows.
