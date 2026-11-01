@@ -2437,7 +2437,17 @@ serving its own network has no route to a broker.
 On the **Nodes** tab, the dropdown at the top lists every node: favorites
 first, separated from the rest by a dashed divider, and each group in
 alphabetical order. Nodes with no name yet (`----`) come last. A favorite's
-detail panel reads *(favorite)* after its long name. Lite has no Nodes tab, so this is everywhere the
+detail panel reads *(favorite)* after its long name.
+
+Three checkboxes above the dropdown narrow it. They combine, and the line under
+them says how many nodes are left. Your browser remembers which are ticked.
+
+- **Show only known**: nodes whose NodeInfo (name) has been heard.
+- **Show only with location**: nodes the map can place.
+- **Show only favorites**: favorited nodes.
+
+The checkboxes filter the dropdown only. The search always looks at every
+node. Lite has no Nodes tab, so this is everywhere the
 full page is served — every board except the Cardputer.
 
 The search box under the dropdown finds nodes as you type. It matches the short

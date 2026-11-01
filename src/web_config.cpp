@@ -3493,6 +3493,15 @@ static void sendConfigPage(const char *msg = "", bool lite = false) {
             buf += optId;
             buf += "' data-fav='";
             buf += n->favorite ? "1" : "0";
+            // For the dropdown's filters: a NodeInfo name heard, and a
+            // position the map can place.
+            buf += "' data-known='";
+            buf += n->hasName ? "1" : "0";
+            {
+                float lat = 0.0f, lon = 0.0f;
+                buf += "' data-loc='";
+                buf += extractNodeCoords(n, lat, lon) ? "1" : "0";
+            }
             buf += "'>";
             appendAttr(buf, shortName);
             buf += " -- ";
@@ -5922,6 +5931,13 @@ static void sendConfigPage(const char *msg = "", bool lite = false) {
     if (totalNodes > 0) {
         // Two ways to pick a node, one result: the dropdown and a search match
         // both fill #node-info below and centre the map on the node.
+        // Narrow the dropdown only; the search below always looks at every node.
+        html += "<div class='node-filters'>"
+                "<label><input type='checkbox' id='nf-known' onchange='nodeFilterChanged()'>Show only known</label>"
+                "<label><input type='checkbox' id='nf-loc' onchange='nodeFilterChanged()'>Show only with location</label>"
+                "<label><input type='checkbox' id='nf-fav' onchange='nodeFilterChanged()'>Show only favorites</label>"
+                "</div>";
+        html += "<p class='gps-hint' id='node-filter-count' style='margin:.1em 0 .2em'></p>";
         html += "<select id='node-select' onchange='selectNode()'>";
         html += "<option value=''>-- select a node --</option>";
         sendChunk(html);            // flush before streaming the option list
@@ -7244,13 +7260,24 @@ static void sendConfigPage(const char *msg = "", bool lite = false) {
                         "function nodeOptCmp(a,b){"
                             "return nodeOptKey(a).localeCompare(nodeOptKey(b),undefined,{sensitivity:'base',numeric:true});"
                         "}"
+                        // The dropdown's checkboxes, as option attributes that
+                        // must read '1'.
+                        "function nodeFilterAttrs(){"
+                            "var f=[],ids=[['nf-known','data-known'],['nf-loc','data-loc'],['nf-fav','data-fav']],i,c;"
+                            "for(i=0;i<ids.length;i++){c=document.getElementById(ids[i][0]);if(c&&c.checked)f.push(ids[i][1]);}"
+                            "return f;"
+                        "}"
                         // Favorites first, as the device ranks them, then the
                         // rest, each group alphabetical; q filters, '' keeps all.
-                        "function nodeGroups(q){"
-                            "var all=nodeOpts(),favs=[],rest=[],i,o;"
+                        // attrs: the dropdown's checkboxes; the search passes none.
+                        "function nodeGroups(q,attrs){"
+                            "var all=nodeOpts(),favs=[],rest=[],i,j,o,skip;"
                             "for(i=0;i<all.length;i++){"
                                 "o=all[i];"
                                 "if(!nodeOptMatches(o,q))continue;"
+                                "skip=false;"
+                                "for(j=0;attrs&&j<attrs.length;j++)if(o.getAttribute(attrs[j])!=='1')skip=true;"
+                                "if(skip)continue;"
                                 "if(o.getAttribute('data-fav')==='1')favs.push(o);else rest.push(o);"
                             "}"
                             "favs.sort(nodeOptCmp);"
@@ -7262,7 +7289,7 @@ static void sendConfigPage(const char *msg = "", bool lite = false) {
                         "function renderNodeDropdown(){"
                             "var sel=document.getElementById('node-select');"
                             "if(!sel)return;"
-                            "var g=nodeGroups(''),keep=sel.value,i;"
+                            "var attrs=nodeFilterAttrs(),g=nodeGroups('',attrs),keep=sel.value,i;"
                             "while(sel.options.length>1)sel.remove(1);"   // keeps the placeholder
                             "for(i=0;i<g.favs.length;i++)sel.appendChild(g.favs[i]);"
                             "if(g.favs.length&&g.rest.length){"
@@ -7276,6 +7303,21 @@ static void sendConfigPage(const char *msg = "", bool lite = false) {
                             "}"
                             "for(i=0;i<g.rest.length;i++)sel.appendChild(g.rest[i]);"
                             "sel.value=keep;"
+                            "if(sel.value!==keep)sel.value='';"   // the picked node was filtered out
+                            "var shown=g.favs.length+g.rest.length,cnt=document.getElementById('node-filter-count');"
+                            "if(cnt)cnt.textContent=!attrs.length?'':(shown?('Showing '+shown+' of '+g.total+' nodes'):'No nodes match these filters');"
+                        "}"
+                        // Remembered per browser, like a tab; a page without
+                        // storage just starts with every box clear.
+                        "function nodeFilterChanged(){"
+                            "try{localStorage.setItem('nodeFilters',JSON.stringify(nodeFilterAttrs()));}catch(e){}"
+                            "renderNodeDropdown();"
+                        "}"
+                        "function nodeFilterRestore(){"
+                            "var f=[],i,c,ids={'data-known':'nf-known','data-loc':'nf-loc','data-fav':'nf-fav'};"
+                            "try{f=JSON.parse(localStorage.getItem('nodeFilters')||'[]')||[];}catch(e){}"
+                            "for(i=0;i<f.length;i++){c=document.getElementById(ids[f[i]]);if(c)c.checked=true;}"
+                            "renderNodeDropdown();"
                         "}"
                         // keepView: a re-sort after a favorite toggle, which must
                         // not move the map or re-pick a node under the user.
@@ -7293,8 +7335,8 @@ static void sendConfigPage(const char *msg = "", bool lite = false) {
                             "if(q&&list.length===1&&!keepView&&sel.value!==list[0].value)nodePick(list[0].value);"
                         "}"
                         "function resortNodeOptions(){renderNodeDropdown();renderNodeOptions(true);}"
-                        "if(document.readyState!=='loading')renderNodeDropdown();"
-                        "else document.addEventListener('DOMContentLoaded',renderNodeDropdown);"
+                        "if(document.readyState!=='loading')nodeFilterRestore();"
+                        "else document.addEventListener('DOMContentLoaded',nodeFilterRestore);"
                         // A node's position, from its detail panel; null when it
                         // has none.
                         "function nodeLoc(v){"

@@ -205,7 +205,9 @@ border:1px solid var(--line);font-weight:400}
 .map-wrap,.live-wrap{margin-top:.6em;border:1px solid var(--line);border-radius:12px;background:var(--panel);padding:.6em}
 .map-canvas{display:block;width:100%;height:340px;border-radius:8px;overflow:hidden;background:#08141f}
 .map-controls{display:flex;gap:.45em;flex-wrap:wrap;margin:.15em 0 .45em}
-/* Nodes tab search: the matches, listed under the box. */
+/* Nodes tab: the dropdown's filters, then the search's matches. */
+.node-filters{display:flex;flex-wrap:wrap;gap:0 1.4em;margin:.2em 0}
+.node-filters label{margin:.3em 0;font-size:.9em}
 .node-results{margin:.35em 0 .5em;max-height:15em;overflow-y:auto;border:1px solid var(--line);border-radius:8px;background:var(--panel)}
 .node-results button{display:flex;width:100%;justify-content:space-between;align-items:baseline;gap:.6em;margin:0;
 padding:.45em .7em;border:0;border-bottom:1px solid var(--line);border-radius:0;background:transparent;color:var(--text);
