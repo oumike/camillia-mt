@@ -7208,17 +7208,11 @@ static void sendConfigPage(const char *msg = "", bool lite = false) {
                             "for(i=0;i<opts.length;i++)opts[i].setAttribute('data-fav',fav?'1':'0');"
                             "resortNodeOptions();"
                         "}"
-                        // Re-partitions the dropdown the way the device ranks it:
-                        // favorites first, everything else after, relative order
-                        // untouched inside each group (the server's secondary keys
-                        // — named-ness, then recency — still hold within a group,
-                        // and nothing here reorders across one). The options are
-                        // kept in NODE_OPTS, read once from the streamed list, and
-                        // the select is refilled from it, so the search can take
-                        // options out and put them back: hiding an <option> is not
-                        // honoured by every browser (iOS Safari shows it anyway).
-                        // No option is rebuilt and the values that map to
-                        // nd-<rank> are never touched.
+                        // The streamed options, read once into NODE_OPTS: the
+                        // dropdown is refilled from it in its own order (see
+                        // renderNodeDropdown()), and the search reads it without
+                        // touching the dropdown. No option is rebuilt, and the
+                        // values that map to nd-<rank> are never touched.
                         "var NODE_OPTS=null,NODE_DIV=null;"
                         "function nodeOpts(){"
                             "if(NODE_OPTS)return NODE_OPTS;"
@@ -7239,22 +7233,39 @@ static void sendConfigPage(const char *msg = "", bool lite = false) {
                             "var t=(o.textContent+' '+(o.getAttribute('data-nid')||'')).toLowerCase();"
                             "return t.indexOf(q)>=0||t.indexOf(q.replace(/^!/,''))>=0;"
                         "}"
-                        // keepView: a re-sort after a favorite toggle, which must
-                        // not move the map or re-pick a node under the user.
-                        "function renderNodeOptions(keepView){"
-                            "var sel=document.getElementById('node-select');"
-                            "if(!sel)return;"
-                            "var box=document.getElementById('node-search');"
-                            "var q=box?box.value.trim().toLowerCase():'';"
-                            "var all=nodeOpts(),keep=sel.value,favs=[],rest=[],i,o;"
+                        // Alphabetical by what the option shows ("SHORT -- Long
+                        // name"), ignoring case and reading digits as numbers.
+                        // Nodes that have sent no NodeInfo show "----" and sort
+                        // last rather than ahead of every letter.
+                        "function nodeOptKey(o){"
+                            "var t=o.textContent;"
+                            "return t.indexOf('----')===0?'\\uffff'+t:t;"
+                        "}"
+                        "function nodeOptCmp(a,b){"
+                            "return nodeOptKey(a).localeCompare(nodeOptKey(b),undefined,{sensitivity:'base',numeric:true});"
+                        "}"
+                        // Favorites first, as the device ranks them, then the
+                        // rest, each group alphabetical; q filters, '' keeps all.
+                        "function nodeGroups(q){"
+                            "var all=nodeOpts(),favs=[],rest=[],i,o;"
                             "for(i=0;i<all.length;i++){"
                                 "o=all[i];"
                                 "if(!nodeOptMatches(o,q))continue;"
                                 "if(o.getAttribute('data-fav')==='1')favs.push(o);else rest.push(o);"
                             "}"
+                            "favs.sort(nodeOptCmp);"
+                            "rest.sort(nodeOptCmp);"
+                            "return{favs:favs,rest:rest,total:all.length};"
+                        "}"
+                        // The dropdown always lists every node; the search only
+                        // drives the results list and the map.
+                        "function renderNodeDropdown(){"
+                            "var sel=document.getElementById('node-select');"
+                            "if(!sel)return;"
+                            "var g=nodeGroups(''),keep=sel.value,i;"
                             "while(sel.options.length>1)sel.remove(1);"   // keeps the placeholder
-                            "for(i=0;i<favs.length;i++)sel.appendChild(favs[i]);"
-                            "if(favs.length&&rest.length){"
+                            "for(i=0;i<g.favs.length;i++)sel.appendChild(g.favs[i]);"
+                            "if(g.favs.length&&g.rest.length){"
                                 "if(!NODE_DIV){"
                                     "NODE_DIV=document.createElement('option');"
                                     "NODE_DIV.disabled=true;"
@@ -7263,18 +7274,27 @@ static void sendConfigPage(const char *msg = "", bool lite = false) {
                                 "}"
                                 "sel.appendChild(NODE_DIV);"
                             "}"
-                            "for(i=0;i<rest.length;i++)sel.appendChild(rest[i]);"
-                            "var list=favs.concat(rest);"
-                            "var cnt=document.getElementById('node-search-count');"
-                            "if(cnt)cnt.textContent=!q?'':(list.length?(list.length+' of '+all.length+' nodes match'):'No nodes match');"
+                            "for(i=0;i<g.rest.length;i++)sel.appendChild(g.rest[i]);"
                             "sel.value=keep;"
-                            "if(sel.value!==keep)sel.value='';"   // the selected node was filtered out
+                        "}"
+                        // keepView: a re-sort after a favorite toggle, which must
+                        // not move the map or re-pick a node under the user.
+                        "function renderNodeOptions(keepView){"
+                            "var sel=document.getElementById('node-select');"
+                            "if(!sel)return;"
+                            "var box=document.getElementById('node-search');"
+                            "var q=box?box.value.trim().toLowerCase():'';"
+                            "var g=nodeGroups(q),list=g.favs.concat(g.rest);"
+                            "var cnt=document.getElementById('node-search-count');"
+                            "if(cnt)cnt.textContent=!q?'':(list.length?(list.length+' of '+g.total+' nodes match'):'No nodes match');"
                             "renderNodeResults(q?list:[]);"
                             "renderNodeSearchMap(q?list:null,!keepView);"
                             // One match: show it, so a typed id or name is all it takes.
                             "if(q&&list.length===1&&!keepView&&sel.value!==list[0].value)nodePick(list[0].value);"
                         "}"
-                        "function resortNodeOptions(){renderNodeOptions(true);}"
+                        "function resortNodeOptions(){renderNodeDropdown();renderNodeOptions(true);}"
+                        "if(document.readyState!=='loading')renderNodeDropdown();"
+                        "else document.addEventListener('DOMContentLoaded',renderNodeDropdown);"
                         // A node's position, from its detail panel; null when it
                         // has none.
                         "function nodeLoc(v){"
