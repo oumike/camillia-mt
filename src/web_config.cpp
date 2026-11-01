@@ -5911,7 +5911,7 @@ static void sendConfigPage(const char *msg = "", bool lite = false) {
     html += "</div>";  // #chat-body
 #endif
     html += "</div><div class='tab-panel' id='tab-map'>";
-    html += "<h3>Node Heatmap</h3>";
+    html += "<h3>Nodes</h3>";
     html += "<p class='gps-hint'>Positioned nodes: ";
     snprintf(tmp, sizeof(tmp), "%d", mapPointCount);
     html += tmp;
@@ -5920,14 +5920,23 @@ static void sendConfigPage(const char *msg = "", bool lite = false) {
     html += tmp;
     html += ". Heat intensity increases where multiple nodes overlap.</p>";
     if (totalNodes > 0) {
-        // Narrows the Nodes Seen list as you type, lists the matches here and
-        // marks the positioned ones on the map below. A match is a button: it
-        // opens that node's card on the map, at its position.
+        // Two ways to pick a node, one result: the dropdown and a search match
+        // both fill #node-info below and centre the map on the node.
+        html += "<select id='node-select' onchange='selectNode()'>";
+        html += "<option value=''>-- select a node --</option>";
+        sendChunk(html);            // flush before streaming the option list
+        streamNodeOptions();
+        html += "</select>";
+        // Narrows the dropdown as you type, lists the matches under it and
+        // marks the positioned ones on the map.
         html += "<input type='search' id='node-search' autocomplete='off' spellcheck='false' "
-                "placeholder='Search nodes by name or ID' "
+                "placeholder='Search nodes by name or ID' style='margin-top:.5em' "
                 "oninput='renderNodeOptions()' onkeydown='nodeSearchKey(event)'>";
         html += "<p class='gps-hint' id='node-search-count' style='margin:.25em 0 0'></p>";
         html += "<div id='node-search-results' class='node-results' style='display:none'></div>";
+        html += "<div id='node-info' style='margin-top:.6em'></div>";
+    } else {
+        html += "<p class='gps-hint'>No nodes discovered yet.</p>";
     }
     html += "<div class='map-controls'>"
             "<button type='button' id='map-fit-btn' class='map-mini-btn' onclick='fitNodeMap()'>Fit Nodes</button>"
@@ -5940,23 +5949,11 @@ static void sendConfigPage(const char *msg = "", bool lite = false) {
             "<div id='node-heatmap' class='map-canvas'></div>"
             "<div class='map-legend'><span>Drag to pan, scroll/pinch to zoom</span><span id='map-status'></span></div>"
             "</div>";
-    html += "<h3>Nodes Seen</h3>";
     if (totalNodes > 0) {
-        html += "<p class='gps-hint'>Select a node to see its details and location.</p>";
-        html += "<select id='node-select' onchange='selectNode()'>";
-        html += "<option value=''>-- select a node --</option>";
-        sendChunk(html);            // flush before streaming the option list
-        streamNodeOptions();
-        html += "</select>";
-        html += "<div id='node-info' style='margin-top:.6em'></div>";
-        html += "<div class='map-wrap' style='margin-top:.6em'>"
-                "<div id='node-mini-map' class='map-canvas' style='height:220px'></div></div>";
         html += "<div id='node-detail-store' style='display:none'>";
         sendChunk(html);            // flush before streaming the detail panels
         streamNodeDetails();
         html += "</div>";
-    } else {
-        html += "<p class='gps-hint'>No nodes discovered yet.</p>";
     }
     html += "<script>var NODE_HEAT_POINTS=";
     sendChunk(html);                // flush before streaming the points array
@@ -7165,40 +7162,29 @@ static void sendConfigPage(const char *msg = "", bool lite = false) {
                             "if(nodeHeatOn){nodeMap.removeLayer(nodeHeatLayer);nodeHeatOn=false;if(hb){hb.textContent='Heat: Off';hb.classList.remove('active');}}"
                             "else{nodeHeatLayer.addTo(nodeMap);nodeHeatOn=true;if(hb){hb.textContent='Heat: On';hb.classList.add('active');}}"
                         "}"
-                        "var nodeMini=null;var nodeMiniMarker=null;"
-                        "function ensureNodeMini(){"
-                            "var el=document.getElementById('node-mini-map');"
-                            "if(!el)return null;"
-                            "if(!window.L){el.innerHTML='<div style=\"padding:1em;color:#ffd0d0\">Map library unavailable. Check internet access.</div>';return null;}"
-                            "if(nodeMini){nodeMini.invalidateSize();return nodeMini;}"
-                            "nodeMini=L.map('node-mini-map',{zoomControl:true,minZoom:2,maxZoom:19});"
-                            "L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png',{maxZoom:19,attribution:'&copy; OpenStreetMap contributors'}).addTo(nodeMini);"
-                            "return nodeMini;"
-                        "}"
-                        "function showNodeMini(hasLoc,lat,lon){"
-                            "var m=ensureNodeMini();"
-                            "if(!m)return;"
-                            "if(nodeMiniMarker){m.removeLayer(nodeMiniMarker);nodeMiniMarker=null;}"
-                            "if(hasLoc&&isFinite(lat)&&isFinite(lon)){"
-                                "m.setView([lat,lon],12);"
-                                "nodeMiniMarker=L.marker([lat,lon]).addTo(m);"
-                            "}else{"
-                                // No node position: show a regional map (this device's area if known).
-                                "var me=window.NODE_ME_POINT;"
-                                "if(me&&isFinite(me.lat)&&isFinite(me.lon))m.setView([me.lat,me.lon],7);"
-                                "else m.setView([39.5,-98.35],4);"
-                            "}"
-                            "setTimeout(function(){m.invalidateSize();},50);"
-                        "}"
+                        // The picked node: its card in #node-info, and the map
+                        // centred on it with a pin. The dropdown, a search match
+                        // and a marker on the map all end up here.
+                        "var nodePinMarker=null;"
                         "function selectNode(){"
                             "var sel=document.getElementById('node-select');"
                             "var info=document.getElementById('node-info');"
                             "if(!sel||!info)return;"
-                            "if(sel.value===''){info.innerHTML='';return;}"
-                            "var d=document.getElementById('nd-'+sel.value);"
+                            "var v=sel.value;"
+                            "var btns=document.querySelectorAll('#node-search-results button'),i;"
+                            "for(i=0;i<btns.length;i++)btns[i].classList.toggle('active',btns[i].getAttribute('data-v')===v);"
+                            "if(nodePinMarker&&nodeMap){nodeMap.removeLayer(nodePinMarker);nodePinMarker=null;}"
+                            "if(v===''){info.innerHTML='';return;}"
+                            "var d=document.getElementById('nd-'+v);"
                             "if(!d){info.innerHTML='';return;}"
                             "info.innerHTML=d.innerHTML;"
-                            "showNodeMini(d.getAttribute('data-loc')==='1',parseFloat(d.getAttribute('data-lat')),parseFloat(d.getAttribute('data-lon')));"
+                            "ensureNodeMap();"
+                            "var ll=nodeLoc(v);"
+                            "if(!nodeMap)return;"
+                            "if(!ll){setMapStatus('No position for '+(sel.options[sel.selectedIndex]||{}).textContent);return;}"
+                            "nodePinMarker=L.marker(ll,{zIndexOffset:1000}).addTo(nodeMap);"
+                            "nodeMap.setView(ll,Math.max(nodeMap.getZoom()||0,13));"
+                            "setMapStatus((sel.options[sel.selectedIndex]||{}).textContent||'');"
                         "}"
                         // ── Favorite toggle ───────────────────────────────────
                         // The detail panels are cloned out of the hidden store
@@ -7284,7 +7270,7 @@ static void sendConfigPage(const char *msg = "", bool lite = false) {
                             "renderNodeResults(q?list:[]);"
                             "renderNodeSearchMap(q?list:null,!keepView);"
                             // One match: show it, so a typed id or name is all it takes.
-                            "if(q&&list.length===1&&!keepView&&sel.value!==list[0].value)nodePick(list[0].value,true);"
+                            "if(q&&list.length===1&&!keepView&&sel.value!==list[0].value)nodePick(list[0].value);"
                         "}"
                         "function resortNodeOptions(){renderNodeOptions(true);}"
                         // A node's position, from its detail panel; null when it
@@ -7354,29 +7340,13 @@ static void sendConfigPage(const char *msg = "", bool lite = false) {
                             "setMapStatus(n?(n+' match'+(n===1?'':'es')+' on the map'):'No matching node has a position');"
                             "if(fit&&n)nodeMap.fitBounds(nodeSearchLayer.getBounds(),{padding:[24,24],maxZoom:13});"
                         "}"
-                        // Shows one node: its card in the dropdown's panel below,
-                        // and on the map, centred on it with the same card in a
-                        // popup. A node with no position has only the panel, so
-                        // the page goes there instead -- unless this is the lone
-                        // match while typing, which must not scroll the box away.
-                        "function nodePick(v,typing){"
+                        // A search match or a map marker picked: the same as
+                        // choosing it in the dropdown.
+                        "function nodePick(v){"
                             "var sel=document.getElementById('node-select');"
                             "if(!sel)return;"
                             "sel.value=v;"
                             "selectNode();"
-                            "var btns=document.querySelectorAll('#node-search-results button'),i;"
-                            "for(i=0;i<btns.length;i++)btns[i].classList.toggle('active',btns[i].getAttribute('data-v')===v);"
-                            "var d=document.getElementById('nd-'+v),ll=nodeLoc(v);"
-                            "ensureNodeMap();"
-                            "if(!d||!ll||!nodeMap){"
-                                "if(d&&!ll)setMapStatus('No position for '+(sel.options[sel.selectedIndex]||{}).textContent);"
-                                "var info=document.getElementById('node-info');"
-                                "if(info&&!typing)info.scrollIntoView({behavior:'smooth',block:'start'});"
-                                "return;"
-                            "}"
-                            "nodeMap.setView(ll,Math.max(nodeMap.getZoom()||0,13));"
-                            "L.popup({maxWidth:340,autoPanPadding:[20,20]}).setLatLng(ll)"
-                                ".setContent('<div class=\"node-pop\">'+d.innerHTML+'</div>').openOn(nodeMap);"
                         "}"
                         "function nodeSearchKey(e){"
                             "if(e.key==='Escape'){e.target.value='';renderNodeOptions();return;}"
@@ -7819,8 +7789,8 @@ static void sendConfigPage(const char *msg = "", bool lite = false) {
                             "if(isMap){"
                                 "ensureNodeMap();"
                                 "var _s=document.getElementById('node-select');"
-                                "if(document.getElementById('node-mini-map')){if(_s&&_s.value!==''){selectNode();}else{showNodeMini(false);}}"
-                                "setTimeout(function(){if(nodeMap)nodeMap.invalidateSize();if(nodeMini)nodeMini.invalidateSize();},0);"
+                                "if(_s&&_s.value!=='')selectNode();"
+                                "setTimeout(function(){if(nodeMap)nodeMap.invalidateSize();},0);"
                             "}"
                         "}"
                         "window.addEventListener('resize',function(){"

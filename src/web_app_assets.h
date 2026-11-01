@@ -214,7 +214,6 @@ text-align:left;font-size:.92em;cursor:pointer}
 .node-results button:hover,.node-results button.active{background:var(--panel-2)}
 .node-results .nr-id{color:var(--dim);font-family:monospace;font-size:.9em;white-space:nowrap}
 .node-results .nr-more{padding:.45em .7em;color:var(--dim);font-size:.85em}
-.node-pop{max-height:260px;overflow-y:auto}
 .map-mini-btn{margin:0;padding:.35em .8em;font-size:.82em;background:var(--panel-2);color:var(--text);border-color:var(--line);border-radius:999px}
 .map-mini-right{margin-left:auto}
 .map-mini-btn.active{background:var(--accent);color:var(--on-accent);border-color:var(--accent)}

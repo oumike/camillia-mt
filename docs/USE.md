@@ -2434,24 +2434,24 @@ WiFi)**, and the page comes up once the device joins the network. Choosing the
 **AP** entry in Choose WiFi still switches the bridge off, since a device
 serving its own network has no route to a broker.
 
-On the **Nodes** tab, the *Nodes Seen* dropdown lists favorited nodes first,
+On the **Nodes** tab, the dropdown at the top lists favorited nodes first,
 separated from the rest by a dashed divider, and a favorite's detail panel reads
 *(favorite)* after its long name. Both come straight from the same ranking the
 device's own Nodes screen uses. Lite has no Nodes tab, so this is everywhere the
 full page is served — every board except the Cardputer.
 
-The search box at the top of the Nodes tab, above the map, finds nodes as you
-type. It matches the short name, the long name and the node ID, with or without
-the leading `!`, so `1a2b` finds `!1a2b3c4d`.
+The search box under the dropdown finds nodes as you type. It matches the short
+name, the long name and the node ID, with or without the leading `!`, so `1a2b`
+finds `!1a2b3c4d`.
 
 - The matches are listed under the box, with how many there are. Matches
-  without a position say *no position*.
+  without a position say *no position*. The dropdown narrows to them too.
 - The ones with a position are marked on the map in blue, and the map zooms to
   fit them.
-- Click a match, in the list or on the map, to centre the map on it and open
-  its details in a popup there. The same details fill the panel under the
-  dropdown, which sits under the map and narrows to the matches too. A node with
-  no position scrolls the page down to that panel instead.
+- Picking a node works the same from every place: the dropdown, a match in the
+  list, or a blue marker on the map. Its details fill the panel above the map,
+  and the map centres on it with a pin. A node with no position gets the panel
+  only, and the map's status line says so.
 - When only one node matches, it is shown straight away. Enter shows the first
   match, and Esc clears the search.
 
