@@ -301,33 +301,10 @@ bool DmMgr::sendDm(uint32_t myNodeId, uint32_t toNodeId, const char *text,
     uint8_t  proto[256];
     uint8_t  cipher[280]; // 256 proto + 12 PKI overhead + margin
 
-    // Conversation IDs can become stale across reboots/resets. If we have a fresher
-    // node with the same short name, send to that node ID instead.
-    uint32_t resolvedToNodeId = toNodeId;
-    DmConv *convHint = find(toNodeId);
-    NodeEntry *initialNode = Nodes.find(toNodeId);
-    uint32_t bestHeardMs = initialNode ? initialNode->lastHeardMs : 0;
-    if (convHint && convHint->shortName[0]) {
-        for (int i = 0; i < Nodes.count(); i++) {
-            NodeEntry *cand = Nodes.getByRank(i);
-            if (!cand || !cand->shortName[0]) continue;
-            if (strncmp(cand->shortName, convHint->shortName, sizeof(convHint->shortName) - 1) != 0)
-                continue;
-            if (cand->lastHeardMs > bestHeardMs) {
-                resolvedToNodeId = cand->nodeId;
-                bestHeardMs = cand->lastHeardMs;
-            }
-        }
-    }
-    if (resolvedToNodeId != toNodeId) {
-        debugLogMessages("[dm] remap destination by shortName '%s': !%08X -> !%08X\n",
-                         convHint ? convHint->shortName : "????", toNodeId, resolvedToNodeId);
-    }
+    // Short names are display labels, never recipient identities.
+    NodeEntry *node = Nodes.find(toNodeId);
 
-    // Nodes.getByRank() sorts in place; reacquire a stable pointer after remap.
-    NodeEntry *node = Nodes.find(resolvedToNodeId);
-
-    size_t protoLen = encodeTextMessageUnicast(text, myNodeId, resolvedToNodeId, proto, sizeof(proto),
+    size_t protoLen = encodeTextMessageUnicast(text, myNodeId, toNodeId, proto, sizeof(proto),
                                                replyId, emoji);
     debugLogMessages("[dm] protoLen=%u\n", (unsigned)protoLen);
     if (protoLen == 0) {
@@ -336,7 +313,7 @@ bool DmMgr::sendDm(uint32_t myNodeId, uint32_t toNodeId, const char *text,
     }
 
     MeshHdr hdr = {};
-    hdr.to    = resolvedToNodeId;
+    hdr.to    = toNodeId;
     hdr.from  = myNodeId;
     hdr.id    = packetId;
     // A DM is PKI-encrypted and carries no channel key, so "which channel" here
@@ -362,14 +339,14 @@ bool DmMgr::sendDm(uint32_t myNodeId, uint32_t toNodeId, const char *text,
         static uint32_t sLastNodeInfoReqNode = 0;
         static uint32_t sLastNodeInfoReqMs = 0;
         uint32_t now = millis();
-        if (resolvedToNodeId != sLastNodeInfoReqNode || (now - sLastNodeInfoReqMs) > 5000) {
+        if (toNodeId != sLastNodeInfoReqNode || (now - sLastNodeInfoReqMs) > 5000) {
             (void)Channels.sendNodeInfo(myNodeId,
                                         MY_LONG_NAME,
                                         MY_SHORT_NAME,
-                                        resolvedToNodeId,
+                                        toNodeId,
                                         true,
                                         false);
-            sLastNodeInfoReqNode = resolvedToNodeId;
+            sLastNodeInfoReqNode = toNodeId;
             sLastNodeInfoReqMs = now;
         }
         return false;
@@ -412,20 +389,20 @@ bool DmMgr::sendDm(uint32_t myNodeId, uint32_t toNodeId, const char *text,
                 oldest = i;
         }
         if (slot < 0) slot = oldest;
-        _pendingTx[slot] = { packetId, resolvedToNodeId, millis(), usedPki, true };
+        _pendingTx[slot] = { packetId, toNodeId, millis(), usedPki, true };
     }
 
     debugLogMessages("[dm] TX OK\n");
     {
         DmConv *conv = find(toNodeId);
         char who[16];
-        liveNodeLabelWithHint(resolvedToNodeId, conv ? conv->shortName : nullptr, who, sizeof(who));
+        liveNodeLabelWithHint(toNodeId, conv ? conv->shortName : nullptr, who, sizeof(who));
         char live[72];
         if (usedPki) {
             snprintf(live, sizeof(live), "T DM PKI %s %08X", who, packetId);
         } else {
             snprintf(live, sizeof(live), "T DM CHAN %s %08X c%d h%02X t%08X",
-                     who, packetId, usedChanIdx, usedHash, resolvedToNodeId);
+                     who, packetId, usedChanIdx, usedHash, toNodeId);
         }
         liveFeedAddLine(live, TFT_WHITE);
     }

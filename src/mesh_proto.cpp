@@ -1526,7 +1526,8 @@ size_t encodeTracerouteReply(uint8_t *buf, size_t bufLen,
     // Appended rather than inserted, and that is what keeps it aligned: relays
     // add their entry as the request passes through, so appending puts ours
     // last, which is the position of the final hop.
-    uint8_t snrField[8];
+    // A negative int32 uses a ten-byte sign-extended varint, plus the field tag.
+    uint8_t snrField[11];
     size_t snrLen = 0;
     if (rxSnr == rxSnr) {              // NAN check without <cmath>
         long q = lroundf(rxSnr * 4.0f);

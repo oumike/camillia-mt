@@ -10,6 +10,10 @@
 // passes in the outcome.
 #include <stddef.h>
 #include <stdint.h>
+#include <ctype.h>
+#include <stdlib.h>
+#include <string.h>
+#include <strings.h>
 
 // Values are upstream's enum, so they mean the same thing in a YAML backup or
 // over remote admin.
@@ -40,6 +44,26 @@ inline const char *sigPolicyName(uint8_t v) {
         case SIG_POLICY_STRICT:   return "Strict";
         default:                  return "Compatible";
     }
+}
+
+// A number, or the policy's name in any case, with or without upstream's
+// PACKET_SIGNATURE_POLICY_ prefix. Anything else is the default.
+inline uint8_t sigPolicyParse(const char *val) {
+    if (!val) return SIG_POLICY_COMPATIBLE;
+    while (isspace((unsigned char)*val)) ++val;
+    if (isdigit((unsigned char)val[0])) return sigPolicyCoerce(atoi(val));
+    if (!strncasecmp(val, "PACKET_SIGNATURE_POLICY_", 24)) val += 24;
+    size_t len = strcspn(val, " \t\r\n");
+    const char *tail = val + len;
+    while (isspace((unsigned char)*tail)) ++tail;
+    // Exported policy names carry an inline YAML comment. Keep this handling
+    // local to the enum; '#' can be literal data in other config values.
+    if (*tail && *tail != '#') return SIG_POLICY_COMPATIBLE;
+    for (int i = 0; i < SIG_POLICY_COUNT; i++) {
+        const char *name = sigPolicyName((uint8_t)i);
+        if (strlen(name) == len && !strncasecmp(val, name, len)) return (uint8_t)i;
+    }
+    return SIG_POLICY_COMPATIBLE;
 }
 
 // What the packet's Data.xeddsa_signature turned out to be.

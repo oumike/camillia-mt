@@ -83,10 +83,41 @@ static void testCoerce() {
     CHECK(accepts(i));
 }
 
+static void testParseExportedPolicy() {
+    const struct { const char *value; uint8_t policy; } cases[] = {
+        {"Balanced   # Compatible, Balanced or Strict", SIG_POLICY_BALANCED},
+        {"Strict   # Compatible, Balanced or Strict", SIG_POLICY_STRICT},
+        {"compatible # default", SIG_POLICY_COMPATIBLE},
+        {"bAlAnCeD", SIG_POLICY_BALANCED},
+        {"PACKET_SIGNATURE_POLICY_STRICT", SIG_POLICY_STRICT},
+        {"packet_signature_policy_balanced # imported", SIG_POLICY_BALANCED},
+        {" \tStrict \t# comment", SIG_POLICY_STRICT},
+        {"Strict \t", SIG_POLICY_STRICT},
+        {"1 # numeric policy", SIG_POLICY_BALANCED},
+        {"2", SIG_POLICY_STRICT},
+        {"99", SIG_POLICY_COMPATIBLE},
+        {nullptr, SIG_POLICY_COMPATIBLE},
+        {"", SIG_POLICY_COMPATIBLE},
+        {"unknown", SIG_POLICY_COMPATIBLE},
+        {"Strictness", SIG_POLICY_COMPATIBLE},
+        {"Strict extra", SIG_POLICY_COMPATIBLE},
+        {"Strict#not-a-comment", SIG_POLICY_COMPATIBLE},
+    };
+    for (const auto &c : cases) {
+        uint8_t actual = sigPolicyParse(c.value);
+        if (actual != c.policy) {
+            printf("FAIL policy '%s': expected %u, got %u\n",
+                   c.value ? c.value : "(null)", (unsigned)c.policy, (unsigned)actual);
+            g_fail = 1;
+        }
+    }
+}
+
 int main() {
     testSignedAllPolicies();
     testUnsigned();
     testCoerce();
+    testParseExportedPolicy();
     printf(g_fail ? "FAILED\n" : "ok\n");
     return g_fail;
 }

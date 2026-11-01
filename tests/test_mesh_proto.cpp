@@ -9,8 +9,10 @@
 #include "../src/mesh_proto.h"
 #include "../src/xeddsa_sig.h"
 
+#include <math.h>
 #include <signal.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 #include <sys/wait.h>
 #include <unistd.h>
@@ -27,6 +29,8 @@ static int g_fail = 0, g_run = 0;
 // Runs fn in a child; passes only if it returns true within two seconds.
 template <typename F>
 static void guarded(const char *what, F fn) {
+    const char *filter = getenv("CAMILLIA_TEST_FILTER");
+    if (filter && !strstr(what, filter)) return;
     g_run++;
     fflush(stdout);
     pid_t pid = fork();
@@ -48,6 +52,23 @@ static bool dataSliceInBounds(const uint8_t *buf, size_t len, const uint8_t *&pa
     size_t payLen = 0; uint32_t req = 0; bool want = false;
     decodeData(buf, len, port, pay, payLen, req, want);
     return !pay || (pay >= buf && payLen <= (size_t)(buf + len - pay));
+}
+
+static bool tracerouteReplyHasSnr(float snr, const uint8_t *expected, size_t expectedLen) {
+    const uint8_t route[] = {0x0D, 0x78, 0x56, 0x34, 0x12};
+    uint8_t buf[64];
+    const size_t len = encodeTracerouteReply(buf, sizeof(buf), route, sizeof(route),
+                                             0x12345678, 0xAABBCCDD, snr);
+    if (!len) return false;
+    const uint8_t *payload = nullptr;
+    size_t payloadLen = 0;
+    uint32_t port = 0, requestId = 0;
+    bool wantResponse = false;
+    decodeData(buf, len, port, payload, payloadLen, requestId, wantResponse);
+    return port == TRACEROUTE_APP && requestId == 0x12345678 && !wantResponse
+        && payload && payloadLen == sizeof(route) + expectedLen
+        && memcmp(payload, route, sizeof(route)) == 0
+        && (expectedLen == 0 || memcmp(payload + sizeof(route), expected, expectedLen) == 0);
 }
 
 // A length of 2^64 - 11 after an 11-byte tag+varint puts the cursor back at 0.
@@ -176,6 +197,32 @@ int main() {
         const uint8_t f[] = {0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0x01};
         uint64_t v;
         return pbReadVarint(f, sizeof(f), 0, v) == 10 && v == UINT64_MAX;
+    });
+
+    guarded("traceroute reply: negative SNR uses a full signed int32 varint", [] {
+        const uint8_t expected[] = {0x10, 0xFC, 0xFF, 0xFF, 0xFF, 0xFF,
+                                    0xFF, 0xFF, 0xFF, 0xFF, 0x01};
+        return tracerouteReplyHasSnr(-1.0f, expected, sizeof(expected));
+    });
+    guarded("traceroute reply: low SNR clamps without emitting the unknown marker", [] {
+        const uint8_t expected[] = {0x10, 0x81, 0xFF, 0xFF, 0xFF, 0xFF,
+                                    0xFF, 0xFF, 0xFF, 0xFF, 0x01};
+        return tracerouteReplyHasSnr(-32.0f, expected, sizeof(expected));
+    });
+    guarded("traceroute reply: positive SNR retains quarter-dB encoding", [] {
+        const uint8_t expected[] = {0x10, 0x05};
+        return tracerouteReplyHasSnr(1.25f, expected, sizeof(expected));
+    });
+    guarded("traceroute reply: unknown SNR leaves the route unchanged", [] {
+        return tracerouteReplyHasSnr(NAN, nullptr, 0);
+    });
+    guarded("traceroute reply: rejects a small output without writing into it", [] {
+        uint8_t buf[8];
+        memset(buf, 0xA5, sizeof(buf));
+        if (encodeTracerouteReply(buf, sizeof(buf), nullptr, 0, 1, 2, -1.0f) != 0)
+            return false;
+        for (uint8_t b : buf) if (b != 0xA5) return false;
+        return true;
     });
 
     // An unencrypted TEXT frame. The keyless virtual DM/LIVE slots and empty

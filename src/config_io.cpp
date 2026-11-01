@@ -1044,17 +1044,6 @@ static uint8_t findName(const char *val, const char **table, int n) {
     return 0;
 }
 
-// A number, or the policy's name in any case, with or without upstream's
-// PACKET_SIGNATURE_POLICY_ prefix. Anything else is the default.
-static uint8_t sigPolicyParse(const char *val) {
-    if (!val || !val[0]) return SIG_POLICY_COMPATIBLE;
-    if (isdigit((unsigned char)val[0])) return sigPolicyCoerce(atoi(val));
-    if (!strncasecmp(val, "PACKET_SIGNATURE_POLICY_", 24)) val += 24;
-    for (int i = 0; i < SIG_POLICY_COUNT; i++)
-        if (!strcasecmp(val, sigPolicyName((uint8_t)i))) return (uint8_t)i;
-    return SIG_POLICY_COMPATIBLE;
-}
-
 static uint8_t parseMsgAlertSound(const char *val) {
     if (!val || !val[0]) return MSG_ALERT_SOUND_DEFAULT;
     if (isdigit((unsigned char)val[0])) {
