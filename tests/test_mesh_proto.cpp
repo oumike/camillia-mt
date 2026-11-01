@@ -119,6 +119,16 @@ int main() {
         decodeUser(f, sizeof(f), u);
         return u.longName[0] == '\0';
     });
+    // User.role (field 7, varint): CLIENT_BASE, then omitted (proto3 CLIENT).
+    guarded("decodeUser: role", [] {
+        const uint8_t withRole[] = {0x1A, 0x02, 'A', 'B', 0x38, 0x0C};
+        const uint8_t noRole[] = {0x1A, 0x02, 'A', 'B'};
+        UserInfo a, b;
+        decodeUser(withRole, sizeof(withRole), a);
+        b.role = 0xEE;
+        decodeUser(noRole, sizeof(noRole), b);
+        return a.role == 12 && !strcmp(a.shortName, "AB") && b.role == 0;
+    });
     guarded("decodeNeighborInfo: neighbor wrapping the cursor terminates", [] {
         const uint8_t f[] = {0x22, WRAP_LEN};
         NeighborInfoPayload n;

@@ -45,6 +45,11 @@ struct NodeEntry {
     // reboot such a node counts as named.
     bool     nameFromCache;
     bool     favorite;        // pinned by user; sorted to top in node and DM lists
+    // Config.DeviceConfig.Role from the last NodeInfo heard this boot. RAM only:
+    // a node can change role, and an unknown role is the safe reading for the
+    // one thing that depends on it (hop preservation, see relay_policy.h).
+    uint8_t  role;
+    bool     hasRole;
     int      chanIdx;         // channel last heard on
     uint8_t  chanHash;        // raw on-air channel hash last heard from this node
     bool     hasChanHash;
@@ -243,6 +248,12 @@ public:
     void updatePosition(uint32_t nodeId, const PositionInfo &p);
     void updateTelemetry(uint32_t nodeId, const TelemetryInfo &t);
     bool setFavorite(uint32_t nodeId, bool favorite);
+    bool isFavorite(uint32_t nodeId) const;
+    // The node a packet's one-byte relay_node names, among the nodes it could
+    // plausibly be -- direct neighbours, favorites and router-type nodes, as
+    // upstream's resolveUniqueLastByte() -- never `selfId`. Null when none of
+    // them, or more than one, carries that byte.
+    const NodeEntry *resolveRelayByte(uint8_t lastByte, uint32_t selfId) const;
     // Record that this node has passed a signature check, and persist it: the
     // Balanced signature policy drops a later unsigned broadcast from a node
     // marked here, and that protection should not lapse with a reboot.

@@ -281,11 +281,15 @@ bool decodeUser(const uint8_t *buf, size_t len, UserInfo &out) {
     out.longName[0] = out.shortName[0] = '\0';
     memset(out.pubKey, 0, 32);
     out.hasPubKey = false;
+    out.role = 0;
     size_t i = 0;
     while (i < len) {
         uint64_t tag; i = pbReadVarint(buf, len, i, tag); if (!i) break;
         uint32_t field = tag >> 3, wtype = tag & 7;
-        if (wtype == 2) {
+        if (wtype == 0 && field == 7) {
+            uint64_t v; i = pbReadVarint(buf, len, i, v); if (!i) break;
+            out.role = (v <= 0xFF) ? (uint8_t)v : 0;
+        } else if (wtype == 2) {
             uint64_t sz; i = pbReadVarint(buf, len, i, sz); if (!i) break;
             if (!pbFits(i, sz, len)) break;
             if (field == 2 && sz > 0) {

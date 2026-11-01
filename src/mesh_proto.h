@@ -162,6 +162,9 @@ struct UserInfo {
     char    shortName[5];
     uint8_t pubKey[32];   // Curve25519 public key (field 8), zero if absent
     bool    hasPubKey;
+    // Config.DeviceConfig.Role (field 7). proto3 omits CLIENT (0), so an absent
+    // field reads as CLIENT, which is what it means.
+    uint8_t role;
 };
 
 struct PositionInfo {

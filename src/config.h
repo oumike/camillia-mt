@@ -206,6 +206,18 @@
 #define MY_ALT          228         // meters
 
 #define MY_DEVICE_ROLE      0      // CLIENT
+// Whether onboarding and the web config offer CLIENT_BASE (12): the boards
+// that make sense as a powered base station -- an external PA (Heltec V4/R8),
+// mains or USB power (CrowPanel, P4), or an external antenna on a desk build
+// (Mesh Deck). The role is accepted everywhere else too, from an imported
+// config, the customizer or remote admin; it is just not suggested on a
+// battery handheld, which is the node a base exists to serve.
+#if defined(DEVICE_HELTEC_V4_EXPANSION) || defined(DEVICE_CROWPANEL_35) \
+    || defined(DEVICE_CROWPANEL_50) || defined(DEVICE_TDISPLAY_P4) || defined(DEVICE_MESH_DECK)
+#define UI_OFFER_CLIENT_BASE 1
+#else
+#define UI_OFFER_CLIENT_BASE 0
+#endif
 #define MY_REBROADCAST      0      // ALL
 #define MY_NODEINFO_INTV  900      // 15 min (seconds)
 #define MY_POS_INTV      1800      // 30 min (seconds)

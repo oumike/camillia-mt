@@ -242,6 +242,7 @@ private:
                    uint32_t packetId, DisplayLine::AckState ack,
                    uint32_t epoch, uint32_t senderNodeId);
     void _persistChannel(int chanIdx, const Channel &ch);
+    void _persistChannelNow(int chanIdx, const Channel &ch);   // on the storage writer
     // Note a change to a persisted channel. Cheap and safe to call per rendered
     // line; the actual write is servicePersistence()'s job.
     void _markPersistDirty(int chanIdx);

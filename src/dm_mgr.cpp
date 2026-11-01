@@ -128,15 +128,17 @@ bool DmMgr::deleteConversation(uint32_t nodeId) {
     // leftover .tmp would otherwise be adopted by loadAll()'s recovery and bring
     // the deleted conversation back on the next boot.
 #if HAS_FILE_STORAGE
-    char path[40];
-    snprintf(path, sizeof(path), "%s/%08X.bin", "/camillia/dms", nodeId);
-    if (storageFs().exists(path)) {
-        storageFs().remove(path);
-    }
-    snprintf(path, sizeof(path), "%s/%08X.tmp", "/camillia/dms", nodeId);
-    if (storageFs().exists(path)) {
-        storageFs().remove(path);
-    }
+    storageOnWriter([nodeId] {
+        char path[40];
+        snprintf(path, sizeof(path), "%s/%08X.bin", "/camillia/dms", nodeId);
+        if (storageFs().exists(path)) {
+            storageFs().remove(path);
+        }
+        snprintf(path, sizeof(path), "%s/%08X.tmp", "/camillia/dms", nodeId);
+        if (storageFs().exists(path)) {
+            storageFs().remove(path);
+        }
+    });
 #endif
 
     if (_convs[idx].lines) {
@@ -175,21 +177,23 @@ void DmMgr::clearAll(bool clearPersisted) {
 #if HAS_FILE_STORAGE
     if (!clearPersisted) return;
 
-    static const char *kPersistDmDir = "/camillia/dms";
-    File dir = storageFs().open(kPersistDmDir);
-    if (dir && dir.isDirectory()) {
-        File f = dir.openNextFile();
-        while (f) {
-            String fp = String(kPersistDmDir) + "/" + f.name();
-            f.close();
-            storageFs().remove(fp.c_str());
-            f = dir.openNextFile();
+    storageOnWriter([] {
+        static const char *kPersistDmDir = "/camillia/dms";
+        File dir = storageFs().open(kPersistDmDir);
+        if (dir && dir.isDirectory()) {
+            File f = dir.openNextFile();
+            while (f) {
+                String fp = String(kPersistDmDir) + "/" + f.name();
+                f.close();
+                storageFs().remove(fp.c_str());
+                f = dir.openNextFile();
+            }
+            dir.close();
         }
-        dir.close();
-    }
-    if (storageFs().exists(kPersistDmDir)) {
-        (void)storageFs().rmdir(kPersistDmDir);
-    }
+        if (storageFs().exists(kPersistDmDir)) {
+            (void)storageFs().rmdir(kPersistDmDir);
+        }
+    });
 #else
     (void)clearPersisted;
 #endif
@@ -570,12 +574,22 @@ struct PersistDmLine {
     uint32_t epoch;   // wall-clock seconds when added (0 = unknown)
 };
 
+static void saveConvNow(const DmConv *c);
+
 void DmMgr::saveConv(const DmConv *c) {
 #if !HAS_FILE_STORAGE
     (void)c;
-    return;
 #else
     if (!c || !c->lines || c->count == 0) return;
+    // See storageCallOnWriter(): off the display's core on the T-Display P4.
+    storageOnWriter([c] { saveConvNow(c); });
+#endif
+}
+
+static void saveConvNow(const DmConv *c) {
+#if !HAS_FILE_STORAGE
+    (void)c;
+#else
 
     storageFs().mkdir("/camillia");
     storageFs().mkdir(kDmDir);

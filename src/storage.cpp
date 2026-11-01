@@ -16,6 +16,67 @@ namespace {
 bool sMounted = false;
 }
 
+#if defined(DEVICE_TDISPLAY_P4)
+#include <freertos/FreeRTOS.h>
+#include <freertos/queue.h>
+#include <freertos/semphr.h>
+#include <freertos/task.h>
+
+namespace {
+struct WriterJob {
+    void (*fn)(void *);
+    void *arg;
+    SemaphoreHandle_t done;
+};
+
+TaskHandle_t  sWriterTask  = nullptr;
+QueueHandle_t sWriterQueue = nullptr;
+
+void writerMain(void *) {
+    WriterJob job;
+    for (;;) {
+        if (xQueueReceive(sWriterQueue, &job, portMAX_DELAY) != pdTRUE) continue;
+        job.fn(job.arg);
+        xSemaphoreGive(job.done);
+    }
+}
+
+bool writerReady() {
+    if (sWriterTask) return true;
+    sWriterQueue = xQueueCreate(4, sizeof(WriterJob));
+    if (!sWriterQueue) return false;
+    // Above the loop's priority so a queued job runs the moment it is posted
+    // (its caller is blocked on it anyway). 8 KB: the archive and wardrive
+    // flushes format half-kilobyte CSV lines on the stack.
+    if (xTaskCreatePinnedToCore(writerMain, "storage", 8192, nullptr, 3,
+                                &sWriterTask, 0) != pdPASS) {
+        vQueueDelete(sWriterQueue);
+        sWriterQueue = nullptr;
+        sWriterTask = nullptr;
+        return false;
+    }
+    return true;
+}
+}  // namespace
+
+void storageCallOnWriter(void (*fn)(void *), void *arg) {
+    // Inline when there is no writer (it could not be created: running the
+    // write here beats dropping it) or when already on it (a job that saves
+    // something else would otherwise wait on itself).
+    if (!writerReady() || xTaskGetCurrentTaskHandle() == sWriterTask) {
+        fn(arg);
+        return;
+    }
+    StaticSemaphore_t doneBuf;
+    WriterJob job = {fn, arg, xSemaphoreCreateBinaryStatic(&doneBuf)};
+    xQueueSend(sWriterQueue, &job, portMAX_DELAY);
+    xSemaphoreTake(job.done, portMAX_DELAY);
+    vSemaphoreDelete(job.done);
+}
+#else
+void storageCallOnWriter(void (*fn)(void *), void *arg) { fn(arg); }
+#endif
+
 fs::FS &storageFs() {
 #if defined(HAS_SD_SOFT_SPI) && HAS_SD_SOFT_SPI
     if (sdSoftMounted()) return sdSoftFs();
@@ -85,7 +146,7 @@ const char *storageCardTypeName() {
 #endif
 }
 
-void storageUnmount() {
+static void storageUnmountNow() {
 #if defined(HAS_SD_SOFT_SPI) && HAS_SD_SOFT_SPI
     if (sdSoftMounted()) sdSoftEnd();
     else LittleFS.end();
@@ -124,7 +185,7 @@ static bool mountInternalFs() {
 }
 #endif
 
-bool storageBegin() {
+static bool storageBeginNow() {
     if (sMounted) return true;
 
 #if defined(HAS_SD_SOFT_SPI) && HAS_SD_SOFT_SPI
@@ -203,6 +264,17 @@ bool storageBegin() {
     sMounted = mountInternalFs();
 #endif
     return sMounted;
+}
+
+bool storageBegin() {
+    if (sMounted) return true;
+    bool ok = false;
+    storageOnWriter([&] { ok = storageBeginNow(); });
+    return ok;
+}
+
+void storageUnmount() {
+    storageOnWriter([] { storageUnmountNow(); });
 }
 
 #if HAS_SD_MALWARE_SCAN

@@ -3877,9 +3877,13 @@ static void sendConfigPage(const char *msg = "", bool lite = false) {
     // infrastructure ones are absent; values are the canonical Meshtastic enum
     // positions (kept intact for wire compatibility and rebroadcast gating).
     static const struct { uint8_t v; const char *l; } kRoles[] = {
-        {0,"CLIENT"},{1,"CLIENT_MUTE"},{5,"TRACKER"},{8,"CLIENT_HIDDEN"}
+        {0,"CLIENT"},{1,"CLIENT_MUTE"},{5,"TRACKER"},{8,"CLIENT_HIDDEN"},{12,"CLIENT_BASE"}
     };
     for (int i = 0; i < (int)(sizeof(kRoles) / sizeof(kRoles[0])); i++) {
+        // CLIENT_BASE is suggested only on base-station boards, but a node that
+        // already has it (an import, the customizer) still shows it: leaving it
+        // out would make the next Save quietly turn the node back into CLIENT.
+        if (kRoles[i].v == 12 && !UI_OFFER_CLIENT_BASE && gCfg->deviceRole != 12) continue;
         snprintf(tmp, sizeof(tmp), "%d", kRoles[i].v);
         html += "<option value='"; html += tmp; html += "'";
         if (gCfg->deviceRole == kRoles[i].v) html += " selected";
@@ -3905,7 +3909,12 @@ static void sendConfigPage(const char *msg = "", bool lite = false) {
             "nodes and the map see how it means to be treated. "
             "<b>CLIENT</b> is an ordinary node. <b>CLIENT_MUTE</b> does not relay "
             "other people's traffic. <b>CLIENT_HIDDEN</b> only speaks when spoken "
-            "to. <b>TRACKER</b> is a node whose job is reporting where it is: it "
+            "to. <b>CLIENT_BASE</b> is a powered base station (an attic or "
+            "window node) for your own nodes: it always relays packets from or to "
+            "the nodes you have <i>favorited</i>, after every ordinary relay has "
+            "had its turn, and relays everything else like a CLIENT. On this "
+            "role a favorite is a routing choice, not just a pin, so "
+            "auto-favorite by distance is ignored. <b>TRACKER</b> is a node whose job is reporting where it is: it "
             "still relays like a CLIENT, and it needs <i>Share Location</i> on "
             "with a <i>GPS Broadcast Interval</i> short enough to be worth "
             "tracking (Meshtastic suggests 60&nbsp;s). It does <b>not</b> put the "

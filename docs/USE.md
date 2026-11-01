@@ -972,7 +972,7 @@ this node tells the rest of the mesh it means to be treated. It travels in
 NodeInfo, so other nodes and MQTT-fed maps see it, and it is exported as
 `config: device: role:`.
 
-Four roles are offered, using the same names and enum values as stock
+Five roles are offered, using the same names and enum values as stock
 Meshtastic:
 
 - **CLIENT** (default) — an ordinary node. Sends its own traffic and relays
@@ -985,11 +985,51 @@ Meshtastic:
 - **CLIENT_HIDDEN** — only speaks when spoken to. One difference from stock
   Meshtastic worth knowing: theirs still relays, restricted to known meshes,
   where here CLIENT_HIDDEN does not relay at all.
+- **CLIENT_BASE** — a powered base station for your own nodes, such as a board
+  in the attic or a window. See below. Onboarding and web config suggest it only
+  on the Heltec V4 and R8, the CrowPanels, the P4 boards and the Mesh Deck; on
+  any other board it is still accepted from an imported config, the customizer
+  (`cfg set role CLIENT_BASE`) or remote admin.
 
 The infrastructure roles — ROUTER, ROUTER_LATE and REPEATER — are deliberately
 not offered. They change how the whole mesh routes traffic around a node, and
 they are not something a handheld with a screen should claim to be. A config
 imported with one of them is coerced to CLIENT rather than honoured.
+
+#### What CLIENT_BASE does
+
+CLIENT_BASE treats packets from or to the nodes it has **favorited** like a
+ROUTER_LATE would, and everything else like a CLIENT:
+
+- **Favorites always get relayed, once, last.** If another node is heard relaying
+  a favorite's packet first, a CLIENT would stand down; a base moves its relay
+  to the late window instead, after every ordinary relay has had its turn, so
+  the packet still goes out from the base's better position.
+- **No hop spent between bases.** When the packet came through another
+  router-type node (ROUTER, ROUTER_LATE or CLIENT_BASE) that this base has
+  favorited, and the relay byte identifies that node unambiguously, the base
+  relays it without using up a hop. A node's role is learnt from its NodeInfo
+  and not saved, so for a while after a reboot the base spends the hop, which is
+  the safe direction to be wrong in.
+- **Favorites are a routing choice here.** Auto-favorite by distance is ignored
+  while the role is CLIENT_BASE, so only nodes you favorite by hand get the
+  treatment. Clearing non-favorites keeps them, as always.
+- **It does not go asking for names.** A base hears many more nodes than a
+  handheld; it no longer sends its NodeInfo to every unnamed node it hears.
+
+Favorite your own handhelds on the base. A base wants mains or USB power and a
+good antenna: with power saving on it naps between packets as any node does,
+but a queued relay cuts the nap short so it leaves on time.
+
+#### How relaying waits its turn
+
+Every relaying role (CLIENT, TRACKER, CLIENT_BASE) waits before relaying, the way
+stock Meshtastic does: a random number of slots, from a window that grows with
+how strongly the packet was heard. A node that heard it faintly — likely further
+from the sender, so its relay covers more new ground — tends to go first, and a
+node that then hears that relay **stands down** rather than repeating it. On
+LongFast a relay waits between about 0.7 s and 12 s. Device Info counts both:
+**Relayed** and **Stood down**.
 
 #### What TRACKER does here
 

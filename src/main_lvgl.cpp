@@ -70,6 +70,7 @@ LV_FONT_DECLARE(lv_font_eink_bold_18);
 #include "spell.h"
 #endif
 #include "debug_flags.h"
+#include "relay_policy.h"
 #include "release_notes.h"   // generated from RELEASE_NOTES.md at build time
 #include "utf8_utils.h"
 #include "fonts/roboto_splash_fonts.h"
@@ -2374,6 +2375,11 @@ static int s_seenHead = 0;
 
 // Count of packets we have relayed onto the mesh this boot (managed flood).
 static uint32_t s_rebroadcastCount = 0;
+static uint32_t s_relayStoodDownCount = 0;   // queued relays cancelled by someone else's copy
+// True while processMeshPacket() is handling a packet our own radio received,
+// as against one injected from the MQTT downlink: only an on-air copy tells a
+// queued relay that someone nearby has already carried the packet.
+static bool s_rxFromRadio = false;
 
 #if LV_USE_LOG
 // LVGL's warnings, on the same wire as everything else. Without this they are
@@ -6156,6 +6162,8 @@ static const char *cfgDeviceRoleName(uint8_t role) {
         case 8:  return "CLIENT_HIDDEN";
         case 9:  return "LOST_AND_FOUND";
         case 10: return "TAK_TRACKER";
+        case 11: return "ROUTER_LATE";
+        case 12: return "CLIENT_BASE";
         default: return "UNKNOWN";
     }
 }
@@ -15434,7 +15442,7 @@ static void deviceInfoFormatBytes(uint64_t bytes, char *out, size_t cap) {
 // How many rows buildDeviceInfoLines() can produce. One number, because two
 // callers size an array from it and a stale copy in either is a silently
 // truncated screen.
-static constexpr int kDeviceInfoMaxLines = 16;
+static constexpr int kDeviceInfoMaxLines = 17;
 
 static int buildDeviceInfoLines(char info[][96], int maxLines) {
     int n = 0;
@@ -15470,6 +15478,7 @@ static int buildDeviceInfoLines(char info[][96], int maxLines) {
                                (double)s_cfg.loraBw, s_cfg.loraSf, s_cfg.loraCr);
     if (n < maxLines) snprintf(info[n++], 96, TR("Pwr %d dBm Hops %d"), s_cfg.loraPower, s_cfg.loraHopLimit);
     if (n < maxLines) snprintf(info[n++], 96, TR("Relayed: %lu"), (unsigned long)s_rebroadcastCount);
+    if (n < maxLines) snprintf(info[n++], 96, TR("Stood down: %lu"), (unsigned long)s_relayStoodDownCount);
 
 #if HAS_FILE_STORAGE
     // Storage, and on a board with a slot, what the last mount attempt made of
@@ -45805,6 +45814,9 @@ static const OnboardRoleOption kOnboardRoles[] = {
     {1, "CLIENT_MUTE"},
     {5, "TRACKER"},
     {8, "CLIENT_HIDDEN"},
+#if UI_OFFER_CLIENT_BASE
+    {12, "CLIENT_BASE"},
+#endif
 };
 static const int kOnboardRoleCount =
     (int)(sizeof(kOnboardRoles) / sizeof(kOnboardRoles[0]));
@@ -54690,6 +54702,10 @@ static const char *liveDestTag(uint32_t toNode) {
 // continent away, and a sender with no hop_start gives no bound on the flood.
 static void maybeRequestUnknownNodeInfo(const MeshPacket &pkt) {
     static uint32_t sLastAutoReqMs = 0;
+    // A base station hears far more nodes than a handheld, and asking each of
+    // them is airtime spent on a node list nobody may look at. Upstream's
+    // preferred rebroadcasters do not ask either.
+    if (relay::isRouterRole(s_cfg.deviceRole)) return;
     if (!pkt.decrypted || (pkt.hdr.flags & 0x10)) return;
     // A NodeInfo carries the name itself; an S&F replay is not its author on air.
     if (pkt.portnum == NODEINFO_APP || pkt.portnum == STORE_FORWARD_APP) return;
@@ -55837,16 +55853,26 @@ static bool sendTracerouteReply(uint32_t toNodeId, uint32_t requestId,
 
 
 // ── Managed flood rebroadcasting ──────────────────────────────────────────────
-// CLIENT_MUTE is the role that does not forward other people's packets, and
-// this table is why TRACKER needed nothing added to it: a tracker relays exactly
-// like a CLIENT upstream, and reports its own position on top of that. Anyone
-// wanting a node that only reports itself wants CLIENT_MUTE, not TRACKER.
-//
-// One known divergence, left as-is because changing it would alter what existing
-// CLIENT_HIDDEN nodes do on the mesh: upstream's CLIENT_HIDDEN still rebroadcasts
-// (under local-only rebroadcast), where here it does not relay at all.
-static bool roleRebroadcasts(uint8_t role) {
-    return role != 1 /*CLIENT_MUTE*/ && role != 8 /*CLIENT_HIDDEN*/;
+// Which roles relay, how long a relay waits, and what hearing another node's
+// copy does to it are relay_policy.h's, host-tested. TRACKER needed nothing
+// there: a tracker relays exactly like a CLIENT upstream, and reports its own
+// position on top of that. Anyone wanting a node that only reports itself wants
+// CLIENT_MUTE, not TRACKER.
+
+// The packet is from, or (unicast) to, a node we favorited: the traffic a
+// CLIENT_BASE relays like ROUTER_LATE. Upstream's isFromOrToFavoritedNode().
+static bool relayFavoriteParty(const MeshHdr &hdr) {
+    if (Nodes.isFavorite(hdr.from)) return true;
+    return hdr.to != 0xFFFFFFFF && Nodes.isFavorite(hdr.to);
+}
+
+// One contention slot for the radio settings in use. Recomputed per relay
+// rather than cached: it is a few float operations, and a cache would be one
+// more thing a preset change or a preset scan's retune has to remember.
+static uint32_t relaySlotMs() {
+    const uint32_t slot = relay::slotTimeMsec(s_cfg.loraSf, s_cfg.loraBw,
+                                              strcmp(s_cfg.region, "LORA_24") == 0);
+    return slot ? slot : 1;
 }
 
 // A PKI direct message between two other nodes, at least one of whom we know.
@@ -55894,20 +55920,32 @@ static bool rebroadcastModeAllows(const MeshPacket &pkt) {
     }
 }
 
-// Deferred rebroadcast queue. Relaying nodes wait out a short random
-// contention-jitter window before re-transmitting so multiple relays don't all
-// key up simultaneously and collide on-air. This wait MUST NOT be a blocking
-// delay() on the main loop — that starves lv_timer_handler() and makes the whole
-// UI sluggish (every relayed packet froze the screen for up to 150 ms). Instead
-// we stash the framed packet with a send-after deadline and transmit it from
-// servicePendingRebroadcast() once the jitter window elapses.
+// Deferred rebroadcast queue. A relay waits out an SNR-weighted contention
+// window (relay::relayDelayMsec(), upstream's) before re-transmitting, and is
+// cancelled or moved to the late window if another node's copy is heard first
+// (relayHeardDuplicate()). This wait MUST NOT be a blocking delay() on the main
+// loop — that starves lv_timer_handler() and makes the whole UI sluggish.
+// Instead we stash the framed packet with a send-after deadline and transmit it
+// from servicePendingRebroadcast() once the window elapses.
+//
+// The windows are long -- on LongFast, 0.7 s to 12 s -- so the queue holds more
+// at once than the 20-150 ms jitter it replaced did. Sixteen is upstream's TX
+// queue depth; the Cardputer, with no PSRAM and the DRAM already tight, keeps
+// eight. A full queue drops the new relay: relaying is discretionary.
 struct PendingRebroadcast {
     uint8_t  frame[sizeof(MeshHdr) + sizeof(((MeshPacket *)nullptr)->rawCipher)];
     size_t   len;
     uint32_t sendAtMs;
+    uint32_t from, id;   // the packet's identity, to match a copy heard later
+    float    snr;        // as we heard it: sizes the late window
+    bool     late;       // already moved to the late window once
     bool     active;
 };
+#if defined(DEVICE_CARDPUTER_LORA_HAT)
 static constexpr uint8_t kMaxPendingRebroadcast = 8;
+#else
+static constexpr uint8_t kMaxPendingRebroadcast = 16;
+#endif
 static PendingRebroadcast s_pendingRebroadcast[kMaxPendingRebroadcast];
 
 static PendingRebroadcast *allocPendingRebroadcast() {
@@ -55934,7 +55972,7 @@ static void dropPendingRebroadcasts() {
 // from pkt.rawCipher — no re-encryption.
 static void maybeRebroadcastPacket(const MeshPacket &pkt) {
     if (!Radio.isReady() || s_myNodeId == 0) return;
-    if (!roleRebroadcasts(s_cfg.deviceRole)) return;
+    if (!relay::roleRebroadcasts(s_cfg.deviceRole)) return;
 
     uint8_t hopLimit = pkt.hdr.flags & 0x07;
     if (hopLimit == 0) return;               // out of hops
@@ -55968,8 +56006,24 @@ static void maybeRebroadcastPacket(const MeshPacket &pkt) {
         return;
     }
 
+    // A router-type node relaying for a favorited router-type node does not
+    // spend a hop (upstream's shouldDecrementHopLimit()). Only CLIENT_BASE can
+    // be that here, and only when the relay byte names one node unambiguously.
+    relay::PrevRelay prev = {};
+    if (relay::isRouterRole(s_cfg.deviceRole)) {
+        const NodeEntry *via = Nodes.resolveRelayByte(pkt.hdr.relay_node, s_myNodeId);
+        if (via) {
+            prev.unique   = true;
+            prev.favorite = via->favorite;
+            prev.hasRole  = via->hasRole;
+            prev.role     = via->role;
+        }
+    }
+    const bool spendHop = relay::shouldDecrementHopLimit(s_cfg.deviceRole, hopStart, hopLimit, prev);
+    const uint8_t outHopLimit = spendHop ? (uint8_t)(hopLimit - 1) : hopLimit;
+
     MeshHdr hdr = pkt.hdr;
-    hdr.flags = (uint8_t)((pkt.hdr.flags & 0xF8) | ((hopLimit - 1) & 0x07));
+    hdr.flags = (uint8_t)((pkt.hdr.flags & 0xF8) | (outHopLimit & 0x07));
     hdr.relay_node = ourRelayByte;
     // Upstream rewrites next_hop from its route table as it relays. We keep no
     // routes, which upstream treats as no preference: left as our own byte, the
@@ -55982,15 +56036,73 @@ static void maybeRebroadcastPacket(const MeshPacket &pkt) {
                          (unsigned long)pkt.hdr.id);
         return;
     }
+    const uint32_t delayMs = relay::relayDelayMsec(pkt.snr, relaySlotMs(), esp_random());
     memcpy(slot->frame, &hdr, sizeof(hdr));
     memcpy(slot->frame + sizeof(hdr), pkt.rawCipher, pkt.rawLen);
     slot->len      = sizeof(hdr) + pkt.rawLen;
-    slot->sendAtMs = millis() + 20 + (esp_random() % 131);  // 20–150 ms jitter
+    slot->sendAtMs = millis() + delayMs;
+    slot->from     = pkt.hdr.from;
+    slot->id       = pkt.hdr.id;
+    slot->snr      = pkt.snr;
+    slot->late     = false;
     slot->active   = true;
 
-    debugLogMessages("[fwd] queued from=%08lx id=%08lx hop %u->%u %s\n",
+    debugLogMessages("[fwd] queued from=%08lx id=%08lx hop %u->%u in %lu ms %s\n",
                      (unsigned long)pkt.hdr.from, (unsigned long)pkt.hdr.id,
-                     hopLimit, hopLimit - 1, portnumName(pkt.portnum));
+                     hopLimit, outHopLimit, (unsigned long)delayMs, portnumName(pkt.portnum));
+}
+
+// Another node's copy of a packet we may have queued: heard over the radio, so
+// someone has just carried it. An ordinary relay stands down (that node covered
+// the ground ours would have); a CLIENT_BASE relaying for a favorite moves to
+// the late window instead, so it still goes out once, after everyone else.
+// MQTT-downlinked copies never get here: a broker delivering a packet says
+// nothing about who heard it on the air around us.
+static void relayHeardDuplicate(const MeshPacket &pkt) {
+    for (uint8_t i = 0; i < kMaxPendingRebroadcast; i++) {
+        PendingRebroadcast &p = s_pendingRebroadcast[i];
+        if (!p.active || p.from != pkt.hdr.from || p.id != pkt.hdr.id) continue;
+
+        const uint8_t hopLimit = pkt.hdr.flags & 0x07;
+        const uint8_t hopStart = (uint8_t)((pkt.hdr.flags >> 5) & 0x07);
+        const bool repeatedByOrigin = hopStart > 0 && hopStart == hopLimit;
+        switch (relay::onDuplicateHeard(s_cfg.deviceRole, relayFavoriteParty(pkt.hdr), repeatedByOrigin)) {
+            case relay::DupeAction::Cancel:
+                p.active = false;
+                s_relayStoodDownCount++;
+                debugLogMessages("[fwd] stood down id=%08lx (heard relayed)\n",
+                                 (unsigned long)pkt.hdr.id);
+                break;
+            case relay::DupeAction::MoveLate:
+                if (!p.late) {
+                    p.sendAtMs = millis() + relay::lateWindowMsec(p.snr, relaySlotMs());
+                    p.late = true;
+                    debugLogMessages("[fwd] late window id=%08lx\n", (unsigned long)pkt.hdr.id);
+                }
+                break;
+            case relay::DupeAction::Keep:
+                break;
+        }
+        return;
+    }
+}
+
+// Milliseconds until the earliest queued relay is due (0 when one already is),
+// or false when nothing is queued. Light-sleep naps are cut to this, so a relay
+// leaves when its window says rather than up to a nap later.
+static bool relayNextDueInMs(uint32_t now, uint32_t &outMs) {
+    bool any = false;
+    uint32_t best = 0;
+    for (uint8_t i = 0; i < kMaxPendingRebroadcast; i++) {
+        const PendingRebroadcast &p = s_pendingRebroadcast[i];
+        if (!p.active) continue;
+        const int32_t left = (int32_t)(p.sendAtMs - now);
+        const uint32_t ms = left > 0 ? (uint32_t)left : 0;
+        if (!any || ms < best) best = ms;
+        any = true;
+    }
+    outMs = best;
+    return any;
 }
 
 // Transmit at most one queued rebroadcast whose contention-jitter deadline has
@@ -56358,7 +56470,10 @@ static void chatServerLabel(char *out, size_t outLen) {
 static bool processMeshPacket(const MeshPacket &rxPkt) {
     MeshPacket pkt = rxPkt;
 
-    if (isDuplicate(pkt.hdr.from, pkt.hdr.id)) return false;
+    if (isDuplicate(pkt.hdr.from, pkt.hdr.id)) {
+        if (s_rxFromRadio) relayHeardDuplicate(pkt);
+        return false;
+    }
 
     // Match v1 behavior: ignore reflected copies of our own transmitted packets.
     if (s_myNodeId != 0 && pkt.hdr.from == s_myNodeId) return false;
@@ -56939,7 +57054,9 @@ static bool pollMeshRx() {
     bool changed = false;
     MeshPacket pkt;
     while (Radio.pollRx(pkt)) {
+        s_rxFromRadio = true;
         changed = processMeshPacket(pkt) || changed;
+        s_rxFromRadio = false;
     }
 
     if (Channels.expireAcks()) {
@@ -57506,6 +57623,11 @@ static uint32_t s_lastAutoFavMs = 0;
 // pinned by hand — and favorites are what protect a node from eviction.
 static void serviceAutoFavorite(uint32_t nowMs) {
     if (!s_cfg.autoFavoriteEnabled || s_cfg.autoFavoriteRangeM == 0) return;
+    // On CLIENT_BASE a favorite is a routing decision -- whose traffic this node
+    // always relays -- so it is the owner's to make, never a radius's. Upstream
+    // refuses to auto-favorite on this role for the same reason. The setting is
+    // left alone, and applies again if the role changes back.
+    if (s_cfg.deviceRole == relay::ROLE_CLIENT_BASE) return;
     if (s_lastAutoFavMs != 0 && (uint32_t)(nowMs - s_lastAutoFavMs) < kAutoFavIntervalMs) return;
     s_lastAutoFavMs = nowMs;
 
@@ -60845,7 +60967,7 @@ static void seedChatForRepro(int requestedCount) {
 //   cfg set longname <%-encoded>       the on-device setup answers; on first
 //   cfg set shortname <%-encoded>      boot a commit with a region finishes
 //   cfg set region <code>              setup in their place (unset names come
-//   cfg set role <CLIENT|CLIENT_MUTE|TRACKER|CLIENT_HIDDEN>   from the node ID)
+//   cfg set role <CLIENT|CLIENT_MUTE|TRACKER|CLIENT_HIDDEN|CLIENT_BASE>   from the node ID)
 //   cfg set ssid <%-encoded>
 //   cfg set wifipass <%-encoded>
 //   cfg commit
@@ -61198,13 +61320,20 @@ static bool cfgSetSetupField(const char *args) {
         return true;
     }
     if (is("role")) {
-        // The roles setup offers, and no others.
+        // The roles setup offers, plus CLIENT_BASE below.
         for (int i = 0; i < kOnboardRoleCount; i++) {
             if (!strcasecmp(value, kOnboardRoles[i].label)) {
                 s_cfgSetup.role = kOnboardRoles[i].value;
                 s_cliOut->printf("[cfg] ok role=%s staged\n", kOnboardRoles[i].label);
                 return true;
             }
+        }
+        // CLIENT_BASE on a board whose setup does not suggest it: the
+        // customizer is how someone sets up a base, so it is taken here.
+        if (!strcasecmp(value, "CLIENT_BASE")) {
+            s_cfgSetup.role = 12;
+            s_cliOut->printf("[cfg] ok role=CLIENT_BASE staged\n");
+            return true;
         }
         s_cliOut->printf("[cfg] err role: unknown \"%s\"\n", value);
         return true;
@@ -62830,12 +62959,21 @@ static bool enterLightNap() {
         if (digitalRead(w.pin) == (w.wakeOnHigh ? HIGH : LOW)) return false;
     }
 
+    // A queued relay sets its own deadline: nap until then at most, and not at
+    // all when it is due within a few ms (entry and exit cost more).
+    uint32_t napMs = kNapMs;
+    uint32_t relayDueMs = 0;
+    if (relayNextDueInMs(millis(), relayDueMs) && relayDueMs < napMs) {
+        if (relayDueMs < 3) return false;
+        napMs = relayDueMs;
+    }
+
     for (const NapWakeLine &w : kNapWakeLines) {
         gpio_wakeup_enable((gpio_num_t)w.pin,
                            w.wakeOnHigh ? GPIO_INTR_HIGH_LEVEL : GPIO_INTR_LOW_LEVEL);
     }
     esp_sleep_enable_gpio_wakeup();
-    esp_sleep_enable_timer_wakeup((uint64_t)kNapMs * 1000ULL);
+    esp_sleep_enable_timer_wakeup((uint64_t)napMs * 1000ULL);
     esp_light_sleep_start();
 
     if (esp_sleep_get_wakeup_cause() == ESP_SLEEP_WAKEUP_GPIO && s_radioReady) {
