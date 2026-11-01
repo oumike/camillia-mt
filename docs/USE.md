@@ -2440,6 +2440,12 @@ separated from the rest by a dashed divider, and a favorite's detail panel reads
 device's own Nodes screen uses. Lite has no Nodes tab, so this is everywhere the
 full page is served — every board except the Cardputer.
 
+The search box above the dropdown narrows it as you type. It matches the short
+name, the long name and the node ID, with or without the leading `!`, so
+`1a2b` finds `!1a2b3c4d`. The line under the box says how many nodes match.
+When only one is left it is shown straight away, Enter shows the first match,
+and Esc clears the search.
+
 The top-right corner of a node's detail panel has a **Favorite** /
 **Unfavorite** button. It takes effect immediately — the same flag the device's
 own Nodes → Actions → Favorite sets, saved to NVS on the spot — and the page

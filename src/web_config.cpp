@@ -5933,6 +5933,11 @@ static void sendConfigPage(const char *msg = "", bool lite = false) {
     html += "<h3>Nodes Seen</h3>";
     if (totalNodes > 0) {
         html += "<p class='gps-hint'>Select a node to see its details and location.</p>";
+        // Filters the list below as you type; Enter picks the first match.
+        html += "<input type='search' id='node-search' autocomplete='off' spellcheck='false' "
+                "placeholder='Search by name or node ID' "
+                "oninput='renderNodeOptions()' onkeydown='nodeSearchKey(event)'>";
+        html += "<p class='gps-hint' id='node-search-count' style='margin:.2em 0'></p>";
         html += "<select id='node-select' onchange='selectNode()'>";
         html += "<option value=''>-- select a node --</option>";
         sendChunk(html);            // flush before streaming the option list
@@ -7214,32 +7219,80 @@ static void sendConfigPage(const char *msg = "", bool lite = false) {
                         // favorites first, everything else after, relative order
                         // untouched inside each group (the server's secondary keys
                         // — named-ness, then recency — still hold within a group,
-                        // and nothing here reorders across one). appendChild moves
-                        // existing nodes, so no option is rebuilt and the values
-                        // that map to nd-<rank> are never touched.
-                        "function resortNodeOptions(){"
-                            "var sel=document.getElementById('node-select');"
-                            "if(!sel)return;"
-                            "var keep=sel.value,favs=[],rest=[],div=null,i,o;"
+                        // and nothing here reorders across one). The options are
+                        // kept in NODE_OPTS, read once from the streamed list, and
+                        // the select is refilled from it, so the search can take
+                        // options out and put them back: hiding an <option> is not
+                        // honoured by every browser (iOS Safari shows it anyway).
+                        // No option is rebuilt and the values that map to
+                        // nd-<rank> are never touched.
+                        "var NODE_OPTS=null,NODE_DIV=null;"
+                        "function nodeOpts(){"
+                            "if(NODE_OPTS)return NODE_OPTS;"
+                            "var sel=document.getElementById('node-select'),a=[],i,o;"
+                            "if(!sel)return a;"
                             "for(i=0;i<sel.options.length;i++){"
                                 "o=sel.options[i];"
-                                "if(o.getAttribute('data-fav-divider')==='1'){div=o;continue;}"
-                                "if(!o.hasAttribute('data-nid'))continue;"   // the placeholder
+                                "if(o.getAttribute('data-fav-divider')==='1'){NODE_DIV=o;continue;}"
+                                "if(o.hasAttribute('data-nid'))a.push(o);"   // not the placeholder
+                            "}"
+                            "NODE_OPTS=a;"
+                            "return a;"
+                        "}"
+                        // Short and long name as shown, plus the id: "!1a2b3c4d",
+                        // so "1a2b", "!1a2b" and "3c4d" all find it.
+                        "function nodeOptMatches(o,q){"
+                            "if(!q)return true;"
+                            "var t=(o.textContent+' '+(o.getAttribute('data-nid')||'')).toLowerCase();"
+                            "return t.indexOf(q)>=0||t.indexOf(q.replace(/^!/,''))>=0;"
+                        "}"
+                        "function renderNodeOptions(){"
+                            "var sel=document.getElementById('node-select');"
+                            "if(!sel)return;"
+                            "var box=document.getElementById('node-search');"
+                            "var q=box?box.value.trim().toLowerCase():'';"
+                            "var all=nodeOpts(),keep=sel.value,favs=[],rest=[],i,o;"
+                            "for(i=0;i<all.length;i++){"
+                                "o=all[i];"
+                                "if(!nodeOptMatches(o,q))continue;"
                                 "if(o.getAttribute('data-fav')==='1')favs.push(o);else rest.push(o);"
                             "}"
-                            "if(div&&div.parentNode)div.parentNode.removeChild(div);"
+                            "while(sel.options.length>1)sel.remove(1);"   // keeps the placeholder
                             "for(i=0;i<favs.length;i++)sel.appendChild(favs[i]);"
                             "if(favs.length&&rest.length){"
-                                "if(!div){"
-                                    "div=document.createElement('option');"
-                                    "div.disabled=true;"
-                                    "div.setAttribute('data-fav-divider','1');"
-                                    "div.textContent='\\u2014\\u2014\\u2014\\u2014\\u2014\\u2014\\u2014\\u2014\\u2014\\u2014\\u2014\\u2014';"
+                                "if(!NODE_DIV){"
+                                    "NODE_DIV=document.createElement('option');"
+                                    "NODE_DIV.disabled=true;"
+                                    "NODE_DIV.setAttribute('data-fav-divider','1');"
+                                    "NODE_DIV.textContent='\\u2014\\u2014\\u2014\\u2014\\u2014\\u2014\\u2014\\u2014\\u2014\\u2014\\u2014\\u2014';"
                                 "}"
-                                "sel.appendChild(div);"
+                                "sel.appendChild(NODE_DIV);"
                             "}"
                             "for(i=0;i<rest.length;i++)sel.appendChild(rest[i]);"
+                            "var hits=favs.length+rest.length;"
+                            "var cnt=document.getElementById('node-search-count');"
+                            "if(cnt)cnt.textContent=!q?'':(hits?(hits+' of '+all.length+' nodes'):'No nodes match');"
                             "sel.value=keep;"
+                            "if(sel.value!==keep)sel.value='';"   // the selected node was filtered out
+                            // One match: show it, so a typed id or name is all it takes.
+                            "if(q&&hits===1){"
+                                "var only=favs.length?favs[0]:rest[0];"
+                                "if(sel.value!==only.value){sel.value=only.value;selectNode();}"
+                            "}"
+                        "}"
+                        "function resortNodeOptions(){renderNodeOptions();}"
+                        "function nodeSearchKey(e){"
+                            "if(e.key==='Escape'){e.target.value='';renderNodeOptions();return;}"
+                            "if(e.key!=='Enter')return;"
+                            "e.preventDefault();"
+                            "var sel=document.getElementById('node-select'),i,o;"
+                            "if(!sel)return;"
+                            "for(i=1;i<sel.options.length;i++){"
+                                "o=sel.options[i];"
+                                "if(o.disabled)continue;"
+                                "if(sel.value!==o.value){sel.value=o.value;selectNode();}"
+                                "return;"
+                            "}"
                         "}"
                         "function toggleNodeFavorite(btn){"
                             "var id=btn.getAttribute('data-fav-btn');"
