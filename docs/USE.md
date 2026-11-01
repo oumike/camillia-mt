@@ -947,6 +947,14 @@ Config includes Web Config controls, export and import, the theme picker, and
 reset actions. Announcing to the mesh has moved to Live → Tools → Announce.
 
 - Open from the main screen (C on keyboard builds, Config bottom-nav button on Heltec)
+- **Config opens on a grid of sections**: Radio & Identity, Connections,
+  Location, Channels & Security, Display, Chat, Sound & Alerts, Mesh Services,
+  Device & Firmware, and Data & Reset. Every board has it. The grid is two
+  columns, or three on a screen at least 600 px wide (the CrowPanel 5.0, and
+  the T-Display P4 in landscape). Tap a section, or move to it with Up/Down
+  and press Enter, to list its rows. **‹ Back** or the close key returns to the
+  grid; the close key on the grid closes Config. A section with nothing in it
+  on your board is left off
 - Navigate action rows with Up and Down input. The list wraps: going up from
   the first row lands on the last, and down from the last returns to the first
 - Enter runs the selected action
@@ -961,7 +969,8 @@ reset actions. Announcing to the mesh has moved to Live → Tools → Announce.
   Space to arm the filter, then type to narrow the list; the header shows
   `[what you typed]` and how many rows match. Backspace edits the filter and
   disarms it once empty, Up/Down and Enter work normally on whatever is left,
-  and closing Config clears the filter. Rows are matched on the label you can
+  and closing Config clears the filter. The filter searches every section's
+  rows at once, from the grid or from inside a section. Rows are matched on the label you can
   see, so typing part of a value works too — `on` finds every setting currently
   switched on. Keyboard builds only; the touch-only Heltec has no Space to press.
 

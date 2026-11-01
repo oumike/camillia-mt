@@ -657,15 +657,12 @@
 #define MY_NAV_BAR_ENABLED 0
 #endif
 
-// Config opens on a two-column grid of section buttons (Radio & Identity,
-// Connections, Display, ...) and a tap lists that section's rows, on every
-// board with a touch panel: one long list is a lot of flicking to find a row
-// on glass. Builds without touch keep the single list their keys walk.
-#if HAS_TOUCH
+// Config opens on a grid of section buttons (Radio & Identity, Connections,
+// Display, ...), and a tap or Enter lists that section's rows, on every board.
+// Two columns, three where the screen is wide enough (see buildCfgGrid()).
+// Keys walk the grid the way they walk the rows, and the close key steps back
+// out of a section before it closes Config.
 #define UI_CFG_SECTIONS 1
-#else
-#define UI_CFG_SECTIONS 0
-#endif
 
 // A notification LED that blinks while messages are unread. Only the Mesh Deck
 // has one wired (RGB cathodes on expander 0x59 P10..P12, driven by
