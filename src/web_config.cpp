@@ -3493,6 +3493,15 @@ static void sendConfigPage(const char *msg = "", bool lite = false) {
             buf += optId;
             buf += "' data-fav='";
             buf += n->favorite ? "1" : "0";
+            // For the dropdown's filters: a NodeInfo name heard, and a
+            // position the map can place.
+            buf += "' data-known='";
+            buf += n->hasName ? "1" : "0";
+            {
+                float lat = 0.0f, lon = 0.0f;
+                buf += "' data-loc='";
+                buf += extractNodeCoords(n, lat, lon) ? "1" : "0";
+            }
             buf += "'>";
             appendAttr(buf, shortName);
             buf += " -- ";
@@ -5911,7 +5920,7 @@ static void sendConfigPage(const char *msg = "", bool lite = false) {
     html += "</div>";  // #chat-body
 #endif
     html += "</div><div class='tab-panel' id='tab-map'>";
-    html += "<h3>Node Heatmap</h3>";
+    html += "<h3>Nodes</h3>";
     html += "<p class='gps-hint'>Positioned nodes: ";
     snprintf(tmp, sizeof(tmp), "%d", mapPointCount);
     html += tmp;
@@ -5919,6 +5928,32 @@ static void sendConfigPage(const char *msg = "", bool lite = false) {
     snprintf(tmp, sizeof(tmp), "%d", totalNodes);
     html += tmp;
     html += ". Heat intensity increases where multiple nodes overlap.</p>";
+    if (totalNodes > 0) {
+        // Two ways to pick a node, one result: the dropdown and a search match
+        // both fill #node-info below and centre the map on the node.
+        // Narrow the dropdown only; the search below always looks at every node.
+        html += "<div class='node-filters'>"
+                "<label><input type='checkbox' id='nf-known' onchange='nodeFilterChanged()'>Show only known</label>"
+                "<label><input type='checkbox' id='nf-loc' onchange='nodeFilterChanged()'>Show only with location</label>"
+                "<label><input type='checkbox' id='nf-fav' onchange='nodeFilterChanged()'>Show only favorites</label>"
+                "</div>";
+        html += "<p class='gps-hint' id='node-filter-count' style='margin:.1em 0 .2em'></p>";
+        html += "<select id='node-select' onchange='selectNode()'>";
+        html += "<option value=''>-- select a node --</option>";
+        sendChunk(html);            // flush before streaming the option list
+        streamNodeOptions();
+        html += "</select>";
+        // Narrows the dropdown as you type, lists the matches under it and
+        // marks the positioned ones on the map.
+        html += "<input type='search' id='node-search' autocomplete='off' spellcheck='false' "
+                "placeholder='Search nodes by name or ID' style='margin-top:.5em' "
+                "oninput='renderNodeOptions()' onkeydown='nodeSearchKey(event)'>";
+        html += "<p class='gps-hint' id='node-search-count' style='margin:.25em 0 0'></p>";
+        html += "<div id='node-search-results' class='node-results' style='display:none'></div>";
+        html += "<div id='node-info' style='margin-top:.6em'></div>";
+    } else {
+        html += "<p class='gps-hint'>No nodes discovered yet.</p>";
+    }
     html += "<div class='map-controls'>"
             "<button type='button' id='map-fit-btn' class='map-mini-btn' onclick='fitNodeMap()'>Fit Nodes</button>"
             "<button type='button' class='map-mini-btn' onclick='worldNodeMap()'>World View</button>"
@@ -5930,23 +5965,11 @@ static void sendConfigPage(const char *msg = "", bool lite = false) {
             "<div id='node-heatmap' class='map-canvas'></div>"
             "<div class='map-legend'><span>Drag to pan, scroll/pinch to zoom</span><span id='map-status'></span></div>"
             "</div>";
-    html += "<h3>Nodes Seen</h3>";
     if (totalNodes > 0) {
-        html += "<p class='gps-hint'>Select a node to see its details and location.</p>";
-        html += "<select id='node-select' onchange='selectNode()'>";
-        html += "<option value=''>-- select a node --</option>";
-        sendChunk(html);            // flush before streaming the option list
-        streamNodeOptions();
-        html += "</select>";
-        html += "<div id='node-info' style='margin-top:.6em'></div>";
-        html += "<div class='map-wrap' style='margin-top:.6em'>"
-                "<div id='node-mini-map' class='map-canvas' style='height:220px'></div></div>";
         html += "<div id='node-detail-store' style='display:none'>";
         sendChunk(html);            // flush before streaming the detail panels
         streamNodeDetails();
         html += "</div>";
-    } else {
-        html += "<p class='gps-hint'>No nodes discovered yet.</p>";
     }
     html += "<script>var NODE_HEAT_POINTS=";
     sendChunk(html);                // flush before streaming the points array
@@ -7155,40 +7178,31 @@ static void sendConfigPage(const char *msg = "", bool lite = false) {
                             "if(nodeHeatOn){nodeMap.removeLayer(nodeHeatLayer);nodeHeatOn=false;if(hb){hb.textContent='Heat: Off';hb.classList.remove('active');}}"
                             "else{nodeHeatLayer.addTo(nodeMap);nodeHeatOn=true;if(hb){hb.textContent='Heat: On';hb.classList.add('active');}}"
                         "}"
-                        "var nodeMini=null;var nodeMiniMarker=null;"
-                        "function ensureNodeMini(){"
-                            "var el=document.getElementById('node-mini-map');"
-                            "if(!el)return null;"
-                            "if(!window.L){el.innerHTML='<div style=\"padding:1em;color:#ffd0d0\">Map library unavailable. Check internet access.</div>';return null;}"
-                            "if(nodeMini){nodeMini.invalidateSize();return nodeMini;}"
-                            "nodeMini=L.map('node-mini-map',{zoomControl:true,minZoom:2,maxZoom:19});"
-                            "L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png',{maxZoom:19,attribution:'&copy; OpenStreetMap contributors'}).addTo(nodeMini);"
-                            "return nodeMini;"
-                        "}"
-                        "function showNodeMini(hasLoc,lat,lon){"
-                            "var m=ensureNodeMini();"
-                            "if(!m)return;"
-                            "if(nodeMiniMarker){m.removeLayer(nodeMiniMarker);nodeMiniMarker=null;}"
-                            "if(hasLoc&&isFinite(lat)&&isFinite(lon)){"
-                                "m.setView([lat,lon],12);"
-                                "nodeMiniMarker=L.marker([lat,lon]).addTo(m);"
-                            "}else{"
-                                // No node position: show a regional map (this device's area if known).
-                                "var me=window.NODE_ME_POINT;"
-                                "if(me&&isFinite(me.lat)&&isFinite(me.lon))m.setView([me.lat,me.lon],7);"
-                                "else m.setView([39.5,-98.35],4);"
-                            "}"
-                            "setTimeout(function(){m.invalidateSize();},50);"
-                        "}"
+                        // The picked node: its card in #node-info, and the map
+                        // centred on it, marked the way search matches are (see
+                        // nodeMatchMarker()). The dropdown, a search match and a
+                        // marker on the map all end up here.
+                        "var nodePinMarker=null;"
                         "function selectNode(){"
                             "var sel=document.getElementById('node-select');"
                             "var info=document.getElementById('node-info');"
                             "if(!sel||!info)return;"
-                            "if(sel.value===''){info.innerHTML='';return;}"
-                            "var d=document.getElementById('nd-'+sel.value);"
+                            "var v=sel.value;"
+                            "var btns=document.querySelectorAll('#node-search-results button'),i;"
+                            "for(i=0;i<btns.length;i++)btns[i].classList.toggle('active',btns[i].getAttribute('data-v')===v);"
+                            "if(nodePinMarker&&nodeMap){nodeMap.removeLayer(nodePinMarker);nodePinMarker=null;}"
+                            "if(v===''){info.innerHTML='';return;}"
+                            "var d=document.getElementById('nd-'+v);"
                             "if(!d){info.innerHTML='';return;}"
                             "info.innerHTML=d.innerHTML;"
-                            "showNodeMini(d.getAttribute('data-loc')==='1',parseFloat(d.getAttribute('data-lat')),parseFloat(d.getAttribute('data-lon')));"
+                            "ensureNodeMap();"
+                            "var ll=nodeLoc(v);"
+                            "if(!nodeMap)return;"
+                            "if(!ll){setMapStatus('No position for '+(sel.options[sel.selectedIndex]||{}).textContent);return;}"
+                            "nodePinMarker=nodeMatchMarker(ll,(sel.options[sel.selectedIndex]||{}).textContent||'',v).addTo(nodeMap);"
+                            "nodePinMarker.bringToFront();"
+                            "nodeMap.setView(ll,Math.max(nodeMap.getZoom()||0,13));"
+                            "setMapStatus((sel.options[sel.selectedIndex]||{}).textContent||'');"
                         "}"
                         // ── Favorite toggle ───────────────────────────────────
                         // The detail panels are cloned out of the hidden store
@@ -7210,36 +7224,211 @@ static void sendConfigPage(const char *msg = "", bool lite = false) {
                             "for(i=0;i<opts.length;i++)opts[i].setAttribute('data-fav',fav?'1':'0');"
                             "resortNodeOptions();"
                         "}"
-                        // Re-partitions the dropdown the way the device ranks it:
-                        // favorites first, everything else after, relative order
-                        // untouched inside each group (the server's secondary keys
-                        // — named-ness, then recency — still hold within a group,
-                        // and nothing here reorders across one). appendChild moves
-                        // existing nodes, so no option is rebuilt and the values
-                        // that map to nd-<rank> are never touched.
-                        "function resortNodeOptions(){"
-                            "var sel=document.getElementById('node-select');"
-                            "if(!sel)return;"
-                            "var keep=sel.value,favs=[],rest=[],div=null,i,o;"
+                        // The streamed options, read once into NODE_OPTS: the
+                        // dropdown is refilled from it in its own order (see
+                        // renderNodeDropdown()), and the search reads it without
+                        // touching the dropdown. No option is rebuilt, and the
+                        // values that map to nd-<rank> are never touched.
+                        "var NODE_OPTS=null,NODE_DIV=null;"
+                        "function nodeOpts(){"
+                            "if(NODE_OPTS)return NODE_OPTS;"
+                            "var sel=document.getElementById('node-select'),a=[],i,o;"
+                            "if(!sel)return a;"
                             "for(i=0;i<sel.options.length;i++){"
                                 "o=sel.options[i];"
-                                "if(o.getAttribute('data-fav-divider')==='1'){div=o;continue;}"
-                                "if(!o.hasAttribute('data-nid'))continue;"   // the placeholder
+                                "if(o.getAttribute('data-fav-divider')==='1'){NODE_DIV=o;continue;}"
+                                "if(o.hasAttribute('data-nid'))a.push(o);"   // not the placeholder
+                            "}"
+                            "NODE_OPTS=a;"
+                            "return a;"
+                        "}"
+                        // Short and long name as shown, plus the id: "!1a2b3c4d",
+                        // so "1a2b", "!1a2b" and "3c4d" all find it.
+                        "function nodeOptMatches(o,q){"
+                            "if(!q)return true;"
+                            "var t=(o.textContent+' '+(o.getAttribute('data-nid')||'')).toLowerCase();"
+                            "return t.indexOf(q)>=0||t.indexOf(q.replace(/^!/,''))>=0;"
+                        "}"
+                        // Alphabetical by what the option shows ("SHORT -- Long
+                        // name"), ignoring case and reading digits as numbers.
+                        // Nodes that have sent no NodeInfo show "----" and sort
+                        // last rather than ahead of every letter.
+                        "function nodeOptKey(o){"
+                            "var t=o.textContent;"
+                            "return t.indexOf('----')===0?'\\uffff'+t:t;"
+                        "}"
+                        "function nodeOptCmp(a,b){"
+                            "return nodeOptKey(a).localeCompare(nodeOptKey(b),undefined,{sensitivity:'base',numeric:true});"
+                        "}"
+                        // The dropdown's checkboxes, as option attributes that
+                        // must read '1'.
+                        "function nodeFilterAttrs(){"
+                            "var f=[],ids=[['nf-known','data-known'],['nf-loc','data-loc'],['nf-fav','data-fav']],i,c;"
+                            "for(i=0;i<ids.length;i++){c=document.getElementById(ids[i][0]);if(c&&c.checked)f.push(ids[i][1]);}"
+                            "return f;"
+                        "}"
+                        // Favorites first, as the device ranks them, then the
+                        // rest, each group alphabetical; q filters, '' keeps all.
+                        // attrs: the dropdown's checkboxes; the search passes none.
+                        "function nodeGroups(q,attrs){"
+                            "var all=nodeOpts(),favs=[],rest=[],i,j,o,skip;"
+                            "for(i=0;i<all.length;i++){"
+                                "o=all[i];"
+                                "if(!nodeOptMatches(o,q))continue;"
+                                "skip=false;"
+                                "for(j=0;attrs&&j<attrs.length;j++)if(o.getAttribute(attrs[j])!=='1')skip=true;"
+                                "if(skip)continue;"
                                 "if(o.getAttribute('data-fav')==='1')favs.push(o);else rest.push(o);"
                             "}"
-                            "if(div&&div.parentNode)div.parentNode.removeChild(div);"
-                            "for(i=0;i<favs.length;i++)sel.appendChild(favs[i]);"
-                            "if(favs.length&&rest.length){"
-                                "if(!div){"
-                                    "div=document.createElement('option');"
-                                    "div.disabled=true;"
-                                    "div.setAttribute('data-fav-divider','1');"
-                                    "div.textContent='\\u2014\\u2014\\u2014\\u2014\\u2014\\u2014\\u2014\\u2014\\u2014\\u2014\\u2014\\u2014';"
+                            "favs.sort(nodeOptCmp);"
+                            "rest.sort(nodeOptCmp);"
+                            "return{favs:favs,rest:rest,total:all.length};"
+                        "}"
+                        // The dropdown always lists every node; the search only
+                        // drives the results list and the map.
+                        "function renderNodeDropdown(){"
+                            "var sel=document.getElementById('node-select');"
+                            "if(!sel)return;"
+                            "var attrs=nodeFilterAttrs(),g=nodeGroups('',attrs),keep=sel.value,i;"
+                            "while(sel.options.length>1)sel.remove(1);"   // keeps the placeholder
+                            "for(i=0;i<g.favs.length;i++)sel.appendChild(g.favs[i]);"
+                            "if(g.favs.length&&g.rest.length){"
+                                "if(!NODE_DIV){"
+                                    "NODE_DIV=document.createElement('option');"
+                                    "NODE_DIV.disabled=true;"
+                                    "NODE_DIV.setAttribute('data-fav-divider','1');"
+                                    "NODE_DIV.textContent='\\u2014\\u2014\\u2014\\u2014\\u2014\\u2014\\u2014\\u2014\\u2014\\u2014\\u2014\\u2014';"
                                 "}"
-                                "sel.appendChild(div);"
+                                "sel.appendChild(NODE_DIV);"
                             "}"
-                            "for(i=0;i<rest.length;i++)sel.appendChild(rest[i]);"
+                            "for(i=0;i<g.rest.length;i++)sel.appendChild(g.rest[i]);"
                             "sel.value=keep;"
+                            "if(sel.value!==keep)sel.value='';"   // the picked node was filtered out
+                            "var shown=g.favs.length+g.rest.length,cnt=document.getElementById('node-filter-count');"
+                            "if(cnt)cnt.textContent=!attrs.length?'':(shown?('Showing '+shown+' of '+g.total+' nodes'):'No nodes match these filters');"
+                        "}"
+                        // Remembered per browser, like a tab; a page without
+                        // storage just starts with every box clear.
+                        "function nodeFilterChanged(){"
+                            "try{localStorage.setItem('nodeFilters',JSON.stringify(nodeFilterAttrs()));}catch(e){}"
+                            "renderNodeDropdown();"
+                        "}"
+                        "function nodeFilterRestore(){"
+                            "var f=[],i,c,ids={'data-known':'nf-known','data-loc':'nf-loc','data-fav':'nf-fav'};"
+                            "try{f=JSON.parse(localStorage.getItem('nodeFilters')||'[]')||[];}catch(e){}"
+                            "for(i=0;i<f.length;i++){c=document.getElementById(ids[f[i]]);if(c)c.checked=true;}"
+                            "renderNodeDropdown();"
+                        "}"
+                        // keepView: a re-sort after a favorite toggle, which must
+                        // not move the map or re-pick a node under the user.
+                        "function renderNodeOptions(keepView){"
+                            "var sel=document.getElementById('node-select');"
+                            "if(!sel)return;"
+                            "var box=document.getElementById('node-search');"
+                            "var q=box?box.value.trim().toLowerCase():'';"
+                            "var g=nodeGroups(q),list=g.favs.concat(g.rest);"
+                            "var cnt=document.getElementById('node-search-count');"
+                            "if(cnt)cnt.textContent=!q?'':(list.length?(list.length+' of '+g.total+' nodes match'):'No nodes match');"
+                            "renderNodeResults(q?list:[]);"
+                            "renderNodeSearchMap(q?list:null,!keepView);"
+                            // One match: show it, so a typed id or name is all it takes.
+                            "if(q&&list.length===1&&!keepView&&sel.value!==list[0].value)nodePick(list[0].value);"
+                        "}"
+                        "function resortNodeOptions(){renderNodeDropdown();renderNodeOptions(true);}"
+                        "if(document.readyState!=='loading')nodeFilterRestore();"
+                        "else document.addEventListener('DOMContentLoaded',nodeFilterRestore);"
+                        // A node's position, from its detail panel; null when it
+                        // has none.
+                        "function nodeLoc(v){"
+                            "var d=document.getElementById('nd-'+v);"
+                            "if(!d||d.getAttribute('data-loc')!=='1')return null;"
+                            "var la=parseFloat(d.getAttribute('data-lat')),lo=parseFloat(d.getAttribute('data-lon'));"
+                            "return(isFinite(la)&&isFinite(lo))?[la,lo]:null;"
+                        "}"
+                        // The matches, one button each, under the search box.
+                        "function renderNodeResults(list){"
+                            "var box=document.getElementById('node-search-results');"
+                            "if(!box)return;"
+                            "box.innerHTML='';"
+                            "if(!list.length){box.style.display='none';return;}"
+                            "var max=Math.min(list.length,100),sel=document.getElementById('node-select'),i,o,b,nm,id;"
+                            "for(i=0;i<max;i++){"
+                                "o=list[i];"
+                                "b=document.createElement('button');"
+                                "b.type='button';"
+                                "b.setAttribute('data-v',o.value);"
+                                "if(sel&&sel.value===o.value)b.classList.add('active');"
+                                "nm=document.createElement('span');"
+                                "nm.textContent=o.textContent;"
+                                "id=document.createElement('span');"
+                                "id.className='nr-id';"
+                                "id.textContent=(o.getAttribute('data-nid')||'')+(nodeLoc(o.value)?'':' \\u00b7 no position');"
+                                "b.appendChild(nm);"
+                                "b.appendChild(id);"
+                                "b.onclick=function(){nodePick(this.getAttribute('data-v'));};"
+                                "box.appendChild(b);"
+                            "}"
+                            "if(list.length>max){"
+                                "var more=document.createElement('div');"
+                                "more.className='nr-more';"
+                                "more.textContent=(list.length-max)+' more \\u2014 keep typing to narrow the search';"
+                                "box.appendChild(more);"
+                            "}"
+                            "box.style.display='';"
+                        "}"
+                        // Marks the positioned matches on the map, over the heat
+                        // layer; null clears them. fit: frame them.
+                        "var nodeSearchLayer=null;"
+                        // The blue marker for a node found or picked: a click on
+                        // it picks it.
+                        "function nodeMatchMarker(ll,label,v){"
+                            "var mk=L.circleMarker(ll,{radius:8,weight:2,color:'#ffffff',fillColor:'#3fa9f5',fillOpacity:0.95});"
+                            "mk.bindTooltip(label);"
+                            "mk.on('click',function(){nodePick(v);});"
+                            "return mk;"
+                        "}"
+                        "function renderNodeSearchMap(list,fit){"
+                            "if(!list){"
+                                "if(nodeSearchLayer&&nodeMap){nodeMap.removeLayer(nodeSearchLayer);nodeSearchLayer=null;}"
+                                "if(nodeMap&&nodeMarkerLayer){var n0=nodeMarkerLayer.getLayers().length;"
+                                    "setMapStatus(n0?(n0+' positioned node'+(n0===1?'':'s')):'No node positions yet');}"
+                                "return;"
+                            "}"
+                            "ensureNodeMap();"
+                            "if(!nodeMap)return;"
+                            "if(nodeSearchLayer)nodeSearchLayer.clearLayers();"
+                            "else nodeSearchLayer=L.featureGroup().addTo(nodeMap);"
+                            "var i,o,ll,n=0;"
+                            "for(i=0;i<list.length;i++){"
+                                "o=list[i];"
+                                "ll=nodeLoc(o.value);"
+                                "if(!ll)continue;"
+                                "nodeMatchMarker(ll,o.textContent,o.value).addTo(nodeSearchLayer);"
+                                "n++;"
+                            "}"
+                            "setMapStatus(n?(n+' match'+(n===1?'':'es')+' on the map'):'No matching node has a position');"
+                            "if(fit&&n)nodeMap.fitBounds(nodeSearchLayer.getBounds(),{padding:[24,24],maxZoom:13});"
+                        "}"
+                        // A search match or a map marker picked: the same as
+                        // choosing it in the dropdown.
+                        "function nodePick(v){"
+                            "var sel=document.getElementById('node-select');"
+                            "if(!sel)return;"
+                            "sel.value=v;"
+                            "selectNode();"
+                        "}"
+                        "function nodeSearchKey(e){"
+                            "if(e.key==='Escape'){e.target.value='';renderNodeOptions();return;}"
+                            "if(e.key!=='Enter')return;"
+                            "e.preventDefault();"
+                            "var sel=document.getElementById('node-select'),i,o;"
+                            "if(!sel)return;"
+                            "for(i=1;i<sel.options.length;i++){"
+                                "o=sel.options[i];"
+                                "if(o.disabled)continue;"
+                                "nodePick(o.value);"
+                                "return;"
+                            "}"
                         "}"
                         "function toggleNodeFavorite(btn){"
                             "var id=btn.getAttribute('data-fav-btn');"
@@ -7669,8 +7858,8 @@ static void sendConfigPage(const char *msg = "", bool lite = false) {
                             "if(isMap){"
                                 "ensureNodeMap();"
                                 "var _s=document.getElementById('node-select');"
-                                "if(document.getElementById('node-mini-map')){if(_s&&_s.value!==''){selectNode();}else{showNodeMini(false);}}"
-                                "setTimeout(function(){if(nodeMap)nodeMap.invalidateSize();if(nodeMini)nodeMini.invalidateSize();},0);"
+                                "if(_s&&_s.value!=='')selectNode();"
+                                "setTimeout(function(){if(nodeMap)nodeMap.invalidateSize();},0);"
                             "}"
                         "}"
                         "window.addEventListener('resize',function(){"
