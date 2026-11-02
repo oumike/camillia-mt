@@ -18,6 +18,7 @@
 #endif
 #if defined(DEVICE_TDISPLAY_P4)
 #include "hal/tdisplay_p4_io.h"
+#include "hal/tdisplay_p4_haptic.h"
 #endif
 #include "live_util.h"
 #include "live_feed.h"
@@ -3751,6 +3752,9 @@ enum CfgActionId {
     CFG_ACTION_VOLUME,
     #endif
     CFG_ACTION_MSG_ALERT,
+    #if HAS_HAPTIC
+    CFG_ACTION_VIBRATION,
+    #endif
     #if defined(DEVICE_MESH_DECK)
     CFG_ACTION_NOTIFY_LED_CHANNEL_COLOR,
     CFG_ACTION_NOTIFY_LED_DM_COLOR,
@@ -3847,6 +3851,8 @@ static int s_cfgSection = -1;
 static int8_t s_cfgGridSections[CFG_SEC__COUNT] = {};
 static int s_cfgGridCount = 0;
 static int s_cfgGridSelection = 0;
+// Buttons per row, as buildCfgGrid() last laid them out.
+static int s_cfgGridCols = 2;
 // "‹ Back" in the secondary header: shown inside a section, hidden on the grid.
 static lv_obj_t *s_cfgBackBtn = nullptr;
 // "Info" beside it on touch-only builds: the other way round, on the grid only.
@@ -3935,6 +3941,9 @@ static int cfgActionSection(int actionId) {
 #endif
         case CFG_ACTION_SPLASH_MELODY:
         case CFG_ACTION_MSG_ALERT:
+#if HAS_HAPTIC
+        case CFG_ACTION_VIBRATION:
+#endif
 #if defined(DEVICE_MESH_DECK)
         case CFG_ACTION_NOTIFY_LED_CHANNEL_COLOR:
         case CFG_ACTION_NOTIFY_LED_DM_COLOR:
@@ -4183,6 +4192,19 @@ static const char *msgAlertSoundName(uint8_t mode) {
         default:                     return TR("Default");
     }
 }
+
+#if HAS_HAPTIC
+static const char *hapticStyleName(uint8_t style) {
+    switch (style) {
+        case 0:  return TR("Off");
+        case 2:  return TR("Gentle");
+        case 3:  return TR("Long");
+        case 4:  return TR("Heartbeat");
+        case 1:
+        default: return TR("Pulse");
+    }
+}
+#endif
 
 static const char *notifyLedColorName(uint8_t color) {
     switch (cfgCoerceNotifyLedColor((int)color)) {
@@ -4911,6 +4933,15 @@ static void triggerMessageAlert(bool bypassRateLimit = false,
     // alert tone is off — a silent device is exactly when a visual cue matters,
     // and it is the only notification available while the screen is asleep.
     meshDeckLedNotify(visualSource == MSG_ALERT_VISUAL_DM);
+#endif
+
+#if HAS_HAPTIC
+    // Above the sound branches, which return early when the tone is off: a
+    // silent device is exactly when a buzz matters. Started before the tone,
+    // whose blocking I2S writes would otherwise delay it -- the motor runs on
+    // the chip while they play. Once for a channel message, twice for a DM.
+    tdisplayP4HapticPlay(cfgHapticStyle(s_cfg),
+                         visualSource == MSG_ALERT_VISUAL_DM ? 2 : 1);
 #endif
 
 #if HAS_KB_BLINK
@@ -5963,6 +5994,11 @@ static const char *cfgActionLabel(int actionId, char *buf, size_t bufLen) {
         case CFG_ACTION_MSG_ALERT:
             snprintf(buf, bufLen, TR("Notification Sound: %s"), msgAlertSoundName(s_cfg.msgAlertSound));
             break;
+        #if HAS_HAPTIC
+        case CFG_ACTION_VIBRATION:
+            snprintf(buf, bufLen, TR("Vibration: %s"), hapticStyleName(cfgHapticStyle(s_cfg)));
+            break;
+        #endif
         #if HAS_VOLUME_CONTROL
         case CFG_ACTION_VOLUME:
             snprintf(buf, bufLen, TR("Volume: %u%%"), (unsigned)s_cfg.volumePct);
@@ -6230,17 +6266,51 @@ static void cfgDebugSelection(const char *tag, int actionId) {
 // j/k, the pager wheel and the expander buttons all fold onto KEY_SCROLL_UP/DN
 // before they get here, so wrapping once covers all of them. The list is long
 // enough that walking it end to end to reach the last item is the common case.
+#if UI_CFG_SECTIONS
+// One step across the section grid. Sideways walks the buttons in reading
+// order and wraps, so Right from the end of a row lands on the start of the
+// next. Up and Down keep the column and wrap top to bottom; Down from above a
+// short last row lands on that row's last button rather than going nowhere.
+static void cfgGridStep(int dRow, int dCol) {
+    const int n = s_cfgGridCount;
+    if (n <= 0) return;
+    const int cols = s_cfgGridCols > 0 ? s_cfgGridCols : 1;
+    const int cur = s_cfgGridSelection;
+    int next = cur;
+    if (dCol != 0) {
+        next = ((cur + dCol) % n + n) % n;
+    } else if (dRow > 0) {
+        const int lastRow = (n - 1) / cols;
+        next = cur + cols;
+        if (next >= n) next = (cur / cols < lastRow) ? n - 1 : cur % cols;
+    } else if (dRow < 0) {
+        next = cur - cols;
+        if (next < 0) {
+            next = ((n - 1) / cols) * cols + cur % cols;   // same column, last row
+            if (next >= n) next -= cols;                   // short last row
+        }
+    }
+    if (next == cur) return;
+    s_cfgGridSelection = next;
+    s_cfgLastScrollMs = millis();
+    refreshCfgGridSelection();
+}
+#endif
+
 static void cfgMoveSelection(int delta, const char *tag) {
 #if UI_CFG_SECTIONS
-    // On the grid the same inputs walk the section buttons, left to right and
-    // then down, which is the order they read in.
     if (cfgGridShown()) {
-        if (s_cfgGridCount <= 0) return;
-        int next = (s_cfgGridSelection + delta) % s_cfgGridCount;
-        if (next < 0) next += s_cfgGridCount;
-        s_cfgGridSelection = next;
-        s_cfgLastScrollMs = millis();
-        refreshCfgGridSelection();
+#if CFG_GRID_FOUR_WAY
+        // Up/Down move a row; Left/Right arrive separately (the config key
+        // handler) and move one button.
+        cfgGridStep(delta, 0);
+#else
+        // Every other board walks the buttons left to right and then down,
+        // the order they read in: their wheels and paired keys have only the
+        // one axis, and stepping a row at a time would leave buttons they
+        // could never reach.
+        cfgGridStep(0, delta);
+#endif
         return;
     }
 #endif
@@ -15257,6 +15327,10 @@ static void initCfgActions() {
     s_cfgActions[s_cfgActionCount++] = CFG_ACTION_SPLASH_MELODY;
     s_cfgActions[s_cfgActionCount++] = CFG_ACTION_MSG_ALERT;
     #endif
+    // The touch half of the same group: what a new message buzzes, if anything.
+    #if HAS_HAPTIC
+    s_cfgActions[s_cfgActionCount++] = CFG_ACTION_VIBRATION;
+    #endif
     // The light half of the same group. Absent on boards with no LED wired.
     #if defined(DEVICE_MESH_DECK)
     s_cfgActions[s_cfgActionCount++] = CFG_ACTION_NOTIFY_LED_CHANNEL_COLOR;
@@ -15821,6 +15895,7 @@ static void buildCfgGrid() {
     const int btnPad = 4;
 #endif
     const int cols = (lv_disp_get_hor_res(NULL) >= 600) ? 3 : 2;
+    s_cfgGridCols = cols;
     // Just under 1/cols: SPACE_EVENLY shares out what is left between and
     // around the buttons, and exact fractions would wrap one to the next row.
     const int btnPct = (cols == 3) ? 31 : 47;
@@ -44471,6 +44546,21 @@ static void performCfgAction(int actionId) {
             openAlertSoundModal();   // pick directly; navigating previews each tone
             break;
 
+#if HAS_HAPTIC
+        // Cycles in place like the blink-flash rows, five values not earning a
+        // modal; each step buzzes once in the new style so it can be felt.
+        case CFG_ACTION_VIBRATION: {
+            if (s_cfgDebugLog) Serial.println("[lvgl-cfg] exec VIBRATION");
+            showActionPopup = false;   // row already reads the style
+            const uint8_t next = (uint8_t)((cfgHapticStyle(s_cfg) + 1) % HAPTIC_CFG_COUNT);
+            cfgSetHapticStyle(s_cfg, next);
+            markConfigDirty();
+            tdisplayP4HapticPlay(next, 1);
+            snprintf(s_cfgStatus, sizeof(s_cfgStatus), TR("Vibration: %s"), hapticStyleName(next));
+            break;
+        }
+#endif
+
 #if defined(DEVICE_MESH_DECK)
         case CFG_ACTION_NOTIFY_LED_CHANNEL_COLOR:
             if (s_cfgDebugLog) Serial.println("[lvgl-cfg] exec NOTIFY_LED_CHANNEL_COLOR");
@@ -48906,6 +48996,14 @@ static void pumpKeyboardInput() {
             if (k == KEY_ROLLER && s_cfgInfoList) {
                 s_cfgInfoPanelFocused = !s_cfgInfoPanelFocused;
                 refreshCfgPanelFocusStyles();
+                continue;
+            }
+#endif
+#if UI_CFG_SECTIONS && CFG_GRID_FOUR_WAY
+            // Left/Right across the grid. Up/Down take the KEY_SCROLL path
+            // below, which steps a row on these boards (cfgMoveSelection()).
+            if ((k == KEY_PREV_CHAN || k == KEY_NEXT_CHAN) && cfgGridShown()) {
+                cfgGridStep(0, k == KEY_NEXT_CHAN ? 1 : -1);
                 continue;
             }
 #endif
@@ -56807,7 +56905,20 @@ static bool processMeshPacket(const MeshPacket &rxPkt) {
                                         (pkt.hdr.flags & 0x10) != 0);
 
             if (isAck) {
-                Channels.setAckStateFrom(pkt.requestId, pkt.hdr.from);
+                const bool chanMatched = Channels.setAckStateFrom(pkt.requestId, pkt.hdr.from);
+#if HAS_HAPTIC
+                // A tap on the first ACK for one of our messages, channel or
+                // DM. Both managers retire the pending record on that match,
+                // so further ACKs for the same message (other nodes, a relay
+                // and then the addressee) stay quiet. Off with the rest of
+                // vibration.
+                if ((chanMatched || dmRoutingMatched)
+                    && cfgHapticStyle(s_cfg) != HAPTIC_CFG_OFF) {
+                    tdisplayP4HapticTick();
+                }
+#else
+                (void)chanMatched;
+#endif
             } else {
                 Channels.setAckState(pkt.requestId, DisplayLine::NAKED);
                 if (dmRoutingMatched) {
@@ -63577,6 +63688,11 @@ void loop() {
     // phase time into the next one and the measured total could then exceed the
     // iteration it claimed to describe -- 3875ms "in phases" of a 2257ms pass.
     loopPhaseBeginPass();
+#if HAS_HAPTIC
+    // First, ahead of every early return below: a Long buzz loops on the chip
+    // until this stops it.
+    LOOP_PHASE("haptic", tdisplayP4HapticService());
+#endif
 #if defined(DEVICE_TDISPLAY_P4)
     if (s_p4WebAutoStartPending && p4WifiSettled(now)) {
         s_p4WebAutoStartPending = false;

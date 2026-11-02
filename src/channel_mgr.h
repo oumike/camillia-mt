@@ -79,8 +79,10 @@ public:
     }
 
     void setAckState(uint32_t packetId, DisplayLine::AckState state);
-    // Determine ACKED vs ACKED_RELAY by comparing fromNodeId to stored destNodeId
-    void setAckStateFrom(uint32_t packetId, uint32_t fromNodeId);
+    // Determine ACKED vs ACKED_RELAY by comparing fromNodeId to stored destNodeId.
+    // True when packetId was one of ours still waiting: the first ACK for a
+    // message, since the match retires the pending record.
+    bool setAckStateFrom(uint32_t packetId, uint32_t fromNodeId);
     bool expireAcks();   // call from loop(); returns true when any ACK state changed
 
     // Retrieve a display line for rendering (0=newest visible at current scroll).

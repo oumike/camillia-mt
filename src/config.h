@@ -664,6 +664,26 @@
 // out of a section before it closes Config.
 #define UI_CFG_SECTIONS 1
 
+// Boards whose keyboard has all four arrows reaching Config as distinct keys:
+// there the grid moves like a grid, Up/Down a row and Left/Right a button.
+// Elsewhere Left/Right are folded onto Up/Down (M9) or there is only a wheel,
+// and the grid is walked in reading order instead (cfgMoveSelection()).
+#if defined(DEVICE_TDISPLAY_P4)
+#define CFG_GRID_FOUR_WAY 1
+#else
+#define CFG_GRID_FOUR_WAY 0
+#endif
+
+// A vibration motor new messages can buzz. Only the T-Display P4 has one
+// driven (AW86224 LRA driver, src/hal/tdisplay_p4_haptic.cpp). The T-LoRa
+// Pager's DRV2605 is wired but not driven yet. Gates the Vibration setting so
+// it is absent, not inert, everywhere else.
+#if defined(DEVICE_TDISPLAY_P4)
+#define HAS_HAPTIC 1
+#else
+#define HAS_HAPTIC 0
+#endif
+
 // A notification LED that blinks while messages are unread. Only the Mesh Deck
 // has one wired (RGB cathodes on expander 0x59 P10..P12, driven by
 // meshDeckServiceLed). Gate the setting on this so it is absent, not inert,

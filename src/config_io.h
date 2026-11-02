@@ -740,10 +740,38 @@ struct RhinoConfig {
     // padding, so this starts at exactly the previous sizeof(RhinoConfig) and
     // an upgrading device keeps the compiled default.
     uint8_t  packetSigPolicy;
-    // For whoever appends next: the struct's trailing padding, spelled out.
-    // Past it is the old sizeof(RhinoConfig).
-    uint8_t  _reservedPad19[3];
+    // ── Vibration (HAS_HAPTIC boards: the T-Display P4) ──────────────────────
+    // The style new messages buzz with, HapticStyle (src/hal/tdisplay_p4_haptic.h)
+    // with HAPTIC_CFG_MAGIC in the high nibble; read it through cfgHapticStyle().
+    // Takes the first of what was _reservedPad19[3]. Older blobs carry whatever
+    // sat in that pad byte, so a missing magic reads as unset: the default
+    // style, Pulse. Unconditional, like the other board-specific fields, so the
+    // blob layout does not differ between boards.
+    uint8_t  hapticStyle;
+    // For whoever appends next: two pad bytes remain, carrying whatever older
+    // builds wrote into them. Past them is the old sizeof(RhinoConfig).
+    uint8_t  _reservedPad19[2];
 };
+
+// Vibration style codes, as cfgHapticStyle() returns them. Same values as
+// HapticStyle in src/hal/tdisplay_p4_haptic.h, which only the P4 compiles.
+static constexpr uint8_t HAPTIC_CFG_MAGIC   = 0xB0;
+static constexpr uint8_t HAPTIC_CFG_OFF     = 0;
+static constexpr uint8_t HAPTIC_CFG_PULSE   = 1;
+static constexpr uint8_t HAPTIC_CFG_COUNT   = 5;   // Off, Pulse, Gentle, Long, Heartbeat
+inline uint8_t cfgHapticStyle(const RhinoConfig &c) {
+    if ((c.hapticStyle & 0xF0) != HAPTIC_CFG_MAGIC) return HAPTIC_CFG_PULSE;
+    const uint8_t s = c.hapticStyle & 0x0F;
+    return s < HAPTIC_CFG_COUNT ? s : HAPTIC_CFG_PULSE;
+}
+inline void cfgSetHapticStyle(RhinoConfig &c, uint8_t style) {
+    c.hapticStyle = (uint8_t)(HAPTIC_CFG_MAGIC |
+                              (style < HAPTIC_CFG_COUNT ? style : HAPTIC_CFG_PULSE));
+}
+// YAML and the web form: "off", "pulse", "gentle", "long", "heartbeat".
+const char *hapticStyleKey(uint8_t style);
+// Any case; anything unrecognised is Pulse.
+uint8_t hapticStyleParse(const char *v);
 
 #define CHAT_SERVER_MODE_OFF     0
 #define CHAT_SERVER_MODE_AUTO    1

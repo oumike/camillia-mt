@@ -789,7 +789,7 @@ void ChannelMgr::setAckState(uint32_t packetId, DisplayLine::AckState state) {
     }
 }
 
-void ChannelMgr::setAckStateFrom(uint32_t packetId, uint32_t fromNodeId) {
+bool ChannelMgr::setAckStateFrom(uint32_t packetId, uint32_t fromNodeId) {
     for (int i = 0; i < MAX_PENDING_ACK; i++) {
         if (_pending[i].active && _pending[i].packetId == packetId) {
             if (_pending[i].destNodeId == 0xFFFFFFFF) {
@@ -804,9 +804,10 @@ void ChannelMgr::setAckStateFrom(uint32_t packetId, uint32_t fromNodeId) {
                 bool isDirect = (_pending[i].destNodeId == fromNodeId);
                 setAckState(packetId, isDirect ? DisplayLine::ACKED : DisplayLine::ACKED_RELAY);
             }
-            return;
+            return true;
         }
     }
+    return false;
 }
 
 bool ChannelMgr::expireAcks() {
