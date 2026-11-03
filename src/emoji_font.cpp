@@ -38,8 +38,9 @@ EmojiSlot s_slots[] = {
     // what its 18 px text becomes.
     { &lv_font_montserrat_20, 22, {}, nullptr, false },
 #endif
-#if defined(DEVICE_CROWPANEL)
-    // The CrowPanels' Extra Large chat size.
+#if defined(DEVICE_CROWPANEL) || EMOJI_PICKER_LARGE
+    // The CrowPanels' Extra Large chat size, and the emoji tray's cells on
+    // every board with the pool for it (EMOJI_PICKER_LARGE, src/config.h).
     { &lv_font_montserrat_24, 26, {}, nullptr, false },
 #endif
 #if defined(DEVICE_CROWPANEL_50)

@@ -560,6 +560,9 @@ static bool s_emojiPickerSendMode = false;
 // Cells per row in the tray, computed when it is built (see openEmojiPicker), so
 // up/down step a row instead of a cell.
 static int s_emojiPickerCols = 1;
+// Cell edge in px, as openEmojiPicker() last built the tray; the page buttons
+// step in rows of this plus the 2 px row gap.
+static int s_emojiPickerCell = 30;
 // Hold-to-repeat: the direction the held key is stepping, and when it last
 // stepped. Driven from the loop because a held key produces no further key
 // events to hang this off; see serviceEmojiPickerRepeat.
@@ -13967,6 +13970,63 @@ static void onEmojiGridScrolled(lv_event_t *e) {
     logLvglMemDiag("emoji scroll");
 }
 
+#if defined(DEVICE_TDECK_PRO)
+// Page buttons under the tray (T-Deck Pro). Dragging a list on the e-paper
+// panel is miserable -- every intermediate position is a partial refresh -- so
+// a tap moves exactly one screenful of whole rows, unanimated, which is one
+// redraw. The highlight moves to the first cell of the page landed on, so
+// Enter and the keys carry on from what is on screen instead of jumping back.
+static void emojiPickerPage(int dir) {
+    if (!s_emojiPickerModal) return;
+    lv_obj_t *grid = lv_obj_get_child(s_emojiPickerModal, 1);   // [0]=hint, [1]=grid
+    if (!grid || s_emojiPickerCols < 1) return;
+    const int rowH = s_emojiPickerCell + 2;                       // cell + pad_row
+    int rows = (int)lv_obj_get_content_height(grid) / rowH;
+    if (rows < 1) rows = 1;
+    lv_obj_update_layout(grid);
+    const int32_t y = lv_obj_get_scroll_y(grid);
+    const int32_t maxY = y + lv_obj_get_scroll_bottom(grid);
+    int32_t target = y + dir * rows * rowH;
+    target = (target / rowH) * rowH;                              // whole rows
+    if (target < 0) target = 0;
+    if (target > maxY) target = maxY;
+    if (target != y) lv_obj_scroll_to_y(grid, target, LV_ANIM_OFF);
+    int first = (int)((target + rowH - 1) / rowH) * s_emojiPickerCols;
+    if (first >= s_pickerCount) first = s_pickerCount - 1;
+    if (first < 0) first = 0;
+    s_emojiPickerSelection = first;
+    refreshEmojiPickerSelection();
+}
+
+static lv_obj_t *emojiPickerPageBtn(lv_obj_t *row, const char *text, int dir) {
+    lv_obj_t *btn = lv_btn_create(row);
+    if (!btn) return nullptr;
+    lv_obj_set_flex_grow(btn, 1);
+    lv_obj_set_height(btn, lv_pct(100));
+    lv_obj_set_style_radius(btn, 4, 0);
+    lv_obj_set_style_shadow_width(btn, 0, 0);
+    lv_obj_set_style_bg_color(btn, lv_color_make(0xFF, 0xFF, 0xFF), 0);
+    lv_obj_set_style_bg_opa(btn, LV_OPA_COVER, 0);
+    lv_obj_set_style_border_width(btn, 1, 0);
+    lv_obj_set_style_border_color(btn, lv_color_make(0, 0, 0), 0);
+    // Pressed: inverted, so the tap registers on a panel that cannot animate.
+    lv_obj_set_style_bg_color(btn, lv_color_make(0, 0, 0), LV_STATE_PRESSED);
+    lv_obj_set_style_text_color(btn, lv_color_make(0xFF, 0xFF, 0xFF), LV_STATE_PRESSED);
+    lv_obj_set_style_text_color(btn, lv_color_make(0, 0, 0), 0);
+    lv_obj_add_event_cb(btn,
+                        [](lv_event_t *e) {
+                            emojiPickerPage((int)(intptr_t)lv_event_get_user_data(e));
+                        },
+                        LV_EVENT_CLICKED, (void *)(intptr_t)dir);
+    lv_obj_t *lbl = lv_label_create(btn);
+    if (!lbl) return nullptr;
+    lv_obj_set_style_text_font(lbl, &lv_font_montserrat_14, 0);
+    lv_label_set_text(lbl, text);
+    lv_obj_center(lbl);
+    return btn;
+}
+#endif
+
 static void openEmojiPicker(bool sendMode, bool symbolTray) {
     if (!s_rootScreen || s_emojiPickerModal) return;
     // Pick the tray before anything reads it: the grid, the selection clamp and
@@ -13996,12 +14056,21 @@ static void openEmojiPicker(bool sendMode, bool symbolTray) {
     if (modalW > 340) modalW = 340;
 
     // Emoji glyphs come from the fallback face; a blank base label just carries
-    // the fallback, so any Montserrat size works — pick one that reads well.
-    const lv_font_t *cellFont = symbolTray ? &lv_font_montserrat_18
-                                          : emojiFont(&lv_font_montserrat_18);
+    // the fallback, so any Montserrat size with an emoji slot works (see
+    // s_slots in emoji_font.cpp).
+    //
     // Cell size follows the panel: big enough to tap on touch builds, small
     // enough that a couple of rows fit the Cardputer's 135px-tall screen.
+#if EMOJI_PICKER_LARGE
+    // 26 px glyphs: at 20 the faces were hard to tell apart.
+    const lv_font_t *cellFont = symbolTray ? &lv_font_montserrat_24
+                                          : emojiFont(&lv_font_montserrat_24);
+    const int cell = (w <= 160) ? 24 : 38;
+#else
+    const lv_font_t *cellFont = symbolTray ? &lv_font_montserrat_18
+                                          : emojiFont(&lv_font_montserrat_18);
     const int cell = (w <= 160) ? 24 : 30;
+#endif
 
     s_emojiPickerBackdrop = lv_obj_create(s_rootScreen);
     lv_obj_set_size(s_emojiPickerBackdrop, w, h);
@@ -14064,23 +14133,45 @@ static void openEmojiPicker(bool sendMode, bool symbolTray) {
     // of the corner X, and the grid is what gives up the space. Hint + gap +
     // grid + padding then comes to the modal's own (h - 14) cap.
     lv_obj_set_style_max_height(grid, (h > 72) ? (h - 56) : LV_SIZE_CONTENT, 0);
+#elif defined(DEVICE_TDECK_PRO)
+    // 30 px less again for the page buttons under the grid (26 + the 4 px gap).
+    lv_obj_set_style_max_height(grid, (h > 90) ? (h - 74) : LV_SIZE_CONTENT, 0);
 #else
     lv_obj_set_style_max_height(grid, (h > 60) ? (h - 44) : LV_SIZE_CONTENT, 0);
 #endif
     lv_obj_add_flag(grid, LV_OBJ_FLAG_SCROLLABLE);
     lv_obj_set_scroll_dir(grid, LV_DIR_VER);
+    // AUTO: the bar shows only while the tray is taller than its box, i.e.
+    // when there is more to scroll to.
     lv_obj_set_scrollbar_mode(grid, LV_SCROLLBAR_MODE_AUTO);
     lv_obj_set_flex_flow(grid, LV_FLEX_FLOW_ROW_WRAP);
     lv_obj_set_flex_align(grid, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER,
                           LV_FLEX_ALIGN_CENTER);
     lv_obj_set_style_pad_row(grid, 2, 0);
     lv_obj_set_style_pad_column(grid, 2, 0);
+    // The scrollbar has to be styled here: lv_obj_remove_style_all() above
+    // took the theme's away with everything else, so the tray scrolled with no
+    // sign that it could. The thin bar the other lists use, down the right
+    // edge, with the cells kept clear of it.
+    static constexpr int kEmojiScrollbarGutter = 4;
+    lv_obj_set_style_pad_right(grid, kEmojiScrollbarGutter, 0);
+    lv_obj_set_style_width(grid, 2, LV_PART_SCROLLBAR);
+    lv_obj_set_style_radius(grid, 2, LV_PART_SCROLLBAR);
+#if defined(DEVICE_TDECK_PRO)
+    lv_obj_set_style_bg_color(grid, lv_color_make(0, 0, 0), LV_PART_SCROLLBAR);
+    lv_obj_set_style_bg_opa(grid, LV_OPA_COVER, LV_PART_SCROLLBAR);
+#else
+    lv_obj_set_style_bg_color(grid, lv_color_hex(0x8FB5E6), LV_PART_SCROLLBAR);
+    lv_obj_set_style_bg_opa(grid, LV_OPA_70, LV_PART_SCROLLBAR);
+#endif
 
     // Row width, derived from the same numbers the grid is built with (modal
-    // width less its 6px padding either side, cells plus a 2px column gap). Used
-    // by up/down navigation so those keys move a row rather than one cell.
-    s_emojiPickerCols = (modalW - 12 + 2) / (cell + 2);
+    // width less its 6px padding either side and the scrollbar gutter, cells
+    // plus a 2px column gap). Used by up/down navigation so those keys move a
+    // row rather than one cell.
+    s_emojiPickerCols = (modalW - 12 - kEmojiScrollbarGutter + 2) / (cell + 2);
     if (s_emojiPickerCols < 1) s_emojiPickerCols = 1;
+    s_emojiPickerCell = cell;
 
     for (int i = 0; i < s_pickerCount; i++) {
         lv_obj_t *c = lv_obj_create(grid);
@@ -14117,6 +14208,32 @@ static void openEmojiPicker(bool sendMode, bool symbolTray) {
         setLabelTextEmojiSafe(g, s_pickerTray[i]);
         lv_obj_center(g);
     }
+
+#if defined(DEVICE_TDECK_PRO)
+    // After the grid for the same reason as the X below: the grid stays child
+    // [1] of the modal. Allocated like the cells, so a failure closes the tray.
+    {
+        lv_obj_t *pager = lv_obj_create(s_emojiPickerModal);
+        if (!pager) {
+            logLvglMemDiag("emoji picker aborted (low LVGL mem)");
+            closeEmojiPicker();
+            return;
+        }
+        lv_obj_remove_style_all(pager);
+        lv_obj_set_size(pager, lv_pct(100), 26);
+        lv_obj_clear_flag(pager, LV_OBJ_FLAG_SCROLLABLE);
+        lv_obj_set_style_pad_column(pager, 6, 0);
+        lv_obj_set_flex_flow(pager, LV_FLEX_FLOW_ROW);
+        lv_obj_set_flex_align(pager, LV_FLEX_ALIGN_SPACE_BETWEEN, LV_FLEX_ALIGN_CENTER,
+                              LV_FLEX_ALIGN_CENTER);
+        if (!emojiPickerPageBtn(pager, TR("Page Up"), -1)
+            || !emojiPickerPageBtn(pager, TR("Page Down"), 1)) {
+            logLvglMemDiag("emoji picker aborted (low LVGL mem)");
+            closeEmojiPicker();
+            return;
+        }
+    }
+#endif
 
 #if UI_TOUCH_ONLY_PROFILE
     // Built after the grid, not before it: refreshEmojiPickerSelection() reaches

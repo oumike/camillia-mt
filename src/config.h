@@ -674,6 +674,17 @@
 #define CFG_GRID_FOUR_WAY 0
 #endif
 
+// The emoji tray draws its glyphs at 26 px (the 24 px emoji slot) in 38 px
+// cells rather than 20 px in 30, so they can be told apart at a glance. Needs
+// the 24 px tiny_ttf instance and its glyph cache, a few KB of LVGL pool:
+// the PSRAM boards' 512 KB-2 MB pools carry it easily, the Cardputer's 80 KB
+// and the 128 KB internal pools keep the smaller tray.
+#if defined(BOARD_HAS_PSRAM) && !defined(DEVICE_CARDPUTER_LORA_HAT)
+#define EMOJI_PICKER_LARGE 1
+#else
+#define EMOJI_PICKER_LARGE 0
+#endif
+
 // A vibration motor new messages can buzz. Only the T-Display P4 has one
 // driven (AW86224 LRA driver, src/hal/tdisplay_p4_haptic.cpp). The T-LoRa
 // Pager's DRV2605 is wired but not driven yet. Gates the Vibration setting so
