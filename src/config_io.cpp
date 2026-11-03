@@ -1055,6 +1055,25 @@ static uint8_t sigPolicyParse(const char *val) {
     return SIG_POLICY_COMPATIBLE;
 }
 
+static const char *kHapticStyleKeys[HAPTIC_CFG_COUNT] = {
+    "off", "pulse", "gentle", "long", "heartbeat"
+};
+
+const char *hapticStyleKey(uint8_t style) {
+    return kHapticStyleKeys[style < HAPTIC_CFG_COUNT ? style : HAPTIC_CFG_PULSE];
+}
+
+uint8_t hapticStyleParse(const char *v) {
+    if (!v || !v[0]) return HAPTIC_CFG_PULSE;
+    if (isdigit((unsigned char)v[0])) {
+        const int n = atoi(v);
+        return (n >= 0 && n < HAPTIC_CFG_COUNT) ? (uint8_t)n : HAPTIC_CFG_PULSE;
+    }
+    for (uint8_t i = 0; i < HAPTIC_CFG_COUNT; i++)
+        if (!strcasecmp(v, kHapticStyleKeys[i])) return i;
+    return HAPTIC_CFG_PULSE;
+}
+
 static uint8_t parseMsgAlertSound(const char *val) {
     if (!val || !val[0]) return MSG_ALERT_SOUND_DEFAULT;
     if (isdigit((unsigned char)val[0])) {
@@ -1178,6 +1197,7 @@ void cfgInitDefaults(RhinoConfig &cfg) {
     cfg.uiOrientation      = (ORIENTATION_SEED_PORTRAIT != 0) ? 1 : 0;
     cfg.splashMelodyEnabled = MY_SPLASH_MELODY_ENABLED;
     cfg.msgAlertSound      = MY_MSG_ALERT_SOUND;
+    cfgSetHapticStyle(cfg, HAPTIC_CFG_PULSE);
     cfg.uiTheme            = MY_UI_THEME;
     cfg.uiMode             = MY_UI_MODE;
     cfg.chatStyle          = MY_CHAT_STYLE;
@@ -1732,6 +1752,11 @@ void cfgToYaml(const RhinoConfig &cfg, String &out) {
     snprintf(tmp, sizeof(tmp), "    navAlign: %s\n", navAlignKey(cfgNavAlign(cfg))); out += tmp;
     snprintf(tmp, sizeof(tmp), "    messageAlertSound: %s\n",
              kMsgAlertSoundNames[constrain((int)cfg.msgAlertSound, 0, kNumMsgAlertSounds - 1)]);
+    out += tmp;
+    // Carried by every build so a backup moves between boards; only boards
+    // with a vibration motor (HAS_HAPTIC) act on it.
+    snprintf(tmp, sizeof(tmp), "    vibration: %s   # off, pulse, gentle, long or heartbeat\n",
+             hapticStyleKey(cfgHapticStyle(cfg)));
     out += tmp;
     out += "    theme: ";
     if (uiThemeIsCustom(cfg.uiTheme)) {
@@ -2496,6 +2521,7 @@ bool cfgImportFromBuf(const char *buf, size_t len, RhinoConfig &cfg) {
                 else if (!strcmp(key, "navSide"))
                     cfg.navAlign = (!strcasecmp(val, "right")) ? kNavAlignRight : kNavAlignUnset;
                 else if (!strcmp(key, "messageAlertSound")) cfg.msgAlertSound = parseMsgAlertSound(val);
+                else if (!strcmp(key, "vibration")) cfgSetHapticStyle(cfg, hapticStyleParse(val));
                 else if (!strcmp(key, "messageAlertBeep")) {
                     cfg.msgAlertSound = parseBoolValue(val)
                         ? MSG_ALERT_SOUND_DEFAULT

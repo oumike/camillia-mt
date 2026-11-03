@@ -4704,6 +4704,22 @@ static void sendConfigPage(const char *msg = "", bool lite = false) {
             "<option value='3'"; if (gCfg->msgAlertSound == MSG_ALERT_SOUND_OFF) html += " selected"; html += ">Off</option>"
             "</select></label>";
 #endif
+#if HAS_HAPTIC
+    // Same values as the on-device Vibration row (cfgHapticStyle()).
+    {
+        static const char *kNames[HAPTIC_CFG_COUNT] = {
+            "Off", "Pulse", "Gentle", "Long", "Heartbeat"
+        };
+        const uint8_t cur = cfgHapticStyle(*gCfg);
+        html += "<label>Vibration<select name='vibration'>";
+        for (uint8_t i = 0; i < HAPTIC_CFG_COUNT; i++) {
+            snprintf(tmp, sizeof(tmp), "<option value='%u'%s>%s</option>",
+                     (unsigned)i, (i == cur) ? " selected" : "", kNames[i]);
+            html += tmp;
+        }
+        html += "</select></label>";
+    }
+#endif
 #if defined(DEVICE_MESH_DECK)
     // Kept in this section rather than given its own: it is the same question
     // as the alert tone — how the device gets your attention — and one more
@@ -8608,6 +8624,11 @@ static void handlePostSave() {
 #if HAS_AUDIO_ALERTS
     if (server.hasArg("msg_alert_sound")) {   // same guard, same reason
         gCfg->msgAlertSound  = (uint8_t)constrain(server.arg("msg_alert_sound").toInt(), 0, 3);
+    }
+#endif
+#if HAS_HAPTIC
+    if (server.hasArg("vibration")) {
+        cfgSetHapticStyle(*gCfg, hapticStyleParse(server.arg("vibration").c_str()));
     }
 #endif
     // WiFi credentials — save directly to NVS (not part of gCfg)
