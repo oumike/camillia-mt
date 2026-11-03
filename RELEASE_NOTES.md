@@ -1,11 +1,11 @@
 ### New
-- Web config Nodes tab: a search box finds nodes by short name, long name or node ID, with or without the leading `!` (`1a2b` finds `!1a2b3c4d`). It lists the matches with a count, marks the ones without a position as *no position*, and shows the positioned ones as blue markers on the map, which zooms to fit them. All boards except the Cardputer.
-- Web config Nodes tab: if only one node matches, it is shown straight away. Enter shows the first match, and Esc clears the search.
-- Web config Nodes tab: three checkboxes, *Show only known*, *Show only with location* and *Show only favorites*, narrow the node dropdown. They can be combined, a line shows how many nodes are left, and the browser remembers which are ticked. All boards except the Cardputer.
+- T-Display P4: New messages now vibrate. Channel messages buzz once and DMs buzz twice. Choose the style in Config → Notifications → Vibration: Off, Pulse, Gentle, Long or Heartbeat. Each step plays a sample buzz. Vibration works even when Notification Sound is Off.
+- T-Display P4: Vibration is **on by default** (Pulse) after updating. Set it to Off in Config → Notifications → Vibration to turn it off.
+- T-Display P4: You can also set the vibration style in the web config's Notifications section, or with `vibration:` in a YAML config backup (`off`, `pulse`, `gentle`, `long` or `heartbeat`).
+- T-Display P4: Your device gives a short tap when one of your channel or direct messages is first acknowledged. Later acknowledgements for the same message don't tap. The tap is off when Vibration is Off.
+- T-Display P4: The new Vibration settings text (Vibration, Pulse, Gentle, Heartbeat) is not translated yet and shows in English.
 
 ### Changed
-- Web config Nodes tab: the page now has a single map. The small second map under the node dropdown is gone, and the tab now reads, top to bottom: filters, dropdown, search, node details, map. All boards except the Cardputer.
-- Web config Nodes tab: choosing a node from the dropdown, from the search results or by clicking its blue marker on the map all do the same thing. The node's details fill the panel above the map, and the map centres on it with a blue marker. For a node with no position, the map's status line says so.
-- Web config Nodes tab: the node dropdown is sorted alphabetically, ignoring case and putting numbers in numeric order. Favorites stay first, above the divider, and nodes with no name yet (`----`) come last. Favoriting a node re-sorts the list straight away.
+- T-Display P4: In the Config settings grid, Up/Down now move one row and Left/Right move one button. Before, Up/Down stepped sideways through the buttons and Left/Right did nothing.
 
-Pull request: #138
+Pull request: #139
