@@ -1,9 +1,9 @@
-// pio test -e native wrapper for tools/test_wardrive_util.cpp: runs its checks as one Unity test.
+// pio test -e native wrapper for tests/test_wardrive_util.cpp: runs its checks as one Unity test.
 // The checks live there, so tests/run.sh and this run the same code.
 #include <unity.h>
 
 #define main host_test_main
-#include "../../../tools/test_wardrive_util.cpp"
+#include "../../test_wardrive_util.cpp"
 #undef main
 
 void setUp() {}

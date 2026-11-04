@@ -57,31 +57,35 @@ concurrency:
 # pair.
 
 jobs:
-  # Host tests: pure logic (signature policy, admin and chat-server protocols,
-  # spell, wardrive export) compiled with the system compiler. Seconds, not
-  # minutes, and no PlatformIO. clang++ because that is what the tests are run
-  # with locally (macOS); with -Werror a different compiler's warnings would
-  # fail the job for reasons unrelated to the change.
+  # Hardware-free tests, including malformed packets and output-buffer bounds.
+  # ASan/UBSan failures must stop the build just like failed assertions.
+  # Keep clang++ aligned with the local macOS runner's -Werror diagnostics.
   host-tests:
     name: Host tests
     runs-on: ubuntu-latest
+    timeout-minutes: 10
 
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Unit tests (tests/run.sh)
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Test runner regression tests
+        run: python3 -m unittest discover -s tests -p 'test_*.py' -v
+
+      - name: Unit tests with AddressSanitizer and UndefinedBehaviorSanitizer
         env:
           CXX: clang++
+          SANITIZE: '1'
         run: bash tests/run.sh
-
-      - name: Wardrive utility test
-        run: |
-          g++ -std=c++17 -I src tools/test_wardrive_util.cpp -o "$RUNNER_TEMP/wardrive"
-          "$RUNNER_TEMP/wardrive"
 
   build:
     name: PlatformIO build
+    needs: host-tests
     runs-on: ubuntu-latest
 
     steps:

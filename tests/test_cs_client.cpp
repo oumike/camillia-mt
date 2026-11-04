@@ -326,6 +326,70 @@ static void testRequestTimeoutRetriesSameChannelOnce() {
     ok(!c.poll(t, anchorFor, s), "second miss on the same channel ends the round");
 }
 
+static void testDiscoveryAndDeadlineRollover() {
+    const uint32_t start = UINT32_MAX - 1000u;
+    Client c;
+    c.begin(MODE_AUTO, 0, false, ME_IDS, 3, nullptr, start);
+    Send s;
+    ok(c.poll(start, anchorFor, s), "discover before millis rollover");
+    uint32_t ids[csp::MAX_DISCOVER_CHANNELS] = {};
+    uint8_t count = 0; bool hasList = false;
+    ok(csp::decodeDiscover(s.payload, s.len, ids, count, hasList)
+       && hasList && count == 2 && ids[0] == 0x1111 && ids[1] == 0x3333,
+       "discovery contains only enabled channel IDs");
+    ok(!c.poll(start + DISCOVERY_INTERVAL_MS - 1, anchorFor, s),
+       "discovery waits the entire interval across rollover");
+    ok(c.poll(start + DISCOVERY_INTERVAL_MS, anchorFor, s), "discovery deadline survives rollover");
+
+    knownServer(c, MODE_AUTO, start);
+    ok(c.poll(start, anchorFor, s), "request before rollover");
+    ok(c.holdOwnTx(start + HOLD_OWN_TX_MS - 1) && !c.holdOwnTx(start + HOLD_OWN_TX_MS),
+       "TX hold deadline survives rollover");
+    const uint32_t deadline = start + REPLY_TIMEOUT_MS;
+    ok(!c.poll(deadline - 1, anchorFor, s), "request does not time out early across rollover");
+    ok(!c.poll(deadline, anchorFor, s), "deadline registers timeout without sending twice");
+    ok(c.poll(deadline, anchorFor, s) && s.chanIdx == 0, "rollover timeout retries same channel");
+}
+
+static void testCheckCooldownRollover() {
+    const uint32_t start = UINT32_MAX - 1000u;
+    Client c;
+    c.begin(MODE_MANUAL, 0, false, ME_IDS, 3, nullptr, start);
+    const char *why = nullptr;
+    ok(c.checkNow(start, &why), "manual search starts before rollover");
+    ok(!c.checkNow(start + CHECK_COOLDOWN_MS - 1, &why) && !strcmp(why, "cooldown"),
+       "manual search cooldown not shortened by rollover");
+    ok(c.checkNow(start + CHECK_COOLDOWN_MS, &why), "manual search allowed at wrapped deadline");
+}
+
+static void testDisableCancelsInFlightAndResumeStartsFresh() {
+    Client c;
+    knownServer(c, MODE_AUTO);
+    Send s;
+    ok(c.poll(0, anchorFor, s), "request in flight");
+    c.setMode(MODE_OFF, 100);
+    batch(c, SERVER, 0, 7, csp::FLAG_FIRST | csp::FLAG_LAST, {41}, 200);
+    ok(c.state(0).cursor == 40 && !c.holdOwnTx(200), "off mode ignores late reply and releases TX");
+    ok(!c.poll(AUTO_INTERVAL_MS, anchorFor, s), "off mode does not resume a pending round");
+    c.setMode(MODE_AUTO, AUTO_INTERVAL_MS);
+    ok(c.poll(AUTO_INTERVAL_MS, anchorFor, s) && s.chanIdx == 0,
+       "auto resumes with a new request for the original channel");
+    csp::Request request{};
+    ok(csp::decodeRequest(s.payload, s.len, request) && request.cursor == 40,
+       "late reply did not move the persisted cursor");
+}
+
+static void testHopCapAndAbsentAnchor() {
+    Client c;
+    c.begin(MODE_AUTO, SERVER, false, ME_IDS, 3, nullptr, 0);
+    c.onAnnounce(SERVER, 255, announce("FAR", {0x1111}), 0);
+    Send s;
+    ok(c.poll(0, {}, s) && s.hopLimit == 7, "unknown or excessive hop count is capped");
+    csp::Request r{};
+    ok(csp::decodeRequest(s.payload, s.len, r) && r.anchorFrom == 0 && r.anchorId == 0,
+       "absent history callback sends an empty anchor");
+}
+
 int main() {
     testOffModeSendsNothing();
     testNoServerDiscoversAtBootAndHourly();
@@ -346,6 +410,10 @@ int main() {
     testDisplayEpochFromAge();
     testHoldOwnTxWhileAwaitingReply();
     testRequestTimeoutRetriesSameChannelOnce();
+    testDiscoveryAndDeadlineRollover();
+    testCheckCooldownRollover();
+    testDisableCancelsInFlightAndResumeStartsFresh();
+    testHopCapAndAbsentAnchor();
     printf("%s  %d checks, %d failed\n", g_fail ? "FAILED" : "ok", g_run, g_fail);
     return g_fail ? 1 : 0;
 }

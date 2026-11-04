@@ -8,6 +8,7 @@
 
 #include <stdio.h>
 #include <string.h>
+#include <initializer_list>
 
 using namespace AdminProto;
 
@@ -229,6 +230,94 @@ static void testNames() {
     ok(!strcmp(configBlockName(CONFIG_SECURITY), "security"), "block name renders");
 }
 
+static void testVarintBoundariesAndFixed32() {
+    const struct { uint64_t value; size_t len; uint8_t bytes[10]; } cases[] = {
+        {0, 1, {0}}, {127, 1, {0x7F}}, {128, 2, {0x80, 1}},
+        {16384, 3, {0x80, 0x80, 1}},
+        {UINT32_MAX, 5, {0xFF, 0xFF, 0xFF, 0xFF, 0x0F}},
+        {UINT64_MAX, 10, {0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 1}},
+    };
+    for (const auto &c : cases) {
+        uint8_t out[16] = {};
+        const size_t n = writeVarint(out, sizeof(out), 1, c.value);
+        ok(n == c.len + 1 && out[0] == 0 && !memcmp(out + 1, c.bytes, c.len),
+           "varint golden bytes and nonzero offset");
+        uint64_t value = 0;
+        ok(readVarint(out, n, 1, value) == n && value == c.value,
+           "varint boundaries decode at nonzero offsets");
+        for (size_t cap = 0; cap < c.len; cap++) {
+            memset(out, 0xA5, sizeof(out));
+            ok(writeVarint(out, cap, 0, c.value) == 0 && out[cap] == 0xA5,
+               "varint cannot overwrite caller capacity");
+            ok(readVarint(c.bytes, cap, 0, value) == 0, "truncated varint rejected");
+        }
+    }
+    const uint8_t want[] = {0x0D, 0xFE, 0xFF, 0xFF, 0xFF};
+    uint8_t out[8];
+    ok(writeSfixed32Field(out, sizeof(out), 0, 1, -2) == sizeof(want)
+       && !memcmp(out, want, sizeof(want)), "negative coordinate is little-endian sfixed32");
+    for (size_t cap = 0; cap < sizeof(want); cap++) {
+        memset(out, 0xA5, sizeof(out));
+        ok(writeSfixed32Field(out, cap, 0, 1, -2) == 0 && out[cap] == 0xA5,
+           "sfixed32 cannot overwrite a short output");
+    }
+}
+
+static void testSpliceGoldenAndBounds() {
+    const uint8_t src[] = {0x08, 1, 0x12, 3, 'a', 'b', 'c',
+                           0x1D, 0xEF, 0xBE, 0xAD, 0xDE, 0x21, 1, 2, 3, 4, 5, 6, 7, 8};
+    const uint8_t want[] = {0x08, 1, 0x12, 2, 'x', 'y',
+                            0x1D, 0xEF, 0xBE, 0xAD, 0xDE, 0x21, 1, 2, 3, 4, 5, 6, 7, 8};
+    const uint8_t replacement[] = {'x', 'y'};
+    uint8_t out[64];
+    const size_t n = spliceBytes(src, sizeof(src), 2, replacement, sizeof(replacement), out, sizeof(out));
+    okBytes(out, n, want, sizeof(want), "splice preserves literal unknown fixed32 and fixed64 records");
+    for (size_t cap = 0; cap < sizeof(want); cap++) {
+        memset(out, 0xA5, sizeof(out));
+        ok(spliceBytes(src, sizeof(src), 2, replacement, sizeof(replacement), out, cap) == 0
+           && out[cap] == 0xA5, "splice never overruns a short output");
+    }
+    ok(spliceVarint(nullptr, 1, 1, 1, out, sizeof(out)) == 0, "splice rejects missing input");
+    ok(spliceBytes(src, sizeof(src), 2, nullptr, 1, out, sizeof(out)) == 0,
+       "splice rejects missing replacement bytes");
+}
+
+static void testMalformedResponsesAndCredentials() {
+    const struct { uint8_t bytes[12]; size_t len; } bad[] = {
+        {{0x80}, 1}, {{0x32, 3, 'x'}, 3}, {{0x0D, 1, 2, 3}, 4},
+        {{0x09, 1, 2, 3, 4, 5, 6, 7}, 8}, {{0x0B}, 1},
+        {{0x32, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 1}, 11},
+    };
+    Response r{};
+    for (const auto &c : bad) {
+        ok(!decodeResponse(c.bytes, c.len, r), "malformed admin response rejected");
+        uint8_t out[64];
+        ok(spliceVarint(c.bytes, c.len, 1, 2, out, sizeof(out)) == 0,
+           "malformed response cannot become a configuration write");
+    }
+    const uint8_t keyFirst[] = {0xAA, 0x06, 2, 0xAB, 0xCD, 0x32, 2, 0x30, 3};
+    ok(decodeResponse(keyFirst, sizeof(keyFirst), r) && r.field == GET_CONFIG_RESPONSE
+       && r.payloadLen == 2 && r.hasPasskey && r.passkeyLen == 2
+       && r.passkey[0] == 0xAB && r.passkey[1] == 0xCD,
+       "passkey may precede the response without becoming its payload");
+    ok(!decodeResponse(keyFirst, 5, r), "credential without a response is not a successful reply");
+    const uint8_t longKey[] = {0x32, 0, 0xAA, 0x06, 9, 1, 2, 3, 4, 5, 6, 7, 8, 9};
+    ok(decodeResponse(longKey, sizeof(longKey), r) && !r.hasPasskey && r.passkeyLen == 0,
+       "oversized incoming passkey is never truncated into a usable credential");
+    ok(!decodeResponse(nullptr, 0, r) && !r.hasPasskey && !r.payload && r.field == 0,
+       "empty response clears stale credentials and payload");
+    const struct { uint32_t field; bool read; } commands[] = {
+        {GET_CHANNEL_REQUEST, true}, {GET_OWNER_REQUEST, true}, {GET_CONFIG_REQUEST, true},
+        {GET_MODULE_CONFIG_REQUEST, true}, {GET_DEVICE_METADATA_REQUEST, true},
+        {SET_CONFIG, false}, {REBOOT_SECONDS, false}, {GET_CONFIG_RESPONSE, false},
+    };
+    for (const auto &command : commands) {
+        uint8_t out[16];
+        const size_t n = encodeGetRequest(out, sizeof(out), command.field, 1);
+        ok(isReadRequest(out, n) == command.read, "only read commands request an admin response");
+    }
+}
+
 int main() {
     testVarint();
     testFindField();
@@ -241,6 +330,9 @@ int main() {
     testEncodeDecode();
     testWriteCarriesPasskey();
     testNames();
+    testVarintBoundariesAndFixed32();
+    testSpliceGoldenAndBounds();
+    testMalformedResponsesAndCredentials();
 
     printf("%s  %d checks, %d failed\n", g_fail ? "FAILED" : "ok", g_run, g_fail);
     return g_fail ? 1 : 0;

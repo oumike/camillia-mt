@@ -218,6 +218,7 @@ static void testUnauthorizedNakClosesSession() {
     ok(errorMeansUnauthorized(33) && errorMeansUnauthorized(37),
        "33 and 37 are the unauthorized pair");
     ok(!errorMeansUnauthorized(3), "a timeout is not unauthorized");
+    s.close();
 }
 
 static void testAckClosesAWrite() {
@@ -456,7 +457,73 @@ static void testPreviouslyUnwiredCommands() {
     s.close();
 }
 
+static void testRepliesMustMatchAndReadAckIsNotTheReply() {
+    Fake f; Session s; s.open(1, hooksFor(f));
+    s.submit("info", 100);
+    const uint32_t request = f.sent.back().id;
+    const uint8_t response[] = {0x6A, 0x00}; // get_device_metadata_response
+    const uint32_t revision = s.revision();
+    s.onAdminReply(request + 1, response, sizeof(response), TRANSPORT_RF, 200);
+    s.onRouting(request + 1, 33, TRANSPORT_RF, 200);
+    ok(s.isOpen() && s.busy() && s.revision() == revision,
+       "unmatched reply or NAK cannot change the active session");
+    s.onRouting(request, 0, TRANSPORT_RF, 200);
+    ok(s.busy(), "routing ACK does not complete an admin read");
+    s.onAdminReply(request, response, sizeof(response), TRANSPORT_MQTT, 300);
+    ok(!s.busy() && s.isOpen(), "matching reply may arrive over another transport");
+    s.close();
+}
+
+static void testSendFailureIsReportedWithoutRetry() {
+    Fake f; f.sendFails = true;
+    Session s; s.open(1, hooksFor(f));
+    s.submit("info", 100);
+    ok(!s.busy() && transcriptHas(s, "send failed"), "failed send reports error and clears busy");
+    s.service(40000);
+    ok(f.sent.empty(), "service does not silently retry a failed transport");
+    f.sendFails = false;
+    s.submit("info", 40001);
+    ok(f.sent.size() == 1 && s.busy(), "operator can retry after transport recovers");
+    s.close();
+}
+
+static void testRequestTimeoutRollover() {
+    Fake f; Session s; s.open(1, hooksFor(f));
+    const uint32_t start = UINT32_MAX - 1000u;
+    s.submit("set lora hop_limit 5", start);
+    s.service(start + 29999u);
+    ok(s.busy(), "admin request still pending one millisecond before wrapped deadline");
+    s.service(start + 30000u);
+    ok(!s.busy() && s.isOpen() && f.sent.size() == 1 && transcriptHas(s, "timeout"),
+       "wrapped timeout cancels read-modify-write without demoting the peer");
+    const uint8_t key[8] = {1, 2, 3, 4, 5, 6, 7, 8};
+    const auto response = loraResponse(key, sizeof(key));
+    s.onAdminReply(f.sent[0].id, response.data(), response.size(), TRANSPORT_RF, start + 30001u);
+    ok(f.sent.size() == 1, "late read after timeout cannot issue a write");
+    s.close();
+}
+
+static void testPasskeyExpiryRollover() {
+    for (uint32_t age : {119999u, 120000u}) {
+        Fake f; Session s; s.open(1, hooksFor(f));
+        const uint32_t minted = UINT32_MAX - 1000u;
+        s.submit("info", minted - 100);
+        const uint8_t response[] = {0x6A, 0, 0xAA, 0x06, 8, 1, 2, 3, 4, 5, 6, 7, 8};
+        s.onAdminReply(f.sent[0].id, response, sizeof(response), TRANSPORT_RF, minted);
+        s.submit("reboot 5", minted + age);
+        s.submit("confirm", minted + age);
+        ok(f.sent.size() == (age < 120000 ? 2u : 1u),
+           "destructive command requires a key younger than two minutes across rollover");
+        if (age == 120000) ok(!s.busy(), "expired passkey never sends an unauthenticated write");
+        s.close();
+    }
+}
+
 int main() {
+    testRepliesMustMatchAndReadAckIsNotTheReply();
+    testSendFailureIsReportedWithoutRetry();
+    testRequestTimeoutRollover();
+    testPasskeyExpiryRollover();
     testPreviouslyUnwiredCommands();
     testInfoRendersFields();
     testConfigResponseNamesItsBlock();

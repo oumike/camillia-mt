@@ -8,6 +8,7 @@
 #include <esp_random.h>
 #include "xeddsa_sig.h"
 #include "ack_proof.h"
+#include "utf8_utils.h"
 
 // ── PSK expansion ─────────────────────────────────────────────
 // Meshtastic DEFAULT_KEY = kDkBase[0..14] + PSK_byte.
@@ -293,15 +294,9 @@ bool decodeUser(const uint8_t *buf, size_t len, UserInfo &out) {
             uint64_t sz; i = pbReadVarint(buf, len, i, sz); if (!i) break;
             if (!pbFits(i, sz, len)) break;
             if (field == 2 && sz > 0) {
-                size_t copy = min((size_t)sz, sizeof(out.longName) - 1);
-                while (copy > 0 && ((buf[i + copy] & 0xC0u) == 0x80u)) copy--;
-                memcpy(out.longName, buf + i, copy);
-                out.longName[copy] = '\0';
+                utf8util::copyTruncateBytes(out.longName, sizeof(out.longName), buf + i, (size_t)sz);
             } else if (field == 3 && sz > 0) {
-                size_t copy = min((size_t)sz, sizeof(out.shortName) - 1);
-                while (copy > 0 && ((buf[i + copy] & 0xC0u) == 0x80u)) copy--;
-                memcpy(out.shortName, buf + i, copy);
-                out.shortName[copy] = '\0';
+                utf8util::copyTruncateBytes(out.shortName, sizeof(out.shortName), buf + i, (size_t)sz);
             } else if (field == 8 && sz == 32) {
                 memcpy(out.pubKey, buf + i, 32);
                 out.hasPubKey = true;
@@ -953,6 +948,19 @@ static size_t pbWriteVarint(uint8_t *buf, uint64_t val) {
     return n;
 }
 
+static size_t pbWriteDataHeader(uint8_t *buf, size_t bufLen,
+                                uint32_t portnum, size_t payloadLen) {
+    uint8_t header[17]; // two tags, a uint32 port, and a uint64 length
+    size_t n = 0;
+    n += pbWriteVarint(header + n, (1 << 3) | 0);
+    n += pbWriteVarint(header + n, portnum);
+    n += pbWriteVarint(header + n, (2 << 3) | 2);
+    n += pbWriteVarint(header + n, payloadLen);
+    if (!buf || n > bufLen || payloadLen > bufLen - n) return 0;
+    memcpy(buf, header, n);
+    return n;
+}
+
 // Appends Data.bitfield (field 9) and returns the new length, or 0 if it would
 // not fit. Written unconditionally, *including when the value is zero*.
 //
@@ -988,16 +996,10 @@ static size_t pbWriteDataBitfield(uint8_t *buf, size_t n, size_t bufLen, uint32_
 
 size_t encodeTextMessage(const char *text, uint8_t *buf, size_t bufLen,
                          uint32_t bitfield, uint32_t replyId, uint32_t emoji) {
-    size_t n = 0;
     size_t textLen = strlen(text);
     if (textLen > MESH_TEXT_MAX_LEN) return 0;
-    // field 1 (portnum = TEXT_MESSAGE_APP = 1), varint
-    n += pbWriteVarint(buf + n, (1 << 3) | 0);
-    n += pbWriteVarint(buf + n, TEXT_MESSAGE_APP);
-    // field 2 (payload), length-delimited
-    n += pbWriteVarint(buf + n, (2 << 3) | 2);
-    n += pbWriteVarint(buf + n, textLen);
-    if (n + textLen > bufLen) return 0;
+    size_t n = pbWriteDataHeader(buf, bufLen, TEXT_MESSAGE_APP, textLen);
+    if (!n) return 0;
     memcpy(buf + n, text, textLen);
     n += textLen;
     // field 7 (reply_id), fixed32
@@ -1026,16 +1028,8 @@ size_t encodeAdminData(const uint8_t *admin, size_t adminLen,
                        uint32_t fromNode, uint32_t toNode, bool wantResponse,
                        uint8_t *buf, size_t bufLen) {
     if (!admin || !adminLen || !buf) return 0;
-    size_t n = 0;
-
-    // field 1: portnum
-    n += pbWriteVarint(buf + n, (1 << 3) | 0);
-    n += pbWriteVarint(buf + n, ADMIN_APP);
-
-    // field 2: payload
-    n += pbWriteVarint(buf + n, (2 << 3) | 2);
-    n += pbWriteVarint(buf + n, adminLen);
-    if (n + adminLen > bufLen) return 0;
+    size_t n = pbWriteDataHeader(buf, bufLen, ADMIN_APP, adminLen);
+    if (!n) return 0;
     memcpy(buf + n, admin, adminLen);
     n += adminLen;
 
@@ -1135,14 +1129,11 @@ size_t encodeNodeInfo(uint32_t nodeId, const char *longName,
                      pubKeyValid ? "YES" : "NO", (unsigned)u);
 
     // Wrap in Data message
-    size_t n = 0;
-    n += pbWriteVarint(buf + n, (1 << 3) | 0);
-    n += pbWriteVarint(buf + n, NODEINFO_APP);
-    n += pbWriteVarint(buf + n, (2 << 3) | 2);
-    n += pbWriteVarint(buf + n, u);
-    if (n + u > bufLen) return 0;
+    size_t n = pbWriteDataHeader(buf, bufLen, NODEINFO_APP, u);
+    if (!n) return 0;
     memcpy(buf + n, user, u); n += u;
     if (wantResponse) {
+        if (n + 2 > bufLen) return 0;
         // want_response = true: causes receiving nodes to reply with their own NODEINFO
         n += pbWriteVarint(buf + n, (3 << 3) | 0);  // field 3, varint
         n += pbWriteVarint(buf + n, 1);              // true
@@ -1184,12 +1175,8 @@ size_t encodeSharedNodeInfo(uint32_t nodeId, const char *longName,
         memcpy(user + u, pubKey32, 32); u += 32;
     }
 
-    size_t n = 0;
-    n += pbWriteVarint(buf + n, (1 << 3) | 0);
-    n += pbWriteVarint(buf + n, NODEINFO_APP);
-    n += pbWriteVarint(buf + n, (2 << 3) | 2);
-    n += pbWriteVarint(buf + n, u);
-    if (n + u > bufLen) return 0;
+    size_t n = pbWriteDataHeader(buf, bufLen, NODEINFO_APP, u);
+    if (!n) return 0;
     memcpy(buf + n, user, u); n += u;
     // field 9: bitfield. A share goes out zero-hop (hop_start 0), and a 2.8.1
     // node drops a hop_start-0 packet with no bitfield as pre-2.3 firmware
@@ -1251,12 +1238,8 @@ size_t encodePosition(int32_t latI, int32_t lonI, int32_t alt,
     }
 
     // Wrap in Data message
-    size_t n = 0;
-    n += pbWriteVarint(buf + n, (1 << 3) | 0);
-    n += pbWriteVarint(buf + n, POSITION_APP);
-    n += pbWriteVarint(buf + n, (2 << 3) | 2);
-    n += pbWriteVarint(buf + n, p);
-    if (n + p > bufLen) return 0;
+    size_t n = pbWriteDataHeader(buf, bufLen, POSITION_APP, p);
+    if (!n) return 0;
     memcpy(buf + n, pos, p); n += p;
     n = pbWriteDataBitfield(buf, n, bufLen, bitfield);
     if (n == 0) return 0;
@@ -1316,12 +1299,8 @@ size_t encodeTelemetryDevice(uint8_t battPct, float voltage,
     t += d;
 
     // Wrap in Data message
-    size_t n = 0;
-    n += pbWriteVarint(buf + n, (1 << 3) | 0);
-    n += pbWriteVarint(buf + n, TELEMETRY_APP);
-    n += pbWriteVarint(buf + n, (2 << 3) | 2);
-    n += pbWriteVarint(buf + n, t);
-    if (n + t > bufLen) return 0;
+    size_t n = pbWriteDataHeader(buf, bufLen, TELEMETRY_APP, t);
+    if (!n) return 0;
     memcpy(buf + n, telem, t);
     n += t;
 
@@ -1371,12 +1350,8 @@ size_t encodeTelemetryEnvironment(float temperatureC, float humidityPct, float p
     t += e;
 
     // Wrap in Data message
-    size_t n = 0;
-    n += pbWriteVarint(buf + n, (1 << 3) | 0);
-    n += pbWriteVarint(buf + n, TELEMETRY_APP);
-    n += pbWriteVarint(buf + n, (2 << 3) | 2);
-    n += pbWriteVarint(buf + n, t);
-    if (n + t > bufLen) return 0;
+    size_t n = pbWriteDataHeader(buf, bufLen, TELEMETRY_APP, t);
+    if (!n) return 0;
     memcpy(buf + n, telem, t);
     n += t;
 
@@ -1436,12 +1411,8 @@ size_t encodeNeighborInfo(uint32_t nodeId,
         p += e;
     }
 
-    size_t n = 0;
-    n += pbWriteVarint(buf + n, (1 << 3) | 0);
-    n += pbWriteVarint(buf + n, NEIGHBORINFO_APP);
-    n += pbWriteVarint(buf + n, (2 << 3) | 2);
-    n += pbWriteVarint(buf + n, p);
-    if (n + p > bufLen) return 0;
+    size_t n = pbWriteDataHeader(buf, bufLen, NEIGHBORINFO_APP, p);
+    if (!n) return 0;
     memcpy(buf + n, info, p);
     n += p;
 
@@ -1466,14 +1437,8 @@ size_t encodeRouting(uint32_t requestId, uint32_t fromNodeId, uint32_t errorReas
         if (withProof) innerLen = withProof;
     }
 
-    size_t n = 0;
-    // Data field 1 (portnum = ROUTING_APP), varint
-    n += pbWriteVarint(buf + n, (1 << 3) | 0);
-    n += pbWriteVarint(buf + n, ROUTING_APP);
-    // Data field 2 (payload = inner Routing proto), length-delimited
-    n += pbWriteVarint(buf + n, (2 << 3) | 2);
-    n += pbWriteVarint(buf + n, innerLen);
-    if (n + innerLen + 10 > bufLen) return 0;
+    size_t n = pbWriteDataHeader(buf, bufLen, ROUTING_APP, innerLen);
+    if (!n || n + innerLen + 10 > bufLen) return 0;
     memcpy(buf + n, inner, innerLen); n += innerLen;
     // Data field 5 (source), fixed32 — identifies who is sending this ACK
     buf[n++] = (5 << 3) | 5;  // field 5, wire type 5 (fixed32)
@@ -1491,17 +1456,11 @@ size_t encodeTracerouteRequest(uint8_t *buf, size_t bufLen, bool wantResponse,
                                uint32_t bitfield) {
     // Empty RouteDiscovery payload is valid for a traceroute request.
     const size_t routePayloadLen = 0;
-    size_t n = 0;
-
-    // Data.portnum = TRACEROUTE_APP
-    n += pbWriteVarint(buf + n, (1 << 3) | 0);
-    n += pbWriteVarint(buf + n, TRACEROUTE_APP);
-
-    // Data.payload = empty RouteDiscovery
-    n += pbWriteVarint(buf + n, (2 << 3) | 2);
-    n += pbWriteVarint(buf + n, routePayloadLen);
+    size_t n = pbWriteDataHeader(buf, bufLen, TRACEROUTE_APP, routePayloadLen);
+    if (!n) return 0;
 
     if (wantResponse) {
+        if (n + 2 > bufLen) return 0;
         n += pbWriteVarint(buf + n, (3 << 3) | 0);
         n += pbWriteVarint(buf + n, 1);
     }
@@ -1526,7 +1485,7 @@ size_t encodeTracerouteReply(uint8_t *buf, size_t bufLen,
     // Appended rather than inserted, and that is what keeps it aligned: relays
     // add their entry as the request passes through, so appending puts ours
     // last, which is the position of the final hop.
-    uint8_t snrField[8];
+    uint8_t snrField[11]; // tag + ten varint bytes for a sign-extended negative int32
     size_t snrLen = 0;
     if (rxSnr == rxSnr) {              // NAN check without <cmath>
         long q = lroundf(rxSnr * 4.0f);
@@ -1575,15 +1534,8 @@ size_t encodeTracerouteReply(uint8_t *buf, size_t bufLen,
 
 size_t encodePositionRequest(uint8_t *buf, size_t bufLen, uint32_t bitfield) {
     // Empty Position payload + want_response=true: peer replies with their Position.
-    size_t n = 0;
-
-    // Data.portnum = POSITION_APP
-    n += pbWriteVarint(buf + n, (1 << 3) | 0);
-    n += pbWriteVarint(buf + n, POSITION_APP);
-
-    // Data.payload = empty Position
-    n += pbWriteVarint(buf + n, (2 << 3) | 2);
-    n += pbWriteVarint(buf + n, 0);
+    size_t n = pbWriteDataHeader(buf, bufLen, POSITION_APP, 0);
+    if (!n || n + 2 > bufLen) return 0;
 
     // Data.want_response = true
     n += pbWriteVarint(buf + n, (3 << 3) | 0);
