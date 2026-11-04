@@ -31,3 +31,6 @@ src/spell_dict_en.h
 .pio-core/
 .pio-core-p4/
 platformio_local.ini
+
+# Python unit-test bytecode.
+tests/__pycache__/

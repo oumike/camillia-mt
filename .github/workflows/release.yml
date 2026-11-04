@@ -124,13 +124,15 @@ jobs:
         run: pip install platformio 'esptool==4.11.0'
 
       # The host unit tests, both ways build.yml runs them: tests/run.sh with
-      # -Werror, then the same tests through PlatformIO's runner. Seconds, and
-      # before the signing key is on disk, so a failing test stops the release
+      # -Werror and sanitizers, then the same tests through PlatformIO's runner.
+      # They run before the signing key is on disk, so a failing test stops the release
       # before anything is built or signed.
       - name: Unit tests
         env:
           CXX: clang++
+          SANITIZE: '1'
         run: |
+          python3 -m unittest discover -s tests -p 'test_*.py' -v
           bash tests/run.sh
           pio test -e native
 

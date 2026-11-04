@@ -374,17 +374,68 @@ them by hand. Exit with `Ctrl+C`.
 
 ### Unit tests
 
+Run from the repository root on macOS or Linux. No device, ESP32 toolchain,
+network service, or PlatformIO is needed for the host runner; it uses a C++17
+compiler (`c++` by default, or set `CXX=clang++`).
+
+```bash
+bash tests/run.sh
+SANITIZE=1 bash tests/run.sh
+python3 -m unittest discover -s tests -p 'test_*.py' -v
 ```
+
+The first command runs all C++ suites with warnings treated as errors.
+`SANITIZE=1` additionally enables AddressSanitizer and UndefinedBehaviorSanitizer,
+with undefined behavior treated as a fatal failure. It requires a compiler with
+those runtimes (Apple Clang and the Clang installed on GitHub's Ubuntu runners
+support them). The Python standard-library tests exercise the runner itself:
+discovery, selection, compilation/runtime failures, and sanitizer enforcement.
+
+The same C++ suites also run through PlatformIO's Unity runner:
+
+```bash
 pio test -e native
 ```
 
-Runs the host unit tests on your computer; no device needed. The tests cover
-Arduino-free logic (protocols, signing policy, node eviction, spell, and so on)
-and live in `tests/test_*.cpp`. `bash tests/run.sh` runs the same tests with the
-system compiler and stricter warnings (`-Werror`), without PlatformIO. A new
-test needs a wrapper in `tests/native/test_<name>/test_main.cpp` (copy an
-existing one) so `pio test` runs it too; `tests/run.sh` fails without one.
-Add `-f test_<name>` to run one test.
+For a focused run, select one or several suite names:
+
+```bash
+bash tests/run.sh test_mesh_proto test_admin_proto
+SANITIZE=1 bash tests/run.sh test_utf8_utils
+pio test -e native -f test_mesh_proto
+```
+
+| Area | Coverage |
+|---|---|
+| Mesh protocol | Golden wire fixtures, text/DM/admin envelopes, NodeInfo, position, telemetry, neighbors, traceroutes, MQTT envelopes and location-sharing policy; truncated/malformed inputs and output capacity boundaries |
+| Channel/routing policy | Public PSKs, AEAD channel hashes, per-channel hop budgets, position precision, relay/duplicate rules and signature acceptance policy |
+| Admin and chat-server clients | Read-modify-write, credential/confirmation gates, transport failures, reply matching, timeouts, retries, discovery, cursor gaps, mode changes and timer rollover |
+| Admin and chat-server codecs | Golden encodings, unknown-field preservation, malformed/truncated frames, passkey sizes, maximum messages and bounded outputs |
+| Cryptographic utilities | SHA-256 known-answer and streaming/padding vectors, HMAC vectors and ACK proof binding/extraction |
+| Names and text | Base64 standard/URL-safe keys, UTF-8 byte boundaries, name-cache eviction, key pinning, node eviction and spell suggestions |
+| Display/log utilities | Clock formats and parsing, node labels, web-theme contrast, map tile paths/filenames and PNG structure checks, wardrive CSV formatting and throttling |
+| Battery logic | T-Deck ADC-path sampling, calibration, voltage curve, filtering, hysteresis, missing samples and timer rollover with a fake ADC/clock |
+
+These are **unit tests, not hardware acceptance tests**. They compile the real
+modules, replacing only the necessary external boundaries. The mesh protocol
+suite uses crypto stand-ins: it does not validate AES, Curve25519, PKI encryption
+or XEdDSA signing/verification. Map tests do not mount storage or decode PNG
+pixels. NVS/config persistence, radio/BLE/WiFi drivers, other boards' battery
+drivers, and rendered LVGL/e-paper behavior still require integration or
+hardware checks.
+
+Tests live in `tests/test_*.cpp`. Each needs a matching
+`tests/native/test_<name>/test_main.cpp` wrapper; `tests/run.sh` rejects missing
+wrappers and native-only suites so the two runners cannot silently diverge.
+The native wrapper reports the suite's checks as one Unity test. Source
+dependencies belong in the test's `// test-deps:` line and the native source
+filter (or a suite-local source wrapper for modules needing link-time fakes).
+Minimal header stand-ins are in `tests/host`.
+
+GitHub **Build** runs the Python runner tests and all C++ suites with sanitizers
+before allowing the firmware build job to start, then checks the native runner
+before compiling board environments. **Release** runs the same checks before
+building or signing. Neither local unit-test command flashes a device.
 
 ### Helper script (macOS and Linux only)
 

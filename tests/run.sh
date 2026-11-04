@@ -11,22 +11,61 @@
 # A "// test-cflags:" line adds compiler flags, paths relative to tests/. It is
 # how a module that includes <Arduino.h> or mbedtls builds against the minimal
 # stand-ins in host/.
+# Pass suite names to select tests. SANITIZE=1 enables ASan and fatal UBSan.
 set -euo pipefail
 cd "$(dirname "$0")"
+shopt -s nullglob
 
 CXX="${CXX:-c++}"
+flags=(-std=c++17 -Wall -Wextra -Werror -O1)
+case "${SANITIZE:-0}" in
+    0) ;;
+    1) flags+=(-g -fsanitize=address,undefined -fno-sanitize-recover=all -fno-omit-frame-pointer) ;;
+    *) echo "SANITIZE must be 0 or 1" >&2; exit 2 ;;
+esac
+
+all_tests=(test_*.cpp)
+if [ "${#all_tests[@]}" -eq 0 ]; then
+    echo "No host test suites found" >&2
+    exit 1
+fi
+
+fail=0
+for t in "${all_tests[@]}"; do
+    name="${t%.cpp}"
+    if [ ! -f "native/$name/test_main.cpp" ]; then
+        echo "$name: no native/$name/test_main.cpp for pio test -e native" >&2
+        fail=1
+    fi
+done
+for wrapper in native/test_*/test_main.cpp; do
+    name="${wrapper#native/}"
+    name="${name%/test_main.cpp}"
+    if [ ! -f "$name.cpp" ]; then
+        echo "$name: native suite has no matching host test $name.cpp" >&2
+        fail=1
+    fi
+done
+[ "$fail" -eq 0 ] || exit 1
+
+tests=("${all_tests[@]}")
+if [ "$#" -gt 0 ]; then
+    tests=()
+    for name in "$@"; do
+        name="${name%.cpp}"
+        if [[ "$name" != test_* || "$name" == */* || ! -f "$name.cpp" ]]; then
+            echo "Unknown test suite: $name" >&2
+            exit 2
+        fi
+        tests+=("$name.cpp")
+    done
+fi
+
 OUT="$(mktemp -d)"
 trap 'rm -rf "$OUT"' EXIT
 
-fail=0
-for t in test_*.cpp; do
+for t in "${tests[@]}"; do
     name="${t%.cpp}"
-    # `pio test -e native` runs each test through its wrapper in native/; one
-    # without a wrapper would pass here and silently never run there.
-    if [ ! -f "native/$name/test_main.cpp" ]; then
-        echo "$name: no native/$name/test_main.cpp for pio test -e native"
-        fail=1
-    fi
     srcs=("$t")
 
     mod="../src/${name#test_}.cpp"
@@ -42,13 +81,17 @@ for t in test_*.cpp; do
 
     printf '%-28s ' "$name"
     # shellcheck disable=SC2086
-    if ! "$CXX" -std=c++17 -Wall -Wextra -Werror -O1 $cflags -o "$OUT/$name" "${srcs[@]}" 2> "$OUT/$name.log"; then
+    if ! "$CXX" "${flags[@]}" $cflags -o "$OUT/$name" "${srcs[@]}" 2> "$OUT/$name.log"; then
         echo "BUILD FAILED"
         cat "$OUT/$name.log"
-        fail=1
+        fail=$((fail + 1))
         continue
     fi
-    "$OUT/$name" || fail=1
+    if ! "$OUT/$name"; then
+        echo "$name: FAILED"
+        fail=$((fail + 1))
+    fi
 done
 
-exit $fail
+printf '\n%d suite(s), %d failed\n' "${#tests[@]}" "$fail"
+[ "$fail" -eq 0 ]
