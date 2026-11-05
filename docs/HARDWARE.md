@@ -52,6 +52,27 @@ and its [`src/hal/hw_*.h`](../src/hal/) pin map.
 | **microSD** | Four-bit SD_MMC on CLK43/CMD44/D0-D3 39-42; active-low power control through XL9535 |
 | **Status** | Implementation present; no subsystem is hardware-verified without serial logs or measurements |
 
+### Nicolai Electronics Tanmatsu (WIP)
+
+| Spec | Tanmatsu |
+| --- | --- |
+| **Build env** | `tanmatsu` |
+| **MCU** | ESP32-P4 (ECO2, `esp32p4_es` profile) at 360 MHz, 16 MB flash, 32 MB PSRAM |
+| **Display** | 3.92-inch ST7701 IPS LCD, 480x800 over two-lane MIPI-DSI; backlight driven by the coprocessor |
+| **Coprocessor** | CH32V203 on I2C (`0x5F`): keyboard matrix, display and keyboard backlights, C6 power, battery, charger and power-off |
+| **Wireless** | ESP32-C6 over SDIO via ESP-Hosted. Wi-Fi works through it; BLE keyboard is not supported yet (NimBLE-Arduino 1.x needs an on-chip controller) |
+| **LoRa** | SX1262 attached to the C6, not the P4. Camillia drives it through the C6 firmware's LoRa RPC over ESP-Hosted (`src/hal/tanmatsu_lora.cpp`); the C6 is not reflashed |
+| **Input** | Full QWERTY keyboard. F1 Home, F2 channels, F3 DMs, F4 nodes, F5 tools, F6 settings; arrows scroll and switch channel; Fn+Up/Down page; Fn+Backspace back |
+| **Battery** | Voltage and charge state from the coprocessor; Li-ion voltage curve for percentage |
+| **Audio** | ES8156 DAC (I2C `0x08`) over I2S MCLK30/BCK29/WS31/DOUT28; speaker amp switched by the coprocessor per sound. Alerts, splash melody and volume |
+| **LEDs** | Coprocessor LEDs in manual mode: power (charge-state colors) and radio (Wi-Fi: green connected, blue AP, amber joining) share the Status Lights level in Settings, messages LED blinks for unread messages |
+| **microSD** | Four-bit SD_MMC on CLK43/CMD44/D0-D3 39-42, powered by the P4's LDO channel 4 |
+| **Not used** | Touch (none fitted), GNSS (none fitted), microphone, IR, camera, expansion port |
+| **Status** | Compiles. No subsystem is hardware-verified yet |
+
+Flashing Camillia replaces the badge.team launcher. To go back, flash the
+launcher again from <https://tanmatsu.cloud>.
+
 ### Elecrow CrowPanel Advance 3.5 (WIP)
 
 `crowpanel-35` targets the ESP32-S3-WROOM-1-N16R8 bundle with an ILI9488
@@ -203,6 +224,7 @@ Each board's full pin map and feature flags (`HAS_KEYBOARD`, `HAS_TOUCH`, `HAS_G
 | Elecrow ThinkNode M9 | [`src/hal/hw_m9.h`](../src/hal/hw_m9.h) |
 | Seeed Wio Tracker L2 | [`src/hal/hw_wio_tracker_l2.h`](../src/hal/hw_wio_tracker_l2.h) |
 | LilyGo T-Display P4 | [`src/hal/hw_tdisplay_p4.h`](../src/hal/hw_tdisplay_p4.h) |
+| Nicolai Electronics Tanmatsu | [`src/hal/hw_tanmatsu.h`](../src/hal/hw_tanmatsu.h) |
 | Elecrow CrowPanel Advance 3.5" | [`src/hal/hw_crowpanel_35.h`](../src/hal/hw_crowpanel_35.h) |
 | Elecrow CrowPanel Advance 5.0" | [`src/hal/hw_crowpanel_50.h`](../src/hal/hw_crowpanel_50.h) |
 

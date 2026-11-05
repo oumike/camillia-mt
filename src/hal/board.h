@@ -39,6 +39,8 @@
 //   DEVICE_TDISPLAY_P4          LilyGO T-Display P4 (RM69A10 MIPI-DSI)
 //   DEVICE_CROWPANEL_35         Elecrow CrowPanel Advance 3.5" (ILI9488, SX1262)
 //   DEVICE_CROWPANEL_50         Elecrow CrowPanel Advance 5.0" (800x480 RGB, SX1262)
+//   DEVICE_TANMATSU             Nicolai Electronics Tanmatsu (ESP32-P4, ST7701
+//                               MIPI-DSI, LoRa via the ESP32-C6)
 //
 // DEVICE_CROWPANEL is defined for both CrowPanels: what they share -- the
 // touch-first UI and its sizing -- keys on it, and what differs (pins, panel,
@@ -76,11 +78,20 @@
 #  include "hw_crowpanel_35.h"
 #elif defined(DEVICE_CROWPANEL_50)
 #  include "hw_crowpanel_50.h"
+#elif defined(DEVICE_TANMATSU)
+#  include "hw_tanmatsu.h"
 #else
 #  error "No DEVICE_* build flag set. Define one of: DEVICE_TDECK, DEVICE_TDECK_PRO, \
 DEVICE_TLORA_PAGER_TFT, DEVICE_CARDPUTER_LORA_HAT, DEVICE_HELTEC_V4_EXPANSION, \
 DEVICE_HELTEC_R8, DEVICE_MESH_DECK, DEVICE_M9, DEVICE_WIO_TRACKER_L2, \
-DEVICE_TDISPLAY_P4, DEVICE_CROWPANEL_35, DEVICE_CROWPANEL_50"
+DEVICE_TDISPLAY_P4, DEVICE_CROWPANEL_35, DEVICE_CROWPANEL_50, DEVICE_TANMATSU"
+#endif
+
+// ESP32-P4 boards share the Arduino 3.x / ESP-IDF 5.5 platform, ESP-Hosted
+// radio coprocessor and SDMMC storage. Board-specific peripherals still key
+// on their own DEVICE_* macro.
+#if defined(DEVICE_TDISPLAY_P4) || defined(DEVICE_TANMATSU)
+#  define PLATFORM_ESP32P4 1
 #endif
 
 #if defined(DEVICE_CROWPANEL_35) || defined(DEVICE_CROWPANEL_50)
@@ -118,6 +129,11 @@ DEVICE_TDISPLAY_P4, DEVICE_CROWPANEL_35, DEVICE_CROWPANEL_50"
 #elif defined(DEVICE_CROWPANEL_50)
 // The RGB panel is native 800x480 landscape.
 #  define TFT_ROTATION_DEFAULT 0
+#elif defined(DEVICE_TANMATSU)
+// ST7701 is native 480x800 portrait, mounted sideways above the keyboard.
+// On hardware 3 (wadamesh's 270 degrees) came out upside down, so this is the
+// opposite turn.
+#  define TFT_ROTATION_DEFAULT 1
 #elif DEVICE_UI_VERTICAL
 #  define TFT_ROTATION_DEFAULT 0
 #else
@@ -210,7 +226,8 @@ DEVICE_TDISPLAY_P4, DEVICE_CROWPANEL_35, DEVICE_CROWPANEL_50"
 #if defined(DEVICE_TDECK) || defined(DEVICE_TDECK_PRO) || defined(DEVICE_HELTEC_V4_EXPANSION) \
     || defined(DEVICE_CARDPUTER_LORA_HAT) || defined(DEVICE_MESH_DECK) \
     || defined(DEVICE_M9) || defined(DEVICE_WIO_TRACKER_L2) \
-    || defined(DEVICE_TDISPLAY_P4) || defined(DEVICE_CROWPANEL)
+    || defined(DEVICE_TDISPLAY_P4) || defined(DEVICE_CROWPANEL) \
+    || defined(DEVICE_TANMATSU)
 #  define UI_CHANNEL_LIST_DROPDOWN 1
 #else
 #  define UI_CHANNEL_LIST_DROPDOWN 0
@@ -262,6 +279,10 @@ DEVICE_TDISPLAY_P4, DEVICE_CROWPANEL_35, DEVICE_CROWPANEL_50"
 #    define TDISPLAY_P4_UI_SCALE 2
 #  endif
 #  define UI_PIXEL_SCALE TDISPLAY_P4_UI_SCALE
+#elif defined(DEVICE_TANMATSU)
+// 800x480 at 3.9" is ~240 DPI. At 2 LVGL sees a 400x240 landscape panel,
+// which the keyboard UI already lays out for (the Pager is 480x222).
+#  define UI_PIXEL_SCALE 2
 #else
 #  define UI_PIXEL_SCALE 1
 #endif
@@ -386,7 +407,7 @@ DEVICE_TDISPLAY_P4, DEVICE_CROWPANEL_35, DEVICE_CROWPANEL_50"
     || defined(DEVICE_HELTEC_V4_EXPANSION) || defined(DEVICE_MESH_DECK) \
     || defined(DEVICE_M9) || defined(DEVICE_WIO_TRACKER_L2) \
     || defined(DEVICE_TDECK_PRO) || defined(DEVICE_TDISPLAY_P4) \
-    || defined(DEVICE_CROWPANEL)
+    || defined(DEVICE_CROWPANEL) || defined(DEVICE_TANMATSU)
 #  define HAS_VNC_HOST 1
 #else
 #  define HAS_VNC_HOST 0
@@ -399,6 +420,9 @@ DEVICE_TDISPLAY_P4, DEVICE_CROWPANEL_35, DEVICE_CROWPANEL_50"
 // The S3 targets have no Bluetooth Classic (BR/EDR), and the P4 target reaches
 // Bluetooth through its C6 coprocessor. BLE remains the only keyboard transport
 // supported here. docs/BLUETOOTH_KEYBOARDS.md has the buying guidance.
+//
+// The Tanmatsu is left out: NimBLE-Arduino 1.x needs an on-chip controller
+// (esp_bt.h), and its BLE sits behind ESP-Hosted on the C6.
 //
 // Keyboard-less touch boards gain the most. Nothing in the implementation is
 // board-specific — this macro plus a build_src_filter entry is the entire gate

@@ -19,6 +19,7 @@ CROWPANEL_35_ENV_NAME="crowpanel-35"
 CROWPANEL_50_ENV_NAME="crowpanel-50"
 P4_AMOLED_SX1262_ENV_NAME="p4-amoled-sx1262"
 P4_AMOLED_LR2021_ENV_NAME="p4-amoled-lr2021"
+TANMATSU_ENV_NAME="tanmatsu"
 DEFAULT_PIO_CORE_DIR="${PLATFORMIO_CORE_DIR:-$HOME/.platformio}"
 P4_PIO_CORE_DIR="${CAMILLIA_P4_PIO_CORE_DIR:-${DEFAULT_PIO_CORE_DIR}-p4}"
 ENV_EXPLICIT=false
@@ -165,7 +166,7 @@ prompt_for_device() {
 }
 
 show_usage() {
-	echo "Usage: $0 [--tdeck|-t] [--tdeck-pro|-p] [--debug|-d] [--cardputer|-C] [--pager|-P] [--heltec|-H] [--heltec-r8|-R] [--mesh-deck|-M] [--m9|-9] [--wio-tracker-l2] [--crowpanel-35] [--crowpanel-50] [--p4-amoled-sx1262|--p4-amoled-lr2021] [--erase|-E] [--fullclean|-F] [--just-build|-B]"
+	echo "Usage: $0 [--tdeck|-t] [--tdeck-pro|-p] [--debug|-d] [--cardputer|-C] [--pager|-P] [--heltec|-H] [--heltec-r8|-R] [--mesh-deck|-M] [--m9|-9] [--wio-tracker-l2] [--crowpanel-35] [--crowpanel-50] [--p4-amoled-sx1262|--p4-amoled-lr2021] [--tanmatsu] [--erase|-E] [--fullclean|-F] [--just-build|-B]"
 	echo "  --tdeck, -t  Use T-Deck environment (tdeck)"
 	echo "  --tdeck-pro, -p  Use T-Deck Pro environment ($TDECK_PRO_ENV_NAME)"
 	echo "  --debug, -d   Use debug PlatformIO environment ($DEBUG_ENV_NAME)"
@@ -180,6 +181,7 @@ show_usage() {
 	echo "  --crowpanel-50  Use Elecrow CrowPanel Advance 5.0\" environment ($CROWPANEL_50_ENV_NAME)"
 	echo "  --p4-amoled-sx1262  Use LilyGo T-Display P4 AMOLED SX1262 environment ($P4_AMOLED_SX1262_ENV_NAME)"
 	echo "  --p4-amoled-lr2021  Use LilyGo T-Display P4 AMOLED LR2021 environment ($P4_AMOLED_LR2021_ENV_NAME)"
+	echo "  --tanmatsu          Use Nicolai Electronics Tanmatsu environment ($TANMATSU_ENV_NAME)"
 	echo "                If neither is provided, you'll be prompted to choose a device."
 	echo "  --erase, -E   Erase flash before clean build/upload"
 	echo "                M9 uses the combined upload_erase target."
@@ -195,7 +197,7 @@ run_pio_for_env() {
 	local env_name="$1"
 	shift
 	case "$env_name" in
-		p4-amoled-*) PLATFORMIO_CORE_DIR="$P4_PIO_CORE_DIR" pio "$@" ;;
+		p4-amoled-*|tanmatsu) PLATFORMIO_CORE_DIR="$P4_PIO_CORE_DIR" pio "$@" ;;
 		*)           pio "$@" ;;
 	esac
 }
@@ -205,6 +207,61 @@ run_pio_target() {
 	local label="$2"
 	echo "[PIO] $label ($ENV_NAME)..."
 	run_pio_for_env "$ENV_NAME" run -e "$ENV_NAME" -t "$target"
+}
+
+# The Tanmatsu enumerates two USB serial ports: the ESP32-P4 and its ESP32-C6
+# radio coprocessor. PlatformIO's auto-detect can pick the C6. That's harmless,
+# because esptool aborts on the chip mismatch before writing anything. So try
+# each port in turn and keep the first one that works for later steps.
+DEVICE_PORT=""
+
+serial_port_candidates() {
+	local p
+	for p in /dev/cu.usbmodem* /dev/ttyACM*; do
+		[ -e "$p" ] && echo "$p"
+	done
+}
+
+needs_port_fallback() {
+	[ "$ENV_NAME" = "$TANMATSU_ENV_NAME" ]
+}
+
+run_pio_flash_target() {
+	local target="$1"
+	local label="$2"
+
+	if ! needs_port_fallback; then
+		run_pio_target "$target" "$label"
+		return
+	fi
+
+	local ports=()
+	if [ -n "$DEVICE_PORT" ]; then
+		ports=("$DEVICE_PORT")
+	else
+		local p
+		while IFS= read -r p; do
+			ports+=("$p")
+		done < <(serial_port_candidates)
+	fi
+
+	if [ "${#ports[@]}" -eq 0 ]; then
+		echo "[PIO] No USB serial ports found for $ENV_NAME. Is the device connected?"
+		return 1
+	fi
+
+	local port
+	for port in "${ports[@]}"; do
+		echo "[PIO] $label ($ENV_NAME) on $port..."
+		if run_pio_for_env "$ENV_NAME" run -e "$ENV_NAME" -t "$target" --upload-port "$port"; then
+			DEVICE_PORT="$port"
+			return 0
+		fi
+		echo "[PIO] $label failed on $port."
+	done
+
+	echo "[PIO] $label failed on every port: ${ports[*]}"
+	return 1
 }
 
 format_duration() {
@@ -277,6 +334,9 @@ for arg in "$@"; do
 			;;
 		--p4-amoled-lr2021)
 			select_env_or_exit "$P4_AMOLED_LR2021_ENV_NAME" "Environment '$P4_AMOLED_LR2021_ENV_NAME' not found in platformio.ini"
+			;;
+		--tanmatsu)
+			select_env_or_exit "$TANMATSU_ENV_NAME" "Environment '$TANMATSU_ENV_NAME' not found in platformio.ini"
 			;;
 		--help|-h)
 			show_usage
@@ -383,7 +443,7 @@ if [ "$ERASE_FIRST" = true ]; then
 		UPLOAD_TARGET="upload_erase"
 		UPLOAD_LABEL="Erase flash and upload"
 	else
-		run_pio_target "erase" "Erasing device flash"
+		run_pio_flash_target "erase" "Erasing device flash"
 	fi
 fi
 
@@ -391,7 +451,12 @@ BUILD_START_TS="$(date +%s)"
 if [ "$FULLCLEAN" = true ]; then
 	run_pio_target "fullclean" "Full clean"
 fi
-run_pio_target "$UPLOAD_TARGET" "$UPLOAD_LABEL"
+if needs_port_fallback; then
+	# Build once up front so a compile error fails once, not once per port.
+	echo "[PIO] Build ($ENV_NAME)..."
+	run_pio_for_env "$ENV_NAME" run -e "$ENV_NAME"
+fi
+run_pio_flash_target "$UPLOAD_TARGET" "$UPLOAD_LABEL"
 BUILD_END_TS="$(date +%s)"
 BUILD_ELAPSED_SECS=$((BUILD_END_TS - BUILD_START_TS))
 echo "[PIO] Build completed in $(format_duration "$BUILD_ELAPSED_SECS")."
@@ -408,4 +473,9 @@ if [ -f "$BIN_PATH" ]; then
 	echo "[PIO] BIN SHA256: $BIN_SHA"
 fi
 
-run_pio_target "monitor" "Monitor"
+if [ -n "$DEVICE_PORT" ]; then
+	echo "[PIO] Monitor ($ENV_NAME) on $DEVICE_PORT..."
+	run_pio_for_env "$ENV_NAME" run -e "$ENV_NAME" -t monitor --monitor-port "$DEVICE_PORT"
+else
+	run_pio_target "monitor" "Monitor"
+fi

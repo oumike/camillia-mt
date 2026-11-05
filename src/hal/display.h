@@ -32,6 +32,8 @@
 
 #if defined(DEVICE_TDISPLAY_P4)
 #include "tdisplay_p4_display.h"
+#elif defined(DEVICE_TANMATSU)
+#include "tanmatsu_display.h"
 #elif defined(DEVICE_TDECK_PRO)
 #include "tdeck_pro_display.h"
 #elif defined(DEVICE_CROWPANEL_50)

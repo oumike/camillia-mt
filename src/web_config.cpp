@@ -4720,7 +4720,7 @@ static void sendConfigPage(const char *msg = "", bool lite = false) {
         html += "</select></label>";
     }
 #endif
-#if defined(DEVICE_MESH_DECK)
+#if HAS_NOTIFY_LED
     // Kept in this section rather than given its own: it is the same question
     // as the alert tone — how the device gets your attention — and one more
     // heading is heap the AP-mode lite page cannot spare. Compiled out on boards
@@ -4848,6 +4848,20 @@ static void sendConfigPage(const char *msg = "", bool lite = false) {
             "touch lights it again. Notification blinks still flash while it is "
             "off. Never keeps it lit for as long as the screen is. Takes effect "
             "immediately, no reboot.</p>";
+#endif
+#if HAS_POWER_LED_LEVEL
+    html += "<label>Status Lights<select name='power_led_pct'>";
+    {
+        const uint8_t cur = cfgCoercePowerLedPct(gCfg->powerLedPct);
+        for (int i = 0; i < kPowerLedLevelCount; i++) {
+            snprintf(tmp, sizeof(tmp), "<option value='%u'%s>%s</option>",
+                     (unsigned)kPowerLedLevels[i].pct,
+                     (cur == kPowerLedLevels[i].pct) ? " selected" : "",
+                     kPowerLedLevels[i].label);
+            html += tmp;
+        }
+    }
+    html += "</select></label>";
 #endif
 #if HAS_NAV_BAR_TOGGLE
     html += "<label>Bottom Nav Bar<select name='nav_bar'>"
@@ -8435,7 +8449,13 @@ static void handlePostSave() {
             cfgCoerceKbLightTimeout(server.arg("kb_light_timeout").toInt());
     }
 #endif
-#if defined(DEVICE_MESH_DECK)
+#if HAS_POWER_LED_LEVEL
+    // Picked up by the status-light poll within a second; no reboot.
+    if (server.hasArg("power_led_pct")) {
+        gCfg->powerLedPct = cfgCoercePowerLedPct(server.arg("power_led_pct").toInt());
+    }
+#endif
+#if HAS_NOTIFY_LED
     // Legacy compatibility for older cached pages that still post notify_led:
     // the new model is per-type control, so turning the old global toggle off
     // means both types become Off.
@@ -8695,16 +8715,19 @@ static void handlePostSave() {
     cfgMasked.kbLightTimeoutS = cfgBefore.kbLightTimeoutS;
     // Read on every received packet.
     cfgMasked.packetSigPolicy = cfgBefore.packetSigPolicy;
+    // Read by the Tanmatsu status-light poll once a second.
+    cfgMasked.powerLedPct = cfgBefore.powerLedPct;
     const bool fontChanged  = (gCfg->fontSize != cfgBefore.fontSize);
     const bool spellChanged = (gCfg->spellCheckEnabled != cfgBefore.spellCheckEnabled);
     const bool wardriveChanged = (gCfg->wardriveLogEnabled != cfgBefore.wardriveLogEnabled);
     const bool navAlignChanged = (gCfg->navAlign != cfgBefore.navAlign);
     const bool kbLightTimeoutChanged = (gCfg->kbLightTimeoutS != cfgBefore.kbLightTimeoutS);
     const bool sigPolicyChanged = (gCfg->packetSigPolicy != cfgBefore.packetSigPolicy);
+    const bool powerLedChanged = (gCfg->powerLedPct != cfgBefore.powerLedPct);
     const bool liveOnly = (memcmp(&cfgMasked, &cfgBefore, sizeof(RhinoConfig)) == 0)
                           && (fontChanged || spellChanged || wardriveChanged
                               || navAlignChanged || kbLightTimeoutChanged
-                              || sigPolicyChanged);
+                              || sigPolicyChanged || powerLedChanged);
 
     if (liveOnly) {
         redirectHomeWithFlash(fontChanged ? "Saved. Font size applied." : "Saved.");

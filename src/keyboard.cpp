@@ -2,6 +2,8 @@
 #include "keyboard.h"
 #if defined(DEVICE_TDISPLAY_P4)
 #include "hal/tdisplay_p4_io.h"
+#elif defined(DEVICE_TANMATSU)
+#include "hal/tanmatsu_coproc.h"
 #endif
 #include "battery_util.h"
 #if HAS_BLE_KEYBOARD
@@ -17,7 +19,8 @@
 //
 // KEY_NONE means "not a chord", which for a driver whose Alt state costs a bus
 // transaction is also the answer to "do I need to go and look?".
-#if defined(DEVICE_MESH_DECK) || defined(DEVICE_TDECK) || defined(DEVICE_CARDPUTER_LORA_HAT)
+#if defined(DEVICE_MESH_DECK) || defined(DEVICE_TDECK) || defined(DEVICE_CARDPUTER_LORA_HAT) \
+    || defined(DEVICE_TANMATSU)
 static char altNavShortcut(char k) {
     switch (k) {
         // H is Home on every build; what Home *means* is the difference.
@@ -112,6 +115,8 @@ void keyboardSetKeypadBacklight(uint8_t level) {
 #elif defined(DEVICE_TDISPLAY_P4) && defined(KB_BL) && (KB_BL >= 0)
     sP4BacklightLevel = level;
     if (sP4BacklightAttached) ledcWrite(KB_BL, level);
+#elif defined(DEVICE_TANMATSU)
+    (void)tanmatsuCoprocSetKeyboardBacklight(level);
 #else
     (void)level;
 #endif
@@ -1539,6 +1544,123 @@ static bool tdeckKeyboardAltHeldRaw() {
 }
 #endif
 
+#if defined(DEVICE_TANMATSU)
+// ── Tanmatsu keyboard ────────────────────────────────────────────────────────
+// The CH32V203 coprocessor scans the matrix and keeps a 9-byte bitmap of every
+// key that is down, so this side diffs successive snapshots: real press and
+// release, which also makes the held-key report exact. Bit layout follows
+// tanmatsu_coprocessor_keys_t (LSB first).
+namespace {
+#define TM_MOD_SHIFT 0x01
+#define TM_MOD_ALT   0x02
+#define TM_MOD_FN    0x03
+#define TM_MOD_OTHER 0x04   // Ctrl, Meta: modifiers with no meaning here
+
+const char kTmKeymap[TANMATSU_KEYBOARD_BYTES][8] = {
+    {KEY_ESCAPE, KEY_OPEN_HOME, KEY_OPEN_CHAT_BTN, KEY_OPEN_DMS, '`', '1', '2', '3'},
+    {KEY_TAB, 'q', 'w', 'e', TM_MOD_FN, 'a', 's', 'd'},
+    {TM_MOD_SHIFT, 'z', 'x', 'c', TM_MOD_OTHER, TM_MOD_OTHER, TM_MOD_ALT, '\\'},
+    {'4', '5', '6', '7', 'r', 't', 'y', 'u'},
+    {'f', 'g', 'h', 'j', 'v', 'b', 'n', 'm'},
+    {KEY_OPEN_NODES, KEY_OPEN_TOOLS, KEY_OPEN_CONFIG, KEY_BACKSPACE, '9', '0', '-', '='},
+    {'o', 'p', '[', ']', 'l', ';', '\'', KEY_ENTER},
+    {'.', '/', KEY_SCROLL_UP, TM_MOD_SHIFT, TM_MOD_ALT, KEY_PREV_CHAN, KEY_SCROLL_DN, KEY_NEXT_CHAN},
+    {'8', 'i', 'k', ',', ' ', ' ', ' ', KEY_NONE},
+};
+
+uint8_t  sTmPrev[TANMATSU_KEYBOARD_BYTES] = {};
+uint8_t  sTmNow[TANMATSU_KEYBOARD_BYTES] = {};
+uint32_t sTmLastScanMs = 0;
+char     sTmHeldKey = KEY_NONE;
+uint32_t sTmHeldSinceMs = 0;
+uint32_t sTmLastKeyMs = 0;
+
+bool tmModHeld(uint8_t mod) {
+    for (uint8_t b = 0; b < TANMATSU_KEYBOARD_BYTES; b++) {
+        for (uint8_t i = 0; i < 8; i++) {
+            if ((sTmNow[b] & (1u << i)) && kTmKeymap[b][i] == (char)mod) return true;
+        }
+    }
+    return false;
+}
+
+char tmApplyShift(char k) {
+    if (k >= 'a' && k <= 'z') return (char)(k - 'a' + 'A');
+    static const char kFrom[] = "1234567890-=[];',./`\\";
+    static const char kTo[]   = "!@#$%^&*()_+{}:\"<>?~|";
+    for (uint8_t i = 0; kFrom[i]; i++) {
+        if (kFrom[i] == k) return kTo[i];
+    }
+    return k;
+}
+
+// Resolves the next unreported press, or KEY_NONE. Touches no hardware.
+char tmEmitPending() {
+    for (uint8_t b = 0; b < TANMATSU_KEYBOARD_BYTES; b++) {
+        sTmPrev[b] &= sTmNow[b];          // releases are always consumed
+        const uint8_t down = (uint8_t)(sTmNow[b] & ~sTmPrev[b]);
+        if (!down) continue;
+        for (uint8_t i = 0; i < 8; i++) {
+            if (!(down & (1u << i))) continue;
+            sTmPrev[b] |= (uint8_t)(1u << i);
+            char k = kTmKeymap[b][i];
+            if (sKeyTrace) {
+                Serial.printf("[tanmatsu-kb] byte %u bit %u -> 0x%02X\n",
+                              (unsigned)b, (unsigned)i, (unsigned)(uint8_t)k);
+            }
+            if (k == KEY_NONE || (uint8_t)k <= TM_MOD_OTHER) continue;
+            if (tmModHeld(TM_MOD_FN)) {
+                if (k == KEY_SCROLL_UP) k = KEY_PAGE_UP;
+                else if (k == KEY_SCROLL_DN) k = KEY_PAGE_DN;
+                else if (k == KEY_BACKSPACE) k = KEY_BACK_BTN;
+            } else if (tmModHeld(TM_MOD_ALT)) {
+                const char nav = altNavShortcut(k);
+                if (nav != KEY_NONE) k = nav;
+            } else if (tmModHeld(TM_MOD_SHIFT)) {
+                k = tmApplyShift(k);
+            }
+            sTmHeldKey = k;
+            sTmHeldSinceMs = millis();
+            sTmLastKeyMs = sTmHeldSinceMs;
+            return k;
+        }
+    }
+    return KEY_NONE;
+}
+
+void tmScan(uint32_t now) {
+    uint8_t fresh[TANMATSU_KEYBOARD_BYTES];
+    if (!tanmatsuCoprocReadKeys(fresh)) return;
+    memcpy(sTmNow, fresh, sizeof(sTmNow));
+    // The held key ends when no non-modifier key is down any more.
+    bool anyKey = false;
+    for (uint8_t b = 0; b < TANMATSU_KEYBOARD_BYTES && !anyKey; b++) {
+        for (uint8_t i = 0; i < 8; i++) {
+            const char k = kTmKeymap[b][i];
+            if ((fresh[b] & (1u << i)) && k != KEY_NONE && (uint8_t)k > TM_MOD_OTHER) {
+                anyKey = true;
+                break;
+            }
+        }
+    }
+    if (!anyKey) {
+        sTmHeldKey = KEY_NONE;
+        sTmHeldSinceMs = 0;
+    }
+    sTmLastScanMs = now;
+}
+
+char tmReadKey() {
+    const char pending = tmEmitPending();
+    if (pending != KEY_NONE) return pending;
+    const uint32_t now = millis();
+    if ((uint32_t)(now - sTmLastScanMs) < 15) return KEY_NONE;
+    tmScan(now);
+    return tmEmitPending();
+}
+} // namespace
+#endif  // DEVICE_TANMATSU
+
 void TDeckKeyboard::begin() {
 #if defined(DEVICE_MESH_DECK)
     Wire.begin(KB_SDA, KB_SCL, 100000UL);
@@ -1643,6 +1765,8 @@ void TDeckKeyboard::begin() {
     digitalWrite(KB_BL, HIGH);
 #endif
     tloraResetKeyboardController();
+#elif defined(DEVICE_TANMATSU)
+    if (!tanmatsuCoprocBegin()) Serial.println("[kb] Tanmatsu coprocessor not responding");
 #elif HAS_KEYBOARD
 #if defined(M9_KB_NEEDS_USB_PAD_RELEASE)
     // Before Wire.begin(): the USB PHY is holding SDA until this runs.
@@ -1896,6 +2020,8 @@ char TDeckKeyboard::readKey() {
     if (!sP4KeyboardPresent) return KEY_NONE;
 #endif
     return tloraReadMappedKey();
+#elif defined(DEVICE_TANMATSU)
+    return tmReadKey();
 #elif !HAS_KEYBOARD
     return KEY_NONE;
 #else
@@ -2429,6 +2555,8 @@ uint32_t keyboardLastKeyMs() {
 #if defined(DEVICE_TLORA_PAGER_TFT) || defined(DEVICE_TDECK_PRO) \
     || defined(DEVICE_TDISPLAY_P4)
     return sTloraLastKeyMs;
+#elif defined(DEVICE_TANMATSU)
+    return sTmLastKeyMs;
 #else
     return 0;
 #endif
@@ -2441,6 +2569,8 @@ char keyboardHeldKey() {
 #if defined(DEVICE_TLORA_PAGER_TFT) || defined(DEVICE_TDECK_PRO) \
     || defined(DEVICE_TDISPLAY_P4)
     return sTloraHeldKey;
+#elif defined(DEVICE_TANMATSU)
+    return sTmHeldKey;
 #elif !HAS_KEYBOARD
 #  if HAS_BLE_KEYBOARD
     // This board has no keyboard of its own, so a held key can only come from a
@@ -2463,6 +2593,9 @@ uint32_t keyboardHeldMs() {
     || defined(DEVICE_TDISPLAY_P4)
     if (sTloraHeldKey == KEY_NONE || sTloraHeldSinceMs == 0) return 0;
     return millis() - sTloraHeldSinceMs;
+#elif defined(DEVICE_TANMATSU)
+    if (sTmHeldKey == KEY_NONE || sTmHeldSinceMs == 0) return 0;
+    return millis() - sTmHeldSinceMs;
 #elif !HAS_KEYBOARD
 #  if HAS_BLE_KEYBOARD
     return bleKeyboardHeldMs();

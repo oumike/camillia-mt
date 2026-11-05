@@ -657,6 +657,41 @@ uint8_t cfgCoerceKbBacklightLevel(int level) {
     return (uint8_t)level;         // any 1..255 is a real brightness; keep it
 }
 
+// Ascending, Off last, for the same slider reason as the lists above.
+const PowerLedOption kPowerLedLevels[] = {
+    {   5, TR_NOOP("5%")   },
+    {  10, TR_NOOP("10%")  },
+    {  25, TR_NOOP("25%")  },
+    {  50, TR_NOOP("50%")  },
+    { 100, TR_NOOP("100%") },
+    {   0, TR_NOOP("Off")  },
+};
+const int kPowerLedLevelCount =
+    (int)(sizeof(kPowerLedLevels) / sizeof(kPowerLedLevels[0]));
+
+const char *powerLedLevelName(uint8_t pct) {
+    for (int i = 0; i < kPowerLedLevelCount; i++) {
+        if (kPowerLedLevels[i].pct == pct) return kPowerLedLevels[i].label;
+    }
+    return TR_NOOP("Custom");
+}
+
+uint8_t cfgCoercePowerLedPct(int pct) {
+    if (pct <= 0) return 0;
+    uint8_t best = 0;
+    int bestDelta = -1;
+    for (int i = 0; i < kPowerLedLevelCount; i++) {
+        if (kPowerLedLevels[i].pct == 0) continue;
+        int delta = (int)kPowerLedLevels[i].pct - pct;
+        if (delta < 0) delta = -delta;
+        if (bestDelta < 0 || delta < bestDelta) {
+            bestDelta = delta;
+            best = kPowerLedLevels[i].pct;
+        }
+    }
+    return best;
+}
+
 const char *notifyLightTimeoutName(uint16_t secs) {
     for (int i = 0; i < kNotifyLightTimeoutCount; i++) {
         if (kNotifyLightTimeouts[i].secs == secs) return kNotifyLightTimeouts[i].label;
@@ -1293,6 +1328,7 @@ void cfgInitDefaults(RhinoConfig &cfg) {
     cfg.kbBlinkDmFlashes   = cfgCoerceKbFlashes(MY_KB_BLINK_DM_FLASHES);
     cfg.notifyLightTimeoutS = cfgCoerceNotifyLightTimeout(MY_NOTIFY_LIGHT_TIMEOUT_S);
     cfg.kbLightTimeoutS     = cfgCoerceKbLightTimeout(MY_KB_LIGHT_TIMEOUT_S);
+    cfg.powerLedPct         = cfgCoercePowerLedPct(MY_POWER_LED_PCT);
     cfg.meshBeaconListen  = (bool)MY_MESH_BEACON_LISTEN;
     cfg.debugAcks          = MY_DBG_ACKS;
     cfg.debugMessages      = MY_DBG_MESSAGES;
@@ -1746,6 +1782,10 @@ void cfgToYaml(const RhinoConfig &cfg, String &out) {
     // Carried by every build so a backup moves between boards.
     snprintf(tmp, sizeof(tmp), "    keyboardLightTimeoutSecs: %u   # 0 = never (%s)\n",
              (unsigned)cfg.kbLightTimeoutS, kbLightTimeoutName(cfg.kbLightTimeoutS));
+    out += tmp;
+    // Carried by every build so a backup moves between boards.
+    snprintf(tmp, sizeof(tmp), "    powerLedPercent: %u   # 0 = off\n",
+             (unsigned)cfg.powerLedPct);
     out += tmp;
     snprintf(tmp, sizeof(tmp), "    invertScroll: %s\n", cfg.invertScroll ? "true" : "false"); out += tmp;
     snprintf(tmp, sizeof(tmp), "    navBar: %s\n", cfg.navBarEnabled ? "true" : "false"); out += tmp;
@@ -2510,6 +2550,8 @@ bool cfgImportFromBuf(const char *buf, size_t len, RhinoConfig &cfg) {
                     cfg.notifyLightTimeoutS = cfgCoerceNotifyLightTimeout(atol(val));
                 else if (!strcmp(key, "keyboardLightTimeoutSecs"))
                     cfg.kbLightTimeoutS = cfgCoerceKbLightTimeout(atol(val));
+                else if (!strcmp(key, "powerLedPercent"))
+                    cfg.powerLedPct = cfgCoercePowerLedPct(atoi(val));
                 else if (!strcmp(key, "chatBlinkSecs")) {
                     // Message Blink, retired: in backups from older builds.
                 }

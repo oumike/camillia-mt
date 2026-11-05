@@ -137,6 +137,7 @@ jobs:
           pio run -e crowpanel-50 --disable-auto-clean
           PLATFORMIO_CORE_DIR="$HOME/.platformio-p4" pio run -e p4-amoled-sx1262 --disable-auto-clean
           PLATFORMIO_CORE_DIR="$HOME/.platformio-p4" pio run -e p4-amoled-lr2021 --disable-auto-clean
+          PLATFORMIO_CORE_DIR="$HOME/.platformio-p4" pio run -e tanmatsu --disable-auto-clean
 
       # Flash headroom, printed tightest-first, so the next board to approach
       # its ceiling is visible here rather than in a failed release. This has

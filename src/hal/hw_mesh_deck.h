@@ -63,12 +63,17 @@
 //   P06 BTN_R2 (top-right shoulder)          P07 POWER_BTN
 //   LED: red P10, green P11, blue P12 (active-low, common anode)
 // POWER_BTN is hardware-fixed: a long press (~2 s) cuts power below firmware.
+// Along the top edge, left to right (Attaky Core: ESP32 datasheet): L1 (P05),
+// Boot (IO38, direct GPIO), Power (P07), R1 (P06; BTN_R2 here).
 #define BTN_EXPANDER_ADDR       0x59
+// P05 (BTN_L1), leftmost on the top edge, opens the home dashboard. Boot beside
+// it opens chat (pollUserButton).
+#define BTN_L1_BIT              5
 // P06 (BTN_R2) sleeps and wakes the panel -- the R button, rightmost of the
 // pair of shoulder buttons along the top edge. See meshDeckPollButtons(), which
 // binds it outside the key path so the press cannot wake the screen it just
-// turned off. The BOOT button below does the same job for the case an expander
-// pin cannot cover: waking the CPU out of a light-sleep nap.
+// turned off. The BOOT button keeps the wake/unlock half of that job for the
+// case an expander pin cannot cover: waking the CPU out of a light-sleep nap.
 //
 // P07 (POWER_BTN) is deliberately NOT bound. A long press there cuts power in
 // hardware at roughly the same two seconds that unlocks every other board, so a
@@ -260,7 +265,9 @@
 // Worth having even though BTN_R2 already toggles the panel: this is a true
 // GPIO, so unlike the expander buttons it can serve as a light-sleep wake
 // source. The expander cannot wake the CPU, which is why a press there can take
-// until the end of a nap (NAP_MAX_MS) to register.
+// until the end of a nap (NAP_MAX_MS) to register. That wake/unlock role holds
+// only while the panel is dark or locked; with the UI up the button opens chat
+// (and, pressed again on chat, the channel list) -- see pollUserButton().
 #define USER_BUTTON_PIN   BOOT_BUTTON_PIN
 #define USER_BUTTON_ACTIVE_LEVEL LOW
 

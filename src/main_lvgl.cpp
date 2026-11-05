@@ -20,6 +20,10 @@
 #include "hal/tdisplay_p4_io.h"
 #include "hal/tdisplay_p4_haptic.h"
 #endif
+#if defined(DEVICE_TANMATSU)
+#include "hal/tanmatsu_lora.h"
+#include "hal/tanmatsu_coproc.h"
+#endif
 #include "live_util.h"
 #include "live_feed.h"
 #include "cs_client.h"
@@ -110,7 +114,7 @@ LV_FONT_DECLARE(lv_font_eink_bold_18);
 #include <AudioBoard.h>
 #endif
 #if defined(DEVICE_TLORA_PAGER_TFT) || defined(DEVICE_TDECK) || defined(DEVICE_WIO_TRACKER_L2) \
-    || defined(DEVICE_TDISPLAY_P4)
+    || defined(DEVICE_TDISPLAY_P4) || defined(DEVICE_TANMATSU)
 #include <driver/i2s.h>
 #endif
 #include <esp_sleep.h>
@@ -821,7 +825,7 @@ static lv_obj_t *s_alertSoundRows[MSG_ALERT_SOUND_MAX + 1] = {};
 static int s_alertSoundSelection = 0;
 static uint8_t s_alertSoundOriginal = 0;   // restored if the picker is cancelled
 
-#if defined(DEVICE_MESH_DECK)
+#if HAS_NOTIFY_LED
 static constexpr int kNotifyLedColorOptionCount = (int)NOTIFY_LED_COLOR_OFF + 1;
 static constexpr int kNotifyLedColorCols = 3;
 static constexpr int kNotifyLedColorCellW = 52;
@@ -2712,7 +2716,7 @@ static void refreshAlertSoundSelection();
 static void applyAlertSoundSelection(int mode);
 static void onAlertSoundRowPressed(lv_event_t *e);
 static void onAlertSoundBackdropPressed(lv_event_t *e);
-#if defined(DEVICE_MESH_DECK)
+#if HAS_NOTIFY_LED
 static void openNotifyLedColorModal(bool forDm);
 static void closeNotifyLedColorModal();
 static void refreshNotifyLedColorSelection();
@@ -3243,7 +3247,7 @@ static bool serviceWakeButton(WakeButtonPoll &st, bool pressed, uint32_t nowMs,
 #if defined(DEVICE_WIO_TRACKER_L2)
 static bool serviceWioTrackerL2WakeButton(uint32_t nowMs);
 #endif
-#if defined(DEVICE_MESH_DECK)
+#if HAS_NOTIFY_LED
 // Defined further down with the expander code; called from triggerMessageAlert()
 // above it.
 static void meshDeckLedNotify(bool isDm);
@@ -3758,7 +3762,7 @@ enum CfgActionId {
     #if HAS_HAPTIC
     CFG_ACTION_VIBRATION,
     #endif
-    #if defined(DEVICE_MESH_DECK)
+    #if HAS_NOTIFY_LED
     CFG_ACTION_NOTIFY_LED_CHANNEL_COLOR,
     CFG_ACTION_NOTIFY_LED_DM_COLOR,
     #endif
@@ -3775,6 +3779,9 @@ enum CfgActionId {
     #endif
     #if HAS_KB_LIGHT_TIMEOUT
     CFG_ACTION_KB_LIGHT_TIMEOUT,
+    #endif
+    #if HAS_POWER_LED_LEVEL
+    CFG_ACTION_POWER_LED_LEVEL,
     #endif
     CFG_ACTION_SPLASH_MELODY,
     CFG_ACTION_OTA_UPDATE,
@@ -3911,6 +3918,9 @@ static int cfgActionSection(int actionId) {
 #if HAS_KB_LIGHT_TIMEOUT
         case CFG_ACTION_KB_LIGHT_TIMEOUT:
 #endif
+#if HAS_POWER_LED_LEVEL
+        case CFG_ACTION_POWER_LED_LEVEL:
+#endif
 #if HAS_NAV_BAR_TOGGLE
         case CFG_ACTION_NAV_BAR:
 #endif
@@ -3947,7 +3957,7 @@ static int cfgActionSection(int actionId) {
 #if HAS_HAPTIC
         case CFG_ACTION_VIBRATION:
 #endif
-#if defined(DEVICE_MESH_DECK)
+#if HAS_NOTIFY_LED
         case CFG_ACTION_NOTIFY_LED_CHANNEL_COLOR:
         case CFG_ACTION_NOTIFY_LED_DM_COLOR:
 #endif
@@ -4223,7 +4233,7 @@ static const char *notifyLedColorName(uint8_t color) {
     }
 }
 
-#if defined(DEVICE_MESH_DECK)
+#if HAS_NOTIFY_LED
 static uint16_t notifyLedColorPreview565(uint8_t color) {
     switch (cfgCoerceNotifyLedColor((int)color)) {
         case NOTIFY_LED_COLOR_RED:     return TFT_RED;
@@ -4240,7 +4250,7 @@ static uint16_t notifyLedColorPreview565(uint8_t color) {
 #endif
 
 #if defined(DEVICE_TLORA_PAGER_TFT) || defined(DEVICE_WIO_TRACKER_L2) \
-    || defined(DEVICE_TDISPLAY_P4)
+    || defined(DEVICE_TDISPLAY_P4) || defined(DEVICE_TANMATSU)
 namespace {
 static bool sPagerAudioInitTried = false;
 static bool sPagerAudioReady = false;
@@ -4249,14 +4259,24 @@ static constexpr uint8_t kPagerAudioVolActive = 50;
 static constexpr uint8_t kPagerAudioVolIdle = 10;
 static constexpr float kPagerToneAmplitude = 7800.0f;
 static uint8_t sPagerAudioVolume = 0xFF;
+#if !defined(DEVICE_TANMATSU)
 static audio_driver::DriverPins sPagerAudioPins;
 static audio_driver::AudioBoard sPagerAudioBoard(audio_driver::AudioDriverES8311,
                                                  sPagerAudioPins);
+#endif
 
 // The codec's I2C bus. On the T-Display P4 that is controller 1 re-pinned to
 // the codec's 20/21, which it shares with the keyboard accessory -- so every
 // codec access points it back here first (tdisplayP4I2c1()). Elsewhere the
 // codec has the main bus to itself.
+#if defined(DEVICE_TANMATSU)
+// The Tanmatsu's ES8156 is driven directly (tanmatsu_coproc.cpp), not through
+// AudioBoard, which has no driver for it. Its digital volume stays fixed and the
+// amplifier, switched per sound, is what keeps idle silent; loudness is scaled
+// in the samples as on every board.
+static inline void pagerAudioSetMute(bool) {}
+static inline void pagerAudioApplyVolume(uint8_t volume) { sPagerAudioVolume = volume; }
+#else
 static inline TwoWire &pagerAudioCodecBus() {
 #if defined(DEVICE_TDISPLAY_P4)
     return tdisplayP4I2c1(TDISPLAY_P4_I2C1_AUDIO);
@@ -4276,6 +4296,7 @@ static inline void pagerAudioApplyVolume(uint8_t volume) {
     sPagerAudioBoard.setVolume(volume);
     sPagerAudioVolume = volume;
 }
+#endif
 
 // Gate the speaker power amp. It stays off while idle so power-supply
 // transients (for example LoRa TX current spikes) cannot become random clicks.
@@ -4291,6 +4312,11 @@ static void pagerAudioSetAmp(bool on) {
     // XL9535 bit 6 (TDISPLAY_P4_EXP_AUDIO_POWER), LilyGO's amplifier enable.
     if (!tdisplayP4IoSetAudioPower(on)) {
         Serial.printf("[audio] T-Display P4 amp %s failed\n", on ? "on" : "off");
+    }
+#elif defined(DEVICE_TANMATSU)
+    // Coprocessor OUTPUT bit 0.
+    if (!tanmatsuCoprocSetAmplifier(on)) {
+        Serial.printf("[audio] Tanmatsu amp %s failed\n", on ? "on" : "off");
     }
 #else
     if (sPagerExpAddr == -2) sPagerExpAddr = xl9555FindAddr();
@@ -4370,9 +4396,17 @@ static bool pagerAudioEnsureReady() {
         sPagerAudioInitTried = true;
     } else {
         // Splash playback can run before full UI init; keep retrying.
-        Serial.println("[audio] ES8311 init retry");
+        Serial.println("[audio] codec init retry");
     }
 
+#if defined(DEVICE_TANMATSU)
+    if (!tanmatsuCodecBegin()) {
+        Serial.println("[audio] codec init failed");
+        return false;
+    }
+    sPagerAudioVolume = 0xFF;
+    pagerAudioSetAmp(false);  // amp powered only during playback (see pagerAudioSetAmp)
+#else
     sPagerAudioPins.addI2C(audio_driver::PinFunction::CODEC, pagerAudioCodecBus());
     sPagerAudioPins.addI2S(audio_driver::PinFunction::CODEC,
                            AUDIO_DAC_I2S_MCLK,
@@ -4404,6 +4438,7 @@ static bool pagerAudioEnsureReady() {
     // DC-offset clicks/snaps. We unmute only while a tone is actually playing.
     sPagerAudioBoard.setMute(true);
     pagerAudioSetAmp(false);  // amp powered only during playback (see pagerAudioSetAmp)
+#endif
 
     if (!pagerAudioInitI2S()) {
         sPagerAudioReady = false;
@@ -4411,7 +4446,7 @@ static bool pagerAudioEnsureReady() {
     }
 
     sPagerAudioReady = true;
-    Serial.println("[audio] ES8311 codec/i2s ready");
+    Serial.println("[audio] codec/i2s ready");
     return true;
 }
 
@@ -4930,7 +4965,7 @@ static void triggerMessageAlert(bool bypassRateLimit = false,
     lightNotifyArm();
 #endif
 
-#if defined(DEVICE_MESH_DECK)
+#if HAS_NOTIFY_LED
     // Blink the front LED for any new message, channel or DM. Deliberately
     // above the sound branches below, each of which returns early when the
     // alert tone is off — a silent device is exactly when a visual cue matters,
@@ -4956,7 +4991,7 @@ static void triggerMessageAlert(bool bypassRateLimit = false,
 #endif
 
 #if defined(DEVICE_TLORA_PAGER_TFT) || defined(DEVICE_WIO_TRACKER_L2) \
-    || defined(DEVICE_TDISPLAY_P4)
+    || defined(DEVICE_TDISPLAY_P4) || defined(DEVICE_TANMATSU)
     if (s_cfg.msgAlertSound == MSG_ALERT_SOUND_OFF) return;
 
     switch (s_cfg.msgAlertSound) {
@@ -5035,7 +5070,7 @@ static void triggerMessageAlert(bool bypassRateLimit = false,
 // slider is about level, not about which sound.
 static void playVolumePreviewTone() {
 #if defined(DEVICE_TLORA_PAGER_TFT) || defined(DEVICE_WIO_TRACKER_L2) \
-    || defined(DEVICE_TDISPLAY_P4)
+    || defined(DEVICE_TDISPLAY_P4) || defined(DEVICE_TANMATSU)
     pagerAudioPlayAlertPattern();
 #elif defined(DEVICE_TDECK)
     tdeckPlayAlertPattern();
@@ -5058,7 +5093,7 @@ static void playSplashStartupRiff() {
     static const size_t kCount = sizeof(kNotesHz) / sizeof(kNotesHz[0]);
 
 #if defined(DEVICE_TLORA_PAGER_TFT) || defined(DEVICE_WIO_TRACKER_L2) \
-    || defined(DEVICE_TDISPLAY_P4)
+    || defined(DEVICE_TDISPLAY_P4) || defined(DEVICE_TANMATSU)
     if (!pagerAudioEnsureReady()) return;
     pagerAudioStartPlayback();
     for (size_t i = 0; i < kCount; i++) {
@@ -6007,7 +6042,7 @@ static const char *cfgActionLabel(int actionId, char *buf, size_t bufLen) {
             snprintf(buf, bufLen, TR("Volume: %u%%"), (unsigned)s_cfg.volumePct);
             break;
         #endif
-        #if defined(DEVICE_MESH_DECK)
+        #if HAS_NOTIFY_LED
         case CFG_ACTION_NOTIFY_LED_CHANNEL_COLOR:
             snprintf(buf, bufLen, TR("Channel Message LED: %s"),
                      notifyLedColorName(s_cfg.notifyLedColorChannel));
@@ -6034,6 +6069,12 @@ static const char *cfgActionLabel(int actionId, char *buf, size_t bufLen) {
         case CFG_ACTION_NOTIFY_LIGHT_TIMEOUT:
             snprintf(buf, bufLen, TR("Notification Light Timeout: %s"),
                      TR(notifyLightTimeoutName(s_cfg.notifyLightTimeoutS)));
+            break;
+        #endif
+        #if HAS_POWER_LED_LEVEL
+        case CFG_ACTION_POWER_LED_LEVEL:
+            snprintf(buf, bufLen, TR("Status Lights: %s"),
+                     TR(powerLedLevelName(cfgCoercePowerLedPct(s_cfg.powerLedPct))));
             break;
         #endif
         #if HAS_KB_BACKLIGHT_LEVEL
@@ -10152,16 +10193,7 @@ static void requestScreenOff(const char *reason) {
     sleepScreen(reason);
 }
 
-#if defined(DEVICE_MESH_DECK)
-// The front buttons hang off expander 0x59, not GPIO, so they are polled rather
-// than interrupt-driven. Per the Attaky docs the right shoulder is R1 = P06 and
-// Power = P07. P06 is bound here; P07 is left alone so Power keeps the meaning
-// wadamesh gives it, including the long-press hardware power-cut that never
-// reaches firmware.
-//
-// Deliberately not routed through the normal key path: every key there wakes
-// the screen as a side effect, so a press would light the panel straight back
-// up and the button could never turn it off.
+#if HAS_NOTIFY_LED
 // ── RGB notification LED ────────────────────────────────────────────────────
 // Cathodes on expander 0x59 P10 (R) / P11 (G) / P12 (B), active low, common
 // anode. Two rules from Attaky's driver notes are load-bearing here:
@@ -10172,6 +10204,10 @@ static void requestScreenOff(const char *reason) {
 // P13 on this same port is the touch controller's reset line. A blanket write
 // would drop it and put the FT6636 back into reset, killing touch until the
 // next boot. So every access below masks itself to P10..P12.
+//
+// On the Tanmatsu the same light is the coprocessor's "messages" LED; only
+// meshDeckLedSet() differs, and the state machine below is shared.
+#if defined(DEVICE_MESH_DECK)
 static constexpr uint8_t kMdLedMask = 0x07;          // P10 | P11 | P12
 
 static void meshDeckLedSet(bool r, bool g, bool b) {
@@ -10194,6 +10230,17 @@ static void meshDeckLedSet(bool r, bool g, bool b) {
     if (b) out &= (uint8_t)~(1u << 2);
     s_mdButtons.writeReg(Aw9523::REG_OUTPUT1, out);
 }
+#elif defined(DEVICE_TANMATSU)
+// Bright enough to catch the eye beside the screen without lighting the room.
+static constexpr uint8_t kTanmatsuLedLevel = 0x30;
+
+static void meshDeckLedSet(bool r, bool g, bool b) {
+    tanmatsuCoprocSetLed(TANMATSU_LED_MESSAGE,
+                         r ? kTanmatsuLedLevel : 0,
+                         g ? kTanmatsuLedLevel : 0,
+                         b ? kTanmatsuLedLevel : 0);
+}
+#endif
 
 // Blink pattern state. Non-blocking: an incoming message only arms the counter,
 // and the loop services it — a blocking blink would stall the UI and the radio.
@@ -10235,7 +10282,9 @@ static bool meshDeckLedDualColorEnabled() {
 
 static void meshDeckLedSetColor(uint8_t color, bool on) {
     const uint8_t c = cfgCoerceNotifyLedColor((int)color);
+#if defined(DEVICE_MESH_DECK)
     meshDeckKeyboardSetLedColor(c, on);
+#endif
     if (!on || c == NOTIFY_LED_COLOR_OFF) {
         meshDeckLedSet(false, false, false);
         return;
@@ -10353,7 +10402,75 @@ static void meshDeckServiceLed() {
         meshDeckLedSetColor(s_mdLedColor, false);    // always end dark
     }
 }
+#endif  // HAS_NOTIFY_LED
 
+#if defined(DEVICE_TANMATSU)
+// ── Tanmatsu power and Wi-Fi lights ─────────────────────────────────────────
+// Driving the messages LED puts the coprocessor in manual LED mode, which also
+// stops it driving the power and radio LEDs. So they are driven here, both at
+// the user's Status Lights level: the power LED in the coprocessor's own
+// colors, and the radio LED (the one marked with the Wi-Fi glyph) following
+// Wi-Fi rather than the C6.
+static bool s_tmStatusLedsDirty = true;
+
+// Settings changes call this so the new level shows now rather than at the
+// next one-second poll.
+static void tanmatsuRefreshStatusLeds() { s_tmStatusLedsDirty = true; }
+
+static uint8_t tanmatsuScaleLed(uint8_t full, uint8_t pct) {
+    if (!full || !pct) return 0;
+    const uint16_t v = (uint16_t)(((uint32_t)full * pct + 50) / 100);
+    return v ? (uint8_t)v : 1;   // a set level never rounds a color away
+}
+
+static void tanmatsuServiceStatusLeds() {
+    static uint32_t lastMs = 0;
+    const uint32_t now = millis();
+    if (!s_tmStatusLedsDirty && (uint32_t)(now - lastMs) < 1000) return;
+    lastMs = now;
+    s_tmStatusLedsDirty = false;
+
+    // Power: blue on battery, orange charging, green charged on USB, red on
+    // USB with no battery -- the coprocessor's automatic-mode meanings.
+    uint8_t r = 0, g = 255, b = 0;
+    bool battery = false, usb = false, charging = false;
+    if (tanmatsuCoprocChargeStatus(&battery, &usb, &charging)) {
+        if (usb && !battery)  { r = 255; g = 0;   b = 0;   }
+        else if (charging)    { r = 255; g = 80;  b = 0;   }
+        else if (usb)         { r = 0;   g = 255; b = 0;   }
+        else                  { r = 0;   g = 0;   b = 255; }
+    }
+    const uint8_t pct = cfgCoercePowerLedPct(s_cfg.powerLedPct);
+    tanmatsuCoprocSetLed(TANMATSU_LED_POWER, tanmatsuScaleLed(r, pct),
+                         tanmatsuScaleLed(g, pct), tanmatsuScaleLed(b, pct));
+
+    // Wi-Fi: green connected, blue in AP (setup) mode, amber while trying to
+    // join, dark when off. Same tests as the status bar's Wi-Fi icon.
+    const wifi_mode_t mode = WiFi.getMode();
+    bool ap = (mode == WIFI_AP);
+#ifdef WIFI_AP_STA
+    ap = ap || (mode == WIFI_AP_STA);
+#endif
+    const bool sta = !ap && (mode == WIFI_STA);
+    r = g = b = 0;
+    if (ap)                                        { b = 255; }
+    else if (sta && WiFi.status() == WL_CONNECTED) { g = 255; }
+    else if (sta)                                  { r = 255; g = 80; }
+    tanmatsuCoprocSetLed(TANMATSU_LED_RADIO, tanmatsuScaleLed(r, pct),
+                         tanmatsuScaleLed(g, pct), tanmatsuScaleLed(b, pct));
+}
+#endif
+
+#if defined(DEVICE_MESH_DECK)
+// The front buttons hang off expander 0x59, not GPIO, so they are polled rather
+// than interrupt-driven. Per the Attaky docs the right shoulder is R1 = P06 and
+// Power = P07. P06 is bound here; P07 is left alone so Power keeps the meaning
+// wadamesh gives it, including the long-press hardware power-cut that never
+// reaches firmware.
+//
+// Deliberately not routed through the normal key path: every key there wakes
+// the screen as a side effect, so a press would light the panel straight back
+// up and the button could never turn it off.
 static void meshDeckPollButtons() {
     if (!s_mdButtonsReady) return;
 
@@ -10417,6 +10534,7 @@ static void meshDeckPollButtons() {
     else if (pressed & (1u << 1)) k = KEY_PREV_CHAN;   // P01 LEFT
     else if (pressed & (1u << 3)) k = KEY_NEXT_CHAN;   // P03 RIGHT
     else if (pressed & (1u << 2)) k = KEY_ENTER;       // P02 SELECT
+    else if (pressed & (1u << BTN_L1_BIT)) k = KEY_OPEN_HOME;   // top-left: Home
     if (k != KEY_NONE) s_mdPendingKey = k;
 }
 
@@ -11120,10 +11238,22 @@ static bool pollUserButton(uint32_t nowMs) {
             }
             return screenBtn.stablePressed;
         }
+#elif defined(DEVICE_MESH_DECK)
+        // Second from the left along the top edge, so with the UI up it is the
+        // Chat key beside L1's Home: one press goes to chat, a second on chat
+        // opens the channel list. Screen-off is R1's job alone. With the panel
+        // dark or locked it keeps the shared tap/hold rule below -- it is the
+        // board's only input that can wake the CPU out of a nap.
+        if (uiIsUp) {
+            const bool wasDown = screenBtn.stablePressed;
+            (void)serviceWakeButtonDebounce(screenBtn, pressed, nowMs);
+            if (!wasDown && screenBtn.stablePressed) s_mdPendingKey = KEY_OPEN_CHAT_BTN;
+            return screenBtn.stablePressed;
+        }
 #else
-        // The T-Display P4 and the Mesh Deck (HAS_WAKE_BUTTON, board.h): lock
-        // and unlock only, exactly as the Wio Tracker L2's Wake button. Config
-        // is tapped here, so it has no use for a hardware Enter.
+        // The T-Display P4 (HAS_WAKE_BUTTON, board.h): lock and unlock only,
+        // exactly as the Wio Tracker L2's Wake button. Config is tapped here,
+        // so it has no use for a hardware Enter.
         (void)uiIsUp;
 #endif
         if (serviceWakeButton(screenBtn, pressed, nowMs, "BOOT button")) return true;
@@ -11885,6 +12015,7 @@ static void applyLoadedConfigInvariants() {
     // something else entirely, and the row could not cycle back to it.
     s_cfg.notifyLightTimeoutS = cfgCoerceNotifyLightTimeout((long)s_cfg.notifyLightTimeoutS);
     s_cfg.kbLightTimeoutS = cfgCoerceKbLightTimeout((long)s_cfg.kbLightTimeoutS);
+    s_cfg.powerLedPct = cfgCoercePowerLedPct(s_cfg.powerLedPct);
     // Off-list values would leave the lock screen lit for an interval the slider
     // cannot show or cycle back to. 0 survives coercion on purpose — it is the
     // "stay on the lock screen" choice, not an unset field.
@@ -15372,6 +15503,9 @@ static void initCfgActions() {
     // it — the Cardputer arguably most of all.
     s_cfgActions[s_cfgActionCount++] = CFG_ACTION_FONT_SIZE;
     s_cfgActions[s_cfgActionCount++] = CFG_ACTION_BRIGHTNESS;
+    #if HAS_POWER_LED_LEVEL
+    s_cfgActions[s_cfgActionCount++] = CFG_ACTION_POWER_LED_LEVEL;
+    #endif
     #if HAS_KB_BACKLIGHT_LEVEL
     // Next to the screen brightness, because they are the same question asked
     // about the two lit surfaces this board has.
@@ -15449,7 +15583,7 @@ static void initCfgActions() {
     s_cfgActions[s_cfgActionCount++] = CFG_ACTION_VIBRATION;
     #endif
     // The light half of the same group. Absent on boards with no LED wired.
-    #if defined(DEVICE_MESH_DECK)
+    #if HAS_NOTIFY_LED
     s_cfgActions[s_cfgActionCount++] = CFG_ACTION_NOTIFY_LED_CHANNEL_COLOR;
     s_cfgActions[s_cfgActionCount++] = CFG_ACTION_NOTIFY_LED_DM_COLOR;
     #endif
@@ -17923,6 +18057,41 @@ static void openCfgLightTimeoutModal() {
 }
 #endif  // HAS_LIGHT_NOTIFY
 
+#if HAS_POWER_LED_LEVEL
+// ── Power light brightness ───────────────────────────────────────────────────
+
+static const char *cfgPowerLedLabelFor(int idx) {
+    if (idx < 0 || idx >= kPowerLedLevelCount) idx = 0;
+    return TR(kPowerLedLevels[idx].label);
+}
+
+static void cfgPowerLedApply(int idx) {
+    if (idx < 0 || idx >= kPowerLedLevelCount) idx = 0;
+    s_cfg.powerLedPct = kPowerLedLevels[idx].pct;
+    persistConfigToPrefs();
+    tanmatsuRefreshStatusLeds();
+    snprintf(s_cfgStatus, sizeof(s_cfgStatus), TR("Status Lights: %s"),
+             TR(powerLedLevelName(s_cfg.powerLedPct)));
+}
+
+static void openCfgPowerLedModal() {
+    int startIdx = 0;
+    const uint8_t cur = cfgCoercePowerLedPct(s_cfg.powerLedPct);
+    for (int i = 0; i < kPowerLedLevelCount; i++) {
+        if (kPowerLedLevels[i].pct == cur) { startIdx = i; break; }
+    }
+    static const CfgSliderPicker kSpec = {
+        TR_NOOP("Status Lights"),
+        kPowerLedLevelCount,
+        cfgPowerLedLabelFor,
+        cfgPowerLedApply,
+        TR_NOOP("dim"),
+        TR_NOOP("off"),
+    };
+    openCfgSliderModal(&kSpec, startIdx);
+}
+#endif  // HAS_POWER_LED_LEVEL
+
 #if HAS_KB_BACKLIGHT_LEVEL
 #if !defined(DEVICE_TDISPLAY_P4)   // the P4 sends its row to F11, not a picker
 static const char *cfgKbBacklightLabelFor(int idx) {
@@ -18257,13 +18426,10 @@ static void openCfgLockScreenOffModal() {
 // cell at 3.9 V are both at the same state of charge, they just hold it for
 // different lengths of time. Two units disagreeing at the same charge level is
 // a divider/ADC difference, which is exactly what this trims out.
-#if defined(DEVICE_MESH_DECK)
-// The MAX17048 reports state of charge itself (see batteryReadPercent), so the
-// trim moves the voltage readout but not the percentage.
-static constexpr bool kBattPctFromGauge = true;
-#else
-static constexpr bool kBattPctFromGauge = false;
-#endif
+//
+// The Mesh Deck's MAX17048 reports state of charge itself, which is what shows
+// at zero trim; any other trim hands the percentage to the trimmed voltage the
+// same way (see batteryReadPercent).
 
 // Tenths of a percent with an explicit sign. Not "%+d.%d": integer division
 // truncates toward zero, so a trim of -5 would print as "+0.5%".
@@ -18456,11 +18622,8 @@ static void openCfgBattCalModal() {
         lv_obj_set_style_text_align(how, LV_TEXT_ALIGN_CENTER, 0);
         lv_label_set_long_mode(how, LV_LABEL_LONG_WRAP);
         lv_label_set_text(how,
-                          kBattPctFromGauge
-                              ? TR("Match the voltage to a meter reading.\n"
-                                "Percent comes from the fuel gauge and does not change.")
-                              : TR("Match the voltage to a meter reading.\n"
-                                "Percent follows it. 0% = uncalibrated."));
+                          TR("Match the voltage to a meter reading.\n"
+                             "Percent follows it. 0% = uncalibrated."));
     }
 
 #if UI_TOUCH_ONLY_PROFILE
@@ -21708,7 +21871,7 @@ static void openAlertSoundModal() {
     refreshAlertSoundSelection();
 }
 
-#if defined(DEVICE_MESH_DECK)
+#if HAS_NOTIFY_LED
 static void closeNotifyLedColorModal() {
     if (lvObjValid(s_notifyLedColorBackdrop)) {
         lv_obj_del(s_notifyLedColorBackdrop);
@@ -24888,7 +25051,7 @@ static void closeCfgModal() {
     closeSysStatsModal();
     closeReleaseNotesModal();
     closeTimeCfgModal();
-#if defined(DEVICE_MESH_DECK)
+#if HAS_NOTIFY_LED
     closeNotifyLedColorModal();
 #endif
 #if !defined(DEVICE_TLORA_PAGER_TFT)
@@ -25005,10 +25168,11 @@ static void openCfgActionMessageModal(const char *msg, const char *titleText) {
 
     lv_obj_t *bodyPanel = lv_obj_create(s_cfgActionMsgModal);
     lv_obj_set_width(bodyPanel, contentW);
-    lv_coord_t bodyPanelH = (lv_coord_t)(screenH / 3);
-    if (bodyPanelH < 44) bodyPanelH = 44;
-    if (bodyPanelH > 96) bodyPanelH = 96;
-    lv_obj_set_height(bodyPanel, bodyPanelH);
+    lv_coord_t bodyMaxH = (lv_coord_t)(screenH / 3);
+    if (bodyMaxH < 44) bodyMaxH = 44;
+    if (bodyMaxH > 96) bodyMaxH = 96;
+    lv_obj_set_height(bodyPanel, LV_SIZE_CONTENT);
+    lv_obj_set_style_max_height(bodyPanel, bodyMaxH, 0);
     lv_obj_add_flag(bodyPanel, LV_OBJ_FLAG_SCROLLABLE);
     setupVScroll(bodyPanel);
     lv_obj_set_scrollbar_mode(bodyPanel, LV_SCROLLBAR_MODE_AUTO);
@@ -44678,7 +44842,7 @@ static void performCfgAction(int actionId) {
         }
 #endif
 
-#if defined(DEVICE_MESH_DECK)
+#if HAS_NOTIFY_LED
         case CFG_ACTION_NOTIFY_LED_CHANNEL_COLOR:
             if (s_cfgDebugLog) Serial.println("[lvgl-cfg] exec NOTIFY_LED_CHANNEL_COLOR");
             showActionPopup = false;
@@ -44736,6 +44900,14 @@ static void performCfgAction(int actionId) {
             if (s_cfgDebugLog) Serial.println("[lvgl-cfg] exec NOTIFY_LIGHT_TIMEOUT");
             showActionPopup = false;   // the picker is the feedback
             openCfgLightTimeoutModal();
+        } break;
+#endif
+
+#if HAS_POWER_LED_LEVEL
+        case CFG_ACTION_POWER_LED_LEVEL: {
+            if (s_cfgDebugLog) Serial.println("[lvgl-cfg] exec POWER_LED_LEVEL");
+            showActionPopup = false;   // the picker is the feedback
+            openCfgPowerLedModal();
         } break;
 #endif
 
@@ -46089,6 +46261,8 @@ static const char *onboardingPickerCurrentText() {
 
 static void onboardingComputeModalSizeForStage(uint8_t stage, int screenW, int screenH,
                                                int &modalW, int &modalH) {
+    const bool textEntry = stage == ONBOARD_STAGE_ENTER_LONG
+                       || stage == ONBOARD_STAGE_ENTER_SHORT;
     modalW = screenW - 20;
     if (modalW < 180) modalW = screenW - 4;
     if (modalW > 320) modalW = 320;
@@ -46097,45 +46271,28 @@ static void onboardingComputeModalSizeForStage(uint8_t stage, int screenW, int s
     if (modalH < 140) modalH = screenH - 4;
 
 #if UI_EDGE_TO_EDGE_TEXT_ENTRY
-    modalW = screenW;
+    if (textEntry) modalW = screenW;
 #endif
 
 #if UI_LARGE_PANEL_PROFILE
-    const bool needsKeyboard = stage == ONBOARD_STAGE_ENTER_LONG
-                            || stage == ONBOARD_STAGE_ENTER_SHORT;
     modalW = screenW - 32;
-    const int maxModalW = uiPortrait() ? 536 : 900;
+    const int maxModalW = textEntry && !uiPortrait() ? 900 : 536;
     if (modalW > maxModalW) modalW = maxModalW;
     modalH = screenH - 32;
-    const int maxModalH = needsKeyboard ? 860 : 560;
-    if (modalH > maxModalH) modalH = maxModalH;
+    if (modalH > 860) modalH = 860;
 #endif
 
 #if defined(DEVICE_CARDPUTER_LORA_HAT)
-    if (stage == ONBOARD_STAGE_ASK_IMPORT) {
-        // Cardputer import prompt is keyboard-only and titleless, so keep the
-        // modal tight to maximize visible context around it.
-        modalW = screenW - 12;
-        if (modalW < 180) modalW = screenW - 4;
-        if (modalW > 228) modalW = 228;
+    modalW = screenW - (stage == ONBOARD_STAGE_ASK_IMPORT ? 12 : 14);
+    if (modalW < 180) modalW = screenW - 4;
+    if (modalW > 228) modalW = 228;
 
-        modalH = screenH - 50;
-        if (modalH < 74) modalH = screenH - 6;
-        if (modalH > 84) modalH = 84;
-    } else {
-        // Cardputer onboarding stages are keyboard-only and titleless,
-        // so shrink overall height to avoid bottom clipping.
-        modalW = screenW - 14;
-        if (modalW < 180) modalW = screenW - 4;
-        if (modalW > 228) modalW = 228;
-
-        modalH = screenH - 44;
-        if (modalH < 84) modalH = screenH - 6;
-        if (modalH > 92) modalH = 92;
-    }
-#else
-    LV_UNUSED(stage);
+    modalH = screenH - 44;
+    if (modalH < 84) modalH = screenH - 6;
+    if (modalH > 92) modalH = 92;
 #endif
+
+    if (!textEntry) modalH = LV_SIZE_CONTENT;
 }
 
 static void renderOnboardingStage() {
@@ -46146,8 +46303,24 @@ static void renderOnboardingStage() {
     int modalW = 0;
     int modalH = 0;
     onboardingComputeModalSizeForStage(s_onboardingStage, screenW, screenH, modalW, modalH);
+    const bool contentSized = (modalH == LV_SIZE_CONTENT);
     lv_obj_set_size(s_onboardingModal, modalW, modalH);
+    lv_obj_set_style_max_height(s_onboardingModal, screenH - 4, 0);
     lv_obj_align(s_onboardingModal, LV_ALIGN_CENTER, 0, 0);
+    if (contentSized) {
+        lv_obj_add_flag(s_onboardingModal, LV_OBJ_FLAG_SCROLLABLE);
+        setupVScroll(s_onboardingModal);
+        lv_obj_set_scrollbar_mode(s_onboardingModal, LV_SCROLLBAR_MODE_AUTO);
+    } else {
+        lv_obj_clear_flag(s_onboardingModal, LV_OBJ_FLAG_SCROLLABLE);
+    }
+    lv_obj_set_flex_align(s_onboardingModal,
+#if defined(DEVICE_TDISPLAY_P4)
+                          contentSized ? LV_FLEX_ALIGN_START : LV_FLEX_ALIGN_CENTER,
+#else
+                          LV_FLEX_ALIGN_START,
+#endif
+                          LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
 
 #if defined(DEVICE_CARDPUTER_LORA_HAT)
     const bool compactOnboarding = true;
@@ -46168,8 +46341,10 @@ static void renderOnboardingStage() {
                                : (compactImportStage ? 6 : (compactOnboarding ? 8 : 10)),
                              0);
 #if UI_EDGE_TO_EDGE_TEXT_ENTRY
-    lv_obj_set_style_pad_left(s_onboardingModal, 2, 0);
-    lv_obj_set_style_pad_right(s_onboardingModal, 2, 0);
+    if (!contentSized) {
+        lv_obj_set_style_pad_left(s_onboardingModal, 2, 0);
+        lv_obj_set_style_pad_right(s_onboardingModal, 2, 0);
+    }
 #endif
     lv_obj_set_style_pad_row(s_onboardingModal,
                                                          largeOnboarding ? 14
@@ -46249,7 +46424,8 @@ static void renderOnboardingStage() {
         lv_obj_set_style_pad_column(btnRow,
                         compactImportStage ? 8 : (compactOnboarding ? 10 : 14),
                         0);
-        lv_obj_set_flex_flow(btnRow, LV_FLEX_FLOW_ROW);
+        lv_obj_set_style_pad_row(btnRow, largeOnboarding ? 14 : 8, 0);
+        lv_obj_set_flex_flow(btnRow, LV_FLEX_FLOW_ROW_WRAP);
         lv_obj_set_flex_align(btnRow, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER,
                               LV_FLEX_ALIGN_CENTER);
 
@@ -46370,7 +46546,8 @@ static void renderOnboardingStage() {
         lv_obj_set_style_border_width(btnRow, 0, 0);
         lv_obj_set_style_pad_all(btnRow, 0, 0);
         lv_obj_set_style_pad_column(btnRow, compactOnboarding ? 10 : 14, 0);
-        lv_obj_set_flex_flow(btnRow, LV_FLEX_FLOW_ROW);
+        lv_obj_set_style_pad_row(btnRow, largeOnboarding ? 14 : 8, 0);
+        lv_obj_set_flex_flow(btnRow, LV_FLEX_FLOW_ROW_WRAP);
         lv_obj_set_flex_align(btnRow, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER,
                               LV_FLEX_ALIGN_CENTER);
 
@@ -46429,7 +46606,8 @@ static void renderOnboardingStage() {
         lv_obj_set_style_border_width(btnRow, 0, 0);
         lv_obj_set_style_pad_all(btnRow, 0, 0);
         lv_obj_set_style_pad_column(btnRow, compactOnboarding ? 8 : 10, 0);
-        lv_obj_set_flex_flow(btnRow, LV_FLEX_FLOW_ROW);
+        lv_obj_set_style_pad_row(btnRow, largeOnboarding ? 14 : 8, 0);
+        lv_obj_set_flex_flow(btnRow, LV_FLEX_FLOW_ROW_WRAP);
         lv_obj_set_flex_align(btnRow, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER,
                               LV_FLEX_ALIGN_CENTER);
 
@@ -46661,17 +46839,6 @@ static void openOnboardingModal() {
     lv_obj_set_style_pad_all(s_onboardingModal, 10, 0);
     lv_obj_set_style_pad_row(s_onboardingModal, 8, 0);
     lv_obj_set_flex_flow(s_onboardingModal, LV_FLEX_FLOW_COLUMN);
-#if defined(DEVICE_TDISPLAY_P4)
-    // Centred top to bottom. The modal is nearly the full 596-px height, and
-    // packed from the top every stage left most of the screen empty below its
-    // buttons. The name stages centre over the keyboard instead; see the
-    // spacer added with it in renderOnboardingStage().
-    lv_obj_set_flex_align(s_onboardingModal, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER,
-                          LV_FLEX_ALIGN_CENTER);
-#else
-    lv_obj_set_flex_align(s_onboardingModal, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_CENTER,
-                          LV_FLEX_ALIGN_CENTER);
-#endif
     lv_obj_move_foreground(s_onboardingBackdrop);
 
     renderOnboardingStage();
@@ -46865,7 +47032,8 @@ static void onboardingFinalize() {
 #define HAS_GLOBAL_NAV_SHORTCUTS \
     (defined(DEVICE_M9) || defined(DEVICE_TDECK) || defined(DEVICE_TDECK_PRO) \
      || defined(DEVICE_MESH_DECK) || defined(DEVICE_TLORA_PAGER_TFT) \
-     || defined(DEVICE_CARDPUTER_LORA_HAT) || defined(DEVICE_TDISPLAY_P4))
+     || defined(DEVICE_CARDPUTER_LORA_HAT) || defined(DEVICE_TDISPLAY_P4) \
+     || defined(DEVICE_TANMATSU))
 
 #if HAS_GLOBAL_NAV_SHORTCUTS
 static bool prepareGlobalNavigation() {
@@ -47148,7 +47316,8 @@ static bool handleGlobalNavigationKey(char key) {
 #endif  // HAS_GLOBAL_NAV_SHORTCUTS
 
 #if defined(DEVICE_TDECK) || defined(DEVICE_TDECK_PRO) || defined(DEVICE_MESH_DECK) \
-    || defined(DEVICE_TLORA_PAGER_TFT) || defined(DEVICE_CARDPUTER_LORA_HAT)
+    || defined(DEVICE_TLORA_PAGER_TFT) || defined(DEVICE_CARDPUTER_LORA_HAT) \
+    || defined(DEVICE_TANMATSU)
 // Alt+H is "close everything and get back to chat", and it deliberately does
 // NOT open the channel list the way the M9's dedicated Home button does.
 //
@@ -47470,7 +47639,8 @@ static void pumpKeyboardInput() {
 #endif
 
 #if defined(DEVICE_TDECK) || defined(DEVICE_TDECK_PRO) || defined(DEVICE_MESH_DECK) \
-    || defined(DEVICE_TLORA_PAGER_TFT) || defined(DEVICE_CARDPUTER_LORA_HAT)
+    || defined(DEVICE_TLORA_PAGER_TFT) || defined(DEVICE_CARDPUTER_LORA_HAT) \
+    || defined(DEVICE_TANMATSU)
         // The Cardputer belongs on this list and was missing from it, which made
         // Alt+H a dead key on that board alone: altNavShortcut() raised
         // KEY_OPEN_HOME, nothing here caught it, and handleGlobalNavigationKey()
@@ -48356,7 +48526,7 @@ static void pumpKeyboardInput() {
             continue;
         }
 
-#if defined(DEVICE_MESH_DECK)
+#if HAS_NOTIFY_LED
         if (s_notifyLedColorModal) {
             if (isModalCloseKey(k)) {
                 closeNotifyLedColorModal();
@@ -62546,6 +62716,10 @@ void setup() {
     } else if (!tdisplayP4IoResetEsp32C6()) {
         Serial.println("[wifi-p4] initial ESP32-C6 reset failed");
     }
+#elif defined(DEVICE_TANMATSU)
+    // Coprocessor, then the C6 and the ESP-Hosted link: Wi-Fi, BLE and LoRa
+    // all ride it, and its SDIO pins must be set before any of them starts.
+    (void)tanmatsuHostedBegin();
 #endif
 
     // Before the display, radio, Wi-Fi and GPS come up, because that current
@@ -63847,7 +64021,12 @@ void loop() {
     // Front buttons live on an I2C expander, so they need polling. Kept out of
     // the key path on purpose — see meshDeckPollButtons().
     LOOP_PHASE("md:buttons", meshDeckPollButtons());
+#endif
+#if HAS_NOTIFY_LED
     LOOP_PHASE("md:led", meshDeckServiceLed());
+#endif
+#if defined(DEVICE_TANMATSU)
+    LOOP_PHASE("tm:leds", tanmatsuServiceStatusLeds());
 #endif
 #if HAS_KB_BLINK
     LOOP_PHASE("kbblink", serviceKbBlink());

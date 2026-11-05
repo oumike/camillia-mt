@@ -335,6 +335,7 @@ Pick the environment for your board:
 | Elecrow CrowPanel Advance 5.0" | `crowpanel-50` |
 | LilyGo T-Display P4 AMOLED + SX1262 | `p4-amoled-sx1262` |
 | LilyGo T-Display P4 AMOLED + LR2021 | `p4-amoled-lr2021` |
+| Nicolai Electronics Tanmatsu | `tanmatsu` |
 
 The command is identical on Windows, macOS and Linux:
 
@@ -464,6 +465,7 @@ Run it with no flags to get a device picker.
 | `--crowpanel-50` | `crowpanel-50` |
 | `--p4-amoled-sx1262` | `p4-amoled-sx1262` |
 | `--p4-amoled-lr2021` | `p4-amoled-lr2021` |
+| `--tanmatsu` | `tanmatsu` |
 | `--erase`, `-E` | erase flash before a clean build/upload (M9 uses `upload_erase`) |
 
 Windows users: run the three `pio` commands above instead, or use WSL.
@@ -664,6 +666,23 @@ once more` on a fresh checkout, the library had not been fetched yet; build agai
 > AMOLED timing, touch orientation, hosted WiFi, LoRa TX/RX, SD, battery, or the
 > optional keyboard works on a physical unit. Record serial logs or measured
 > behavior before marking any of those complete.
+
+### Nicolai Electronics Tanmatsu (tanmatsu)
+
+- Built with the same isolated P4 toolchain as the T-Display P4:
+  `PLATFORMIO_CORE_DIR="$HOME/.platformio-p4" pio run -e tanmatsu`.
+  It is not in the release set yet; build it from source.
+- Camillia replaces the badge.team launcher. To restore it, flash the launcher
+  again from <https://tanmatsu.cloud>.
+- The ESP32-C6 keeps its shipped firmware. Wi-Fi and LoRa both go through it
+  over ESP-Hosted. Turning Wi-Fi off leaves the hosted link up
+  (`-Wl,--wrap=hostedDeinitWiFi`) because the C6 cannot be re-attached over
+  SDIO once torn down.
+- BLE keyboards are not supported here yet: NimBLE-Arduino 1.x needs an on-chip
+  Bluetooth controller.
+
+> **Hardware verification pending.** Display init, rotation, keyboard map, LoRa
+> RPC, Wi-Fi, SD and battery readings have not been checked on a unit.
 
 ### Seeed Wio Tracker L2 (wio-tracker-l2)
 

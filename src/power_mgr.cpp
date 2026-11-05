@@ -148,7 +148,7 @@ static void pmBoardOff() {
     // Arm the button so the device can be brought back deliberately. Only RTC
     // GPIOs can wake from deep sleep; on a pin that cannot, this is skipped and
     // recovery is via USB or a battery pull.
-#if defined(DEVICE_TDISPLAY_P4)
+#if defined(PLATFORM_ESP32P4)
     if (esp_sleep_is_valid_wakeup_gpio((gpio_num_t)USER_BUTTON_PIN)) {
         esp_deep_sleep_enable_gpio_wakeup(
             1ULL << USER_BUTTON_PIN,

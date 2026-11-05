@@ -751,6 +751,19 @@ struct RhinoConfig {
     // For whoever appends next: two pad bytes remain, carrying whatever older
     // builds wrote into them. Past them is the old sizeof(RhinoConfig).
     uint8_t  _reservedPad19[2];
+
+    // ── Status light brightness (HAS_POWER_LED_LEVEL boards: the Tanmatsu) ──
+    // Shown as "Status Lights": scales the power and Wi-Fi LEDs together.
+    // Percent, one of kPowerLedLevels; 0 = off. Read it through
+    // cfgCoercePowerLedPct(). Unconditional like the other board fields.
+    //
+    // Safe at the end: _reservedPad19 above fills the old struct out to a 4-byte
+    // boundary, so this starts at exactly the previous sizeof(RhinoConfig) and
+    // an upgrading device keeps the compiled default.
+    uint8_t  powerLedPct;
+    // For whoever appends next: the struct's trailing padding, spelled out.
+    // Past it is the old sizeof(RhinoConfig).
+    uint8_t  _reservedPad20[3];
 };
 
 // Vibration style codes, as cfgHapticStyle() returns them. Same values as
@@ -943,6 +956,23 @@ const char *kbLightTimeoutName(uint16_t secs);
 // Snaps to the nearest listed value, the same way cfgCoerceNotifyLightTimeout()
 // does and for the same reasons: only an exact 0 means never.
 uint16_t cfgCoerceKbLightTimeout(long secs);
+
+// ── Power LED brightness ─────────────────────────────────────────────────────
+// Stepped percent levels for the power and Wi-Fi LEDs, Off last like the other
+// stepped lists. Values, not indices, are stored.
+struct PowerLedOption {
+    uint8_t     pct;
+    const char *label;
+};
+extern const PowerLedOption kPowerLedLevels[];
+extern const int kPowerLedLevelCount;
+
+// Label for a stored value; Custom for anything off the list.
+const char *powerLedLevelName(uint8_t pct);
+
+// Snaps to the nearest listed level. Only an exact 0 (or nonsense) means off,
+// so no small value rounds the light away.
+uint8_t cfgCoercePowerLedPct(int pct);
 
 // How the local battery reads where it is shown as a single number: the chat
 // header indicator and the web status chip. Percentage comes off a Li-ion SOC

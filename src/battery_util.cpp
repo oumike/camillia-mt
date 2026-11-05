@@ -291,6 +291,10 @@ static float batteryReadCardputerVolts() {
 } // namespace
 #endif
 
+#if defined(DEVICE_TANMATSU)
+#include "hal/tanmatsu_coproc.h"
+#endif
+
 #if defined(DEVICE_TDISPLAY_P4)
 #include <Wire.h>
 #include "keyboard.h"   // keyboardAttached(): the expansion carries its own cells
@@ -598,6 +602,9 @@ static float batteryReadVoltageHw() {
     return batteryReadMeshDeckVolts();
 #elif defined(DEVICE_TDISPLAY_P4)
     return batteryReadP4GaugeVolts();
+#elif defined(DEVICE_TANMATSU)
+    // The coprocessor samples the cell continuously; 0 means no battery.
+    return tanmatsuCoprocBatteryMv() / 1000.0f;
 #else
     return 0.0f;
 #endif
@@ -710,6 +717,12 @@ bool batteryExternalPowerPresent(bool *known) {
     }
 #elif defined(DEVICE_TDISPLAY_P4)
     present = batteryP4ExternalPowerPresent(haveAnswer);
+#elif defined(DEVICE_TANMATSU)
+    bool battery = false, usb = false, charging = false;
+    if (tanmatsuCoprocChargeStatus(&battery, &usb, &charging)) {
+        haveAnswer = true;
+        present = usb;
+    }
 #endif
     if (known) *known = haveAnswer;
     return present;
@@ -718,6 +731,8 @@ bool batteryExternalPowerPresent(bool *known) {
 bool batteryHardwarePowerOffSupported() {
 #if defined(DEVICE_TLORA_PAGER_TFT) || defined(DEVICE_TDECK_PRO)
     return sBqPresent;
+#elif defined(DEVICE_TANMATSU)
+    return tanmatsuCoprocReady();
 #else
     return false;
 #endif
@@ -726,6 +741,10 @@ bool batteryHardwarePowerOffSupported() {
 bool batteryHardwarePowerOff() {
 #if defined(DEVICE_TLORA_PAGER_TFT) || defined(DEVICE_TDECK_PRO)
     return bqBatfetDisable();
+#elif defined(DEVICE_TANMATSU)
+    // The coprocessor cuts the main rail; the power button brings it back.
+    tanmatsuCoprocPowerOff();
+    return true;
 #else
     return false;
 #endif
@@ -752,9 +771,16 @@ uint8_t batteryReadPercent() {
     // percentage from a filtered resting voltage because it has nothing better;
     // this board does, and coulomb counting stays honest under load where the
     // voltage curve sags and reads low.
-    const int gaugePct = batteryReadMeshDeckPct();
-    if (gaugePct >= 0) return (uint8_t)gaugePct;
-    // Gauge silent: fall through to the shared voltage-curve estimate.
+    //
+    // Only untrimmed, though. The gauge's model can stop short of 100% on a
+    // full cell, and the trim is the user's one lever on that; with it set, the
+    // percentage follows the trimmed voltage as it does on every other board.
+    const bool trimmed = sBatteryCalTrimScale < 0.9999f || sBatteryCalTrimScale > 1.0001f;
+    if (!trimmed) {
+        const int gaugePct = batteryReadMeshDeckPct();
+        if (gaugePct >= 0) return (uint8_t)gaugePct;
+    }
+    // Trimmed, or gauge silent: the shared voltage-curve estimate.
 #elif defined(DEVICE_TDISPLAY_P4)
     // The keyboard expansion holds a 21700 battery board (two cells behind
     // their own protection), and its pack reaches the main board through the

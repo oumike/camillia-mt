@@ -20,7 +20,7 @@
 // still gets DEVICE_TDECK forced on underneath it, and because board.h tests
 // DEVICE_TDECK first, the build then silently compiles against the T-Deck pin
 // map — the real target's header is never included at all.
-#if !defined(DEVICE_TDECK) && !defined(DEVICE_TDECK_PRO) && !defined(DEVICE_TLORA_PAGER_TFT) && !defined(DEVICE_CARDPUTER_LORA_HAT) && !defined(DEVICE_HELTEC_V4_EXPANSION) && !defined(DEVICE_MESH_DECK) && !defined(DEVICE_M9) && !defined(DEVICE_WIO_TRACKER_L2) && !defined(DEVICE_TDISPLAY_P4) && !defined(DEVICE_CROWPANEL_35) && !defined(DEVICE_CROWPANEL_50)
+#if !defined(DEVICE_TDECK) && !defined(DEVICE_TDECK_PRO) && !defined(DEVICE_TLORA_PAGER_TFT) && !defined(DEVICE_CARDPUTER_LORA_HAT) && !defined(DEVICE_HELTEC_V4_EXPANSION) && !defined(DEVICE_MESH_DECK) && !defined(DEVICE_M9) && !defined(DEVICE_WIO_TRACKER_L2) && !defined(DEVICE_TDISPLAY_P4) && !defined(DEVICE_CROWPANEL_35) && !defined(DEVICE_CROWPANEL_50) && !defined(DEVICE_TANMATSU)
 #  define DEVICE_TDECK 1
 #endif
 
@@ -179,6 +179,9 @@
 #define MY_HW_MODEL MESH_HW_MODEL_CROWPANEL
 #elif defined(DEVICE_TDISPLAY_P4)
 // No Meshtastic HardwareModel has been allocated for the T-Display P4.
+#define MY_HW_MODEL MESH_HW_MODEL_PRIVATE_HW
+#elif defined(DEVICE_TANMATSU)
+// Nor for the Tanmatsu.
 #define MY_HW_MODEL MESH_HW_MODEL_PRIVATE_HW
 #elif defined(DEVICE_M9)
 // Meshtastic's HardwareModel enum has no ThinkNode M9 — the M1/M2 are in it,
@@ -562,7 +565,8 @@
 // every tone call there compiles to nothing, and the alert-sound, splash-melody
 // and volume settings were UI for hardware that does not exist.
 #if defined(DEVICE_TLORA_PAGER_TFT) || defined(DEVICE_TDECK) || defined(DEVICE_WIO_TRACKER_L2) \
-    || defined(DEVICE_CARDPUTER_LORA_HAT) || defined(DEVICE_TDISPLAY_P4) || (BOARD_BUZZER >= 0)
+    || defined(DEVICE_CARDPUTER_LORA_HAT) || defined(DEVICE_TDISPLAY_P4) \
+    || defined(DEVICE_TANMATSU) || (BOARD_BUZZER >= 0)
 #define HAS_AUDIO_ALERTS 1
 #else
 #define HAS_AUDIO_ALERTS 0
@@ -668,7 +672,7 @@
 // there the grid moves like a grid, Up/Down a row and Left/Right a button.
 // Elsewhere Left/Right are folded onto Up/Down (M9) or there is only a wheel,
 // and the grid is walked in reading order instead (cfgMoveSelection()).
-#if defined(DEVICE_TDISPLAY_P4)
+#if defined(DEVICE_TDISPLAY_P4) || defined(DEVICE_TANMATSU)
 #define CFG_GRID_FOUR_WAY 1
 #else
 #define CFG_GRID_FOUR_WAY 0
@@ -695,15 +699,26 @@
 #define HAS_HAPTIC 0
 #endif
 
-// A notification LED that blinks while messages are unread. Only the Mesh Deck
-// has one wired (RGB cathodes on expander 0x59 P10..P12, driven by
-// meshDeckServiceLed). Gate the setting on this so it is absent, not inert,
-// everywhere else.
-#if defined(DEVICE_MESH_DECK)
+// A notification LED that blinks while messages are unread: the Mesh Deck's
+// RGB cathodes on expander 0x59 P10..P12, and the Tanmatsu's "messages" LED
+// behind its coprocessor. Both are driven by meshDeckServiceLed(). Gate the
+// setting on this so it is absent, not inert, everywhere else.
+#if defined(DEVICE_MESH_DECK) || defined(DEVICE_TANMATSU)
 #define HAS_NOTIFY_LED 1
 #else
 #define HAS_NOTIFY_LED 0
 #endif
+
+// A front power LED whose brightness the firmware sets: the Tanmatsu, where
+// taking its LEDs into manual mode (for the messages and Wi-Fi lights) also
+// hands us the power LED the coprocessor used to drive.
+#if defined(DEVICE_TANMATSU)
+#define HAS_POWER_LED_LEVEL 1
+#else
+#define HAS_POWER_LED_LEVEL 0
+#endif
+// Percent; see kPowerLedLevels. Dim by default: it sits beside the screen.
+#define MY_POWER_LED_PCT 10
 #define MY_NOTIFY_LED_ENABLED 1
 // Mesh Deck RGB notification LED defaults.
 // 0=Red, 1=Green, 2=Blue, 3=Yellow, 4=Cyan, 5=Magenta, 6=White
@@ -849,7 +864,7 @@
 
 // True on any board with a light to blink. The notification LED and the
 // keyboard backlight never coexist — HAS_NOTIFY_LED is the Mesh Deck and
-// HAS_KB_BLINK is the T-Deck and Pager — so the timeout below is one setting
+// Tanmatsu, HAS_KB_BLINK is the T-Deck and Pager — so the timeout below is one setting
 // covering whichever of the two a board actually has.
 #define HAS_LIGHT_NOTIFY (HAS_KB_BLINK || HAS_NOTIFY_LED)
 // How long the light keeps reminding after a message arrives, in seconds.
@@ -1101,7 +1116,8 @@ extern int VISIBLE_LINES;   // visible rows at LINE_H spacing
 // the code says "unknown" rather than guessing — see powerMgrChargerPresent().
 #ifndef POWER_HAS_CHARGER_SENSE
 #if defined(DEVICE_TLORA_PAGER_TFT) || defined(DEVICE_TDECK_PRO) \
-    || defined(DEVICE_CARDPUTER_LORA_HAT) || defined(DEVICE_TDISPLAY_P4)
+    || defined(DEVICE_CARDPUTER_LORA_HAT) || defined(DEVICE_TDISPLAY_P4) \
+    || defined(DEVICE_TANMATSU)
 #define POWER_HAS_CHARGER_SENSE 1
 #else
 #define POWER_HAS_CHARGER_SENSE 0
@@ -1114,7 +1130,8 @@ extern int VISIBLE_LINES;   // visible rows at LINE_H spacing
 #ifndef HAS_BATTERY_SENSE
 #if (BATT_ADC_PIN >= 0) || defined(DEVICE_TLORA_PAGER_TFT) || defined(DEVICE_TDECK_PRO) \
     || defined(DEVICE_CARDPUTER_LORA_HAT) || defined(DEVICE_MESH_DECK) \
-    || defined(DEVICE_WIO_TRACKER_L2) || defined(DEVICE_TDISPLAY_P4)
+    || defined(DEVICE_WIO_TRACKER_L2) || defined(DEVICE_TDISPLAY_P4) \
+    || defined(DEVICE_TANMATSU)
 #define HAS_BATTERY_SENSE 1
 #else
 #define HAS_BATTERY_SENSE 0

@@ -11,6 +11,8 @@
 
 #if defined(DEVICE_TDISPLAY_P4)
 #include "hal/tdisplay_p4_radio_hal.h"
+#elif defined(DEVICE_TANMATSU)
+#include "hal/tanmatsu_lora.h"
 #endif
 
 #ifndef PAGER_LORA_USE_LR1121
@@ -179,6 +181,9 @@ private:
 #  else
     SX1262 _radio{&_module};
 #  endif
+#elif defined(DEVICE_TANMATSU)
+    // SX1262 on the ESP32-C6, reached over ESP-Hosted; see tanmatsu_lora.h.
+    TanmatsuLoraRpc _radio;
 #elif defined(MESH_LORA_LR1110)
     MeshLR1110 _radio{new Module(LORA_CS, LORA_DIO1, LORA_RST, LORA_BUSY)};
 #elif defined(DEVICE_TLORA_PAGER_TFT) && (PAGER_LORA_USE_LR1121)

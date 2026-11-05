@@ -211,13 +211,15 @@ static bool storageBeginNow() {
     }
 #endif
     delay(10);
-#if defined(DEVICE_TDISPLAY_P4)
+#if defined(DEVICE_TDISPLAY_P4) || defined(DEVICE_TANMATSU)
     if (!SD_MMC.setPins(SDMMC_CLK, SDMMC_CMD, SDMMC_D0,
                         SDMMC_D1, SDMMC_D2, SDMMC_D3)) {
         Serial.printf("[sd] SD_MMC pin setup failed clk=%d cmd=%d d0=%d d1=%d d2=%d d3=%d\n",
                       SDMMC_CLK, SDMMC_CMD, SDMMC_D0,
                       SDMMC_D1, SDMMC_D2, SDMMC_D3);
+#if defined(DEVICE_TDISPLAY_P4)
         (void)tdisplayP4IoSetSdPower(false);
+#endif
         return false;
     }
 #else
@@ -230,8 +232,10 @@ static bool storageBeginNow() {
         return false;
     }
 #endif
+    // The Tanmatsu's slot is powered by the P4's on-chip LDO channel 4, which
+    // SD_MMC enables by default on this core.
     sMounted = SD_MMC.begin("/sdcard",
-#if defined(DEVICE_TDISPLAY_P4)
+#if defined(DEVICE_TDISPLAY_P4) || defined(DEVICE_TANMATSU)
                             /*mode1bit=*/false,
 #else
                             /*mode1bit=*/true,
