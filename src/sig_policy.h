@@ -71,6 +71,10 @@ struct SigPolicyInput {
     bool         knownSigner;     // this sender has passed a signature check before
     bool         broadcast;       // addressed to everyone
     size_t       dataLen;         // encoded Data, unsigned (for the downgrade rule)
+    // A unicast the sender would have signed: we are licensed, so licensed
+    // peers sign their plaintext DMs (lic::shouldSign()). Last, so existing
+    // aggregate initialisers stay valid.
+    bool         unicastSignable;
 };
 
 struct SigPolicyResult {
@@ -104,11 +108,10 @@ inline SigPolicyResult sigPolicyDecide(const SigPolicyInput &in) {
     if (policy == SIG_POLICY_STRICT) return {false, false};
     if (policy == SIG_POLICY_COMPATIBLE) return {true, false};
 
-    // Balanced: drop only what a signer always signs, a broadcast whose signed
-    // encoding would have fitted in a LoRa frame. Upstream also covers unicasts
-    // when the receiving node is itself licensed (ham mode, where DMs go
-    // plaintext and are signed); Camillia has no licensed mode.
-    if (in.knownSigner && in.broadcast) {
+    // Balanced: drop only what a signer always signs, a broadcast -- or, when
+    // we are licensed (DMs go plaintext and are signed), a signable unicast --
+    // whose signed encoding would have fitted in a LoRa frame.
+    if (in.knownSigner && (in.broadcast || in.unicastSignable)) {
         // XEDDSA_SIGNATURE_FIELD_BYTES (66) + MESH_HEADER_BYTES (16) <=
         // MESH_MAX_FRAME_BYTES (255), as upstream's canonicalSignableSize() test.
         if (in.dataLen + 66 + 16 <= 255) return {false, false};

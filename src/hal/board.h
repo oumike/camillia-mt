@@ -280,14 +280,34 @@ DEVICE_TDISPLAY_P4, DEVICE_CROWPANEL_35, DEVICE_CROWPANEL_50, DEVICE_TANMATSU"
 #  endif
 #  define UI_PIXEL_SCALE TDISPLAY_P4_UI_SCALE
 #elif defined(DEVICE_TANMATSU)
-// 800x480 at 3.9" is ~240 DPI. At 2 LVGL sees a 400x240 landscape panel,
-// which the keyboard UI already lays out for (the Pager is 480x222).
-#  define UI_PIXEL_SCALE 2
+// 800x480 at 3.9" is ~240 DPI. The keyboard UI is laid out for a 400x240
+// landscape panel (the Pager is 480x222). By default LVGL renders natively at
+// 800x480 and src/ui_coord_shim.h doubles every coordinate and font the UI
+// asks for (UI_COORD_SCALE below), so text is drawn from 2x faces instead of
+// pixel-doubled. Build with -DTANMATSU_NATIVE_UI=0 for the old 2x2 doubling.
+#  ifndef TANMATSU_NATIVE_UI
+#    define TANMATSU_NATIVE_UI 1
+#  endif
+#  if TANMATSU_NATIVE_UI
+#    define UI_PIXEL_SCALE 1
+#  else
+#    define UI_PIXEL_SCALE 2
+#  endif
 #else
 #  define UI_PIXEL_SCALE 1
 #endif
 #if UI_PIXEL_SCALE < 1
 #  error "UI_PIXEL_SCALE must be at least 1"
+#endif
+
+// Layout coordinates to LVGL pixels. Where it is above 1 the UI code keeps
+// working in the same logical pixels and src/ui_coord_shim.h scales them, and
+// the fonts with them, on the way into LVGL -- so LVGL renders at full panel
+// resolution without the layout being rewritten.
+#if defined(DEVICE_TANMATSU) && TANMATSU_NATIVE_UI
+#  define UI_COORD_SCALE 2
+#else
+#  define UI_COORD_SCALE 1
 #endif
 
 // ── Rounded panel corners ───────────────────────────────────────────────────

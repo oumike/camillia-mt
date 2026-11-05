@@ -442,6 +442,16 @@ static int batteryVoltageToPct(float vbat) {
         float v;
         uint8_t pct;
     };
+#if defined(DEVICE_TANMATSU)
+    // The badge BSP's own curve (badge_bsp_power.c). The coprocessor reads the
+    // cell under the P4 and panel's load, which sits well below its resting
+    // voltage; the resting curve below put a half-full cell near 0% and swung
+    // with every change in load.
+    static const CurvePt kLiIonCurve[] = {
+        {4.05f, 100}, {4.00f, 93}, {3.90f, 81}, {3.80f, 67}, {3.70f, 51},
+        {3.60f, 36},  {3.50f, 22}, {3.40f, 10}, {3.30f, 0},
+    };
+#else
     static const CurvePt kLiIonCurve[] = {
         {4.20f, 100}, {4.15f, 95}, {4.11f, 90}, {4.08f, 85},
         {4.02f, 75},  {3.98f, 65}, {3.95f, 55}, {3.91f, 45},
@@ -449,6 +459,7 @@ static int batteryVoltageToPct(float vbat) {
         {3.80f, 15},  {3.79f, 10}, {3.77f, 5},  {3.73f, 2},
         {3.70f, 0},
     };
+#endif
 
     if (vbat <= 0.0f) return 0;
     if (vbat >= kLiIonCurve[0].v) return 100;

@@ -31,7 +31,13 @@ public:
     int16_t setDio2AsRfSwitch(bool) { return RADIOLIB_ERR_NONE; }
     int16_t setCurrentLimit(float) { return RADIOLIB_ERR_NONE; }
 
-    void setDio1Action(void (*func)(void)) { _dio1 = func; }
+    // MeshRadio calls this after begin(), so it must reach the static the RX
+    // callback fires, not just the member.
+    void setDio1Action(void (*func)(void));
+    // True while received packets wait in the queue. MeshRadio clears its RX
+    // flag around TX; on a real SX1262 the chip still holds the packet, but here
+    // the queue is the only record, so poll it as a level.
+    bool rxPending() const;
 
     int16_t standby();
     int16_t startReceive();

@@ -146,7 +146,9 @@
 #define LV_FONT_MONTSERRAT_24 0
 #define LV_FONT_MONTSERRAT_28 0
 #define LV_FONT_MONTSERRAT_32 0
+#define LV_FONT_MONTSERRAT_36 0
 #define LV_FONT_MONTSERRAT_40 0
+#define LV_FONT_MONTSERRAT_48 0
 #define LV_FONT_CUSTOM_DECLARE \
     LV_FONT_DECLARE(lv_font_montserrat_8) \
     LV_FONT_DECLARE(lv_font_montserrat_10) \
@@ -158,7 +160,9 @@
     LV_FONT_DECLARE(lv_font_montserrat_24) \
     LV_FONT_DECLARE(lv_font_montserrat_28) \
     LV_FONT_DECLARE(lv_font_montserrat_32) \
-    LV_FONT_DECLARE(lv_font_montserrat_40)
+    LV_FONT_DECLARE(lv_font_montserrat_36) \
+    LV_FONT_DECLARE(lv_font_montserrat_40) \
+    LV_FONT_DECLARE(lv_font_montserrat_48)
 #else
 // English-only builds (I18N_ENABLED=0, see i18n.h) keep LVGL's own ASCII
 // copies: they are a fraction of the size, and nothing they draw needs accents.
@@ -172,7 +176,9 @@
 #define LV_FONT_MONTSERRAT_24 1
 #define LV_FONT_MONTSERRAT_28 1
 #define LV_FONT_MONTSERRAT_32 1
+#define LV_FONT_MONTSERRAT_36 1
 #define LV_FONT_MONTSERRAT_40 1
+#define LV_FONT_MONTSERRAT_48 1
 #endif
 
 #define LV_FONT_DEFAULT &lv_font_montserrat_16

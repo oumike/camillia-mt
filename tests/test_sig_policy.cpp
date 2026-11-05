@@ -65,6 +65,12 @@ static void testUnsigned() {
     i.dataLen = 40;
     i.broadcast = false;
     CHECK(accepts(i));
+    // Unless the sender signs unicasts too (licensed mode): then an unsigned
+    // one that would have fitted is a downgrade like a broadcast.
+    i.unicastSignable = true;
+    CHECK(!accepts(i));
+    i.unicastSignable = false;
+    CHECK(accepts(i));
     // Nor a PKI DM.
     i.broadcast = true;
     i.pkiEncrypted = true;

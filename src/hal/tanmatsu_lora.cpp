@@ -200,7 +200,7 @@ int16_t TanmatsuLoraRpc::begin(float freq, float bw, uint8_t sf, uint8_t cr, uin
         const int16_t r = reset();
         if (r != RADIOLIB_ERR_NONE) return r;
     }
-    sDio1 = _dio1;
+    if (_dio1) sDio1 = _dio1;
 
     // A status round trip is the cheapest proof the C6 runs the LoRa server.
     uint8_t status[2 + 1 + 16] = {};
@@ -302,6 +302,15 @@ int16_t TanmatsuLoraRpc::transmit(uint8_t *data, size_t len, uint8_t) {
     // It restores RX itself only if it was in RX; MeshRadio sends standby first.
     _mode = kModeStandbyRc;
     return state;
+}
+
+void TanmatsuLoraRpc::setDio1Action(void (*func)(void)) {
+    _dio1 = func;
+    sDio1 = func;
+}
+
+bool TanmatsuLoraRpc::rxPending() const {
+    return sRxQueue && uxQueueMessagesWaiting(sRxQueue) > 0;
 }
 
 size_t TanmatsuLoraRpc::getPacketLength(bool) {

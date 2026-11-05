@@ -76,6 +76,8 @@ LV_FONT_DECLARE(lv_font_eink_bold_18);
 #endif
 #include "debug_flags.h"
 #include "relay_policy.h"
+#include "mesh_beacon.h"
+#include "licensed_mode.h"
 #include "release_notes.h"   // generated from RELEASE_NOTES.md at build time
 #include "utf8_utils.h"
 #include "fonts/roboto_splash_fonts.h"
@@ -157,6 +159,7 @@ LV_FONT_DECLARE(lv_font_eink_bold_18);
 #endif
 
 #include "hal/crowpanel_50_fonts.h"   // last: renames fonts for the rest of this file
+#include "hal/ui_coord_shim.h"        // after it: doubles coordinates and fonts (UI_COORD_SCALE)
 
 // LVGL runs entirely on the Arduino loopTask (lv_timer_handler below), and the
 // default 8 KB loopTask stack is not enough to rasterize an emoji under LVGL 9.
@@ -322,7 +325,8 @@ static lv_obj_t *s_chatHeaderBattBar = nullptr;
 // margin, same faces, the screen's name where the channel name goes. Rebuilt
 // with the UI, so a font or orientation change reaches both.
 struct ChatHeaderGeom {
-    int margin;                 // panelMargin: the bar's inset from the panel edges
+    int margin;                 // panelMargin: the bar's inset from the panel's sides
+    int top;                    // headerTop: the bar's inset from the top edge
     int h;                      // chatHeaderH
     int titleX;                 // where the channel name starts, inside the bar
     int padX;                   // the battery's inset from the bar's right end
@@ -793,10 +797,10 @@ static const CfgSliderPicker *s_cfgSliderSpec = nullptr;
 static int       s_cfgSliderStaged = 0;
 static lv_obj_t *s_cfgSliderCheck = nullptr;
 static bool      s_cfgSliderCheckStaged = false;
-#if defined(DEVICE_M9)
-// Which control the d-pad is on when the picker has a checkbox: 0 the slider,
+#if UI_ARROW_GRID_NAV
+// Which control the arrows are on when the picker has a checkbox: 0 the slider,
 // 1 the checkbox. Up/Down move between them and Left/Right change the focused
-// one, the way the Brightness screen's two rows work on this board.
+// one, the way the Brightness screen's two rows work.
 static int       s_cfgSliderFocus = 0;
 #endif
 
@@ -949,6 +953,23 @@ enum OnboardingStage : uint8_t {
 };
 static uint8_t s_onboardingStage = ONBOARD_STAGE_ENTER_LONG;
 static bool s_onboardingSdConfigPresent = false;
+
+// The Tanmatsu has no touch screen, so its onboarding buttons take a keyboard
+// focus: Left/Right move it, Enter presses the focused one. Each stage's
+// buttons register here as they are built (renderOnboardingStage()); the
+// focus starts on the last one, the stage's primary action.
+#if defined(DEVICE_TANMATSU)
+#define ONBOARD_BUTTON_FOCUS 1
+#else
+#define ONBOARD_BUTTON_FOCUS 0
+#endif
+#if ONBOARD_BUTTON_FOCUS
+static constexpr int kOnboardingMaxBtns = 4;
+static lv_obj_t *s_onboardingBtns[kOnboardingMaxBtns] = {};
+static lv_event_cb_t s_onboardingBtnCbs[kOnboardingMaxBtns] = {};
+static int s_onboardingBtnCount = 0;
+static int s_onboardingBtnFocus = 0;
+#endif
 static bool s_firstBoot = false;
 
 // A freshly flashed device has no identity of its own yet: it would announce
@@ -1593,8 +1614,8 @@ static inline const char *activeActionShortcuts() {
     return s_nodesActionMsgMode ? kMsgActionShortcuts : kNodesActionShortcuts;
 }
 
-#if defined(DEVICE_M9)
-// Where the M9's d-pad goes from `sel`, moving (dx, dy) across the menu as it is
+#if UI_ARROW_GRID_NAV
+// Where the M9's d-pad (or the Tanmatsu's arrows) goes from `sel`, moving (dx, dy) across the menu as it is
 // drawn: the action buttons are a two-column grid (every row is lv_pct(49)), and
 // in message mode the tapback strip is one row of cells above it. Returns `sel`
 // unchanged at an edge -- nothing wraps.
@@ -1904,7 +1925,9 @@ static lv_obj_t *s_composeTitle = nullptr;
 
 static uint32_t s_composeReplyPacketId = 0;
 static int s_composeChannelIdx = 0;
-static char s_lastHeaderTime[LIVE_CLOCK_BUF] = "";
+// Room for the licensed-mode "HAM <call> " ahead of the clock.
+static constexpr size_t kHeaderTimeBuf = LIVE_CLOCK_BUF + 4 + 15 + 1;
+static char s_lastHeaderTime[kHeaderTimeBuf] = "";
 static uint8_t s_lastBattPct = 255;
 // Battery voltage in hundredths, cached alongside the percentage so the header
 // early-out notices a change in either. 0xFFFF is the "not yet drawn" sentinel,
@@ -2384,6 +2407,10 @@ static int s_seenHead = 0;
 // Count of packets we have relayed onto the mesh this boot (managed flood).
 static uint32_t s_rebroadcastCount = 0;
 static uint32_t s_relayStoodDownCount = 0;   // queued relays cancelled by someone else's copy
+// Licensed mode, since boot: packets dropped for an unlicensed peer
+// (lic::allowPacket), and NodeInfo not stored for an is_licensed mismatch.
+static uint32_t s_licDropUnlicensed = 0;
+static uint32_t s_licNodeInfoMismatch = 0;
 // True while processMeshPacket() is handling a packet our own radio received,
 // as against one injected from the MQTT downlink: only an on-air copy tells a
 // queued relay that someone nearby has already carried the packet.
@@ -2838,10 +2865,34 @@ static void closeDiscoveryPresetModal();
 // Puts the radio back on the node's own preset. `aborted` is true when the scan
 // did not run its window out — the screen was closed, or a save retuned under it.
 static void discoveryEndPresetScan(bool aborted);
+#endif
 // Frames waiting out their contention jitter are addressed to the preset they
 // were heard on; a retune under them would put them on the air of another mesh.
 static void dropPendingRebroadcasts();
-#endif
+// A temporary retune to another preset that must always be undone: everything
+// tempTuneLeave() needs to put the radio and channel 0 back exactly as they
+// were. Never written to s_cfg (see tempTuneEnter()).
+struct TempTuneSnapshot {
+    float       freq, bw;
+    uint8_t     sf, cr;
+    bool        renamed;      // channel 0 was renamed to the target preset's name
+    const char *prevName;     // CHANNEL_KEYS[0].name, verbatim
+    char        prevBuf[16];  // CHANNEL_KEYS[0].name_buf, verbatim
+};
+static void tempTuneEnter(uint8_t preset, TempTuneSnapshot &snap, bool renameCh0);
+static void tempTuneLeave(TempTuneSnapshot &snap);
+// MeshBeacon broadcast (port 37): hourly-ish advert of our mesh onto a target
+// preset's public channel. Called from the config save paths.
+static void meshBeaconSettingsChanged();
+static void meshBeaconConfigSaved();
+// What the Beacons screen's "Your beacon" line reports.
+struct MeshBeaconStatus {
+    enum State : uint8_t { OFF, WAITING, HELD_SCAN, HELD_AIRTIME, HELD_PRESET } state;
+    uint32_t nextInMs;    // WAITING / HELD_AIRTIME: ms until the next attempt
+    uint32_t lastEpoch;   // epoch seconds of the last send, 0 = unknown/never
+};
+static MeshBeaconStatus meshBeaconStatus();
+static const char *meshBeaconHomeChannelName();
 static void openBeaconsModal();
 #if HAS_WEATHER
 static void openWeatherModal();
@@ -3040,6 +3091,8 @@ static SigPolicyResult checkPacketSignature(const MeshPacket &pkt) {
     in.pkiEncrypted = (pkt.chanIdx == -2);
     in.broadcast    = (pkt.hdr.to == 0xFFFFFFFF);
     in.dataLen      = pkt.env.dataLen;
+    in.unicastSignable = lic::active() && !in.broadcast
+                         && lic::shouldSign(true, false, pkt.portnum);
 
     NodeEntry *n = Nodes.find(pkt.hdr.from);
     const bool haveKey = n && n->hasPubKey;
@@ -3696,6 +3749,9 @@ enum CfgActionId {
     CFG_ACTION_NODE_NAME,
     CFG_ACTION_PRESET,
     CFG_ACTION_COMMUNITY_PRESET,
+#if FEATURE_LICENSED_MODE
+    CFG_ACTION_LICENSED_MODE,  // amateur call sign; strips keys, reboots
+#endif
 #if defined(DEVICE_TDISPLAY_P4)
     CFG_ACTION_ANTENNA,        // on-board vs external antenna socket
 #endif
@@ -3744,6 +3800,9 @@ enum CfgActionId {
     #endif
     #if HAS_NAV_BAR_TOGGLE
     CFG_ACTION_NAV_BAR,
+    #endif
+    #if HAS_CHANNEL_PANEL_LOCK
+    CFG_ACTION_CHANNEL_PANEL_LOCK,
     #endif
     #if HAS_NAV_ALIGN_SETTING
     CFG_ACTION_NAV_ALIGN,
@@ -3876,6 +3935,9 @@ static int cfgActionSection(int actionId) {
         case CFG_ACTION_NODE_NAME:
         case CFG_ACTION_PRESET:
         case CFG_ACTION_COMMUNITY_PRESET:
+#if FEATURE_LICENSED_MODE
+        case CFG_ACTION_LICENSED_MODE:
+#endif
 #if defined(DEVICE_TDISPLAY_P4)
         case CFG_ACTION_ANTENNA:
 #endif
@@ -3923,6 +3985,9 @@ static int cfgActionSection(int actionId) {
 #endif
 #if HAS_NAV_BAR_TOGGLE
         case CFG_ACTION_NAV_BAR:
+#endif
+#if HAS_CHANNEL_PANEL_LOCK
+        case CFG_ACTION_CHANNEL_PANEL_LOCK:
 #endif
 #if HAS_NAV_ALIGN_SETTING
         case CFG_ACTION_NAV_ALIGN:
@@ -4184,6 +4249,14 @@ static uint8_t s_appliedFontSize = 0xFF;
 // telling "changed" from "unchanged" there — this is, the same way
 // s_appliedFontSize is for the font.
 static bool s_appliedNavBar = false;
+#endif
+#if HAS_CHANNEL_PANEL_LOCK
+// The channel panel lock the current screen was built with (onWebCfgSaved()).
+static bool s_appliedChannelPanelLocked = true;
+// Keyboard focus on the docked column: no touch on this board, so Left (or C)
+// steps into the list, Up/Down move the cursor (s_cardputerDropdownSelection),
+// Enter switches, Right/Esc hand the keys back to the chat.
+static bool s_channelColumnFocus = false;
 #endif
 #if HAS_NAV_ALIGN_SETTING
 // The nav alignment the current screen was built with, so a web config save
@@ -5900,6 +5973,12 @@ static const char *cfgActionLabel(int actionId, char *buf, size_t bufLen) {
         case CFG_ACTION_COMMUNITY_PRESET:
             snprintf(buf, bufLen, "%s", TR("Community Preset"));
             break;
+#if FEATURE_LICENSED_MODE
+        case CFG_ACTION_LICENSED_MODE:
+            snprintf(buf, bufLen, TR("Licensed (ham) mode: %s"),
+                     lic::active() ? s_cfg.callSign : TR("Off"));
+            break;
+#endif
         case CFG_ACTION_EXPORT:
             snprintf(buf, bufLen, "%s", TR("Export Config"));
             break;
@@ -5987,6 +6066,12 @@ static const char *cfgActionLabel(int actionId, char *buf, size_t bufLen) {
             snprintf(buf, bufLen, TR("Nav Bar: %s"), s_cfg.navBarEnabled ? TR("On") : TR("Off"));
             break;
         #endif
+        #if HAS_CHANNEL_PANEL_LOCK
+        case CFG_ACTION_CHANNEL_PANEL_LOCK:
+            snprintf(buf, bufLen, TR("Channel Panel: %s"),
+                     cfgChannelPanelLocked(s_cfg) ? TR("Locked") : TR("Unlocked"));
+            break;
+        #endif
         #if HAS_NAV_ALIGN_SETTING
         case CFG_ACTION_NAV_ALIGN:
             snprintf(buf, bufLen, TR("Nav Alignment: %s"), navAlignName(cfgNavAlign(s_cfg)));
@@ -6004,11 +6089,24 @@ static const char *cfgActionLabel(int actionId, char *buf, size_t bufLen) {
         case CFG_ACTION_NEIGHBOR_INFO:
             snprintf(buf, bufLen, TR("Neighborhood Info: %s"), s_cfg.neighborInfoEnabled ? TR("On") : TR("Off"));
             break;
-        case CFG_ACTION_MESH_BEACON:
-            snprintf(buf, bufLen, TR("Mesh Beacons: %s"), s_cfg.meshBeaconListen ? TR("On") : TR("Off"));
-            break;
+        case CFG_ACTION_MESH_BEACON: {
+            char both[48];
+            const char *state = TR("Off");
+            if (s_cfg.meshBeaconListen && s_cfg.meshBeaconBroadcast) {
+                snprintf(both, sizeof(both), "%s \xC2\xB7 %s", TR("Listen"), TR("Broadcast"));
+                state = both;
+            } else if (s_cfg.meshBeaconListen) {
+                state = TR("Listen");
+            } else if (s_cfg.meshBeaconBroadcast) {
+                state = TR("Broadcast");
+            }
+            if (lic::active() && s_cfg.meshBeaconBroadcast)
+                state = s_cfg.meshBeaconListen ? TR("Listen") : TR("Off");
+            snprintf(buf, bufLen, TR("Mesh Beacons: %s"), state);
+        } break;
         case CFG_ACTION_CS_MODE:
             snprintf(buf, bufLen, TR("Chat Server: %s"),
+                     lic::active()                                   ? TR("Off while licensed") :
                      s_cfg.chatServerMode == CHAT_SERVER_MODE_OFF    ? TR("Off") :
                      s_cfg.chatServerMode == CHAT_SERVER_MODE_MANUAL ? TR("Manual only")
                                                                      : TR("Automatic"));
@@ -6194,7 +6292,8 @@ static const char *cfgActionLabel(int actionId, char *buf, size_t bufLen) {
 static bool cfgActionDisabled(int actionId) {
     switch (actionId) {
         case CFG_ACTION_MQTT_TOGGLE: return !s_cfg.wifiEnabled;
-        case CFG_ACTION_CS_CHECK:    return s_cfg.chatServerMode == CHAT_SERVER_MODE_OFF;
+        case CFG_ACTION_CS_MODE:     return lic::active();
+        case CFG_ACTION_CS_CHECK:    return lic::active() || s_cfg.chatServerMode == CHAT_SERVER_MODE_OFF;
 #if HAS_SD_MALWARE_SCAN
         // Nothing to look at. The row stays visible rather than disappearing:
         // "no card" is the answer to the question someone opened this to ask.
@@ -7686,6 +7785,10 @@ static void kbLightDrive(bool on) {
     keyboardSetKeypadBacklight(
         (on && s_cfg.kbBacklightEnabled)
             ? cfgCoerceKbBacklightLevel((int)s_cfg.kbBacklightLevel) : 0);
+#elif defined(DEVICE_TANMATSU)
+    // The coprocessor holds the duty; lit is the Keyboard Light level.
+    keyboardSetKeypadBacklight(on ? cfgCoerceKbBacklightLevel((int)s_cfg.kbBacklightLevel)
+                                  : 0);
 #else
     LV_UNUSED(on);
 #endif
@@ -8247,10 +8350,42 @@ static inline int navSideInsetRight() {
 static inline bool channelListIsDropdown() {
 #if defined(DEVICE_TDISPLAY_P4)
     return uiPortrait() || !UI_LARGE_PANEL_PROFILE;
+#elif HAS_CHANNEL_PANEL_LOCK
+    // Display > Channel Panel: locked docks it beside the chat (buildUi()).
+    // Read at build time; the setting rebuilds the screen when it changes.
+    return !cfgChannelPanelLocked(s_cfg);
 #else
     return UI_CHANNEL_LIST_DROPDOWN != 0;
 #endif
 }
+
+#if HAS_CHANNEL_PANEL_LOCK
+// The locked panel's keyboard cursor (s_channelColumnFocus).
+static inline bool channelColumnDocked() {
+    return !channelListIsDropdown() && s_channelList != nullptr;
+}
+
+static inline bool channelColumnFocused() {
+    return s_channelColumnFocus && channelColumnDocked();
+}
+
+static void setChannelColumnFocus(bool on) {
+    if (on && !channelColumnDocked()) on = false;
+    s_channelColumnFocus = on;
+    if (on) {
+        if (s_cardputerDropdownSelection < 0 || s_cardputerDropdownSelection >= MESH_CHANNELS) {
+            s_cardputerDropdownSelection = s_activeChannel;
+        }
+        int sel = s_cardputerDropdownSelection;
+        if (sel >= 0 && sel < MESH_CHANNELS && s_channelBtns[sel]) {
+            lv_obj_scroll_to_view(s_channelBtns[sel], LV_ANIM_OFF);
+        }
+    } else {
+        s_cardputerDropdownSelection = -1;
+    }
+    refreshChannelGlow(true);
+}
+#endif
 
 // The drawers' slide (the channel list's, and the DM screen's conversation
 // list). Instant on the Pro, for the reason the dashboard carousel is
@@ -9508,6 +9643,41 @@ static void glanceFitHeroFonts() {
 }
 #endif
 
+#if !defined(HAS_EINK)
+// A small camellia: five pink petals round a gold centre, d units across, its
+// top-left corner at (x, y) from the parent's top-middle.
+static void glanceAddCamellia(lv_obj_t *parent, int d, int x, int y) {
+    lv_obj_t *f = lv_obj_create(parent);
+    lv_obj_remove_style_all(f);
+    lv_obj_set_size(f, d, d);
+    lv_obj_clear_flag(f, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_clear_flag(f, LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_align(f, LV_ALIGN_TOP_MID, x, y);
+
+    auto dot = [f](int size, int cx, int cy, uint32_t rgb) {
+        lv_obj_t *o = lv_obj_create(f);
+        lv_obj_remove_style_all(o);
+        lv_obj_set_size(o, size, size);
+        lv_obj_set_style_radius(o, LV_RADIUS_CIRCLE, 0);
+        lv_obj_set_style_bg_color(o, lv_color_hex(rgb), 0);
+        lv_obj_set_style_bg_opa(o, LV_OPA_COVER, 0);
+        lv_obj_clear_flag(o, LV_OBJ_FLAG_CLICKABLE);
+        lv_obj_set_pos(o, cx - size / 2, cy - size / 2);
+    };
+    // Petal centres at 72-degree steps from straight up, in thousandths.
+    static const int16_t kDir[5][2] = {
+        {0, -1000}, {951, -309}, {588, 809}, {-588, 809}, {-951, -309},
+    };
+    const int c = d / 2;
+    const int petal = (d * 52) / 100;
+    const int reach = c - petal / 2;
+    for (const auto &v : kDir) {
+        dot(petal, c + (v[0] * reach) / 1000, c + (v[1] * reach) / 1000, 0xE0457B);
+    }
+    dot((d * 34) / 100, c, c, 0xF6C343);
+}
+#endif
+
 static void buildGlanceHeader(lv_obj_t *parent, GlanceHeader &w,
                               bool withStatusIcons, bool themed) {
     w.themed = themed;
@@ -9528,6 +9698,22 @@ static void buildGlanceHeader(lv_obj_t *parent, GlanceHeader &w,
     lv_obj_set_style_text_align(w.title, LV_TEXT_ALIGN_CENTER, 0);
     lv_label_set_text(w.title, TR("Camillia"));
     lv_obj_align(w.title, LV_ALIGN_TOP_MID, 0, kTdeckProTitleTop);
+#if !defined(HAS_EINK)
+    // A flower either side of the wordmark, for a little colour. Placed from
+    // the measured word, so a translated title keeps them beside it.
+    {
+        const int lineH = (int)lv_font_get_line_height(kSleepOverlayTitleFont);
+        lv_point_t sz = {0, 0};
+        lv_text_get_size(&sz, TR("Camillia"), kSleepOverlayTitleFont, 0, 0,
+                         LV_COORD_MAX, LV_TEXT_FLAG_NONE);
+        int d = (lineH * 55) / 100;
+        if (d < 10) d = 10;
+        const int offset = (int)sz.x / 2 + d / 2 + d / 2;
+        const int y = kTdeckProTitleTop + (lineH - d) / 2;
+        glanceAddCamellia(parent, d, -offset, y);
+        glanceAddCamellia(parent, d, offset, y);
+    }
+#endif
 
     // A rule under the wordmark, separating "which device is this" from
     // everything the screen is actually reporting.
@@ -11697,6 +11883,7 @@ static bool pngDimensions(const uint8_t *data, size_t len, int &w, int &h) {
 }
 
 static void persistConfigToPrefs() {
+    meshBeaconConfigSaved();   // beacon payload follows the saved setup
     // s_cfg is the single source of truth for credentials; nothing is folded in
     // from web config here.
     //
@@ -11843,6 +12030,7 @@ static_assert(sizeof(ChanBlobRecord) == 52, "ChanBlobRecord stride changed - see
 static ChanBlob s_chanBlob;
 
 static bool persistChannelsToPrefs() {
+    meshBeaconConfigSaved();   // channel 0 is the beacon's offer
     ChanBlob &blob = s_chanBlob;
     memset(&blob, 0, sizeof(blob));
     blob.version = kChanBlobVersion;
@@ -12020,6 +12208,8 @@ static void applyLoadedConfigInvariants() {
     // cannot show or cycle back to. 0 survives coercion on purpose — it is the
     // "stay on the lock screen" choice, not an unset field.
     s_cfg.lockScreenOffSecs = cfgCoerceLockScreenOffSecs(s_cfg.lockScreenOffSecs);
+    cfgCoerceMeshBeacon(s_cfg);
+    cfgCoerceLicensed(s_cfg);
     applyPresetParams(s_cfg);
 }
 
@@ -12379,6 +12569,11 @@ static void loadConfigFromPrefs() {
     }
 }
 
+// Channels whose stored blob record had no key. The loader leaves a keyless
+// record on the compiled default key, so licensed boot uses this to tell a key
+// it has to strip again (nothing to save) from one that was really stored.
+static uint32_t s_chanStoredKeylessMask = 0;
+
 static void loadChannelsFromPrefs() {
     Preferences cp;
     // Open read-write so first boot can create namespace instead of logging NOT_FOUND.
@@ -12450,6 +12645,7 @@ static void loadChannelsFromPrefs() {
                 memcpy(CHANNEL_KEYS[i].key, r.key, r.keyLen);
                 CHANNEL_KEYS[i].keyLen = r.keyLen;
             }
+            if (r.keyLen == 0) s_chanStoredKeylessMask |= (1UL << i);
             CHANNEL_KEYS[i].role            = r.role;
             CHANNEL_KEYS[i].uplinkEnabled   = (r.flags & 1) != 0;
             CHANNEL_KEYS[i].downlinkEnabled = (r.flags & 2) != 0;
@@ -12773,6 +12969,131 @@ static void syncPrimaryChannelName() {
     CHANNEL_KEYS[0].name_buf[sizeof(CHANNEL_KEYS[0].name_buf) - 1] = '\0';
     CHANNEL_KEYS[0].name = CHANNEL_KEYS[0].name_buf;
 }
+
+// ── Licensed (amateur) mode ───────────────────────────────────
+// Every channel open (keyLen 0, key zeroed) and any channel named "admin"
+// disabled, as upstream's ensureLicensedOperation(). Returns true when that
+// changed what is stored; a key in a slot whose stored record was already
+// keyless (keylessMask) is the loader's compiled default and does not count.
+static bool licStripChannels(uint32_t keylessMask) {
+    bool changed = false;
+    for (int i = 0; i < MAX_CHANNELS; i++) {
+        ChannelKey &ck = CHANNEL_KEYS[i];
+        if (ck.keyLen != 0 && !(i < 32 && (keylessMask & (1UL << i)))) changed = true;
+        memset(ck.key, 0, sizeof(ck.key));
+        ck.keyLen = 0;
+        const char *nm = ck.name_buf[0] ? ck.name_buf : ck.name;
+        if (nm && strcasecmp(nm, "admin") == 0 && ck.role != 2) {
+            // Slot 0 is always the primary; disabling it would drop every
+            // packet on it. It is still made keyless above.
+            if (i == 0) {
+                Serial.println("[lic] primary channel named admin left enabled");
+                continue;
+            }
+            ck.role = 2;
+            changed = true;
+        }
+    }
+    return changed;
+}
+
+#if FEATURE_LICENSED_MODE
+bool licStripChannelsForImport() { return licStripChannels(0); }
+#endif
+
+// TX stays off while a ham-region exit is unconfirmed, or while licensed under
+// the N0CALL test call sign.
+static bool licTxInhibitWanted() {
+    return s_cfg.licTxHold || (lic::active() && lic::isNoCall(s_cfg.callSign));
+}
+
+// Boot: after the config and channel plan load, before the radio and the
+// channel hashes. Re-applies the licensed channel rules, which also covers a
+// backup restore or a QR import made before licensed mode was turned on.
+static void licensedModeBootSetup() {
+    lic::setActive(FEATURE_LICENSED_MODE && s_cfg.licensedMode);
+    if (lic::active()) {
+        Serial.printf("[lic] licensed mode active, call sign %s\n", s_cfg.callSign);
+        if (licStripChannels(s_chanStoredKeylessMask)) {
+            Serial.println("[lic] channel keys stripped / admin disabled at boot - saving");
+            persistChannelsToPrefs();
+        }
+        if (s_cfg.rebroadcastMode != lic::kRebroadcastLocalOnly) {
+            s_cfg.rebroadcastMode = lic::kRebroadcastLocalOnly;
+            persistConfigToPrefs();
+        }
+    }
+    Radio.setTxInhibit(licTxInhibitWanted());
+    if (Radio.txInhibited()) {
+        Serial.printf("[lic] TX inhibited (%s)\n",
+                      s_cfg.licTxHold ? "left a ham region - resume to transmit" : "N0CALL");
+    }
+}
+
+static void licPersistAndReboot(const char *why) {
+    persistConfigToPrefs();
+    syncPrimaryChannelName();
+    persistChannelsToPrefs();
+    Serial.printf("[lic] %s - rebooting\n", why);
+    // No lv_timer_handler() here, unlike onboarding: callers include LVGL event
+    // handlers, which must not re-enter LVGL. They render before calling.
+    delay(500);
+    flushPersistentState();   // settings and transcripts must land before we go
+    ESP.restart();
+}
+
+// The transaction of spec §1 (upstream handleSetHamMode). Returns false with a
+// reason in err when refused; on success it does not return (reboots).
+bool enterLicensedMode(const char *callSign, const char *longSuffix, uint8_t txPower,
+                       char *err, size_t errCap) {
+    if (err && errCap) err[0] = '\0';
+#if !FEATURE_LICENSED_MODE
+    (void)callSign; (void)longSuffix; (void)txPower;
+    if (err && errCap) snprintf(err, errCap, "%s", TR("Licensed mode is not available on this device"));
+    return false;
+#else
+    char call[sizeof(s_cfg.callSign)];
+    if (!lic::normalizeCallSign(callSign, call, sizeof(call))) {
+        if (err && errCap) snprintf(err, errCap, "%s", TR("Invalid call sign"));
+        return false;
+    }
+    memcpy(s_cfg.callSign, call, sizeof(s_cfg.callSign));
+    lic::composeLongName(call, longSuffix, s_cfg.nodeLong, MESH_LONG_NAME_MAX_BYTES + 1);
+    licStripChannels(0);
+    s_cfg.rebroadcastMode = lic::kRebroadcastLocalOnly;
+    s_cfg.loraPower = (uint8_t)constrain((int)txPower, 1, (int)MESH_POWER);
+    s_cfg.licensedMode = true;
+    s_cfg.licTxHold = false;
+    licPersistAndReboot("licensed mode on");
+    return true;
+#endif
+}
+
+// Off: the ISM rules come back. Keys stripped on the way in are not restored.
+void exitLicensedMode() {
+    s_cfg.licensedMode = false;
+    const RegionPlan *r = regionPlan(s_cfg.region);
+    if (r && r->licensedOnly) {
+        // Never left transmitting unlicensed on a ham band: back to the board's
+        // ISM region, TX held until the user confirms (resumeTxAfterLicensedExit).
+        utf8util::copyTruncate(s_cfg.region, sizeof(s_cfg.region), MY_REGION);
+        s_cfg.licTxHold = true;
+        applyPresetParams(s_cfg);
+    }
+    const uint8_t cap = regionPower(s_cfg.region);
+    if (s_cfg.loraPower > cap) s_cfg.loraPower = cap;
+    licPersistAndReboot("licensed mode off");
+}
+
+// Confirms TX after leaving a ham region. No reboot.
+void resumeTxAfterLicensedExit() {
+    s_cfg.licTxHold = false;
+    persistConfigToPrefs();
+    Radio.setTxInhibit(licTxInhibitWanted());
+    Serial.printf("[lic] TX resumed by user (inhibit %s)\n", Radio.txInhibited() ? "on" : "off");
+}
+
+bool licensedTxInhibited() { return Radio.txInhibited(); }
 
 static void formatReplyPreview(const char *src, char *dst, size_t dstLen) {
     if (!dst || dstLen == 0) return;
@@ -15427,6 +15748,10 @@ static void initCfgActions() {
     // Under Preset: the other way to pick one, along with the region and the
     // channels a local mesh uses.
     s_cfgActions[s_cfgActionCount++] = CFG_ACTION_COMMUNITY_PRESET;
+#if FEATURE_LICENSED_MODE
+    // With the other "which band, which mesh" choices.
+    s_cfgActions[s_cfgActionCount++] = CFG_ACTION_LICENSED_MODE;
+#endif
 #if defined(DEVICE_TDISPLAY_P4)
     // Under the preset: the other half of "can this node be heard at all".
     s_cfgActions[s_cfgActionCount++] = CFG_ACTION_ANTENNA;
@@ -15527,6 +15852,9 @@ static void initCfgActions() {
     // Decides what the bottom of every screen looks like; set once to taste.
     #if HAS_NAV_BAR_TOGGLE
     s_cfgActions[s_cfgActionCount++] = CFG_ACTION_NAV_BAR;
+    #endif
+    #if HAS_CHANNEL_PANEL_LOCK
+    s_cfgActions[s_cfgActionCount++] = CFG_ACTION_CHANNEL_PANEL_LOCK;
     #endif
     #if HAS_NAV_ALIGN_SETTING
     // Every placement choice in one row: bottom row or a column down either
@@ -15767,7 +16095,7 @@ static void deviceInfoFormatBytes(uint64_t bytes, char *out, size_t cap) {
 // How many rows buildDeviceInfoLines() can produce. One number, because two
 // callers size an array from it and a stale copy in either is a silently
 // truncated screen.
-static constexpr int kDeviceInfoMaxLines = 17;
+static constexpr int kDeviceInfoMaxLines = 18;   // 16 worst case, +2 licensed
 
 static int buildDeviceInfoLines(char info[][96], int maxLines) {
     int n = 0;
@@ -15785,8 +16113,11 @@ static int buildDeviceInfoLines(char info[][96], int maxLines) {
     if (n < maxLines) {
         const bool trackerNotSharing =
             (s_cfg.deviceRole == 5 /*TRACKER*/) && !s_cfg.shareLocation;
+        // Licensed mode pins rebroadcast to LOCAL_ONLY whatever the role; there
+        // is no role or rebroadcast row on the device, so this line says it.
         snprintf(info[n++], 96, TR("Role: %s%s"), cfgDeviceRoleName(s_cfg.deviceRole),
-                 trackerNotSharing ? TR(" (not sharing location)") : "");
+                 lic::active() ? TR(" (licensed: local only)")
+                 : trackerNotSharing ? TR(" (not sharing location)") : "");
     }
     if (n < maxLines) snprintf(info[n++], 96, TR("PKI key: %s"), hasPubKey ? TR("present") : TR("missing"));
     if (n < maxLines) snprintf(info[n++], 96, TR("Long: %s"), s_cfg.nodeLong);
@@ -15804,6 +16135,14 @@ static int buildDeviceInfoLines(char info[][96], int maxLines) {
     if (n < maxLines) snprintf(info[n++], 96, TR("Pwr %d dBm Hops %d"), s_cfg.loraPower, s_cfg.loraHopLimit);
     if (n < maxLines) snprintf(info[n++], 96, TR("Relayed: %lu"), (unsigned long)s_rebroadcastCount);
     if (n < maxLines) snprintf(info[n++], 96, TR("Stood down: %lu"), (unsigned long)s_relayStoodDownCount);
+    // The station-ID NodeInfo interval licensed mode fixes; not settable here.
+    if (lic::active() && n < maxLines) {
+        snprintf(info[n++], 96, "%s", TR("NodeInfo (licensed: 10 min)"));
+    }
+    if (lic::active() && n < maxLines) {
+        snprintf(info[n++], 96, TR("Lic drops %lu / NI mismatch %lu"),
+                 (unsigned long)s_licDropUnlicensed, (unsigned long)s_licNodeInfoMismatch);
+    }
 
 #if HAS_FILE_STORAGE
     // Storage, and on a board with a slot, what the last mount attempt made of
@@ -17110,7 +17449,10 @@ static void onCfgColorBackdropPressed(lv_event_t *e) {
 // both boards the second row was unreachable by key. Here the wheel and the pad
 // pick the row, and the value moves with j/k — plus Left/Right on the M9, which
 // this modal is exempted from the fold for.
-#if FEATURE_LOCK_SCREEN && (defined(DEVICE_M9) || defined(DEVICE_TLORA_PAGER_TFT))
+// The Tanmatsu opts in for consistency with its other popups, where Up/Down
+// picks the row and Left/Right changes it.
+#if FEATURE_LOCK_SCREEN && (defined(DEVICE_M9) || defined(DEVICE_TLORA_PAGER_TFT) \
+                            || defined(DEVICE_TANMATSU))
 static constexpr bool kBrightVertPicksRow = true;
 #else
 static constexpr bool kBrightVertPicksRow = false;
@@ -17796,7 +18138,7 @@ static void toggleCfgSliderCheck() {
     }
 }
 
-#if defined(DEVICE_M9)
+#if UI_ARROW_GRID_NAV
 // Outlines whichever control has focus. Same halo the Brightness rows use
 // (paintCfgBrightnessRow()), so "which one am I on" reads the same way.
 static void refreshCfgSliderFocus() {
@@ -17837,7 +18179,7 @@ static void openCfgSliderModal(const CfgSliderPicker *spec, int startIdx) {
     if (startIdx >= spec->count) startIdx = spec->count - 1;
     s_cfgSliderStaged = startIdx;
     s_cfgSliderCheckStaged = spec->checkValue ? *spec->checkValue : false;
-#if defined(DEVICE_M9)
+#if UI_ARROW_GRID_NAV
     s_cfgSliderFocus = 0;   // always opens on the slider
 #endif
 
@@ -17953,7 +18295,7 @@ static void openCfgSliderModal(const CfgSliderPicker *spec, int startIdx) {
         lv_obj_set_style_text_color(hint, lv_color_hex(0xA7C7FF), 0);
         lv_obj_set_style_text_align(hint, LV_TEXT_ALIGN_CENTER, 0);
         if (hasCheck) {
-#if defined(DEVICE_M9)
+#if UI_ARROW_GRID_NAV
             lv_label_set_text_fmt(hint,
                                   TR("Up/Down=Select  Left/Right=Change  Space=Toggle  Enter=Save  %s=Cancel"),
                                   modalCloseKeyLabel());
@@ -17974,7 +18316,7 @@ static void openCfgSliderModal(const CfgSliderPicker *spec, int startIdx) {
 #endif
 
     cfgSliderShow(startIdx);
-#if defined(DEVICE_M9)
+#if UI_ARROW_GRID_NAV
     if (hasCheck) refreshCfgSliderFocus();
 #endif
 }
@@ -18110,6 +18452,9 @@ static void applyKbBacklightSetting() {
 #elif defined(DEVICE_TDISPLAY_P4)
     // Through the same gate as the Pro, for the same reason: F7 decides whether
     // the keyboard is lit, and a sleeping screen has it dark regardless.
+    setPagerKeyboardBacklight(!s_screenAsleep);
+#elif defined(DEVICE_TANMATSU)
+    // Dark while the screen sleeps; wakeScreen() relights it at this level.
     setPagerKeyboardBacklight(!s_screenAsleep);
 #elif defined(DEVICE_TDECK)
     // The level is where it rests -- unless the idle timeout has it dark.
@@ -19938,6 +20283,8 @@ struct BeaconOffer {
     bool     channelUsesAead;   // an AEAD channel: joining it means turning AEAD on here too
     int      preset;            // our PRESET_* index, or -1 when not offered/unmappable
     char     region[12];        // "" when not offered
+    bool     hasSlot;
+    uint32_t slot;              // offer_slot, 1-based; only when hasSlot
     int8_t   chanIdx;           // channel it arrived on, for legacy-split pairing
     bool     textPaired;        // message came from a split TEXT_MESSAGE, not the beacon
 };
@@ -20054,6 +20401,8 @@ static void beaconOfferStore(const MeshPacket &pkt, const MeshBeaconPayload &b, 
     o.preset = b.hasOfferPreset ? presetFromMeshtastic(b.offerPreset) : -1;
     const char *rc = regionCodeFromMeshtastic(b.offerRegion);
     if (rc) utf8util::copyTruncate(o.region, sizeof(o.region), rc);
+    o.hasSlot = b.hasOfferSlot;
+    o.slot    = b.offerSlot;
     s_beaconOfferSeq++;
 }
 
@@ -20067,6 +20416,7 @@ static void beaconOfferStore(const MeshPacket &pkt, const MeshBeaconPayload &b, 
 static lv_obj_t *s_beaconsModal = nullptr;
 static lv_obj_t *s_beaconsList = nullptr;
 static lv_obj_t *s_beaconsStatusLabel = nullptr;
+static lv_obj_t *s_beaconsTxLabel = nullptr;   // "Your beacon: ..."
 // One per card, holding the only text that moves on its own. Kept so a ticking
 // age does not cost a full teardown of a list the user may be reading.
 static lv_obj_t *s_beaconAgeLabels[kBeaconOfferMax] = {};
@@ -20348,16 +20698,10 @@ static uint32_t s_presetScanResultToMs = 0;
 // way out: re-deriving would depend on applyPresetParams() reaching the same
 // answer it reached at boot, and a restore has no business being that clever.
 // It also has to be right for a node running custom modem settings, where there
-// is no preset to derive anything from.
-static float    s_presetScanPrevFreq = 0.0f;
-static float    s_presetScanPrevBw   = 0.0f;
-static uint8_t  s_presetScanPrevSf   = 0;
-static uint8_t  s_presetScanPrevCr   = 0;
-// Channel 0's name, restored verbatim. Both halves: name may point at a
-// compiled-in literal rather than into name_buf (see ChannelKey, mesh_proto.h).
-static const char *s_presetScanPrevChanName = nullptr;
-static char     s_presetScanPrevChanBuf[sizeof(CHANNEL_KEYS[0].name_buf)] = {};
-static bool     s_presetScanRenamedChan = false;
+// is no preset to derive anything from. Channel 0's name is in there too, both
+// halves: name may point at a compiled-in literal rather than into name_buf (see
+// ChannelKey, mesh_proto.h). tempTuneEnter()/tempTuneLeave() own the contents.
+static TempTuneSnapshot s_presetScanSnap = {};
 
 // Preset picker. Rows are the presets worth scanning, so a row index is not a
 // preset index — s_presetPickChoices maps one to the other.
@@ -20383,6 +20727,70 @@ static inline bool discoveryRadioParked() { return s_presetScanActive; }
 #else
 static inline bool discoveryRadioParked() { return false; }
 #endif
+
+static_assert(sizeof(((TempTuneSnapshot *)nullptr)->prevBuf) == sizeof(CHANNEL_KEYS[0].name_buf),
+              "TempTuneSnapshot::prevBuf must mirror ChannelKey::name_buf");
+
+// Parks the radio on `preset`, having snapshotted what it has to go back to.
+// Shared by the Discovery preset scan and the MeshBeacon broadcast; every
+// caller must pair it with tempTuneLeave(), whatever happened in between.
+//
+// Deliberately NOT applyPresetParams() and NOT the onWebCfgSaved() retune
+// sequence, both of which write s_cfg. That would be the whole feature's
+// failure mode: markConfigDirty() is called from three dozen unrelated places
+// and serviceConfigFlush() writes the *entire* s_cfg to NVS 1.5 s later, so a
+// brightness nudge while parked would make the temporary preset permanent.
+// Same argument s_powerWifiHold settled for the low-battery Wi-Fi shed: a
+// runtime hold is not a configuration change, and must not be able to become
+// one. Everything below is derived locally and handed straight to the radio.
+//
+// renameCh0: Discovery's sweep is an ordinary channel-0 send, and the hash
+// stamped on every packet is computeChannelHash(name, key, keyLen) — a sweep
+// sent while channel 0 is still called LongFast carries the LongFast hash and
+// the mesh we just retuned to hear will drop it. Gated on the same test every
+// other path uses, so a primary channel the user deliberately renamed is left
+// alone. The beacon passes false: it never goes out on channel 0 (which may
+// hold a private key) and stamps the target's public hash itself.
+static void tempTuneEnter(uint8_t preset, TempTuneSnapshot &snap, bool renameCh0) {
+    const PresetParams &p = kPresets[preset < PRESET_COUNT ? preset : PRESET_LONG_FAST];
+
+    snap.freq = s_cfg.loraFreq;
+    snap.bw   = s_cfg.loraBw;
+    snap.sf   = s_cfg.loraSf;
+    snap.cr   = s_cfg.loraCr;
+
+    snap.renamed = renameCh0 && primaryChannelNameIsPresetDefault();
+    if (snap.renamed) {
+        snap.prevName = CHANNEL_KEYS[0].name;
+        memcpy(snap.prevBuf, CHANNEL_KEYS[0].name_buf, sizeof(snap.prevBuf));
+        strncpy(CHANNEL_KEYS[0].name_buf, p.channelName,
+                sizeof(CHANNEL_KEYS[0].name_buf) - 1);
+        CHANNEL_KEYS[0].name_buf[sizeof(CHANNEL_KEYS[0].name_buf) - 1] = '\0';
+        CHANNEL_KEYS[0].name = CHANNEL_KEYS[0].name_buf;
+        recomputeChannelHashes();
+    }
+
+    // Same slot arithmetic applyPresetParams() runs, read straight out of the
+    // preset table instead of through the config struct.
+    const float freq = regionSlotFreq(s_cfg.region, p.bw, p.channelName);
+    dropPendingRebroadcasts();   // framed for the preset we are leaving
+    Radio.reconfigure(freq, p.bw, p.sf, p.cr, s_cfg.loraPower);
+}
+
+// Undoes tempTuneEnter() in reverse: channel 0's name and hashes, the relay
+// queue, then the radio. Safe to call whatever the parked period did.
+static void tempTuneLeave(TempTuneSnapshot &snap) {
+    if (snap.renamed) {
+        memcpy(CHANNEL_KEYS[0].name_buf, snap.prevBuf, sizeof(snap.prevBuf));
+        CHANNEL_KEYS[0].name = snap.prevName;
+        recomputeChannelHashes();
+        snap.renamed = false;
+    }
+    dropPendingRebroadcasts();   // and the ones framed for the preset we are leaving
+    if (s_radioReady) {
+        Radio.reconfigure(snap.freq, snap.bw, snap.sf, snap.cr, s_cfg.loraPower);
+    }
+}
 
 
 static lv_obj_t *s_chanCfgBackdrop = nullptr;
@@ -20456,6 +20864,19 @@ static void refreshChanEditRows();
 static void openChanTextModal(int field);
 static void closeChanTextModal();
 static void commitChanTextModal();
+// The text modal doubles as the Mesh Beacons message editor: this field id
+// sits outside ChanEditRow, and its commit goes to s_cfg, not the channel.
+static constexpr int kChanTextBeaconMessage = 0x40;
+static void meshBeaconCfgMessageCommitted(const char *msg);
+// And as the licensed-mode call sign / long-name suffix editor; both are staged
+// in that popup and only saved by enterLicensedMode().
+static constexpr int kChanTextLicCall   = 0x41;
+static constexpr int kChanTextLicSuffix = 0x42;
+#if FEATURE_LICENSED_MODE
+static char s_licCfgCall[lic::kCallSignMax + 1] = {};
+static char s_licCfgSuffix[MESH_LONG_NAME_MAX_BYTES + 1] = {};
+static void licCfgTextCommitted(int field, const char *text);
+#endif
 
 // Channel-name limit. Meshtastic caps the on-air name at 11 bytes and the web
 // config's input already enforces that, so the on-device editor matches rather
@@ -20518,6 +20939,7 @@ static void chanEditApplyEncType(ChanEncType t) {
 }
 
 static void chanEditCycleEncType(int delta) {
+    if (lic::active()) return;   // licensed: channels carry no key
     int next = (int)chanEncTypeOf(s_chanEditKey, s_chanEditKeyLen) + delta;
     while (next < 0) next += CHAN_ENC_TYPE_COUNT;
     next %= CHAN_ENC_TYPE_COUNT;
@@ -20550,6 +20972,11 @@ static void chanEditSave() {
     ck.name_buf[sizeof(ck.name_buf) - 1] = '\0';
     ck.name = ck.name_buf;
 
+    // Licensed mode: whatever was staged, the channel is saved keyless.
+    if (lic::active()) {
+        memset(s_chanEditKey, 0, sizeof(s_chanEditKey));
+        s_chanEditKeyLen = 0;
+    }
     memset(ck.key, 0, sizeof(ck.key));
     memcpy(ck.key, s_chanEditKey, s_chanEditKeyLen);
     ck.keyLen = s_chanEditKeyLen;
@@ -20847,6 +21274,7 @@ static void chanEditActivateRow(int row) {
     switch (row) {
         case CHAN_EDIT_NAME:
         case CHAN_EDIT_KEY:
+            if (row == CHAN_EDIT_KEY && lic::active()) break;   // disabled while licensed
             openChanTextModal(row);
             break;
         case CHAN_EDIT_ENC:
@@ -20894,6 +21322,10 @@ static void openChanEditModal(int slot) {
                                                             : (uint8_t)sizeof(s_chanEditKey);
     memset(s_chanEditKey, 0, sizeof(s_chanEditKey));
     memcpy(s_chanEditKey, ck.key, s_chanEditKeyLen);
+    if (lic::active()) {
+        memset(s_chanEditKey, 0, sizeof(s_chanEditKey));
+        s_chanEditKeyLen = 0;
+    }
     s_chanEditShareLoc = ck.shareLocation;
     s_chanEditAead     = ck.useAead;
     s_chanEditHopPlus1 = ck.hopLimitPlus1;
@@ -21001,6 +21433,10 @@ static void openChanEditModal(int slot) {
         lv_obj_set_flex_flow(row, LV_FLEX_FLOW_ROW);
         lv_obj_set_flex_align(row, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
         lv_obj_add_event_cb(row, onChanEditRowPressed, LV_EVENT_CLICKED, (void *)(intptr_t)i);
+        // Licensed: Key and Encryption do nothing, and look it.
+        if (lic::active() && (i == CHAN_EDIT_KEY || i == CHAN_EDIT_ENC)) {
+            lv_obj_set_style_opa(row, LV_OPA_40, 0);
+        }
 
         lv_obj_t *label = lv_label_create(row);
         lv_obj_set_style_text_font(label, kChanModalRowFont, 0);
@@ -21104,6 +21540,34 @@ static void commitChanTextModal() {
     const char *text = lv_textarea_get_text(s_chanTextInput);
     if (!text) text = "";
 
+    if (s_chanTextField == kChanTextBeaconMessage) {
+        char msg[61];
+        beaconCopyMessage(msg, text);   // copied before closing frees the textarea
+        closeChanTextModal();
+        meshBeaconCfgMessageCommitted(msg);
+        return;
+    }
+
+#if FEATURE_LICENSED_MODE
+    if (s_chanTextField == kChanTextLicCall || s_chanTextField == kChanTextLicSuffix) {
+        const int field = s_chanTextField;
+        char val[MESH_LONG_NAME_MAX_BYTES + 1];
+        if (field == kChanTextLicCall) {
+            // Rejected, never truncated: a clipped call sign is someone else's.
+            val[0] = '\0';
+            if (text[0] && !lic::normalizeCallSign(text, val, lic::kCallSignMax + 1)) {
+                if (s_chanTextStatus) lv_label_set_text(s_chanTextStatus, TR("Invalid call sign"));
+                return;
+            }
+        } else {
+            utf8util::copyTruncate(val, sizeof(val), text);
+        }
+        closeChanTextModal();
+        licCfgTextCommitted(field, val);
+        return;
+    }
+#endif
+
     if (s_chanTextField == CHAN_EDIT_NAME) {
         snprintf(s_chanEditName, sizeof(s_chanEditName), "%s", text);
         if (strlen(s_chanEditName) > kChanNameMax) s_chanEditName[kChanNameMax] = '\0';
@@ -21128,7 +21592,8 @@ static void commitChanTextModal() {
 
 static void openChanTextModal(int field) {
     if (!s_rootScreen || s_chanTextModal || s_chanTextBackdrop) return;
-    if (field != CHAN_EDIT_NAME && field != CHAN_EDIT_KEY) return;
+    if (field != CHAN_EDIT_NAME && field != CHAN_EDIT_KEY && field != kChanTextBeaconMessage
+        && field != kChanTextLicCall && field != kChanTextLicSuffix) return;
     s_chanTextField = field;
 
     const int w = lv_disp_get_hor_res(NULL);
@@ -21152,14 +21617,11 @@ static void openChanTextModal(int field) {
     lv_obj_add_event_cb(s_chanTextBackdrop, onChanTextBackdropPressed, LV_EVENT_CLICKED, nullptr);
 
     s_chanTextModal = lv_obj_create(s_chanTextBackdrop);
-    lv_obj_set_size(s_chanTextModal,
-                    modalW,
 #if UI_TOUCH_ONLY_PROFILE
-                    h - 18
+    lv_obj_set_size(s_chanTextModal, modalW, h - 18);
 #else
-                    LV_SIZE_CONTENT
+    lv_obj_set_size(s_chanTextModal, modalW, LV_SIZE_CONTENT);
 #endif
-    );
     lv_obj_align(s_chanTextModal, LV_ALIGN_CENTER, 0, 0);
     lv_obj_clear_flag(s_chanTextModal, LV_OBJ_FLAG_SCROLLABLE);
     lv_obj_set_style_bg_color(s_chanTextModal, lv_color_hex(0x0E285B), 0);
@@ -21177,14 +21639,21 @@ static void openChanTextModal(int field) {
                           LV_FLEX_ALIGN_START);
     lv_obj_move_foreground(s_chanTextBackdrop);
 
-    const bool editingName = (field == CHAN_EDIT_NAME);
+    const bool editingName   = (field == CHAN_EDIT_NAME);
+    const bool editingKey    = (field == CHAN_EDIT_KEY);
+    const bool editingBeacon = (field == kChanTextBeaconMessage);
+    const bool editingLicCall = (field == kChanTextLicCall);
+    const bool editingLicSuffix = (field == kChanTextLicSuffix);
 
     lv_obj_t *title = lv_label_create(s_chanTextModal);
     lv_obj_set_width(title, lv_pct(100));
     lv_obj_set_style_text_font(title, &lv_font_montserrat_14, 0);
     lv_obj_set_style_text_color(title, lv_color_hex(0xD9E8FF), 0);
     lv_obj_set_style_text_align(title, LV_TEXT_ALIGN_CENTER, 0);
-    lv_label_set_text(title, editingName ? TR("Channel Name") : TR("Channel Key"));
+    lv_label_set_text(title, editingBeacon ? TR("Beacon message")
+                             : editingLicCall ? TR("Call sign")
+                             : editingLicSuffix ? TR("Long name suffix")
+                             : editingName ? TR("Channel Name") : TR("Channel Key"));
 
     s_chanTextInput = lv_textarea_create(s_chanTextModal);
     if (!s_chanTextInput) {
@@ -21201,11 +21670,23 @@ static void openChanTextModal(int field) {
     lv_obj_set_style_border_width(s_chanTextInput, 1, 0);
     lv_obj_set_style_border_color(s_chanTextInput, lv_color_hex(0x4C76BA), 0);
     lv_textarea_set_one_line(s_chanTextInput, true);
-    lv_textarea_set_max_length(s_chanTextInput, editingName ? (uint32_t)kChanNameMax : 48);
+    // Characters, not bytes: commit truncates to 60 bytes on a UTF-8 boundary.
+    lv_textarea_set_max_length(s_chanTextInput, editingBeacon ? 60u
+                                                : editingLicCall ? (uint32_t)lic::kCallSignMax
+                                                : editingLicSuffix ? (uint32_t)(MESH_LONG_NAME_MAX_BYTES - 3)
+                                                : editingName ? (uint32_t)kChanNameMax : 48);
     lv_textarea_set_placeholder_text(s_chanTextInput,
-                                     editingName ? TR("Leave blank to clear") : TR("base64 key"));
+                                     editingKey ? TR("base64 key") : TR("Leave blank to clear"));
 
-    if (editingName) {
+    if (editingBeacon) {
+        lv_textarea_set_text(s_chanTextInput, s_cfg.meshBeaconMessage);
+#if FEATURE_LICENSED_MODE
+    } else if (editingLicCall) {
+        lv_textarea_set_text(s_chanTextInput, s_licCfgCall);
+    } else if (editingLicSuffix) {
+        lv_textarea_set_text(s_chanTextInput, s_licCfgSuffix);
+#endif
+    } else if (editingName) {
         lv_textarea_set_text(s_chanTextInput, s_chanEditName);
     } else {
         char b64[48];
@@ -21233,9 +21714,9 @@ static void openChanTextModal(int field) {
 #endif
 
 #if defined(DEVICE_TDECK) || defined(DEVICE_TDECK_PRO)
-    // Key field only: the name field has no use for a character the keyboard
-    // can't produce.
-    if (!editingName) {
+    // Key field only: the other fields have no use for a character the
+    // keyboard can't produce.
+    if (editingKey) {
         lv_obj_t *eqRow = lv_obj_create(s_chanTextModal);
         lv_obj_set_width(eqRow, lv_pct(100));
         lv_obj_set_height(eqRow, 30);
@@ -22518,14 +22999,11 @@ static void openCfgWifiPassModal(int scanIdx) {
     lv_obj_add_event_cb(s_cfgWifiPassBackdrop, onCfgWifiPassBackdropPressed, LV_EVENT_CLICKED, nullptr);
 
     s_cfgWifiPassModal = lv_obj_create(s_cfgWifiPassBackdrop);
-    lv_obj_set_size(s_cfgWifiPassModal,
-                    modalW,
 #if UI_TOUCH_ONLY_PROFILE
-                    h - 18
+    lv_obj_set_size(s_cfgWifiPassModal, modalW, h - 18);
 #else
-                    LV_SIZE_CONTENT
+    lv_obj_set_size(s_cfgWifiPassModal, modalW, LV_SIZE_CONTENT);
 #endif
-    );
     lv_obj_align(s_cfgWifiPassModal, LV_ALIGN_CENTER, 0, 0);
     lv_obj_clear_flag(s_cfgWifiPassModal, LV_OBJ_FLAG_SCROLLABLE);
     lv_obj_set_style_bg_color(s_cfgWifiPassModal, lv_color_hex(0x0E285B), 0);
@@ -23616,6 +24094,719 @@ static void openCfgPresetModal() {
     refreshCfgPresetSelection();
 }
 
+// ── Config -> Mesh Beacons ──────────────────────────────────────────────────
+// Listening for other meshes' beacons and broadcasting our own, in one popup
+// built like the preset picker: a list of rows, Enter (or a tap) changes the
+// one under the cursor. Toggles flip in place; the two pickers reuse the shared
+// slider modal and the message reuses the channel text-entry modal, so every
+// board's keys, trackball, d-pad and touch work here the way they do there.
+// Each change is saved at once (markConfigDirty) and reschedules the beacon.
+enum MbCfgRow : uint8_t {
+    MB_CFG_LISTEN = 0,
+    MB_CFG_BROADCAST,
+    MB_CFG_TARGET,
+    MB_CFG_OFFER_KEY,
+    MB_CFG_MESSAGE,
+    MB_CFG_INTERVAL,
+    MB_CFG_ROW_COUNT
+};
+
+static const char *const kMbCfgRowNames[MB_CFG_ROW_COUNT] = {
+    TR_NOOP("Listen"),
+    TR_NOOP("Broadcast"),
+    TR_NOOP("Target preset"),
+    TR_NOOP("Include key"),
+    TR_NOOP("Message"),
+    TR_NOOP("Interval"),
+};
+
+static const uint8_t kMbIntervalsH[] = { 1, 2, 3, 6, 12, 24 };
+static constexpr int kMbIntervalCount = (int)(sizeof(kMbIntervalsH) / sizeof(kMbIntervalsH[0]));
+
+static lv_obj_t *s_mbCfgBackdrop = nullptr;
+static lv_obj_t *s_mbCfgModal = nullptr;
+static lv_obj_t *s_mbCfgRows[MB_CFG_ROW_COUNT] = {};
+static lv_obj_t *s_mbCfgValues[MB_CFG_ROW_COUNT] = {};
+static lv_obj_t *s_mbCfgWarn = nullptr;
+static int       s_mbCfgSelection = 0;
+static uint8_t   s_mbCfgPresetChoices[PRESET_COUNT] = {};
+static int       s_mbCfgPresetCount = 0;
+
+static const char *meshBeaconHomeChannelName() {
+    const ChannelKey &c0 = CHANNEL_KEYS[0];
+    const char *name = c0.name_buf[0] ? c0.name_buf : c0.name;
+    if (name && name[0]) return name;
+    const uint8_t pi = s_cfg.modemPreset < PRESET_COUNT ? s_cfg.modemPreset : PRESET_LONG_FAST;
+    return s_cfg.loraUsePreset ? kPresets[pi].channelName : CUSTOM_CHANNEL_NAME;
+}
+
+static void closeMeshBeaconCfgModal() {
+    if (s_chanTextField == kChanTextBeaconMessage) closeChanTextModal();
+    if (lvObjValid(s_mbCfgBackdrop)) {
+        lv_obj_del(s_mbCfgBackdrop);
+    } else if (lvObjValid(s_mbCfgModal)) {
+        lv_obj_del(s_mbCfgModal);
+    }
+    s_mbCfgBackdrop = nullptr;
+    s_mbCfgModal = nullptr;
+    s_mbCfgWarn = nullptr;
+    memset(s_mbCfgRows, 0, sizeof(s_mbCfgRows));
+    memset(s_mbCfgValues, 0, sizeof(s_mbCfgValues));
+}
+
+static void refreshMeshBeaconCfgModal() {
+    if (!s_mbCfgModal || !lvObjValid(s_mbCfgModal)) return;
+    const uint8_t target = s_cfg.meshBeaconTargetPreset < PRESET_COUNT
+                               ? s_cfg.meshBeaconTargetPreset : PRESET_LONG_FAST;
+    char buf[72];
+    for (int i = 0; i < MB_CFG_ROW_COUNT; i++) {
+        if (!s_mbCfgValues[i]) continue;
+        const char *v = "";
+        switch (i) {
+            case MB_CFG_LISTEN:    v = s_cfg.meshBeaconListen ? TR("On") : TR("Off"); break;
+            case MB_CFG_BROADCAST:
+                v = lic::active() ? TR("Off while licensed")
+                                  : s_cfg.meshBeaconBroadcast ? TR("On") : TR("Off");
+                break;
+            case MB_CFG_TARGET:    v = kPresets[target].name; break;
+            case MB_CFG_OFFER_KEY: v = s_cfg.meshBeaconOfferPsk ? TR("On") : TR("Off"); break;
+            case MB_CFG_MESSAGE:
+                v = s_cfg.meshBeaconMessage[0] ? s_cfg.meshBeaconMessage : TR("(none)");
+                break;
+            case MB_CFG_INTERVAL:
+                snprintf(buf, sizeof(buf), TR("%u h"),
+                         (unsigned)clampBeaconIntervalH(s_cfg.meshBeaconIntervalH));
+                v = buf;
+                break;
+        }
+        lv_label_set_text(s_mbCfgValues[i], v);
+    }
+    if (s_mbCfgWarn) {
+        if (s_cfg.meshBeaconOfferPsk) {
+            snprintf(buf, sizeof(buf), TR("Anyone on %s can join %s."),
+                     kPresets[target].channelName, meshBeaconHomeChannelName());
+            lv_label_set_text(s_mbCfgWarn, buf);
+            lv_obj_clear_flag(s_mbCfgWarn, LV_OBJ_FLAG_HIDDEN);
+        } else {
+            lv_obj_add_flag(s_mbCfgWarn, LV_OBJ_FLAG_HIDDEN);
+        }
+    }
+    paintPickerRows(s_mbCfgRows, MB_CFG_ROW_COUNT, s_mbCfgSelection, PICKER_SCROLL_VIEW);
+}
+
+// Saved, rescheduled, and redrawn here and on the Config row underneath.
+static void meshBeaconCfgChanged() {
+    markConfigDirty();
+    meshBeaconSettingsChanged();
+    refreshMeshBeaconCfgModal();
+    refreshCfgModal();
+}
+
+static void meshBeaconCfgMessageCommitted(const char *msg) {
+    if (!msg) msg = "";
+    if (strcmp(msg, s_cfg.meshBeaconMessage) == 0) return;
+    beaconCopyMessage(s_cfg.meshBeaconMessage, msg);
+    meshBeaconCfgChanged();
+}
+
+static const char *mbCfgTargetLabelFor(int idx) {
+    if (idx < 0 || idx >= s_mbCfgPresetCount) idx = 0;
+    return kPresets[s_mbCfgPresetChoices[idx]].name;
+}
+
+static void mbCfgTargetApply(int idx) {
+    if (idx < 0 || idx >= s_mbCfgPresetCount) return;
+    const uint8_t preset = s_mbCfgPresetChoices[idx];
+    if (preset == s_cfg.meshBeaconTargetPreset) return;
+    s_cfg.meshBeaconTargetPreset = preset;
+    meshBeaconCfgChanged();
+}
+
+static const char *mbCfgIntervalLabelFor(int idx) {
+    static char buf[16];
+    if (idx < 0 || idx >= kMbIntervalCount) idx = 0;
+    snprintf(buf, sizeof(buf), TR("%u h"), (unsigned)kMbIntervalsH[idx]);
+    return buf;
+}
+
+static void mbCfgIntervalApply(int idx) {
+    if (idx < 0 || idx >= kMbIntervalCount) return;
+    if (kMbIntervalsH[idx] == s_cfg.meshBeaconIntervalH) return;
+    s_cfg.meshBeaconIntervalH = kMbIntervalsH[idx];
+    meshBeaconCfgChanged();
+}
+
+static void meshBeaconCfgActivate(int row) {
+    switch (row) {
+        case MB_CFG_LISTEN:
+            s_cfg.meshBeaconListen = !s_cfg.meshBeaconListen;
+            // Turning it off drops what was already collected: leaving stale
+            // offers on the Beacons screen after switching the feature off
+            // would read as the switch not having worked.
+            if (!s_cfg.meshBeaconListen) s_beaconOfferCount = 0;
+            meshBeaconCfgChanged();
+            break;
+        case MB_CFG_BROADCAST:
+            s_cfg.meshBeaconBroadcast = !s_cfg.meshBeaconBroadcast;
+            meshBeaconCfgChanged();
+            break;
+        case MB_CFG_OFFER_KEY:
+            s_cfg.meshBeaconOfferPsk = !s_cfg.meshBeaconOfferPsk;
+            meshBeaconCfgChanged();
+            break;
+        case MB_CFG_TARGET: {
+            // Only presets this radio can run, as on the home preset picker.
+            s_mbCfgPresetCount = 0;
+            int start = 0;
+            for (uint8_t i = 0; i < PRESET_COUNT; i++) {
+                if (!presetUsableOnThisRadio(i)) continue;
+                if (i == s_cfg.meshBeaconTargetPreset) start = s_mbCfgPresetCount;
+                s_mbCfgPresetChoices[s_mbCfgPresetCount++] = i;
+            }
+            if (s_mbCfgPresetCount == 0) break;
+            static CfgSliderPicker spec = {
+                TR_NOOP("Target preset"), 0, mbCfgTargetLabelFor, mbCfgTargetApply,
+                nullptr, nullptr, nullptr, nullptr,
+            };
+            spec.count = s_mbCfgPresetCount;
+            openCfgSliderModal(&spec, start);
+        } break;
+        case MB_CFG_MESSAGE:
+            openChanTextModal(kChanTextBeaconMessage);
+            break;
+        case MB_CFG_INTERVAL: {
+            const uint8_t cur = clampBeaconIntervalH(s_cfg.meshBeaconIntervalH);
+            int start = 0;
+            for (int i = 0; i < kMbIntervalCount; i++) {
+                if (kMbIntervalsH[i] == cur) { start = i; break; }
+            }
+            static const CfgSliderPicker kSpec = {
+                TR_NOOP("Interval"), kMbIntervalCount, mbCfgIntervalLabelFor, mbCfgIntervalApply,
+                nullptr, nullptr, nullptr, nullptr,
+            };
+            openCfgSliderModal(&kSpec, start);
+        } break;
+        default:
+            break;
+    }
+}
+
+static void onMeshBeaconCfgRowPressed(lv_event_t *e) {
+    const int idx = (int)(intptr_t)lv_event_get_user_data(e);
+    if (idx < 0 || idx >= MB_CFG_ROW_COUNT) return;
+    s_mbCfgSelection = idx;
+    paintPickerRows(s_mbCfgRows, MB_CFG_ROW_COUNT, s_mbCfgSelection, PICKER_SCROLL_VIEW);
+    meshBeaconCfgActivate(idx);
+}
+
+static void openMeshBeaconCfgModal() {
+    if (!s_rootScreen) return;
+    if (s_mbCfgModal || s_mbCfgBackdrop) return;
+    if (s_mbCfgSelection < 0 || s_mbCfgSelection >= MB_CFG_ROW_COUNT) s_mbCfgSelection = 0;
+
+    const int w = lv_disp_get_hor_res(NULL);
+    const int h = lv_disp_get_ver_res(NULL);
+    int modalW = w - 24;
+    if (modalW < 170) modalW = w - 8;
+    if (modalW > 300) modalW = 300;
+
+    s_mbCfgBackdrop = lv_obj_create(s_rootScreen);
+    lv_obj_set_size(s_mbCfgBackdrop, w, h);
+    lv_obj_align(s_mbCfgBackdrop, LV_ALIGN_CENTER, 0, 0);
+    lv_obj_clear_flag(s_mbCfgBackdrop, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_add_flag(s_mbCfgBackdrop, LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_set_style_bg_color(s_mbCfgBackdrop, lv_color_hex(0x000000), 0);
+    lv_obj_set_style_bg_opa(s_mbCfgBackdrop, LV_OPA_40, 0);
+    lv_obj_set_style_border_width(s_mbCfgBackdrop, 0, 0);
+    lv_obj_set_style_pad_all(s_mbCfgBackdrop, 0, 0);
+    lv_obj_add_event_cb(s_mbCfgBackdrop,
+                        [](lv_event_t *e) {
+                            if (lv_event_get_target_obj(e) != s_mbCfgBackdrop) return;
+                            closeMeshBeaconCfgModal();
+                        },
+                        LV_EVENT_CLICKED, nullptr);
+
+    s_mbCfgModal = lv_obj_create(s_mbCfgBackdrop);
+    lv_obj_set_size(s_mbCfgModal, modalW, LV_SIZE_CONTENT);
+    lv_obj_set_style_max_height(s_mbCfgModal, (h > 40) ? (h - 16) : LV_SIZE_CONTENT, 0);
+    lv_obj_align(s_mbCfgModal, LV_ALIGN_CENTER, 0, 0);
+    lv_obj_clear_flag(s_mbCfgModal, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_add_flag(s_mbCfgModal, LV_OBJ_FLAG_CLICKABLE);
+#if defined(DEVICE_TDECK_PRO)
+    lv_obj_set_style_bg_color(s_mbCfgModal, lv_color_make(255, 255, 255), 0);
+    lv_obj_set_style_border_color(s_mbCfgModal, lv_color_make(0, 0, 0), 0);
+#else
+    lv_obj_set_style_bg_color(s_mbCfgModal, lv_color_hex(0x0E285B), 0);
+    lv_obj_set_style_border_color(s_mbCfgModal, lv_color_hex(0x5C86C6), 0);
+#endif
+    lv_obj_set_style_bg_opa(s_mbCfgModal, LV_OPA_COVER, 0);
+    lv_obj_set_style_border_width(s_mbCfgModal, 1, 0);
+    lv_obj_set_style_pad_all(s_mbCfgModal, 8, 0);
+    lv_obj_set_style_pad_row(s_mbCfgModal, 5, 0);
+    lv_obj_set_flex_flow(s_mbCfgModal, LV_FLEX_FLOW_COLUMN);
+    lv_obj_set_flex_align(s_mbCfgModal, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_CENTER,
+                          LV_FLEX_ALIGN_CENTER);
+    lv_obj_move_foreground(s_mbCfgBackdrop);
+
+#if defined(DEVICE_TDECK_PRO)
+    const lv_color_t titleColor = lv_color_make(0, 0, 0);
+    const lv_color_t hintColor  = lv_color_make(0, 0, 0);
+    const lv_color_t rowColor   = lv_color_make(0, 0, 0);
+#else
+    const lv_color_t titleColor = lv_color_hex(0xD9E8FF);
+    const lv_color_t hintColor  = lv_color_hex(0xA7C7FF);
+    const lv_color_t rowColor   = (s_cfg.uiMode == UI_MODE_LIGHT)
+                                      ? lv_color_hex(0x13233D) : lv_color_hex(0xD9E8FF);
+#endif
+
+    lv_obj_t *title = lv_label_create(s_mbCfgModal);
+    lv_obj_set_width(title, lv_pct(100));
+    lv_obj_set_style_text_font(title, &lv_font_montserrat_14, 0);
+    lv_obj_set_style_text_color(title, titleColor, 0);
+    lv_obj_set_style_text_align(title, LV_TEXT_ALIGN_CENTER, 0);
+    lv_label_set_text(title, TR("Mesh Beacons"));
+
+#if UI_TOUCH_ONLY_PROFILE
+    reserveHeltecCloseXRow(title);
+    appendHeltecCloseX(s_mbCfgModal,
+                       [](lv_event_t *ev) { LV_UNUSED(ev); closeMeshBeaconCfgModal(); });
+#endif
+
+    lv_obj_t *list = lv_obj_create(s_mbCfgModal);
+    lv_obj_remove_style_all(list);
+    lv_obj_set_width(list, lv_pct(100));
+    lv_obj_set_height(list, LV_SIZE_CONTENT);
+    lv_obj_set_style_max_height(list, (h > 150) ? (h - 104) : LV_SIZE_CONTENT, 0);
+    lv_obj_add_flag(list, LV_OBJ_FLAG_SCROLLABLE);
+    setupVScroll(list);
+    lv_obj_set_scrollbar_mode(list, LV_SCROLLBAR_MODE_AUTO);
+    lv_obj_set_flex_flow(list, LV_FLEX_FLOW_COLUMN);
+    lv_obj_set_flex_align(list, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_CENTER,
+                          LV_FLEX_ALIGN_CENTER);
+    lv_obj_set_style_pad_row(list, 3, 0);
+    lv_obj_set_style_pad_right(list, 2, 0);
+
+    for (int i = 0; i < MB_CFG_ROW_COUNT; i++) {
+        lv_obj_t *row = lv_btn_create(list);
+#if defined(DEVICE_TDECK_PRO)
+        lv_obj_remove_style_all(row);
+        lv_obj_add_flag(row, LV_OBJ_FLAG_CLICKABLE);
+#endif
+        s_mbCfgRows[i] = row;
+        lv_obj_set_width(row, lv_pct(100));
+        lv_obj_set_height(row, LV_SIZE_CONTENT);
+        lv_obj_set_style_radius(row, 4, 0);
+        lv_obj_set_style_pad_all(row, 5, 0);
+        lv_obj_set_style_pad_column(row, 6, 0);
+        lv_obj_set_style_shadow_width(row, 0, 0);
+        lv_obj_set_flex_flow(row, LV_FLEX_FLOW_ROW);
+        lv_obj_set_flex_align(row, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_CENTER,
+                              LV_FLEX_ALIGN_CENTER);
+        lv_obj_add_event_cb(row, onMeshBeaconCfgRowPressed, LV_EVENT_CLICKED,
+                            (void *)(intptr_t)i);
+
+        lv_obj_t *name = lv_label_create(row);
+        lv_obj_set_style_text_font(name, &lv_font_montserrat_12, 0);
+        lv_obj_set_style_text_color(name, rowColor, 0);
+        lv_label_set_text(name, TR(kMbCfgRowNames[i]));
+
+        lv_obj_t *value = lv_label_create(row);
+        lv_obj_set_flex_grow(value, 1);
+        lv_obj_set_style_text_font(value, &lv_font_montserrat_12, 0);
+        lv_obj_set_style_text_color(value, rowColor, 0);
+        lv_obj_set_style_text_align(value, LV_TEXT_ALIGN_RIGHT, 0);
+        // The message can be 60 bytes; the row shows what fits.
+        lv_label_set_long_mode(value, LV_LABEL_LONG_DOT);
+        s_mbCfgValues[i] = value;
+    }
+
+    // Under the rows, so it reads as being about the Include key row above it.
+    s_mbCfgWarn = lv_label_create(s_mbCfgModal);
+    lv_obj_set_width(s_mbCfgWarn, lv_pct(100));
+    lv_obj_set_style_text_font(s_mbCfgWarn, &lv_font_montserrat_10, 0);
+#if defined(DEVICE_TDECK_PRO)
+    lv_obj_set_style_text_color(s_mbCfgWarn, lv_color_make(0, 0, 0), 0);
+#else
+    lv_obj_set_style_text_color(s_mbCfgWarn, lv_color_hex(0xFFC98A), 0);
+#endif
+    lv_obj_set_style_text_align(s_mbCfgWarn, LV_TEXT_ALIGN_CENTER, 0);
+    lv_label_set_long_mode(s_mbCfgWarn, LV_LABEL_LONG_WRAP);
+
+    lv_obj_t *hint = lv_label_create(s_mbCfgModal);
+    lv_obj_set_width(hint, lv_pct(100));
+    lv_obj_set_style_text_font(hint, &lv_font_montserrat_10, 0);
+    lv_obj_set_style_text_color(hint, hintColor, 0);
+    lv_obj_set_style_text_align(hint, LV_TEXT_ALIGN_CENTER, 0);
+#if UI_TOUCH_ONLY_PROFILE
+    lv_label_set_text(hint, TR("Tap a row to change it."));
+#else
+    lv_label_set_text_fmt(hint, TR("Move  Enter=Edit  %s=Back"), modalCloseKeyLabel());
+#endif
+
+    refreshMeshBeaconCfgModal();
+}
+
+#if FEATURE_LICENSED_MODE
+// ── Config -> Licensed (ham) mode ───────────────────────────────────────────
+// Call sign, long-name suffix and TX power are staged here and reach the config
+// only through enterLicensedMode(), behind a confirm; turning the mode on or off
+// saves and reboots. While licensed those three rows are read-only (they are
+// what the mode was entered with). Built like the Mesh Beacons popup above, and
+// reusing its text and slider modals.
+enum LicCfgRow : uint8_t {
+    LIC_CFG_CALL = 0,
+    LIC_CFG_SUFFIX,
+    LIC_CFG_POWER,
+    LIC_CFG_TOGGLE,
+    LIC_CFG_RESUME,     // only while licTxHold
+    LIC_CFG_ROW_MAX
+};
+
+static const char *const kLicCfgRowNames[LIC_CFG_ROW_MAX] = {
+    TR_NOOP("Call sign"),
+    TR_NOOP("Long name suffix"),
+    TR_NOOP("TX power"),
+    TR_NOOP("Enable"),              // "Disable" while licensed
+    TR_NOOP("Resume transmitting"),
+};
+
+static lv_obj_t *s_licCfgBackdrop = nullptr;
+static lv_obj_t *s_licCfgModal = nullptr;
+static lv_obj_t *s_licCfgRows[LIC_CFG_ROW_MAX] = {};
+static lv_obj_t *s_licCfgValues[LIC_CFG_ROW_MAX] = {};
+static lv_obj_t *s_licCfgWarn = nullptr;
+static int       s_licCfgSelection = 0;
+static int       s_licCfgRowCount = 0;
+static uint8_t   s_licCfgPower = MESH_POWER;
+static char      s_licCfgConfirm[400] = {};
+
+static void closeLicCfgModal() {
+    if (s_chanTextField == kChanTextLicCall || s_chanTextField == kChanTextLicSuffix) {
+        closeChanTextModal();
+    }
+    if (lvObjValid(s_licCfgBackdrop)) {
+        lv_obj_del(s_licCfgBackdrop);
+    } else if (lvObjValid(s_licCfgModal)) {
+        lv_obj_del(s_licCfgModal);
+    }
+    s_licCfgBackdrop = nullptr;
+    s_licCfgModal = nullptr;
+    s_licCfgWarn = nullptr;
+    memset(s_licCfgRows, 0, sizeof(s_licCfgRows));
+    memset(s_licCfgValues, 0, sizeof(s_licCfgValues));
+}
+
+static void licCfgSetWarn(const char *msg) {
+    if (!lvObjValid(s_licCfgWarn)) return;
+    if (msg && msg[0]) {
+        lv_label_set_text(s_licCfgWarn, msg);
+        lv_obj_clear_flag(s_licCfgWarn, LV_OBJ_FLAG_HIDDEN);
+    } else {
+        lv_obj_add_flag(s_licCfgWarn, LV_OBJ_FLAG_HIDDEN);
+    }
+}
+
+static void refreshLicCfgModal() {
+    if (!s_licCfgModal || !lvObjValid(s_licCfgModal)) return;
+    for (int i = 0; i < s_licCfgRowCount; i++) {
+        if (!s_licCfgValues[i]) continue;
+        char buf[32];
+        const char *v = "";
+        switch (i) {
+            case LIC_CFG_CALL:   v = s_licCfgCall[0] ? s_licCfgCall : TR("(none)"); break;
+            case LIC_CFG_SUFFIX: v = s_licCfgSuffix[0] ? s_licCfgSuffix : TR("(none)"); break;
+            case LIC_CFG_POWER:
+                snprintf(buf, sizeof(buf), TR("%u dBm"), (unsigned)s_licCfgPower);
+                v = buf;
+                break;
+            default: break;
+        }
+        lv_label_set_text(s_licCfgValues[i], v);
+    }
+    paintPickerRows(s_licCfgRows, s_licCfgRowCount, s_licCfgSelection, PICKER_SCROLL_VIEW);
+}
+
+static void licCfgTextCommitted(int field, const char *text) {
+    if (field == kChanTextLicCall) {
+        snprintf(s_licCfgCall, sizeof(s_licCfgCall), "%s", text);
+    } else if (field == kChanTextLicSuffix) {
+        utf8util::copyTruncate(s_licCfgSuffix, sizeof(s_licCfgSuffix), text);
+    }
+    licCfgSetWarn(nullptr);
+    refreshLicCfgModal();
+}
+
+static const char *licCfgPowerLabelFor(int idx) {
+    static char buf[16];
+    snprintf(buf, sizeof(buf), TR("%u dBm"), (unsigned)(idx + 1));
+    return buf;
+}
+
+static void licCfgPowerApply(int idx) {
+    if (idx < 0 || idx >= MESH_POWER) return;
+    s_licCfgPower = (uint8_t)(idx + 1);
+    refreshLicCfgModal();
+}
+
+// Yes on either confirm. The status is painted before the call: on success
+// neither returns, and a device that reboots unexplained reads as a crash.
+static void licCfgEnableCommit(int) {
+    licCfgSetWarn(TR("Rebooting..."));
+    lv_timer_handler();
+    char err[96];
+    if (!enterLicensedMode(s_licCfgCall, s_licCfgSuffix, s_licCfgPower, err, sizeof(err))) {
+        licCfgSetWarn(err[0] ? err : TR("Invalid call sign"));
+    }
+}
+
+static void licCfgDisableCommit(int) {
+    licCfgSetWarn(TR("Rebooting..."));
+    lv_timer_handler();
+    exitLicensedMode();
+}
+
+static void licCfgActivate(int row) {
+    const bool licensed = lic::active();
+    switch (row) {
+        case LIC_CFG_CALL:
+        case LIC_CFG_SUFFIX:
+        case LIC_CFG_POWER:
+            if (licensed) {
+                licCfgSetWarn(TR("Turn licensed mode off to change this."));
+                break;
+            }
+            if (row == LIC_CFG_CALL) {
+                openChanTextModal(kChanTextLicCall);
+            } else if (row == LIC_CFG_SUFFIX) {
+                openChanTextModal(kChanTextLicSuffix);
+            } else {
+                static const CfgSliderPicker kSpec = {
+                    TR_NOOP("TX power"), MESH_POWER, licCfgPowerLabelFor, licCfgPowerApply,
+                    nullptr, nullptr, nullptr, nullptr,
+                };
+                openCfgSliderModal(&kSpec, (int)s_licCfgPower - 1);
+            }
+            break;
+        case LIC_CFG_TOGGLE:
+            if (!licensed) {
+                char norm[lic::kCallSignMax + 1];
+                if (!s_licCfgCall[0]) {
+                    licCfgSetWarn(TR("Enter a call sign"));
+                    break;
+                }
+                if (!lic::normalizeCallSign(s_licCfgCall, norm, sizeof(norm))) {
+                    licCfgSetWarn(TR("Invalid call sign"));
+                    break;
+                }
+                licCfgSetWarn(nullptr);
+                snprintf(s_licCfgConfirm, sizeof(s_licCfgConfirm), "%s",
+                         TR("Every channel's key will be removed. Encrypted DMs, remote admin "
+                            "and relaying for unlicensed nodes will stop. The device will "
+                            "reboot. You must hold an amateur licence for the band you use. "
+                            "Camillia does not verify your licence."));
+                openCfgConfirmModal(-1, s_licCfgConfirm, licCfgEnableCommit, 0);
+            } else {
+                const RegionPlan *r = regionPlan(s_cfg.region);
+                size_t n = (size_t)snprintf(s_licCfgConfirm, sizeof(s_licCfgConfirm), "%s",
+                                            TR("Channel keys will not come back. The device will reboot."));
+                if (r && r->licensedOnly && n < sizeof(s_licCfgConfirm)) {
+                    snprintf(s_licCfgConfirm + n, sizeof(s_licCfgConfirm) - n,
+                             TR(" Region will change to %s and transmit stays off until you resume."),
+                             MY_REGION);
+                }
+                openCfgConfirmModal(-1, s_licCfgConfirm, licCfgDisableCommit, 0);
+            }
+            break;
+        case LIC_CFG_RESUME:
+            resumeTxAfterLicensedExit();
+            snprintf(s_cfgStatus, sizeof(s_cfgStatus), "%s", TR("Transmit resumed"));
+            refreshCfgModal();
+            // The row goes with the hold it was for. Hidden, not rebuilt: this
+            // can be running inside that row's own click event.
+            if (lvObjValid(s_licCfgRows[LIC_CFG_RESUME])) {
+                lv_obj_add_flag(s_licCfgRows[LIC_CFG_RESUME], LV_OBJ_FLAG_HIDDEN);
+            }
+            s_licCfgRowCount = LIC_CFG_RESUME;
+            if (s_licCfgSelection >= s_licCfgRowCount) s_licCfgSelection = s_licCfgRowCount - 1;
+            licCfgSetWarn(TR("Transmit resumed"));
+            refreshLicCfgModal();
+            break;
+        default:
+            break;
+    }
+}
+
+static void onLicCfgRowPressed(lv_event_t *e) {
+    const int idx = (int)(intptr_t)lv_event_get_user_data(e);
+    if (idx < 0 || idx >= s_licCfgRowCount) return;
+    s_licCfgSelection = idx;
+    paintPickerRows(s_licCfgRows, s_licCfgRowCount, s_licCfgSelection, PICKER_SCROLL_VIEW);
+    licCfgActivate(idx);
+}
+
+static void openLicCfgModal() {
+    if (!s_rootScreen) return;
+    if (s_licCfgModal || s_licCfgBackdrop) return;
+
+    // Staged from the config: what the mode is (or was last) entered with.
+    snprintf(s_licCfgCall, sizeof(s_licCfgCall), "%s", s_cfg.callSign);
+    s_licCfgSuffix[0] = '\0';
+    const size_t callLen = strlen(s_cfg.callSign);
+    if (callLen && strncmp(s_cfg.nodeLong, s_cfg.callSign, callLen) == 0
+        && s_cfg.nodeLong[callLen] == '/' && s_cfg.nodeLong[callLen + 1] == '/') {
+        utf8util::copyTruncate(s_licCfgSuffix, sizeof(s_licCfgSuffix),
+                               s_cfg.nodeLong + callLen + 2);
+    }
+    s_licCfgPower = (uint8_t)constrain((int)s_cfg.loraPower, 1, (int)MESH_POWER);
+
+    s_licCfgRowCount = s_cfg.licTxHold ? LIC_CFG_ROW_MAX : LIC_CFG_RESUME;
+    if (s_licCfgSelection < 0 || s_licCfgSelection >= s_licCfgRowCount) s_licCfgSelection = 0;
+
+    const int w = lv_disp_get_hor_res(NULL);
+    const int h = lv_disp_get_ver_res(NULL);
+    int modalW = w - 24;
+    if (modalW < 170) modalW = w - 8;
+    if (modalW > 300) modalW = 300;
+
+    s_licCfgBackdrop = lv_obj_create(s_rootScreen);
+    lv_obj_set_size(s_licCfgBackdrop, w, h);
+    lv_obj_align(s_licCfgBackdrop, LV_ALIGN_CENTER, 0, 0);
+    lv_obj_clear_flag(s_licCfgBackdrop, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_add_flag(s_licCfgBackdrop, LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_set_style_bg_color(s_licCfgBackdrop, lv_color_hex(0x000000), 0);
+    lv_obj_set_style_bg_opa(s_licCfgBackdrop, LV_OPA_40, 0);
+    lv_obj_set_style_border_width(s_licCfgBackdrop, 0, 0);
+    lv_obj_set_style_pad_all(s_licCfgBackdrop, 0, 0);
+    lv_obj_add_event_cb(s_licCfgBackdrop,
+                        [](lv_event_t *e) {
+                            if (lv_event_get_target_obj(e) != s_licCfgBackdrop) return;
+                            closeLicCfgModal();
+                        },
+                        LV_EVENT_CLICKED, nullptr);
+
+    s_licCfgModal = lv_obj_create(s_licCfgBackdrop);
+    lv_obj_set_size(s_licCfgModal, modalW, LV_SIZE_CONTENT);
+    lv_obj_set_style_max_height(s_licCfgModal, (h > 40) ? (h - 16) : LV_SIZE_CONTENT, 0);
+    lv_obj_align(s_licCfgModal, LV_ALIGN_CENTER, 0, 0);
+    lv_obj_clear_flag(s_licCfgModal, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_add_flag(s_licCfgModal, LV_OBJ_FLAG_CLICKABLE);
+#if defined(DEVICE_TDECK_PRO)
+    lv_obj_set_style_bg_color(s_licCfgModal, lv_color_make(255, 255, 255), 0);
+    lv_obj_set_style_border_color(s_licCfgModal, lv_color_make(0, 0, 0), 0);
+#else
+    lv_obj_set_style_bg_color(s_licCfgModal, lv_color_hex(0x0E285B), 0);
+    lv_obj_set_style_border_color(s_licCfgModal, lv_color_hex(0x5C86C6), 0);
+#endif
+    lv_obj_set_style_bg_opa(s_licCfgModal, LV_OPA_COVER, 0);
+    lv_obj_set_style_border_width(s_licCfgModal, 1, 0);
+    lv_obj_set_style_pad_all(s_licCfgModal, 8, 0);
+    lv_obj_set_style_pad_row(s_licCfgModal, 5, 0);
+    lv_obj_set_flex_flow(s_licCfgModal, LV_FLEX_FLOW_COLUMN);
+    lv_obj_set_flex_align(s_licCfgModal, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_CENTER,
+                          LV_FLEX_ALIGN_CENTER);
+    lv_obj_move_foreground(s_licCfgBackdrop);
+
+#if defined(DEVICE_TDECK_PRO)
+    const lv_color_t titleColor = lv_color_make(0, 0, 0);
+    const lv_color_t hintColor  = lv_color_make(0, 0, 0);
+    const lv_color_t rowColor   = lv_color_make(0, 0, 0);
+#else
+    const lv_color_t titleColor = lv_color_hex(0xD9E8FF);
+    const lv_color_t hintColor  = lv_color_hex(0xA7C7FF);
+    const lv_color_t rowColor   = (s_cfg.uiMode == UI_MODE_LIGHT)
+                                      ? lv_color_hex(0x13233D) : lv_color_hex(0xD9E8FF);
+#endif
+
+    lv_obj_t *title = lv_label_create(s_licCfgModal);
+    lv_obj_set_width(title, lv_pct(100));
+    lv_obj_set_style_text_font(title, &lv_font_montserrat_14, 0);
+    lv_obj_set_style_text_color(title, titleColor, 0);
+    lv_obj_set_style_text_align(title, LV_TEXT_ALIGN_CENTER, 0);
+    lv_label_set_text(title, TR("Licensed (ham) mode"));
+
+#if UI_TOUCH_ONLY_PROFILE
+    reserveHeltecCloseXRow(title);
+    appendHeltecCloseX(s_licCfgModal,
+                       [](lv_event_t *ev) { LV_UNUSED(ev); closeLicCfgModal(); });
+#endif
+
+    lv_obj_t *list = lv_obj_create(s_licCfgModal);
+    lv_obj_remove_style_all(list);
+    lv_obj_set_width(list, lv_pct(100));
+    lv_obj_set_height(list, LV_SIZE_CONTENT);
+    lv_obj_set_style_max_height(list, (h > 150) ? (h - 104) : LV_SIZE_CONTENT, 0);
+    lv_obj_add_flag(list, LV_OBJ_FLAG_SCROLLABLE);
+    setupVScroll(list);
+    lv_obj_set_scrollbar_mode(list, LV_SCROLLBAR_MODE_AUTO);
+    lv_obj_set_flex_flow(list, LV_FLEX_FLOW_COLUMN);
+    lv_obj_set_flex_align(list, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_CENTER,
+                          LV_FLEX_ALIGN_CENTER);
+    lv_obj_set_style_pad_row(list, 3, 0);
+    lv_obj_set_style_pad_right(list, 2, 0);
+
+    const bool licensed = lic::active();
+    for (int i = 0; i < s_licCfgRowCount; i++) {
+        lv_obj_t *row = lv_btn_create(list);
+#if defined(DEVICE_TDECK_PRO)
+        lv_obj_remove_style_all(row);
+        lv_obj_add_flag(row, LV_OBJ_FLAG_CLICKABLE);
+#endif
+        s_licCfgRows[i] = row;
+        lv_obj_set_width(row, lv_pct(100));
+        lv_obj_set_height(row, LV_SIZE_CONTENT);
+        lv_obj_set_style_radius(row, 4, 0);
+        lv_obj_set_style_pad_all(row, 5, 0);
+        lv_obj_set_style_pad_column(row, 6, 0);
+        lv_obj_set_style_shadow_width(row, 0, 0);
+        lv_obj_set_flex_flow(row, LV_FLEX_FLOW_ROW);
+        lv_obj_set_flex_align(row, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_CENTER,
+                              LV_FLEX_ALIGN_CENTER);
+        lv_obj_add_event_cb(row, onLicCfgRowPressed, LV_EVENT_CLICKED, (void *)(intptr_t)i);
+        // Read-only while licensed: shown, but dimmed.
+        if (licensed && i <= LIC_CFG_POWER) lv_obj_set_style_opa(row, LV_OPA_60, 0);
+
+        lv_obj_t *name = lv_label_create(row);
+        lv_obj_set_style_text_font(name, &lv_font_montserrat_12, 0);
+        lv_obj_set_style_text_color(name, rowColor, 0);
+        lv_label_set_text(name, (i == LIC_CFG_TOGGLE && licensed) ? TR("Disable")
+                                                                  : TR(kLicCfgRowNames[i]));
+
+        lv_obj_t *value = lv_label_create(row);
+        lv_obj_set_flex_grow(value, 1);
+        lv_obj_set_style_text_font(value, &lv_font_montserrat_12, 0);
+        lv_obj_set_style_text_color(value, rowColor, 0);
+        lv_obj_set_style_text_align(value, LV_TEXT_ALIGN_RIGHT, 0);
+        lv_label_set_long_mode(value, LV_LABEL_LONG_DOT);
+        s_licCfgValues[i] = value;
+    }
+
+    s_licCfgWarn = lv_label_create(s_licCfgModal);
+    lv_obj_set_width(s_licCfgWarn, lv_pct(100));
+    lv_obj_set_style_text_font(s_licCfgWarn, &lv_font_montserrat_10, 0);
+#if defined(DEVICE_TDECK_PRO)
+    lv_obj_set_style_text_color(s_licCfgWarn, lv_color_make(0, 0, 0), 0);
+#else
+    lv_obj_set_style_text_color(s_licCfgWarn, lv_color_hex(0xFFC98A), 0);
+#endif
+    lv_obj_set_style_text_align(s_licCfgWarn, LV_TEXT_ALIGN_CENTER, 0);
+    lv_label_set_long_mode(s_licCfgWarn, LV_LABEL_LONG_WRAP);
+    lv_obj_add_flag(s_licCfgWarn, LV_OBJ_FLAG_HIDDEN);
+
+    lv_obj_t *hint = lv_label_create(s_licCfgModal);
+    lv_obj_set_width(hint, lv_pct(100));
+    lv_obj_set_style_text_font(hint, &lv_font_montserrat_10, 0);
+    lv_obj_set_style_text_color(hint, hintColor, 0);
+    lv_obj_set_style_text_align(hint, LV_TEXT_ALIGN_CENTER, 0);
+#if UI_TOUCH_ONLY_PROFILE
+    lv_label_set_text(hint, TR("Tap a row to change it."));
+#else
+    lv_label_set_text_fmt(hint, TR("Move  Enter=Edit  %s=Back"), modalCloseKeyLabel());
+#endif
+
+    refreshLicCfgModal();
+}
+#endif  // FEATURE_LICENSED_MODE
+
 // ── Config -> Community Preset ──────────────────────────────────────────────
 // The web flasher's community setups (community_presets.h): pick one, read
 // what it changes, and confirm. Applying writes region, radio and the whole
@@ -23656,8 +24847,12 @@ static void refreshCfgCommunitySelection() {
 // the row: the picker is closed by now and its table with it.
 static void cfgCommunityCommit(int presetIdx) {
     closeCfgCommunityModal();
+    // Licensed: the preset's channels go through cfgApplyStagedChannels(),
+    // which takes them without their keys; said here, as nothing after the
+    // reboot would.
     snprintf(s_cfgStatus, sizeof(s_cfgStatus), TR("%s - rebooting..."),
-             kCommunityPresets[presetIdx].label);
+             lic::active() ? TR("Licensed mode: channel imported without its key")
+                           : kCommunityPresets[presetIdx].label);
     refreshCfgModal();
     // Paint the status before going, as the Modem preset picker does: a
     // device that reboots with no explanation reads as a crash.
@@ -24856,14 +26051,11 @@ static void openCfgNodeNameModal() {
                         LV_EVENT_CLICKED, nullptr);
 
     s_cfgNodeNameModal = lv_obj_create(s_cfgNodeNameBackdrop);
-    lv_obj_set_size(s_cfgNodeNameModal,
-                    modalW,
 #if UI_TOUCH_ONLY_PROFILE
-                    h - 18
+    lv_obj_set_size(s_cfgNodeNameModal, modalW, h - 18);
 #else
-                    LV_SIZE_CONTENT
+    lv_obj_set_size(s_cfgNodeNameModal, modalW, LV_SIZE_CONTENT);
 #endif
-    );
     lv_obj_align(s_cfgNodeNameModal, LV_ALIGN_CENTER, 0, 0);
     lv_obj_clear_flag(s_cfgNodeNameModal, LV_OBJ_FLAG_SCROLLABLE);
     lv_obj_set_style_bg_color(s_cfgNodeNameModal, modalBg, 0);
@@ -25035,6 +26227,10 @@ static void closeCfgModal() {
     closeCfgWifiPickerModal();
     closeCfgNodeNameModal();
     closeCfgPresetModal();
+    closeMeshBeaconCfgModal();
+#if FEATURE_LICENSED_MODE
+    closeLicCfgModal();
+#endif
     closeCfgCommunityModal();
     closeCfgLangModal();
 #if HAS_RUNTIME_ORIENTATION
@@ -29195,8 +30391,8 @@ static constexpr int nodeLocateTilesSpanned(int px) {
     return (px + kNodeLocateTilePx - 1) / kNodeLocateTilePx + 1;
 }
 static constexpr int kNodeLocateMaxTileJobs =
-    nodeLocateTilesSpanned(DEVICE_LCD_LANDSCAPE_W / UI_PIXEL_SCALE)
-    * nodeLocateTilesSpanned(DEVICE_LCD_LANDSCAPE_H / UI_PIXEL_SCALE);
+    nodeLocateTilesSpanned(DEVICE_LCD_LANDSCAPE_W / (UI_PIXEL_SCALE * UI_COORD_SCALE))
+    * nodeLocateTilesSpanned(DEVICE_LCD_LANDSCAPE_H / (UI_PIXEL_SCALE * UI_COORD_SCALE));
 static constexpr size_t kNodeLocateMaxTileBytes = 256U * 1024U;
 static constexpr uint32_t kNodeLocatePanDebounceMs = 180UL;
 
@@ -30197,6 +31393,12 @@ static bool nodeLocateBuildModal(const char *titleText, bool allNodes) {
     if (s_nodeLocateCanvasBuf) {
         s_nodeLocateCanvas = lv_canvas_create(s_nodeLocateTileLayer);
         lv_canvas_set_draw_buf(s_nodeLocateCanvas, s_nodeLocateCanvasBuf);
+#if UI_COORD_SCALE > 1
+        // The buffer and the tile math are in layout pixels; stretch the canvas
+        // over the box, which is in LVGL's (hal/ui_coord_shim.h).
+        lv_image_set_inner_align(s_nodeLocateCanvas, LV_IMAGE_ALIGN_STRETCH);
+        lv_obj_set_size(s_nodeLocateCanvas, mapW, mapH);
+#endif
         lv_obj_set_pos(s_nodeLocateCanvas, 0, 0);
         lv_obj_clear_flag(s_nodeLocateCanvas, LV_OBJ_FLAG_CLICKABLE);
         lv_canvas_fill_bg(s_nodeLocateCanvas, nodeLocateCanvasBgColor(),
@@ -30800,12 +32002,13 @@ static void nodeLosRenderResult() {
     if (vmax - vmin < 1.0) vmax = vmin + 1.0;
 
     const int pad = 4;
+    // Line points go to LVGL as they are, so in its pixels (UI_COORD_SCALE).
     auto X = [&](int i) -> lv_value_precise_t {
-        return (lv_value_precise_t)(i * (gw - 1) / (kLosSamples - 1));
+        return (lv_value_precise_t)(i * (gw - 1) / (kLosSamples - 1) * UI_COORD_SCALE);
     };
     auto Y = [&](double v) -> lv_value_precise_t {
         const double t = (v - vmin) / (vmax - vmin);
-        return (lv_value_precise_t)(gh - pad - t * (gh - 2 * pad));
+        return (lv_value_precise_t)((gh - pad - t * (gh - 2 * pad)) * UI_COORD_SCALE);
     };
 
     for (int i = 0; i < kLosSamples; ++i) {
@@ -31362,10 +32565,13 @@ static void refreshNodesListRows() {
         // mark opposite things (a node pinned into the table, and one that has
         // already fallen out of it) and must not be mistaken for each other.
         // '!' leads both: the node's key changed and waits for review.
+        // "ham" follows them: the node says it is a licensed station.
         const bool keyConflict = n && Nodes.hasKeyConflict(n->nodeId);
-        snprintf(rowText, sizeof(rowText), "%s%s%s",
+        const bool hamNode = n && n->licensedKnown && n->isLicensed;
+        snprintf(rowText, sizeof(rowText), "%s%s%s%s",
                  keyConflict ? "! " : "",
-                 arch ? "~ " : ((n && n->favorite) ? "* " : ""), rowName);
+                 arch ? "~ " : ((n && n->favorite) ? "* " : ""),
+                 hamNode ? "ham " : "", rowName);
         setLabelTextEmojiSafe(lbl, rowText);
 #if NODES_LAYOUT_WIDE
         lv_obj_align(lbl, LV_ALIGN_LEFT_MID, 0, 0);
@@ -36684,8 +37890,52 @@ static void closeBeaconsModal() {
     lvObjDeleteSafe(s_beaconsModal);
     s_beaconsList = nullptr;
     s_beaconsStatusLabel = nullptr;
+    s_beaconsTxLabel = nullptr;
     memset(s_beaconAgeLabels, 0, sizeof(s_beaconAgeLabels));
     s_beaconsRenderedSig = 0;
+}
+
+// Our own beacon, from meshBeaconStatus(): off, when the next one goes, or what
+// is holding it.
+static void beaconsFormatTxStatus(char *out, size_t outLen) {
+    const MeshBeaconStatus st = meshBeaconStatus();
+    const uint8_t target = s_cfg.meshBeaconTargetPreset < PRESET_COUNT
+                               ? s_cfg.meshBeaconTargetPreset : PRESET_LONG_FAST;
+    const char *targetName = kPresets[target].channelName;
+    switch (st.state) {
+        case MeshBeaconStatus::WAITING: {
+            char last[24] = {};
+            if (st.lastEpoch) formatChatClock(st.lastEpoch, last, sizeof(last));
+            if (!last[0]) snprintf(last, sizeof(last), "%s", TR("never"));
+            const unsigned mins = (unsigned)((st.nextInMs + 59999UL) / 60000UL);
+            snprintf(out, outLen, TR("Your beacon: %s \xC2\xB7 next in %u min \xC2\xB7 last %s"),
+                     targetName, mins, last);
+        } break;
+        case MeshBeaconStatus::HELD_SCAN:
+            snprintf(out, outLen, "%s", TR("Your beacon: held - Discovery scan"));
+            break;
+        case MeshBeaconStatus::HELD_AIRTIME:
+            snprintf(out, outLen, "%s", TR("Your beacon: held - airtime"));
+            break;
+        case MeshBeaconStatus::HELD_PRESET:
+            snprintf(out, outLen, TR("Your beacon: %s not available in %s"),
+                     targetName, s_cfg.region);
+            break;
+        case MeshBeaconStatus::OFF:
+        default:
+            snprintf(out, outLen, "%s", lic::active() ? TR("Your beacon: off while licensed")
+                                                      : TR("Your beacon: off"));
+            break;
+    }
+}
+
+static void beaconsRefreshTxLabel() {
+    if (!s_beaconsTxLabel) return;
+    char line[112];
+    beaconsFormatTxStatus(line, sizeof(line));
+    const char *shown = lv_label_get_text(s_beaconsTxLabel);
+    if (shown && strcmp(shown, line) == 0) return;
+    lv_label_set_text(s_beaconsTxLabel, line);
 }
 
 // Compact elapsed time. Coarse on purpose: these gaps are minutes to hours, and
@@ -36765,11 +38015,13 @@ static void beaconsBuildList() {
                                "A beacon is only audible while its sender has retuned onto "
                                "this channel, preset and region, and it repeats on that "
                                "node's own schedule - minutes to hours apart. This list "
-                               "keeps what it hears until you clear it.")
-                             : TR("Mesh Beacons is off.\n\n"
-                               "Turn it on in Config (or under Modules in web config) to "
-                               "decode beacons from other meshes. Receive-only: nothing is "
-                               "transmitted, and an offer is never applied to your radio."));
+                               "keeps what it hears until you clear it. Sending your own "
+                               "beacon is a separate setting, under Mesh Beacons in Config.")
+                             : TR("Listening for beacons is off.\n\n"
+                               "Turn on Listen under Mesh Beacons in Config (or under "
+                               "Modules in web config) to decode beacons from other "
+                               "meshes. An offer is never applied to your radio. Sending "
+                               "your own beacon is a separate setting."));
         return;
     }
 
@@ -36830,6 +38082,11 @@ static void beaconsBuildList() {
         if (o.region[0]) {
             n += snprintf(offer + n, sizeof(offer) - n, "%s%s", n ? " / " : "", o.region);
         }
+        if (o.hasSlot && n < (int)sizeof(offer)) {
+            char slot[24];
+            snprintf(slot, sizeof(slot), TR("slot %u"), (unsigned)o.slot);
+            n += snprintf(offer + n, sizeof(offer) - n, "%s%s", n ? " / " : "", slot);
+        }
         snprintf(line, sizeof(line), TR("Offers: %s"), offer[0] ? offer : TR("(nothing)"));
         beaconsMakeLabel(card, kBeaconsBodyFont, kBeaconsBodyColor, line);
 
@@ -36855,6 +38112,7 @@ static void refreshBeaconsModal(bool force) {
         s_beaconsModal = nullptr;
         s_beaconsList = nullptr;
         s_beaconsStatusLabel = nullptr;
+        s_beaconsTxLabel = nullptr;
         memset(s_beaconAgeLabels, 0, sizeof(s_beaconAgeLabels));
         return;
     }
@@ -36876,6 +38134,7 @@ static void refreshBeaconsModal(bool force) {
             }
             lv_label_set_text(s_beaconsStatusLabel, status);
         }
+        beaconsRefreshTxLabel();
         beaconsBuildList();
         return;
     }
@@ -36892,6 +38151,7 @@ static void refreshBeaconsModal(bool force) {
     if ((uint32_t)(now - s_lastAgeTickMs) < 1000UL) return;
     s_lastAgeTickMs = now;
 
+    beaconsRefreshTxLabel();
     char line[112];
     for (int i = 0; i < s_beaconOfferCount && i < kBeaconOfferMax; i++) {
         if (!s_beaconAgeLabels[i]) continue;
@@ -37313,6 +38573,7 @@ static void openBeaconsModal() {
         s_beaconsModal = nullptr;
         s_beaconsList = nullptr;
         s_beaconsStatusLabel = nullptr;
+        s_beaconsTxLabel = nullptr;
         memset(s_beaconAgeLabels, 0, sizeof(s_beaconAgeLabels));
     }
     if (!s_rootScreen || s_beaconsModal) return;
@@ -37383,6 +38644,19 @@ static void openBeaconsModal() {
 #endif
     lv_obj_set_style_text_align(s_beaconsStatusLabel, LV_TEXT_ALIGN_CENTER, 0);
     lv_label_set_text(s_beaconsStatusLabel, "-");
+
+    // Our own beacon, above the list of everyone else's.
+    s_beaconsTxLabel = lv_label_create(s_beaconsModal);
+    lv_obj_set_width(s_beaconsTxLabel, lv_pct(100));
+    lv_obj_set_style_text_font(s_beaconsTxLabel, &lv_font_montserrat_10, 0);
+#if defined(DEVICE_TDECK_PRO)
+    lv_obj_set_style_text_color(s_beaconsTxLabel, lv_color_make(0, 0, 0), 0);
+#else
+    lv_obj_set_style_text_color(s_beaconsTxLabel, lv_color_hex(0xB8D4FF), 0);
+#endif
+    lv_obj_set_style_text_align(s_beaconsTxLabel, LV_TEXT_ALIGN_CENTER, 0);
+    lv_label_set_long_mode(s_beaconsTxLabel, LV_LABEL_LONG_WRAP);
+    lv_label_set_text(s_beaconsTxLabel, "-");
 
     s_beaconsList = lv_obj_create(s_beaconsModal);
     lv_obj_set_width(s_beaconsList, lv_pct(100));
@@ -39328,53 +40602,16 @@ static int discoveryCurrentPreset() {
     return (s_cfg.modemPreset < PRESET_COUNT) ? (int)s_cfg.modemPreset : -1;
 }
 
-// Parks the radio on `preset`, having snapshotted what it has to go back to.
+// Parks the radio on `preset` for a scan. The retune itself, and why it never
+// touches s_cfg, is tempTuneEnter()'s; channel 0 is renamed (renameCh0) so the
+// sweep carries the scanned mesh's hash rather than ours.
 //
-// Deliberately NOT applyPresetParams() and NOT the onWebCfgSaved() retune
-// sequence, both of which write s_cfg. That would be the whole feature's
-// failure mode: markConfigDirty() is called from three dozen unrelated places
-// and serviceConfigFlush() writes the *entire* s_cfg to NVS 1.5 s later, so a
-// brightness nudge during the five-minute window would make the scanned preset
-// permanent. Same argument s_powerWifiHold settled for the low-battery Wi-Fi
-// shed: a runtime hold is not a configuration change, and must not be able to
-// become one. Everything below is derived locally and handed straight to the
-// radio.
+// Keys are not swapped, which bounds what a scan can see: it finds the mesh
+// that shares this node's primary key on that preset — the public one, when
+// the node is on the default key. openDiscoveryPresetModal() says so rather
+// than letting it be discovered.
 static void discoveryTuneToPreset(uint8_t preset) {
-    const PresetParams &p = kPresets[preset];
-
-    s_presetScanPrevFreq = s_cfg.loraFreq;
-    s_presetScanPrevBw   = s_cfg.loraBw;
-    s_presetScanPrevSf   = s_cfg.loraSf;
-    s_presetScanPrevCr   = s_cfg.loraCr;
-
-    // Channel 0's name, and why the scan cannot skip it: the hash stamped on
-    // every packet is computeChannelHash(name, key, keyLen), so a sweep sent
-    // while channel 0 is still called LongFast carries the LongFast hash and the
-    // mesh we just retuned to hear will drop it — and drop us. Gated on the same
-    // test every other path uses, so a primary channel the user deliberately
-    // renamed is left alone here as it is everywhere else.
-    //
-    // Keys are not swapped, which bounds what a scan can see: it finds the mesh
-    // that shares this node's primary key on that preset — the public one, when
-    // the node is on the default key. openDiscoveryPresetModal() says so rather
-    // than letting it be discovered.
-    s_presetScanRenamedChan = primaryChannelNameIsPresetDefault();
-    if (s_presetScanRenamedChan) {
-        s_presetScanPrevChanName = CHANNEL_KEYS[0].name;
-        memcpy(s_presetScanPrevChanBuf, CHANNEL_KEYS[0].name_buf,
-               sizeof(s_presetScanPrevChanBuf));
-        strncpy(CHANNEL_KEYS[0].name_buf, p.channelName,
-                sizeof(CHANNEL_KEYS[0].name_buf) - 1);
-        CHANNEL_KEYS[0].name_buf[sizeof(CHANNEL_KEYS[0].name_buf) - 1] = '\0';
-        CHANNEL_KEYS[0].name = CHANNEL_KEYS[0].name_buf;
-        recomputeChannelHashes();
-    }
-
-    // Same slot arithmetic applyPresetParams() runs, read straight out of the
-    // preset table instead of through the config struct.
-    const float freq = regionSlotFreq(s_cfg.region, p.bw, p.channelName);
-    dropPendingRebroadcasts();   // framed for the preset we are leaving
-    Radio.reconfigure(freq, p.bw, p.sf, p.cr, s_cfg.loraPower);
+    tempTuneEnter(preset, s_presetScanSnap, /*renameCh0=*/true);
 }
 
 static void discoveryEndPresetScan(bool aborted) {
@@ -39386,18 +40623,7 @@ static void discoveryEndPresetScan(bool aborted) {
     // The completion path has already cleared this.
     if (aborted) s_discoverySweepStartedMs = 0;
 
-    if (s_presetScanRenamedChan) {
-        memcpy(CHANNEL_KEYS[0].name_buf, s_presetScanPrevChanBuf,
-               sizeof(s_presetScanPrevChanBuf));
-        CHANNEL_KEYS[0].name = s_presetScanPrevChanName;
-        recomputeChannelHashes();
-        s_presetScanRenamedChan = false;
-    }
-    dropPendingRebroadcasts();   // and the ones framed for the preset we are leaving
-    if (s_radioReady) {
-        Radio.reconfigure(s_presetScanPrevFreq, s_presetScanPrevBw,
-                          s_presetScanPrevSf, s_presetScanPrevCr, s_cfg.loraPower);
-    }
+    tempTuneLeave(s_presetScanSnap);
 
     // The cooldown runs from here whether the scan finished or was cut short: an
     // abort has just retuned the radio, which is exactly when it should not be
@@ -39413,7 +40639,7 @@ static void discoveryEndPresetScan(bool aborted) {
     Serial.printf("[discovery] preset scan %s (%s) - radio back on %.4f MHz\n",
                   aborted ? "aborted" : "done",
                   discoveryPresetLabel(s_presetScanPreset),
-                  (double)s_presetScanPrevFreq);
+                  (double)s_presetScanSnap.freq);
 }
 
 // Elapsed/total for a window that can now be six hours. "43/21600s" is complete
@@ -43291,6 +44517,12 @@ static const char *legendTransportText() {
 // Messages button on the M9.
 static const char *legendChannelListTextRaw() {
 #if UI_CHANNEL_LIST_DROPDOWN
+#if HAS_CHANNEL_PANEL_LOCK
+    if (!channelListIsDropdown()) {
+        return TR("Channels: Left arrow or C, Up/Down to\n"
+                  "move, Enter picks one, Right goes back.");
+    }
+#endif
     if (!channelListIsDropdown()) return "";
 #if defined(DEVICE_M9)
     return TR("Channels: press Messages again on the\n"
@@ -43812,6 +45044,9 @@ static void activateCfgSelection() {
             disabledMessage = TR("Turn BT Keyboard on first");
         }
 #endif
+        if ((actionId == CFG_ACTION_CS_MODE || actionId == CFG_ACTION_CS_CHECK) && lic::active()) {
+            disabledMessage = TR("Chat server is off while licensed");
+        }
         snprintf(s_cfgStatus, sizeof(s_cfgStatus), "%s", disabledMessage);
         openCfgActionMessageModal(s_cfgStatus);
         return;
@@ -44445,6 +45680,14 @@ static void performCfgAction(int actionId) {
             sdForceRescan();   // same reason as Export above
             bool ok = cfgImport(s_cfg);
             if (ok) {
+#if FEATURE_LICENSED_MODE
+                // Licensed now, or by the imported config: its channels come in
+                // keyless. Stripped before onWebCfgSaved() persists them.
+                const bool licKeysStripped =
+                    (lic::active() || s_cfg.licensedMode) && licStripChannels(0);
+#else
+                const bool licKeysStripped = false;
+#endif
                 onWebCfgSaved();
                 persistUiTheme();
                 persistMessageAlertSetting();
@@ -44455,6 +45698,13 @@ static void performCfgAction(int actionId) {
                 refreshHeaderStatus(true);
                 refreshChannelGlow(true);
                 refreshChatView(true);
+                if (licKeysStripped) {
+                    snprintf(s_cfgStatus, sizeof(s_cfgStatus), "%s",
+                             TR("Licensed mode: channel imported without its key"));
+                    refreshCfgModal();
+                    lv_timer_handler();
+                    delay(3000);
+                }
                 const char *importWarn = cfgImportWarning();
                 const bool hasImportWarn = importWarn && importWarn[0];
                 snprintf(s_cfgStatus, sizeof(s_cfgStatus), "%s",
@@ -44613,6 +45863,14 @@ static void performCfgAction(int actionId) {
             openCfgCommunityModal();
             break;
 
+#if FEATURE_LICENSED_MODE
+        case CFG_ACTION_LICENSED_MODE:
+            if (s_cfgDebugLog) Serial.println("[lvgl-cfg] exec LICENSED_MODE");
+            showActionPopup = false;   // the popup is the whole interaction
+            openLicCfgModal();
+            break;
+#endif
+
         case CFG_ACTION_CHAT_COLORS:
             if (s_cfgDebugLog) Serial.println("[lvgl-cfg] exec CHAT_COLORS");
             showActionPopup = false;   // row already reads On/Off; applies live
@@ -44691,6 +45949,22 @@ static void performCfgAction(int actionId) {
             break;
 #endif
 
+#if HAS_CHANNEL_PANEL_LOCK
+        case CFG_ACTION_CHANNEL_PANEL_LOCK: {
+            if (s_cfgDebugLog) Serial.println("[lvgl-cfg] exec CHANNEL_PANEL_LOCK");
+            showActionPopup = false;   // row already reads Locked/Unlocked
+            const bool locked = !cfgChannelPanelLocked(s_cfg);
+            cfgSetChannelPanelLocked(s_cfg, locked);
+            persistConfigToPrefs();
+            snprintf(s_cfgStatus, sizeof(s_cfgStatus), TR("Channel Panel: %s"),
+                     locked ? TR("Locked") : TR("Unlocked"));
+            // Docked column or drawer changes the chat's width: a rebuild,
+            // deferred out of this event callback like the Nav Bar row's.
+            scheduleUiRebuild(true);
+            break;
+        }
+#endif
+
 #if HAS_NAV_ALIGN_SETTING
         case CFG_ACTION_NAV_ALIGN:
             if (s_cfgDebugLog) Serial.println("[lvgl-cfg] exec NAV_ALIGN");
@@ -44729,15 +46003,8 @@ static void performCfgAction(int actionId) {
 
         case CFG_ACTION_MESH_BEACON:
             if (s_cfgDebugLog) Serial.println("[lvgl-cfg] exec MESH_BEACON");
-            showActionPopup = false;   // row already reads On/Off
-            s_cfg.meshBeaconListen = !s_cfg.meshBeaconListen;
-            persistConfigToPrefs();
-            // Turning it off drops what was already collected: leaving stale
-            // offers on the Beacons screen after switching the feature off
-            // would read as the switch not having worked.
-            if (!s_cfg.meshBeaconListen) s_beaconOfferCount = 0;
-            snprintf(s_cfgStatus, sizeof(s_cfgStatus), TR("Mesh beacons: %s"),
-                     s_cfg.meshBeaconListen ? TR("On (listening)") : TR("Off"));
+            showActionPopup = false;   // the popup is the whole interaction
+            openMeshBeaconCfgModal();
             break;
 
         case CFG_ACTION_CS_MODE:
@@ -46226,15 +47493,38 @@ static const OnboardRoleOption kOnboardRoles[] = {
 static const int kOnboardRoleCount =
     (int)(sizeof(kOnboardRoles) / sizeof(kOnboardRoles[0]));
 
+// The regions a picker may offer: kRegions less what regionSelectable() refuses
+// (amateur bands unless licensed). Picker indexes count only these, so index and
+// code are always mapped through here, never through kRegions directly.
+static int regionPickCount() {
+    const bool licensed = lic::active();
+    int n = 0;
+    for (uint8_t i = 0; i < kRegionCount; i++) {
+        if (regionSelectable(kRegions[i].code, licensed)) n++;
+    }
+    return n;
+}
+
+static const RegionPlan *regionPickAt(int idx) {
+    const bool licensed = lic::active();
+    int n = 0;
+    for (uint8_t i = 0; i < kRegionCount; i++) {
+        if (!regionSelectable(kRegions[i].code, licensed)) continue;
+        if (n++ == idx) return &kRegions[i];
+    }
+    return &kRegions[0];  // "US", always selectable
+}
+
 // Map a region code / role value back to its option index, falling back to the
 // onboarding default (US / CLIENT_MUTE) when the value isn't recognised.
 static int onboardingRegionIndex(const char *code) {
     if (code && code[0]) {
-        for (uint8_t i = 0; i < kRegionCount; i++) {
-            if (strcmp(kRegions[i].code, code) == 0) return (int)i;
+        const int count = regionPickCount();
+        for (int i = 0; i < count; i++) {
+            if (strcmp(regionPickAt(i)->code, code) == 0) return i;
         }
     }
-    return 0;  // kRegions[0] is "US"
+    return 0;  // the first selectable region is "US"
 }
 
 static int onboardingRoleIndex(uint8_t value) {
@@ -46247,16 +47537,28 @@ static int onboardingRoleIndex(uint8_t value) {
 // Count of options on the active picker stage.
 static int onboardingPickerCount() {
     return (s_onboardingStage == ONBOARD_STAGE_SELECT_REGION)
-               ? (int)kRegionCount
+               ? regionPickCount()
                : kOnboardRoleCount;
 }
 
 // Text label for the currently selected picker option.
 static const char *onboardingPickerCurrentText() {
     if (s_onboardingStage == ONBOARD_STAGE_SELECT_REGION) {
-        return kRegions[s_onboardingPickIndex].code;
+        return regionPickAt(s_onboardingPickIndex)->code;
     }
     return kOnboardRoles[s_onboardingPickIndex].label;
+}
+
+// The region stage's key hint, kept so the ham-band warning can stand in for it
+// while an amateur region is showing and give it back after.
+static char s_onboardingPickHint[96] = {};
+
+static void onboardingRegionWarnUpdate() {
+    if (s_onboardingStage != ONBOARD_STAGE_SELECT_REGION || !s_onboardingStatus) return;
+    const bool ham = regionPickAt(s_onboardingPickIndex)->licensedOnly;
+    lv_label_set_text(s_onboardingStatus,
+                      ham ? TR("Needs an antenna and front end for this band.")
+                          : s_onboardingPickHint);
 }
 
 static void onboardingComputeModalSizeForStage(uint8_t stage, int screenW, int screenH,
@@ -46294,6 +47596,48 @@ static void onboardingComputeModalSizeForStage(uint8_t stage, int screenW, int s
 
     if (!textEntry) modalH = LV_SIZE_CONTENT;
 }
+
+#if ONBOARD_BUTTON_FOCUS
+static void onboardingRegisterBtn(lv_obj_t *btn, lv_event_cb_t cb) {
+    if (!btn || s_onboardingBtnCount >= kOnboardingMaxBtns) return;
+    s_onboardingBtns[s_onboardingBtnCount] = btn;
+    s_onboardingBtnCbs[s_onboardingBtnCount] = cb;
+    s_onboardingBtnCount++;
+}
+
+static void onboardingRefreshBtnFocus() {
+    for (int i = 0; i < s_onboardingBtnCount; i++) {
+        lv_obj_t *btn = s_onboardingBtns[i];
+        if (!lvObjValid(btn)) continue;
+        const bool focused = (i == s_onboardingBtnFocus);
+        lv_obj_set_style_border_width(btn, focused ? 3 : 0, 0);
+        lv_obj_set_style_border_color(btn, lv_color_hex(0xFFFFFF), 0);
+        lv_obj_set_style_border_opa(btn, LV_OPA_COVER, 0);
+    }
+}
+
+// Left/Right move the focus, Enter presses. False when the key is not one of
+// those (or the stage has no buttons), so the stage's own keys still run.
+static bool onboardingButtonFocusKey(char k) {
+    if (s_onboardingBtnCount <= 0) return false;
+    if (k == KEY_PREV_CHAN || k == KEY_NEXT_CHAN || k == KEY_TAB) {
+        const int step = (k == KEY_PREV_CHAN) ? -1 : 1;
+        s_onboardingBtnFocus = (s_onboardingBtnFocus + step + s_onboardingBtnCount)
+                               % s_onboardingBtnCount;
+        onboardingRefreshBtnFocus();
+        return true;
+    }
+    if (k == KEY_ENTER) {
+        const int idx = constrain(s_onboardingBtnFocus, 0, s_onboardingBtnCount - 1);
+        lv_event_cb_t cb = s_onboardingBtnCbs[idx];
+        // Called directly rather than through an LVGL event: most of these
+        // re-render the stage, which deletes the button they belong to.
+        if (cb) cb(nullptr);
+        return true;
+    }
+    return false;
+}
+#endif
 
 static void renderOnboardingStage() {
     if (!s_onboardingModal) return;
@@ -46358,6 +47702,9 @@ static void renderOnboardingStage() {
     s_onboardingKeyboard = nullptr;
     s_onboardingStatus = nullptr;
     s_onboardingPickLabel = nullptr;
+#if ONBOARD_BUTTON_FOCUS
+    s_onboardingBtnCount = 0;
+#endif
 
     const lv_font_t *onboardingBodyFont =
                 largeOnboarding ? &lv_font_montserrat_24
@@ -46445,6 +47792,9 @@ static void renderOnboardingStage() {
             lv_obj_set_style_bg_color(btn, lv_color_hex(color), 0);
             lv_obj_set_style_shadow_width(btn, 0, 0);
             lv_obj_add_event_cb(btn, cb, LV_EVENT_CLICKED, nullptr);
+#if ONBOARD_BUTTON_FOCUS
+            onboardingRegisterBtn(btn, cb);
+#endif
             lv_obj_t *lbl = lv_label_create(btn);
             lv_obj_set_style_text_font(lbl, font, 0);
             lv_obj_set_style_text_color(lbl, lv_color_hex(0xFFFFFF), 0);
@@ -46466,6 +47816,15 @@ static void renderOnboardingStage() {
         makeBtn(btnRow, "(Y)es", 0x2F6B30,
             [](lv_event_t *) { onboardingAcceptImport(); },
             importBtnH, importBtnMinW, importBtnFont);
+#endif
+#if ONBOARD_BUTTON_FOCUS
+        s_onboardingStatus = lv_label_create(s_onboardingModal);
+        lv_obj_set_width(s_onboardingStatus, lv_pct(100));
+        lv_obj_set_style_text_font(s_onboardingStatus, onboardingStatusFont, 0);
+        lv_obj_set_style_text_color(s_onboardingStatus, lv_color_hex(0xA7C7FF), 0);
+        lv_obj_set_style_text_align(s_onboardingStatus, LV_TEXT_ALIGN_CENTER, 0);
+        lv_label_set_text(s_onboardingStatus,
+                          TR("Left/Right = Select   Enter = Press   Y = Import   N = Skip"));
 #endif
     #endif
     } else if (s_onboardingStage == ONBOARD_STAGE_SELECT_REGION
@@ -46533,9 +47892,15 @@ static void renderOnboardingStage() {
             lv_label_set_text(s_onboardingStatus, TR("j/k=Change   Enter=Next   Bksp=Back"));
         #elif UI_TOUCH_ONLY_PROFILE
         lv_label_set_text(s_onboardingStatus, TR("Use arrows to choose, then tap Next"));
+        #elif ONBOARD_BUTTON_FOCUS
+        lv_label_set_text(s_onboardingStatus,
+                          TR("Up/Down = Change   Left/Right = Select   Enter = Press   Esc = Back"));
         #else
         lv_label_set_text(s_onboardingStatus, TR("Wheel/j-k=Change   Enter=Next"));
         #endif
+        snprintf(s_onboardingPickHint, sizeof(s_onboardingPickHint), "%s",
+                 lv_label_get_text(s_onboardingStatus));
+        onboardingRegionWarnUpdate();
 
         #if !defined(DEVICE_CARDPUTER_LORA_HAT)
         lv_obj_t *btnRow = lv_obj_create(s_onboardingModal);
@@ -46560,6 +47925,9 @@ static void renderOnboardingStage() {
             lv_obj_set_style_bg_color(btn, lv_color_hex(color), 0);
             lv_obj_set_style_shadow_width(btn, 0, 0);
             lv_obj_add_event_cb(btn, cb, LV_EVENT_CLICKED, nullptr);
+#if ONBOARD_BUTTON_FOCUS
+            onboardingRegisterBtn(btn, cb);
+#endif
             lv_obj_t *lbl = lv_label_create(btn);
             lv_obj_set_style_text_font(lbl, onboardingButtonFont, 0);
             lv_obj_set_style_text_color(lbl, lv_color_hex(0xFFFFFF), 0);
@@ -46593,6 +47961,9 @@ static void renderOnboardingStage() {
         lv_obj_set_style_text_align(s_onboardingStatus, LV_TEXT_ALIGN_CENTER, 0);
 #if defined(DEVICE_CARDPUTER_LORA_HAT)
         lv_label_set_text(s_onboardingStatus, TR("N=Choose WiFi   Enter=Finish   Bksp=Back"));
+#elif ONBOARD_BUTTON_FOCUS
+        lv_label_set_text(s_onboardingStatus,
+                          TR("Left/Right = Select   Enter = Press   W = WiFi   F = Finish   Esc = Back"));
 #else
         lv_label_set_text(s_onboardingStatus, TR("Choose WiFi or Finish"));
 #endif
@@ -46620,6 +47991,9 @@ static void renderOnboardingStage() {
             lv_obj_set_style_bg_color(btn, lv_color_hex(color), 0);
             lv_obj_set_style_shadow_width(btn, 0, 0);
             lv_obj_add_event_cb(btn, cb, LV_EVENT_CLICKED, nullptr);
+#if ONBOARD_BUTTON_FOCUS
+            onboardingRegisterBtn(btn, cb);
+#endif
             lv_obj_t *lbl = lv_label_create(btn);
             lv_obj_set_style_text_font(lbl, onboardingButtonFont, 0);
             lv_obj_set_style_text_color(lbl, lv_color_hex(0xFFFFFF), 0);
@@ -46634,10 +48008,17 @@ static void renderOnboardingStage() {
                     s_onboardingPickIndex = onboardingRoleIndex(s_onboardingRoleScratch);
                     renderOnboardingStage();
                 });
+#if ONBOARD_BUTTON_FOCUS
+        makeBtn(btnRow, TR_NOOP("Choose (W)iFi"), 0x3C4A66,
+                [](lv_event_t *) { openCfgWifiPickerModal(true); });
+        makeBtn(btnRow, TR_NOOP("(F)inish"), 0x2F6B30,
+                [](lv_event_t *) { onboardingFinalize(); });
+#else
         makeBtn(btnRow, TR_NOOP("Choose WiFi"), 0x3C4A66,
                 [](lv_event_t *) { openCfgWifiPickerModal(true); });
         makeBtn(btnRow, TR_NOOP("Finish"), 0x2F6B30,
                 [](lv_event_t *) { onboardingFinalize(); });
+#endif
 #endif
     } else {
         const bool isShortStage = (s_onboardingStage == ONBOARD_STAGE_ENTER_SHORT);
@@ -46702,6 +48083,10 @@ static void renderOnboardingStage() {
         const char *statusHint = isShortStage
                                      ? TR("Tap Next to continue, or Back")
                                      : TR("Tap Next to continue");
+    #elif ONBOARD_BUTTON_FOCUS
+        const char *statusHint = isShortStage
+                                     ? TR("Type a name   Left/Right = Select   Enter = Press   Esc = Back")
+                                     : TR("Type a name   Enter = Next");
     #else
         const char *statusHint = TR("Enter=Next");
         if (isShortStage)      statusHint = TR("Enter=Next    Bksp(empty)=Back");
@@ -46730,6 +48115,9 @@ static void renderOnboardingStage() {
             lv_obj_set_style_bg_color(btn, lv_color_hex(color), 0);
             lv_obj_set_style_shadow_width(btn, 0, 0);
             lv_obj_add_event_cb(btn, cb, LV_EVENT_CLICKED, nullptr);
+#if ONBOARD_BUTTON_FOCUS
+            onboardingRegisterBtn(btn, cb);
+#endif
             lv_obj_t *lbl = lv_label_create(btn);
             lv_obj_set_style_text_font(lbl, onboardingButtonFont, 0);
             lv_obj_set_style_text_color(lbl, lv_color_hex(0xFFFFFF), 0);
@@ -46786,6 +48174,10 @@ static void renderOnboardingStage() {
 
 #if defined(DEVICE_TDECK_PRO)
     styleOnboardingPaperTree(s_onboardingModal);
+#endif
+#if ONBOARD_BUTTON_FOCUS
+    s_onboardingBtnFocus = s_onboardingBtnCount > 0 ? s_onboardingBtnCount - 1 : 0;
+    onboardingRefreshBtnFocus();
 #endif
 }
 
@@ -46877,6 +48269,15 @@ static void onboardingAcceptImport() {
         return;
     }
     persistConfigToPrefs();
+#if FEATURE_LICENSED_MODE
+    // A licensed config restores keyless, as boot would make it anyway; said
+    // here so the missing keys are not a surprise.
+    if (s_cfg.licensedMode && licStripChannels(0)) {
+        onboardingSetStatus(TR("Licensed mode: channel imported without its key"));
+        lv_timer_handler();
+        delay(3000);
+    }
+#endif
     // cfgImport() also populated the CHANNEL_KEYS[] plan, but persistConfigToPrefs()
     // only saves the RhinoConfig fields — not the channel plan. Persist the
     // channels too (mirroring onWebCfgSaved) so imported channels survive the
@@ -46950,13 +48351,14 @@ static void onboardingPickerStep(int delta) {
     if (s_onboardingPickLabel) {
         lv_label_set_text(s_onboardingPickLabel, onboardingPickerCurrentText());
     }
+    onboardingRegionWarnUpdate();
 }
 
 // Commit the current picker selection and move to the next stage.
 static void onboardingPickerAdvance() {
     if (s_onboardingStage == ONBOARD_STAGE_SELECT_REGION) {
         utf8util::copyTruncate(s_onboardingRegionScratch, sizeof(s_onboardingRegionScratch),
-                               kRegions[s_onboardingPickIndex].code);
+                               regionPickAt(s_onboardingPickIndex)->code);
         s_onboardingStage = ONBOARD_STAGE_SELECT_ROLE;
         s_onboardingPickIndex = onboardingRoleIndex(s_onboardingRoleScratch);
         renderOnboardingStage();
@@ -47008,6 +48410,8 @@ static void onboardingFinalize() {
                        "(Meshtastic 2.8 default)");
     }
 
+    // The picker lists every region; a ham band must not persist unlicensed.
+    cfgCoerceLicensed(s_cfg);
     // Re-derive loraFreq/BW/SF/CR from the chosen region + current preset.
     applyPresetParams(s_cfg);
     s_firstBoot = false;
@@ -47055,6 +48459,9 @@ static bool prepareGlobalNavigation() {
     // somewhere else, and a dashboard left behind would sit under the screen
     // they opened and reappear when it closed.
     closeHomeDashboard();
+#endif
+#if HAS_CHANNEL_PANEL_LOCK
+    if (s_channelColumnFocus) setChannelColumnFocus(false);
 #endif
     closeEmojiPicker();
 #if HAS_MESSAGE_ACTIONS
@@ -47173,8 +48580,13 @@ static void openNavHelpShortcut() {
 // Home closes it and stops there, so the gesture stays a way out of things
 // rather than a toggle that can leave you where you started.
 static bool homeShouldOpenChannelList() {
-    // Anchored beside the chat already: nothing to open.
+    // Anchored beside the chat already: nothing to open -- except on a locked
+    // keyboard-only panel, where this asks for the column's cursor instead.
+#if HAS_CHANNEL_PANEL_LOCK
+    if (!channelListIsDropdown() && !channelColumnDocked()) return false;
+#else
     if (!channelListIsDropdown()) return false;
+#endif
     if (!chatScreenIsForeground()) return false;
     if (isChannelDropdownVisible()) return false;
     // The Tools surfaces sit above chat but outside that predicate's list — it
@@ -47228,6 +48640,12 @@ static void openNavChatShortcut(bool allowChannelList, bool resetChannel) {
     if (!prepareGlobalNavigation()) return;
     closeDmModal();
     if (pickChannel) {
+#if HAS_CHANNEL_PANEL_LOCK
+        if (channelColumnDocked()) {
+            setChannelColumnFocus(true);
+            return;
+        }
+#endif
         setChannelDropdownVisible(true);
         refreshChannelGlow(true);
         return;
@@ -47919,6 +49337,18 @@ static void pumpKeyboardInput() {
         }
 
         if (s_onboardingModal && !s_cfgWifiModal && !s_cfgWifiScanModal && !s_cfgWifiPassModal) {
+#if ONBOARD_BUTTON_FOCUS
+            if (onboardingButtonFocusKey(k)) continue;
+            if (s_onboardingStage == ONBOARD_STAGE_CHOOSE_WIFI) {
+                if (k == 'w' || k == 'W') { openCfgWifiPickerModal(true); continue; }
+                if (k == 'f' || k == 'F') { onboardingFinalize(); continue; }
+            }
+            if (s_onboardingStage == ONBOARD_STAGE_ENTER_SHORT && k == KEY_ESCAPE) {
+                s_onboardingStage = ONBOARD_STAGE_ENTER_LONG;
+                renderOnboardingStage();
+                continue;
+            }
+#endif
             if (s_onboardingStage == ONBOARD_STAGE_ASK_IMPORT) {
                 if (k == 'y' || k == 'Y' || k == KEY_ENTER) {
                     onboardingAcceptImport();
@@ -48202,7 +49632,7 @@ static void pumpKeyboardInput() {
                 toggleCfgSliderCheck();   // no-op when the picker has no checkbox
                 continue;
             }
-#if defined(DEVICE_M9)
+#if UI_ARROW_GRID_NAV
             // With a checkbox the pad's Up/Down pick between it and the slider,
             // and Left/Right change whichever is picked -- the Brightness
             // screen's grammar. j/k fold onto the same codes and keep adjusting
@@ -48247,7 +49677,7 @@ static void pumpKeyboardInput() {
                 continue;
             }
             int next = s_cfgColorSelection;
-#if defined(DEVICE_M9)
+#if UI_ARROW_GRID_NAV
             if (k == KEY_SCROLL_UP) {
                 if (next > 0) next = (next <= kMsgColorCols) ? 0 : next - kMsgColorCols;
             } else if (k == KEY_SCROLL_DN) {
@@ -48565,7 +49995,7 @@ static void pumpKeyboardInput() {
                 continue;
             }
             int next = s_alertSoundSelection;
-#if defined(DEVICE_M9)
+#if UI_ARROW_GRID_NAV
             if (k == KEY_SCROLL_UP && next >= 2) next -= 2;
             else if (k == KEY_SCROLL_DN && next + 2 <= MSG_ALERT_SOUND_MAX) next += 2;
             else if (k == KEY_PREV_CHAN && (next % 2) != 0) next--;
@@ -48618,7 +50048,7 @@ static void pumpKeyboardInput() {
                 continue;
             }
             int next = s_fontSizeSelection;
-#if defined(DEVICE_M9)
+#if UI_ARROW_GRID_NAV
             if (k == KEY_SCROLL_UP && next >= 2) next -= 2;
             else if (k == KEY_SCROLL_DN && next + 2 <= FONT_SIZE_MAX) next += 2;
             else if (k == KEY_PREV_CHAN && (next % 2) != 0) next--;
@@ -48761,6 +50191,61 @@ static void pumpKeyboardInput() {
             }
             continue;
         }
+
+        // Mesh Beacons settings popup. The slider and text modals it opens are
+        // handled above, so while either is up this never sees a key.
+        if (s_mbCfgModal) {
+            if (isModalCloseKey(k)) {
+                closeMeshBeaconCfgModal();
+                continue;
+            }
+            if (k == KEY_ENTER || k == KEY_ROLLER) {
+                meshBeaconCfgActivate(s_mbCfgSelection);
+                continue;
+            }
+            int delta = 0;
+            if (k == KEY_SCROLL_UP)      delta = invertScrollNav ? 1 : -1;
+            else if (k == KEY_SCROLL_DN) delta = invertScrollNav ? -1 : 1;
+            if (delta != 0) {
+                int next = s_mbCfgSelection + delta;
+                if (next < 0) next = 0;
+                if (next > MB_CFG_ROW_COUNT - 1) next = MB_CFG_ROW_COUNT - 1;
+                if (next != s_mbCfgSelection) {
+                    s_mbCfgSelection = next;
+                    paintPickerRows(s_mbCfgRows, MB_CFG_ROW_COUNT, s_mbCfgSelection,
+                                    PICKER_SCROLL_VIEW);
+                }
+            }
+            continue;
+        }
+
+#if FEATURE_LICENSED_MODE
+        // Licensed mode popup; same shape as Mesh Beacons above.
+        if (s_licCfgModal) {
+            if (isModalCloseKey(k)) {
+                closeLicCfgModal();
+                continue;
+            }
+            if (k == KEY_ENTER || k == KEY_ROLLER) {
+                licCfgActivate(s_licCfgSelection);
+                continue;
+            }
+            int delta = 0;
+            if (k == KEY_SCROLL_UP)      delta = invertScrollNav ? 1 : -1;
+            else if (k == KEY_SCROLL_DN) delta = invertScrollNav ? -1 : 1;
+            if (delta != 0) {
+                int next = s_licCfgSelection + delta;
+                if (next < 0) next = 0;
+                if (next > s_licCfgRowCount - 1) next = s_licCfgRowCount - 1;
+                if (next != s_licCfgSelection) {
+                    s_licCfgSelection = next;
+                    paintPickerRows(s_licCfgRows, s_licCfgRowCount, s_licCfgSelection,
+                                    PICKER_SCROLL_VIEW);
+                }
+            }
+            continue;
+        }
+#endif
 
         if (s_cfgCommunityModal) {
             if (isModalCloseKey(k)) {
@@ -49876,7 +51361,7 @@ static void pumpKeyboardInput() {
                 continue;
             }
 
-#if defined(DEVICE_M9)
+#if UI_ARROW_GRID_NAV
             // The d-pad moves across the grid as drawn rather than through the
             // flat index, which on two columns made Down step sideways and left
             // Left/Right as a second pair of Up/Down (see nodesActionGridStep()).
@@ -50441,6 +51926,49 @@ static void pumpKeyboardInput() {
 
         if (!s_composeModal) {
 #if !UI_TOUCH_ONLY_PROFILE
+#if HAS_CHANNEL_PANEL_LOCK
+            // Locked channel panel, keyboard only: Left steps into the docked
+            // column and its cursor takes Up/Down; Enter switches to the row,
+            // Right/Esc/Backspace go back to the chat untouched. Any other key
+            // drops the cursor and carries on, so shortcuts still work.
+            if (channelColumnFocused()) {
+                if (k == KEY_SCROLL_UP || k == KEY_SCROLL_DN) {
+                    int next = s_cardputerDropdownSelection;
+                    if (next < 0 || next >= MESH_CHANNELS) next = s_activeChannel;
+                    next += (k == KEY_SCROLL_UP) ? -1 : 1;
+                    if (next < 0) next = MESH_CHANNELS - 1;
+                    if (next >= MESH_CHANNELS) next = 0;
+                    s_cardputerDropdownSelection = next;
+                    if (s_channelBtns[next]) {
+                        lv_obj_scroll_to_view(s_channelBtns[next], LV_ANIM_OFF);
+                    }
+                    refreshChannelGlow(true);
+                    continue;
+                }
+                if (k == KEY_ENTER) {
+                    int chosen = s_cardputerDropdownSelection;
+                    if (chosen < 0 || chosen >= MESH_CHANNELS) chosen = s_activeChannel;
+                    setActiveChannel(chosen);
+                    setChannelColumnFocus(false);
+                    continue;
+                }
+                if (k == KEY_PREV_CHAN) continue;
+                if (k == KEY_NEXT_CHAN || isModalCloseKey(k)
+                    || k == KEY_BACKSPACE || k == KEY_BACKSPACE_HOLD) {
+                    setChannelColumnFocus(false);
+                    continue;
+                }
+                setChannelColumnFocus(false);
+            } else if (k == KEY_PREV_CHAN && channelColumnDocked()
+                       && chatScreenIsForeground()) {
+                if (s_pagerChatCursorMode) {
+                    pagerExitChatCursorMode(true);
+                    refreshChatView(true);
+                }
+                setChannelColumnFocus(true);
+                continue;
+            }
+#endif
             if (isChannelDropdownVisible()) {
 #if defined(DEVICE_CARDPUTER_LORA_HAT)
                 // Cardputer directional labels: '/' is right, ',' is left.
@@ -50464,6 +51992,9 @@ static void pumpKeyboardInput() {
                         // this board. This used to reverse itself whenever the
                         // key came from j/k — which, via the arrow-parity rule
                         // in this function, meant the arrows flipped too.
+                        next += (k == KEY_SCROLL_UP) ? -1 : 1;
+#elif defined(DEVICE_TANMATSU)
+                        // Real arrow keys, not a trackball: up is up the list.
                         next += (k == KEY_SCROLL_UP) ? -1 : 1;
 #else
                         // Mirror existing main-screen channel stepping directions.
@@ -50778,6 +52309,22 @@ static void pumpKeyboardInput() {
                     if (navFromJk) navDelta = (k == KEY_SCROLL_UP) ? -1 : 1;
                     else           navDelta = (k == KEY_SCROLL_UP) ? 1 : -1;
                     pagerSelectChatCursorIndex(s_pagerChatCursorDisplayIndex + navDelta);
+                }
+                continue;
+            }
+#elif defined(DEVICE_TANMATSU)
+            // Real arrow keys and no main-nav scroll mode, so nothing else on
+            // the chat screen claims them. With the cursor on (Enter), Up is
+            // the message above and Down the one below; without it they scroll
+            // the chat a text line at a time.
+            if (k == KEY_SCROLL_UP || k == KEY_SCROLL_DN) {
+                if (s_pagerChatCursorMode) {
+                    pagerSelectChatCursorIndex(s_pagerChatCursorDisplayIndex
+                                               + ((k == KEY_SCROLL_UP) ? -1 : 1));
+                } else if (s_chatList) {
+                    const lv_coord_t line = (lv_coord_t)lv_font_get_line_height(
+                        scaledChatFont(kChannelChatFont));
+                    scrollListClamped(s_chatList, (k == KEY_SCROLL_UP) ? line : -line);
                 }
                 continue;
             }
@@ -51106,6 +52653,9 @@ static void onWebCfgSaved() {
 #if HAS_NAV_ALIGN_SETTING
     const NavAlign prevNavAlign = s_appliedNavAlign;
 #endif
+#if HAS_CHANNEL_PANEL_LOCK
+    const bool prevChannelPanelLocked = s_appliedChannelPanelLocked;
+#endif
 
 #if !HAS_ENV_SENSOR_TELEMETRY
     s_cfg.telEnvEnabled = false;
@@ -51117,6 +52667,7 @@ static void onWebCfgSaved() {
     }
 
     persistConfigToPrefs();
+    meshBeaconSettingsChanged();
     persistImportedIdentityKeys("web/config-screen");
     syncPrimaryChannelName();
     // Same reason as at boot: the automatic custom slot hashes channel 0's
@@ -51128,6 +52679,11 @@ static void onWebCfgSaved() {
     applyUiThemePalette();
     s_cfg.brightness = cfgCoerceBrightness(s_cfg.brightness);
     if (!s_screenAsleep) applyBrightness();   // don't light a sleeping panel
+#if defined(DEVICE_TANMATSU)
+    // The form wrote the level straight to the keyboard; this puts it back
+    // behind the screen-sleep gate.
+    applyKbBacklightSetting();
+#endif
 
     recomputeChannelHashes();
     deriveNodeId();
@@ -51185,6 +52741,12 @@ static void onWebCfgSaved() {
 #if HAS_NAV_ALIGN_SETTING
     // The nav bar moved: every screen is laid out around it.
     if (prevNavAlign != cfgNavAlign(s_cfg) && s_rootScreen) {
+        scheduleUiRebuild(s_cfgModal != nullptr);
+    }
+#endif
+#if HAS_CHANNEL_PANEL_LOCK
+    // Docked column or drawer: the chat is laid out around it.
+    if (prevChannelPanelLocked != cfgChannelPanelLocked(s_cfg) && s_rootScreen) {
         scheduleUiRebuild(s_cfgModal != nullptr);
     }
 #endif
@@ -51753,9 +53315,15 @@ static void bootTimeNtpSync() {
     applyTimezoneFromConfig();
 }
 
-#if UI_PIXEL_SCALE > 1
+// Panel pixels per pixel of the boot splash's canvas: the LVGL pixel scale,
+// and on a natively rendered UI (UI_COORD_SCALE) the layout scale too, so the
+// splash -- drawn straight to the panel in fixed sizes -- keeps its proportions.
+#define SPLASH_PANEL_SCALE (UI_PIXEL_SCALE * UI_COORD_SCALE)
+
+#if SPLASH_PANEL_SCALE > 1
 // Writes a block of UI pixels (board.h) to the panel, each one as a
-// UI_PIXEL_SCALE-square block. x, y, w and h are in UI pixels; stride is the
+// SPLASH_PANEL_SCALE-square block (UI_PIXEL_SCALE wherever LVGL flushes
+// through it). x, y, w and h are in UI pixels; stride is the
 // source's row pitch in pixels. One source row at a time, so the expansion
 // needs a few KB rather than a second copy of the block.
 //
@@ -51764,22 +53332,23 @@ static void bootTimeNtpSync() {
 template <typename PixelT>
 static void pushPixelScaled(int32_t x, int32_t y, int32_t w, int32_t h,
                             const PixelT *src, int32_t stride) {
-    static PixelT s_rows[(size_t)kMaxHorRes * UI_PIXEL_SCALE * UI_PIXEL_SCALE];
+    constexpr int kScale = SPLASH_PANEL_SCALE;
+    static PixelT s_rows[(size_t)kMaxHorRes * kScale * kScale];
     if (w <= 0 || h <= 0 || w > (int32_t)kMaxHorRes) return;
-    const int32_t scaledW = w * UI_PIXEL_SCALE;
+    const int32_t scaledW = w * kScale;
     displayDev().startWrite();
     for (int32_t row = 0; row < h; row++) {
         const PixelT *in = src + (size_t)row * (size_t)stride;
         PixelT *out = s_rows;
         for (int32_t i = 0; i < w; i++) {
-            for (int k = 0; k < UI_PIXEL_SCALE; k++) *out++ = in[i];
+            for (int k = 0; k < kScale; k++) *out++ = in[i];
         }
-        for (int r = 1; r < UI_PIXEL_SCALE; r++) {
+        for (int r = 1; r < kScale; r++) {
             memcpy(s_rows + (size_t)r * (size_t)scaledW, s_rows,
                    (size_t)scaledW * sizeof(PixelT));
         }
-        displayDev().pushImage(x * UI_PIXEL_SCALE, (y + row) * UI_PIXEL_SCALE,
-                               scaledW, UI_PIXEL_SCALE, s_rows);
+        displayDev().pushImage(x * kScale, (y + row) * kScale,
+                               scaledW, kScale, s_rows);
     }
     displayDev().endWrite();
 }
@@ -52394,7 +53963,7 @@ static constexpr uint32_t kSplashDotIntervalMs = 350;
 // stays clear of the rounded corners the same way the interface does.
 //
 // Everywhere else splashDev() is displayDev() and presenting is a no-op.
-#if UI_PIXEL_SCALE > 1
+#if SPLASH_PANEL_SCALE > 1
 static LGFX_Sprite s_splashCanvas(&lcd);
 static bool s_splashCanvasTried = false;
 static bool s_splashCanvasReady = false;
@@ -52404,8 +53973,8 @@ static lgfx::LovyanGFX &splashDev() {
         s_splashCanvasTried = true;
         s_splashCanvas.setPsram(true);
         s_splashCanvas.setColorDepth(16);
-        const int32_t w = displayDev().width() / UI_PIXEL_SCALE;
-        const int32_t h = displayDev().height() / UI_PIXEL_SCALE - UI_BOTTOM_SAFE_H;
+        const int32_t w = displayDev().width() / SPLASH_PANEL_SCALE;
+        const int32_t h = displayDev().height() / SPLASH_PANEL_SCALE - UI_BOTTOM_SAFE_H;
         s_splashCanvasReady = (s_splashCanvas.createSprite(w, h) != nullptr);
         if (!s_splashCanvasReady) {
             // Unscaled beats absent: the splash still says the device is booting.
@@ -52433,7 +54002,7 @@ static void splashPresent(int32_t x, int32_t y, int32_t w, int32_t h) {
 
 static void splashPresentAll() {
     if (!s_splashCanvasReady) return;
-    const int32_t stripTop = s_splashCanvas.height() * UI_PIXEL_SCALE;
+    const int32_t stripTop = s_splashCanvas.height() * SPLASH_PANEL_SCALE;
     displayDev().fillRect(0, stripTop, displayDev().width(),
                           displayDev().height() - stripTop, TFT_BLACK);
     splashPresent(0, 0, s_splashCanvas.width(), s_splashCanvas.height());
@@ -53102,7 +54671,11 @@ static void refreshChannelGlow(bool force) {
         // invisible selection and the list looks inert even though it isn't.
         // The Pager has no dropdown, so there is no cursor to show there.
         bool dropdownCursor = UI_CHANNEL_LIST_DROPDOWN
-                              && isChannelDropdownVisible()
+                              && (isChannelDropdownVisible()
+#if HAS_CHANNEL_PANEL_LOCK
+                                  || channelColumnFocused()
+#endif
+                                  )
                               && s_cardputerDropdownSelection == i;
         anyUnread = anyUnread || animate;
         lv_obj_t *lbl = s_channelLabels[i];
@@ -53376,7 +54949,8 @@ static void setActiveChannel(int channelIdx) {
 #if defined(DEVICE_CARDPUTER_LORA_HAT)
     s_cardputerMainChatPanelFocused = false;
 #endif
-#if defined(DEVICE_TDECK) || defined(DEVICE_TDECK_PRO) || defined(DEVICE_CARDPUTER_LORA_HAT) || defined(DEVICE_M9)
+#if defined(DEVICE_TDECK) || defined(DEVICE_TDECK_PRO) || defined(DEVICE_CARDPUTER_LORA_HAT) || defined(DEVICE_M9) \
+    || defined(DEVICE_TANMATSU)
     s_cardputerDropdownSelection = channelIdx;
 #endif
     clearSelectedMsgContext();
@@ -53428,7 +55002,7 @@ static void refreshChannelSelectorLabel() {
 
     const char *name = channelName(s_activeChannel);
 #if defined(DEVICE_TDECK) || defined(DEVICE_TDECK_PRO) || defined(DEVICE_CARDPUTER_LORA_HAT) || defined(DEVICE_MESH_DECK) \
-    || defined(DEVICE_M9)
+    || defined(DEVICE_M9) || defined(DEVICE_TANMATSU)
     if (isChannelDropdownVisible()
         && s_cardputerDropdownSelection >= 0
         && s_cardputerDropdownSelection < MESH_CHANNELS) {
@@ -53446,7 +55020,8 @@ static void refreshChannelSelectorLabel() {
 // T-Deck presentation. It also buys the label the 14 px the caret reserved,
 // which matters more here than on the T-Deck — same 320x240 pixels, smaller
 // glass, so channel names have less room to be legible in.
-#if defined(DEVICE_TDECK) || defined(DEVICE_TDECK_PRO) || defined(DEVICE_MESH_DECK) || defined(DEVICE_M9)
+#if defined(DEVICE_TDECK) || defined(DEVICE_TDECK_PRO) || defined(DEVICE_MESH_DECK) || defined(DEVICE_M9) \
+    || defined(DEVICE_TANMATSU)
     const bool showSelectorCaret = false;
 #elif UI_TOUCH_ONLY_PROFILE
     // The caret said "this opens"; the selector no longer does (it is only the
@@ -53502,7 +55077,7 @@ static void refreshChannelSelectorLabel() {
 
             // Measure button width from text + equal edge padding (+ optional caret room).
             lv_coord_t desiredW = textW + (showSelectorCaret ? 26 : (selectorEdgePad * 2 + selectorAntiClip));
-#if defined(DEVICE_TDECK) || defined(DEVICE_M9)
+#if defined(DEVICE_TDECK) || defined(DEVICE_M9) || defined(DEVICE_TANMATSU)
             if (desiredW < 56) desiredW = 56;
 #elif defined(DEVICE_CARDPUTER_LORA_HAT)
             if (desiredW < 60) desiredW = 60;
@@ -53733,7 +55308,7 @@ static void setChannelDropdownVisible(bool visible) {
     if (visible) {
         channelDrawerSlide(true);
 #if defined(DEVICE_TDECK) || defined(DEVICE_TDECK_PRO) || defined(DEVICE_CARDPUTER_LORA_HAT) || defined(DEVICE_MESH_DECK) \
-    || defined(DEVICE_M9)
+    || defined(DEVICE_M9) || defined(DEVICE_TANMATSU)
         if (s_cardputerDropdownSelection < 0 || s_cardputerDropdownSelection >= MESH_CHANNELS) {
             s_cardputerDropdownSelection = s_activeChannel;
         }
@@ -53745,7 +55320,7 @@ static void setChannelDropdownVisible(bool visible) {
     } else {
         channelDrawerSlide(false);
 #if defined(DEVICE_TDECK) || defined(DEVICE_TDECK_PRO) || defined(DEVICE_CARDPUTER_LORA_HAT) || defined(DEVICE_MESH_DECK) \
-    || defined(DEVICE_M9)
+    || defined(DEVICE_M9) || defined(DEVICE_TANMATSU)
         s_cardputerDropdownSelection = -1;
 #endif
     }
@@ -54009,6 +55584,9 @@ static void loadConfigFromSd() {
         s_cfg.neighborInfoIntervalS = NEIGHBORINFO_MIN_INTERVAL_S;
     }
     loadChannelsFromPrefs();
+    // Straight after both loads: rewrites channel keys before anything hashes
+    // them, and sets the TX inhibit before the radio comes up.
+    licensedModeBootSetup();
     // After the config, because the remembered list is defined relative to the
     // configured network (the picker shows configured first, then these).
     loadKnownWifiNetworks();
@@ -54047,10 +55625,22 @@ static void loadConfigForOtaWorker() {
 static void refreshHeaderTime(bool force) {
     if (!s_chatHeaderTime) return;
 
-    char buf[LIVE_CLOCK_BUF];
-    liveBuildPrefix(buf, sizeof(buf));
-    size_t n = strlen(buf);
-    if (n > 0 && buf[n - 1] == ' ') buf[n - 1] = '\0';
+    char clock[LIVE_CLOCK_BUF];
+    liveBuildPrefix(clock, sizeof(clock));
+    size_t n = strlen(clock);
+    if (n > 0 && clock[n - 1] == ' ') clock[n - 1] = '\0';
+
+    // Licensed: the badge and call sign ride on the clock label, so they cost
+    // no header height and the header layout measures them like any clock.
+    char buf[kHeaderTimeBuf];
+#if FEATURE_LICENSED_MODE
+    if (lic::active() && s_cfg.callSign[0]) {
+        snprintf(buf, sizeof(buf), "HAM %s %s", s_cfg.callSign, clock);
+    } else
+#endif
+    {
+        snprintf(buf, sizeof(buf), "%s", clock);
+    }
 
     if (!force && strcmp(buf, s_lastHeaderTime) == 0) return;
     lv_label_set_text(s_chatHeaderTime, buf);
@@ -54353,7 +55943,7 @@ static lv_obj_t *buildScreenHeader(lv_obj_t *modal, const char *text) {
     lv_obj_t *spacer = lv_obj_create(modal);
     lv_obj_remove_style_all(spacer);
     lv_obj_set_width(spacer, lv_pct(100));
-    lv_obj_set_height(spacer, max(1, g.margin + g.h - inset));
+    lv_obj_set_height(spacer, max(1, g.top + g.h - inset));
     lv_obj_clear_flag(spacer, LV_OBJ_FLAG_SCROLLABLE);
 
     h.bar = lv_obj_create(modal);
@@ -54362,7 +55952,7 @@ static lv_obj_t *buildScreenHeader(lv_obj_t *modal, const char *text) {
     lv_obj_set_size(h.bar, h.barW, g.h);
     // From the content area's left edge, which the side column's padding (added
     // later, by appendHeltecBottomNav()) moves by exactly navSideInsetLeft().
-    lv_obj_align(h.bar, LV_ALIGN_TOP_LEFT, g.margin + leftGap - inset, g.margin - inset);
+    lv_obj_align(h.bar, LV_ALIGN_TOP_LEFT, g.margin + leftGap - inset, g.top - inset);
     lv_obj_clear_flag(h.bar, LV_OBJ_FLAG_SCROLLABLE);
 #if defined(DEVICE_TDECK_PRO)
     lv_obj_set_style_bg_opa(h.bar, LV_OPA_TRANSP, 0);
@@ -55187,6 +56777,13 @@ static AdminClient::Session s_adminSession;
 // off, and would put admin commands under a key every channel member holds.
 static uint32_t adminSendPacket(uint32_t nodeId, AdminClient::Transport via,
                                 const uint8_t *payload, size_t len, void *) {
+    // Every admin send funnels here; remote admin is PKI-only, and PKI is off
+    // while licensed. The session and probe entry points refuse first.
+    if (lic::active()) {
+        Serial.printf("[admin] !%08lx refused - licensed mode (no PKI)\n",
+                      (unsigned long)nodeId);
+        return 0;
+    }
     NodeEntry *node = Nodes.find(nodeId);
     if (!node || !node->hasPubKey) {
         Serial.printf("[admin] !%08lx has no public key - cannot send\n",
@@ -55282,6 +56879,16 @@ static AdminClient::Hooks adminHooks() {
 // Opening and closing are the UI's business, but both UIs do it identically, so
 // the rule about the gate lives here rather than twice over.
 static bool adminOpenSession(uint32_t nodeId) {
+    if (lic::active()) {
+        // Opened only to carry the reason, so the operator reads why at once
+        // instead of waiting out a timeout; every send is refused anyway.
+        if (s_adminSession.isOpen() && s_adminSession.nodeId() == nodeId) return true;
+        if (!s_adminSession.open(nodeId, adminHooks())) return false;
+        // LINE_ERR: the device gutter prints the leading "! ".
+        s_adminSession.notify(AdminClient::LINE_ERR,
+                              TR("Remote admin unavailable in licensed mode (no PKI)"));
+        return true;
+    }
     if (!AdminPeerList.mayOpenTerminal(nodeId)) {
         Serial.printf("[admin] refusing !%08lx - not a listed peer\n",
                       (unsigned long)nodeId);
@@ -55937,6 +57544,12 @@ static bool adminProbeOnRouting(uint32_t requestId, uint32_t errorReason) {
 
 static void serviceAdminBootProbe(uint32_t nowMs) {
     if (s_adminProbe.done || !s_radioReady) return;
+    if (lic::active()) {
+        // PKI-only, so nothing to ask while licensed.
+        s_adminProbe.done = true;
+        Serial.println("[admin-probe] skipped - licensed mode (no PKI)");
+        return;
+    }
 
     // Not while one of the operator's own commands is in flight: that is the
     // case where a probe would be a second admin exchange competing with the
@@ -56365,8 +57978,8 @@ static PendingRebroadcast *allocPendingRebroadcast() {
     return nullptr;
 }
 
-#if FEATURE_DISCOVERY
-// Empty the queue. Called on both edges of a preset scan's retune, because a
+// Empty the queue. Called on both edges of every temporary retune (a preset
+// scan, a MeshBeacon send), because a
 // queued frame is a packet already framed for the preset it was heard on: sent
 // after the radio moved, it lands on a mesh that never carried it, under a
 // channel hash computed for somewhere else. Up to 150 ms of jitter is exactly
@@ -56375,7 +57988,52 @@ static PendingRebroadcast *allocPendingRebroadcast() {
 static void dropPendingRebroadcasts() {
     for (uint8_t i = 0; i < kMaxPendingRebroadcast; i++) s_pendingRebroadcast[i].active = false;
 }
-#endif  // FEATURE_DISCOVERY
+
+// Licensed mode: peers whose NodeInfo mismatched but that have no node entry
+// (none is created for them). RAM only, round-robin; filled only while
+// lic::active(), so licPeerStatus() equals Nodes.licenseStatus() otherwise.
+static constexpr uint8_t kLicUnlicensedMax = 32;
+static uint32_t s_licUnlicensedIds[kLicUnlicensedMax] = {};
+static uint8_t s_licUnlicensedNext = 0;
+
+static int licUnlicensedIndex(uint32_t nodeId) {
+    if (nodeId == 0 || nodeId == 0xFFFFFFFF) return -1;
+    for (uint8_t i = 0; i < kLicUnlicensedMax; i++)
+        if (s_licUnlicensedIds[i] == nodeId) return i;
+    return -1;
+}
+
+static lic::PeerStatus licPeerStatus(uint32_t nodeId) {
+    const lic::PeerStatus s = Nodes.licenseStatus(nodeId);
+    if (s == lic::PEER_UNKNOWN && licUnlicensedIndex(nodeId) >= 0) return lic::PEER_UNLICENSED;
+    return s;
+}
+
+// Record a peer's is_licensed from a NodeInfo: on its entry when it has one,
+// otherwise (unlicensed only) in the RAM set. Never creates an entry.
+static void licRecordPeerLicensed(uint32_t nodeId, bool isLicensed) {
+    if (nodeId == 0 || nodeId == 0xFFFFFFFF) return;
+    const int idx = licUnlicensedIndex(nodeId);
+    if (idx >= 0) s_licUnlicensedIds[idx] = 0;
+    if (NodeEntry *e = Nodes.find(nodeId)) {
+        e->isLicensed = isLicensed;
+        e->licensedKnown = true;
+    } else if (!isLicensed) {
+        s_licUnlicensedIds[s_licUnlicensedNext] = nodeId;
+        s_licUnlicensedNext = (uint8_t)((s_licUnlicensedNext + 1) % kLicUnlicensedMax);
+    }
+}
+
+// Licensed: a NodeInfo whose is_licensed differs from ours. The peer is marked
+// unlicensed; nothing is stored, replied to, acked or relayed.
+static void licHandleNodeInfoMismatch(const MeshPacket &pkt, bool peerLicensed) {
+    s_licNodeInfoMismatch++;
+    licRecordPeerLicensed(pkt.hdr.from, peerLicensed);
+    debugLogMessages("[lic] NodeInfo mismatch from=%08lx (is_licensed=%d)\n",
+                     (unsigned long)pkt.hdr.from, (int)peerLicensed);
+    const int chanIdx = (pkt.chanIdx >= 0 && pkt.chanIdx < MESH_CHANNELS) ? pkt.chanIdx : 0;
+    appendLiveRxSummary(pkt, chanIdx, "N");
+}
 
 // Re-transmit a freshly received packet verbatim (hop limit decremented) so it
 // propagates across the mesh. Caller guarantees the packet is new (passed
@@ -56390,6 +58048,11 @@ static void maybeRebroadcastPacket(const MeshPacket &pkt) {
     if (pkt.hdr.to == s_myNodeId) return;    // we're the endpoint; broadcasts/others relay
     if (pkt.rawLen == 0) return;             // no stored on-air payload to relay
     if (!rebroadcastModeAllows(pkt)) return;
+    // Licensed: never relay what we could not decode, nor traffic to or from a
+    // node known to be unlicensed. Always true when not licensed.
+    if (!lic::allowRelay(lic::active(), pkt.decrypted,
+                         licPeerStatus(pkt.hdr.from),
+                         licPeerStatus(pkt.hdr.to))) return;
 
     // Meshtastic 2.8 classifies hop_start < hop_limit as INVALID and drops the
     // packet before it is even decrypted, so relaying one spends airtime on a
@@ -56622,6 +58285,8 @@ static void csSyncConfig() {
 }
 
 static bool csTransmit(const csc::Send &out) {
+    // Off while licensed: every chat-server frame is encrypted.
+    if (lic::active()) return false;
     if (!Radio.isReady() || s_myNodeId == 0) return false;
     uint8_t data[csp::MAX_PAYLOAD + 16];
     size_t n = 0;
@@ -56801,6 +58466,8 @@ static void chatServerService(uint32_t now) {
         webCfgSetChatServerResult(chatServerCheckNow(&why) ? (why ? TR("searching") : TR("checking"))
                                                             : (why ? why : TR("unavailable")));
     }
+    // The client is off while licensed: no discovery, no requests.
+    if (lic::active()) return;
 
     uint32_t ids[MESH_CHANNELS];
     csComputeChanIds(ids);
@@ -56834,6 +58501,10 @@ static void chatServerService(uint32_t now) {
 }
 
 static bool chatServerCheckNow(const char **why) {
+    if (lic::active()) {
+        if (why) *why = TR("Chat server is off while licensed");
+        return false;
+    }
     const char *reason = nullptr;
     if (!s_csStarted) {
         reason = "busy";
@@ -56893,7 +58564,8 @@ static bool processMeshPacket(const MeshPacket &rxPkt) {
     // (display, rebroadcast, or node-state updates).
     if (s_cfg.ignoreMqtt && (pkt.hdr.flags & 0x10)) return false;
 
-    if (!pkt.decrypted && pkt.hdr.channel == 0 && pkt.rawLen > 12) {
+    // Licensed: PKI-encrypted packets are not decrypted, as upstream.
+    if (!lic::active() && !pkt.decrypted && pkt.hdr.channel == 0 && pkt.rawLen > 12) {
         NodeEntry *sender = Nodes.find(pkt.hdr.from);
         if (sender && sender->hasPubKey) {
             uint8_t plain[256];
@@ -56921,10 +58593,43 @@ static bool processMeshPacket(const MeshPacket &rxPkt) {
         }
     }
 
+    // Licensed: a decoded NodeInfo is read before anything else sees the
+    // packet, so a mismatched one makes no node entry and is not relayed. It
+    // also passes the unlicensed-sender check below, so a peer that has since
+    // become licensed can say so. 0 = not one, 1 = matches, 2 = mismatch.
+    uint8_t licNodeInfo = 0;
+    bool licPeerIsLicensed = false;
+    if (lic::active() && pkt.decrypted && pkt.portnum == NODEINFO_APP) {
+        UserInfo lu = {};
+        if (decodeUser(pkt.payload, pkt.payloadLen, lu)) {
+            licPeerIsLicensed = lu.isLicensed;
+            licNodeInfo = lic::acceptNodeInfo(true, lu.isLicensed) ? 1 : 2;
+        }
+    }
+
+    // Licensed: traffic to or from a node known to be unlicensed is neither
+    // processed nor relayed; unknown nodes pass. Always true when not licensed.
+    if (!lic::allowPacket(lic::active(),
+                          licNodeInfo ? lic::PEER_UNKNOWN : licPeerStatus(pkt.hdr.from),
+                          licPeerStatus(pkt.hdr.to))) {
+        s_licDropUnlicensed++;
+        debugLogMessages("[lic] drop (unlicensed peer) from=%08lx to=%08lx id=%08lx\n",
+                         (unsigned long)pkt.hdr.from, (unsigned long)pkt.hdr.to,
+                         (unsigned long)pkt.hdr.id);
+        return false;
+    }
+
     // Before the node list hears of the packet: one the policy drops does not
     // mark its sender as heard, any more than it is relayed or shown.
     const SigPolicyResult sig = checkPacketSignature(pkt);
     if (!sig.accept) return false;
+
+    // Licensed NodeInfo, once the signature policy has accepted it.
+    if (licNodeInfo == 2) {
+        licHandleNodeInfoMismatch(pkt, licPeerIsLicensed);
+        return false;
+    }
+    if (licNodeInfo == 1) licRecordPeerLicensed(pkt.hdr.from, licPeerIsLicensed);
 
     // Store-and-Forward is the one port where hdr.from is not who we just heard.
     // On a replay it is the *original author* of a message the router stored
@@ -57234,9 +58939,27 @@ static bool processMeshPacket(const MeshPacket &rxPkt) {
         case NODEINFO_APP: {
             UserInfo u = {};
             if (decodeUser(pkt.payload, pkt.payloadLen, u)) {
-                // Key pinned on first use; a different one only raises a
-                // conflict for the user (NodeDB::updateUser).
-                if (Nodes.updateUser(pkt.hdr.from, u)) noteKeyConflictRaised(pkt.hdr.from);
+                if (!lic::acceptNodeInfo(lic::active(), u.isLicensed)) {
+                    if (lic::active()) {
+                        // Normally caught before the node update and relay;
+                        // kept so no path stores, replies to or acks one.
+                        licHandleNodeInfoMismatch(pkt, u.isLicensed);
+                        return false;
+                    }
+                    // Not licensed: a licensed peer's NodeInfo is not stored.
+                    // Its status alone is kept on a record the packet made.
+                    s_licNodeInfoMismatch++;
+                    if (NodeEntry *e = Nodes.find(pkt.hdr.from)) {
+                        e->isLicensed = u.isLicensed;
+                        e->licensedKnown = true;
+                    }
+                    debugLogMessages("[lic] NodeInfo mismatch from=%08lx (is_licensed=%d)\n",
+                                     (unsigned long)pkt.hdr.from, (int)u.isLicensed);
+                } else if (Nodes.updateUser(pkt.hdr.from, u)) {
+                    // Key pinned on first use; a different one only raises a
+                    // conflict for the user (NodeDB::updateUser).
+                    noteKeyConflictRaised(pkt.hdr.from);
+                }
             }
             // Answer a discovery ping. Discovery is symmetric: we sweep the mesh
             // with want_response, so we owe other nodes the same answer.
@@ -57521,6 +59244,17 @@ static void mqttDownlinkInject(const MeshHdr &hdrIn, const uint8_t *cipherIn,
     // graph and is a candidate for rebroadcast, all of it attributed to a window
     // that is supposed to describe five minutes of one foreign preset's air.
     if (discoveryRadioParked()) return;
+
+    // Licensed: third-party traffic from the internet is not this station's
+    // transmission, so nothing from the broker enters the RX (and relay) path.
+    if (lic::active()) {
+        static bool logged = false;
+        if (!logged) {
+            logged = true;
+            Serial.println("[mqtt] downlink drop: licensed mode refuses MQTT downlink");
+        }
+        return;
+    }
 
     // Loop guard: ignore our own packets echoed back by the broker. The dedup
     // check (against RF-heard copies and duplicate MQTT copies) is left to
@@ -57853,7 +59587,11 @@ static void serviceNodeInfoAnnounce(uint32_t nowMs) {
     // instruction, and waiting on it would read as broken.
     if (announceHeldForWebCfg(nowMs) && !forceAnnounce) return;
 
-    bool nodeInfoDue = forceAnnounce || announceDue(nowMs, s_nextNodeInfoTxMs, s_cfg.nodeInfoIntervalS);
+    // Licensed: station ID every 10 min, a regulatory interval that bypasses
+    // the configured one (and any floor); nodeInfoIntervalS itself is untouched.
+    const uint32_t nodeInfoIntervalS = lic::active() ? lic::kStationIdIntervalS
+                                                     : s_cfg.nodeInfoIntervalS;
+    bool nodeInfoDue = forceAnnounce || announceDue(nowMs, s_nextNodeInfoTxMs, nodeInfoIntervalS);
     bool positionDue = forceAnnounce || announceDue(nowMs, s_nextPositionTxMs, s_cfg.posIntervalS);
 
     if (!nodeInfoDue && !positionDue) return;
@@ -57876,8 +59614,8 @@ static void serviceNodeInfoAnnounce(uint32_t nowMs) {
                                         0xFFFFFFFF,
                                         false,
                                         s_cfg.okToMqtt));
-        if (ok) scheduleAnnounceNext(s_nextNodeInfoTxMs, s_nodeInfoTxFails, nowMs, s_cfg.nodeInfoIntervalS);
-        else scheduleAnnounceRetry(s_nextNodeInfoTxMs, s_nodeInfoTxFails, nowMs, s_cfg.nodeInfoIntervalS);
+        if (ok) scheduleAnnounceNext(s_nextNodeInfoTxMs, s_nodeInfoTxFails, nowMs, nodeInfoIntervalS);
+        else scheduleAnnounceRetry(s_nextNodeInfoTxMs, s_nodeInfoTxFails, nowMs, nodeInfoIntervalS);
     }
 
     // The other half of ann:nodeinfo. When both are due in the same pass -- as
@@ -58466,7 +60204,7 @@ static size_t chatAckMarkerOffset(const char *line) {
 // text's so it reads as a note on the message rather than part of it.
 static const char kChatAckMarker[] = "[A]";
 static const lv_font_t *chatAckMarkerFont(const lv_font_t *chatFont) {
-    const int lh = chatFont ? (int)chatFont->line_height : 0;
+    const int lh = chatFont ? (int)lv_font_get_line_height(chatFont) : 0;
     if (lh >= 30) return &lv_font_montserrat_18;   // 28 and 32
     if (lh >= 21) return &lv_font_montserrat_12;   // 18 and 20
     return &lv_font_montserrat_10;                 // 16 and under
@@ -58506,7 +60244,7 @@ static lv_color_t freshDotColor() {
 
 // A third of the line, so it reads as a mark beside the text and not a glyph.
 static int freshDotSize(const lv_font_t *font) {
-    const int lh = font ? (int)font->line_height : 14;
+    const int lh = font ? (int)lv_font_get_line_height(font) : 14;
     return constrain(lh / 3, 5, 12);
 }
 
@@ -59089,7 +60827,7 @@ static void chatMakeIrcRow(lv_obj_t *list, const lv_font_t *font,
     // new message's is filled. Pushed down to sit on the first line's middle.
     const int dotD = freshDotSize(font);
     lv_obj_t *dot = makeFreshDot(row, dotD);
-    lv_obj_set_style_margin_top(dot, max(0, ((int)font->line_height - dotD) / 2), 0);
+    lv_obj_set_style_margin_top(dot, max(0, ((int)lv_font_get_line_height(font) - dotD) / 2), 0);
     if (outFreshDot) *outFreshDot = dot;
     else lv_obj_set_style_bg_opa(dot, LV_OPA_TRANSP, 0);
 
@@ -59932,6 +61670,9 @@ static void buildUi() {
 #if HAS_NAV_ALIGN_SETTING
     s_appliedNavAlign = cfgNavAlign(s_cfg);
 #endif
+#if HAS_CHANNEL_PANEL_LOCK
+    s_appliedChannelPanelLocked = cfgChannelPanelLocked(s_cfg);
+#endif
     lv_obj_t *screen = lv_obj_create(NULL);
     s_rootScreen = screen;
     s_channelSelectorFixedBtnW = 0;
@@ -59958,10 +61699,19 @@ static void buildUi() {
 // dropdown (UI_CHANNEL_LIST_DROPDOWN) instead of an anchored list, so reserving
 // a column for one leaves an empty strip down the side.
 #if defined(DEVICE_TDECK) || defined(DEVICE_TDECK_PRO) || UI_TOUCH_ONLY_PROFILE || defined(DEVICE_MESH_DECK) \
-    || defined(DEVICE_M9)
-#if defined(DEVICE_TDECK) || defined(DEVICE_TDECK_PRO) || defined(DEVICE_MESH_DECK) || defined(DEVICE_M9)
+    || defined(DEVICE_M9) || defined(DEVICE_TANMATSU)
+#if defined(DEVICE_TDECK) || defined(DEVICE_TDECK_PRO) || defined(DEVICE_MESH_DECK) || defined(DEVICE_M9) \
+    || defined(DEVICE_TANMATSU)
     const int panelMargin = 6;
+#if defined(DEVICE_TANMATSU)
+    // Height is what this panel is short of: the header sits near the top edge
+    // and the chat close under it, the side margins as on the T-Deck.
+    const int headerTop = 2;
+    const int chatGap = 3;
+#else
+    const int headerTop = panelMargin;
     const int chatGap = 6;
+#endif
 #if HAS_NAV_BAR_TOGGLE
     // Taller than the 14 px key-hint strip when the bar is on, because it
     // carries tappable icon buttons rather than a line of text; the extra
@@ -59978,6 +61728,7 @@ static void buildUi() {
 #endif
 #else
     const int panelMargin = 0;
+    const int headerTop = panelMargin;
     const int chatGap = 3;
     const int chatLegendH = 28;
 #endif
@@ -59985,12 +61736,20 @@ static void buildUi() {
     // Portrait has height to spare: half as tall again, for a bigger channel
     // name and clock (see selectorTextFont / clockTextFont below). The chat
     // list is what gives it up -- it is sized from what is left over.
-    const int chatHeaderH = uiPortrait() ? 38 : 25;
+    // 35 leaves the selector (chatHeaderH - 6) 29 px round the 24's line --
+    // room for its descenders and no more.
+    const int chatHeaderH = uiPortrait() ? 35 : 25;
 #elif defined(DEVICE_CROWPANEL_50)
     // Twice the usual, fonts with it (below): the 5" has the room, and the
     // header is read at arm's length. Every screen's header copies this one
     // (s_chatHdrGeom), so they all grow together.
     const int chatHeaderH = 50;
+#elif defined(DEVICE_TANMATSU)
+    // Native resolution: 20 units is 40 px, around the 24 px name and clock
+    // (montserrat_12, below) with the 10s beside them. The selector
+    // (chatHeaderH - 6) is 28 px, which holds the 12's 27 px line, descenders
+    // included, once the name is not nudged down (selectorTextYOffset).
+    const int chatHeaderH = 20;
 #else
     const int chatHeaderH = 25;
 #endif
@@ -60006,11 +61765,16 @@ static void buildUi() {
     // With the nav as a side column, the chat and its header stop short of it
     // (navPadL / navPadR), on whichever side it is.
     const int chatX = panelMargin + navPadL + (p4ChannelColW > 0 ? p4ChannelColW + 4 : 0);
+#elif HAS_CHANNEL_PANEL_LOCK
+    // Channel panel locked: the P4's anchored column, narrower for this
+    // 400 px-wide layout. Unlocked, the list is the drawer and this is 0.
+    const int p4ChannelColW = channelListIsDropdown() ? 0 : 96;
+    const int chatX = panelMargin + navPadL + (p4ChannelColW > 0 ? p4ChannelColW + 4 : 0);
 #else
     const int chatX = panelMargin + navPadL;
 #endif
     const int chatW = screenW - chatX - panelMargin - navPadR;
-    const int chatY = panelMargin + chatHeaderH + chatGap;
+    const int chatY = headerTop + chatHeaderH + chatGap;
 #if UI_TOUCH_NAV_BAR
     // The bar runs the full width of the display and sits flush with the bottom
     // edge — the same place and size the copy inside every modal takes, so the
@@ -60030,6 +61794,7 @@ static void buildUi() {
 #endif
 #elif defined(DEVICE_CARDPUTER_LORA_HAT)
     const int panelMargin = 2;
+    const int headerTop = panelMargin;
     const int chatGap = 0;
     const int chatHeaderH = 22;
 #if HAS_NAV_BAR_TOGGLE
@@ -60062,7 +61827,15 @@ static void buildUi() {
     const int panelMargin = 6;
     const int panelW = 89;
     const int panelH = lv_disp_get_ver_res(NULL) - panelMargin * 2;
+#if defined(DEVICE_TLORA_PAGER_TFT)
+    // 222 px tall: the header and the channel panel start near the top edge
+    // and the chat close under the header, keeping the side margins.
+    const int headerTop = 2;
+    const int chatGap = 3;
+#else
+    const int headerTop = panelMargin;
     const int chatGap = 6;
+#endif
     const int chatHeaderH = 25;
 #if HAS_NAV_BAR_TOGGLE
     // Same two states as the boards above: 28 px of icon cells with the bar on,
@@ -60081,7 +61854,7 @@ static void buildUi() {
     const int panelX = panelMargin + navPadL;
     const int chatX = panelX + panelW + chatGap;
     const int chatW = lv_disp_get_hor_res(NULL) - chatX - panelMargin - navPadR;
-    const int chatY = panelMargin + chatHeaderH + chatGap;
+    const int chatY = headerTop + chatHeaderH + chatGap;
 #if UI_TOUCH_NAV_BAR
     // With the bar up it sits flush with the bottom edge, so the bottom margin
     // panelH reserves is not subtracted; with it off this is the expression it
@@ -60102,7 +61875,7 @@ static void buildUi() {
     // so the channel list stops above it instead of running down beside it.
     // Anchored to the top rather than centred, because LV_ALIGN_LEFT_MID would
     // put half of the height it just gave up straight back under the bar.
-    const int panelBodyH = legendTop - panelMargin;
+    const int panelBodyH = legendTop - headerTop;
 #else
     const int panelBodyH = panelH;
 #endif
@@ -60110,7 +61883,7 @@ static void buildUi() {
     panel = lv_obj_create(screen);
     lv_obj_set_size(panel, panelW, panelBodyH);
 #if defined(DEVICE_TLORA_PAGER_TFT)
-    lv_obj_align(panel, LV_ALIGN_TOP_LEFT, panelX, panelMargin);
+    lv_obj_align(panel, LV_ALIGN_TOP_LEFT, panelX, headerTop);
 #else
     lv_obj_align(panel, LV_ALIGN_LEFT_MID, panelX, 0);
 #endif
@@ -60151,7 +61924,7 @@ static void buildUi() {
 
     s_chatHeaderBar = lv_obj_create(screen);
     lv_obj_set_size(s_chatHeaderBar, chatW, chatHeaderH);
-    lv_obj_align(s_chatHeaderBar, LV_ALIGN_TOP_LEFT, chatX, panelMargin);
+    lv_obj_align(s_chatHeaderBar, LV_ALIGN_TOP_LEFT, chatX, headerTop);
     lv_obj_clear_flag(s_chatHeaderBar, LV_OBJ_FLAG_SCROLLABLE);
 #if defined(DEVICE_TDECK_PRO)
     lv_obj_set_style_bg_opa(s_chatHeaderBar, LV_OPA_TRANSP, 0);
@@ -60174,7 +61947,7 @@ static void buildUi() {
     // Cardputer keeps the original clock size to fit its narrow header.
 #if defined(DEVICE_CARDPUTER_LORA_HAT)
     const lv_font_t *clockTextFont = headerTextFont;
-#elif defined(DEVICE_TDECK_PRO)
+#elif defined(DEVICE_TDECK_PRO) || defined(DEVICE_TANMATSU)
     const lv_font_t *clockTextFont = &lv_font_montserrat_12;
 #else
     const lv_font_t *clockTextFont = (chatHeaderH >= 25) ? &lv_font_montserrat_16 : &lv_font_montserrat_14;
@@ -60219,7 +61992,8 @@ static void buildUi() {
 // T-Deck presentation. It also buys the label the 14 px the caret reserved,
 // which matters more here than on the T-Deck — same 320x240 pixels, smaller
 // glass, so channel names have less room to be legible in.
-#if defined(DEVICE_TDECK) || defined(DEVICE_TDECK_PRO) || defined(DEVICE_MESH_DECK) || defined(DEVICE_M9)
+#if defined(DEVICE_TDECK) || defined(DEVICE_TDECK_PRO) || defined(DEVICE_MESH_DECK) || defined(DEVICE_M9) \
+    || defined(DEVICE_TANMATSU)
     const bool showSelectorCaret = false;
 #elif UI_TOUCH_ONLY_PROFILE
     const bool showSelectorCaret = false;   // see refreshChannelSelectorLabel()
@@ -60229,7 +62003,7 @@ static void buildUi() {
     const bool showSelectorCaret = true;
 #endif
 
-#if defined(DEVICE_CARDPUTER_LORA_HAT)
+#if defined(DEVICE_CARDPUTER_LORA_HAT) || defined(DEVICE_TANMATSU)
     const lv_coord_t selectorTextYOffset = 0;
 #else
     const lv_coord_t selectorTextYOffset = 1;
@@ -60344,19 +62118,21 @@ static void buildUi() {
 
     s_chatHeaderBattBar = lv_obj_create(s_chatHeaderBar);
     lv_obj_remove_style_all(s_chatHeaderBattBar);
-    lv_obj_set_size(s_chatHeaderBattBar,
+    {
 #if defined(DEVICE_CARDPUTER_LORA_HAT)
-                    6,
+        const int battW = 6;
 #elif defined(DEVICE_CROWPANEL_50)
-                    16,
+        const int battW = 16;
 #else
-                    (chatHeaderH >= 25) ? 8 : 7,
+        const int battW = (chatHeaderH >= 25) ? 8 : 7;
 #endif
 #if defined(DEVICE_CROWPANEL_50)
-                    16);
+        const int battH = 16;
 #else
-                    (chatHeaderH >= 25) ? 8 : 7);
+        const int battH = (chatHeaderH >= 25) ? 8 : 7;
 #endif
+        lv_obj_set_size(s_chatHeaderBattBar, battW, battH);
+    }
     lv_obj_align(s_chatHeaderBattBar, LV_ALIGN_RIGHT_MID, -headerPadX, 0);
     lv_obj_set_style_radius(s_chatHeaderBattBar, LV_RADIUS_CIRCLE, 0);
     lv_obj_set_style_bg_opa(s_chatHeaderBattBar, LV_OPA_COVER, 0);
@@ -60391,6 +62167,7 @@ static void buildUi() {
 #endif
 
     s_chatHdrGeom.margin = panelMargin;
+    s_chatHdrGeom.top = headerTop;
     s_chatHdrGeom.h = chatHeaderH;
 #if UI_CHANNEL_LIST_DROPDOWN
     // Where refreshChannelSelectorLabel() leaves the name: flush with the
@@ -60481,8 +62258,13 @@ static void buildUi() {
     // Same size as the selector button's own label, so the open list reads as
     // that button unfolded rather than as a smaller menu below it.
     channelNavFont = &lv_font_montserrat_14;
-#elif defined(DEVICE_TDECK) || defined(DEVICE_TDECK_PRO) || defined(DEVICE_M9)
+#elif defined(DEVICE_TDECK) || defined(DEVICE_TDECK_PRO) || defined(DEVICE_M9) || defined(DEVICE_TANMATSU)
     channelNavFont = &lv_font_montserrat_14; // nearest built-in to requested size 13
+#if HAS_CHANNEL_PANEL_LOCK
+    // Docked, the column is read down at native resolution: 10 is drawn as a
+    // 20 px face there, against the 28 px the drawer's 14 comes out at.
+    if (!channelListIsDropdown()) channelNavFont = &lv_font_montserrat_10;
+#endif
 #elif defined(DEVICE_CROWPANEL_50)
     // Its list text as it is (kMainScreenFont, drawn as 20), not the 14 the
     // other touch boards take: the 800x480 panel has the room.
@@ -60494,6 +62276,10 @@ static void buildUi() {
     // 2 px of border per side, and anything shorter clips the glyphs.
     const int channelNavBtnH =
         max(kMainScreenChannelBtnHeight, (int)lv_font_get_line_height(channelNavFont) + 8);
+#elif HAS_CHANNEL_PANEL_LOCK
+    // Docked rows shrink with their font: 2 px padding and up to 2 px of border
+    // a side around an 11-unit line still clears in 20.
+    const int channelNavBtnH = channelListIsDropdown() ? kMainScreenChannelBtnHeight : 20;
 #else
     const int channelNavBtnH = kMainScreenChannelBtnHeight;
 #endif
@@ -60727,8 +62513,20 @@ static void buildUi() {
         lv_obj_set_size(s_chatShortcutBar, legendBarW, chatLegendH);
         lv_obj_align(s_chatShortcutBar, LV_ALIGN_TOP_LEFT, 0, chatY + chatH + 3);
 #else
+#if HAS_CHANNEL_PANEL_LOCK
+        if (!channelListIsDropdown()) {
+            // Docked column: under it as well as the chat, the Pager's way.
+            // Kept to the chat's width, the key hints ran out of room and
+            // wrapped onto a second line the bar has no height for.
+            legendBarW = lv_disp_get_hor_res(NULL) - 2 * panelMargin;
+            lv_obj_set_size(s_chatShortcutBar, legendBarW, chatLegendH);
+            lv_obj_align(s_chatShortcutBar, LV_ALIGN_TOP_LEFT, panelMargin, chatY + chatH + 3);
+        } else
+#endif
+        {
         lv_obj_set_size(s_chatShortcutBar, chatW, chatLegendH);
         lv_obj_align(s_chatShortcutBar, LV_ALIGN_TOP_LEFT, chatX, chatY + chatH + 3);
+        }
 #endif
     }
 #elif defined(DEVICE_TLORA_PAGER_TFT)
@@ -60971,8 +62769,11 @@ static void buildUi() {
 #endif
     }
 
-#if defined(DEVICE_TDISPLAY_P4)
+#if defined(DEVICE_TDISPLAY_P4) || HAS_CHANNEL_PANEL_LOCK
     if (!channelListIsDropdown() && s_channelList) {
+#if HAS_CHANNEL_PANEL_LOCK
+        s_channelColumnFocus = false;
+#endif
         // Landscape: the dropdown list, built above with every channel button
         // in it, becomes the anchored column the chat was offset for -- the
         // Pager's layout, from the P4's own parts. Shown always, down the left
@@ -61735,6 +63536,12 @@ static bool cfgSetSetupField(const char *args) {
     if (is("region")) {
         for (uint8_t i = 0; i < kRegionCount; i++) {
             if (!strcasecmp(value, kRegions[i].code)) {
+                // Amateur bands only while licensed (and never below the radio's
+                // range): staging one would land the node in TX hold.
+                if (!regionSelectable(kRegions[i].code, lic::active())) {
+                    s_cliOut->printf("[cfg] err region: requires licensed mode\n");
+                    return true;
+                }
                 utf8util::copyTruncate(s_cfgSetup.region, sizeof(s_cfgSetup.region), kRegions[i].code);
                 s_cliOut->printf("[cfg] ok region=%s staged\n", kRegions[i].code);
                 return true;
@@ -61900,6 +63707,11 @@ static void cfgApplyStagedChannels() {
         ck.muted = false;
         ck.hopLimitPlus1 = 0;
         ck.useAead = false;
+    }
+    // Licensed: the plan is taken, its keys are not. Serial cfg and community
+    // presets both land here.
+    if (lic::active() && licStripChannels(0)) {
+        s_cliOut->println("[cfg] Licensed mode: channel imported without its key");
     }
     syncPrimaryChannelName();
     recomputeChannelHashes();
@@ -62185,6 +63997,7 @@ static void handleCfgCommand(const char *args) {
             if (setup.role >= 0) s_cfg.deviceRole = cfgCoerceDeviceRole((uint8_t)setup.role);
             if (setup.wifiSsid[0]) utf8util::copyTruncate(s_cfg.wifiSsid, sizeof(s_cfg.wifiSsid), setup.wifiSsid);
             if (setup.wifiPassSet) utf8util::copyTruncate(s_cfg.wifiPass, sizeof(s_cfg.wifiPass), setup.wifiPass);
+            cfgCoerceLicensed(s_cfg);   // a ham region must not persist unlicensed
             applyPresetParams(s_cfg);   // the region moves the frequency
         }
         if (!presetChanges && !haveChans && !haveLogo && !haveSetup && !haveMqtt) {
@@ -62635,6 +64448,304 @@ static void serviceSerialCommands() {
 #endif
 }
 
+#if defined(DEVICE_TANMATSU)
+// ── Scrollbar gutters ────────────────────────────────────────────────────────
+// LVGL draws a scrollbar inside its container's right edge, on top of the
+// children, so anything laid out to that edge is painted over. Rather than
+// re-pad the dozens of lists one by one, every container that actually scrolls
+// vertically is given enough right padding to clear its own bar. Run after
+// each redraw, when layout is current; the padding only ever grows, so a
+// container is touched once and the walk is otherwise read-only.
+static void reserveScrollbarGutters(lv_obj_t *obj) {
+    if (!obj || lv_obj_has_flag(obj, LV_OBJ_FLAG_HIDDEN)) return;
+    if (lv_obj_has_flag(obj, LV_OBJ_FLAG_SCROLLABLE)
+        && (lv_obj_get_scroll_dir(obj) & LV_DIR_VER)) {
+        const lv_scrollbar_mode_t mode = lv_obj_get_scrollbar_mode(obj);
+        if (mode != LV_SCROLLBAR_MODE_OFF) {
+            const int32_t need = lv_obj_get_style_width(obj, LV_PART_SCROLLBAR)
+                               + lv_obj_get_style_pad_right(obj, LV_PART_SCROLLBAR) + 2;
+            if (lv_obj_get_style_pad_right(obj, LV_PART_MAIN) < need
+                && (mode == LV_SCROLLBAR_MODE_ON
+                    || lv_obj_get_scroll_top(obj) > 0
+                    || lv_obj_get_scroll_bottom(obj) > 0)) {
+                lv_obj_set_style_pad_right(obj, need, LV_PART_MAIN);
+            }
+        }
+    }
+    const uint32_t n = lv_obj_get_child_count(obj);
+    for (uint32_t i = 0; i < n; i++) reserveScrollbarGutters(lv_obj_get_child(obj, (int32_t)i));
+}
+
+static void onRefrReadyReserveGutters(lv_event_t *e) {
+    lv_display_t *disp = (lv_display_t *)lv_event_get_target(e);
+    reserveScrollbarGutters(lv_display_get_screen_active(disp));
+    reserveScrollbarGutters(lv_display_get_layer_top(disp));
+}
+#endif
+
+// ── MeshBeacon broadcast (port 37) ───────────────────────────────────────────
+// Advertises this node's mesh (channel 0's name, optionally its PSK, our preset
+// and region) onto a target preset's public default channel, every
+// meshBeaconIntervalH hours. When the target is not what the radio is on, the
+// send is a tempTuneEnter() / transmit / tempTuneLeave() inside one loop()
+// call: Radio.transmit() blocks, so nothing else can go out while parked.
+//
+// Nothing here writes s_cfg, calls markConfigDirty() or saves the channel plan.
+// The only persistent state is the last-sent time, in its own NVS key, so an
+// hourly beacon does not rewrite the whole config blob.
+static constexpr const char *kMbLastSentKey      = "mbLastSent";   // NVS "camillia", uint32 epoch s
+static constexpr uint32_t    kMbSettleMs         = 120000;  // after boot / a beacon settings save
+static constexpr uint32_t    kMbServiceGapMs     = 1000;    // serviceMeshBeacon() poll rate
+static constexpr float       kMbAirUtilTxMaxPct  = 5.0f;    // half the EU 10 % duty cycle
+
+static uint32_t s_mbLastSentMs     = 0;   // millis() of the last send; 0 = never
+static uint32_t s_mbLastEpoch      = 0;   // epoch s of the last send; 0 = unknown
+static uint32_t s_mbNotBeforeMs    = 0;   // settle hold; 0 = none
+static uint32_t s_mbAirRetryMs     = 0;   // current air-util backoff step
+static uint32_t s_mbAirHoldUntilMs = 0;   // air-util hold; 0 = none
+static uint32_t s_mbLastServiceMs  = 0;
+static uint32_t s_mbSettingsSig    = 0;
+static bool     s_mbPayloadValid   = false;
+static size_t   s_mbPayloadLen     = 0;
+static uint8_t  s_mbPayload[160];
+static MeshBeaconTx s_mbTx;
+
+// beaconDueInMs() reads 0 as "never sent" / "no hold", so a real timestamp
+// that happens to land on 0 is stored as 1.
+static inline uint32_t mbNonZeroMs(uint32_t ms) { return ms ? ms : 1; }
+
+static uint32_t meshBeaconSettingsSignature() {
+    uint32_t h = 2166136261u;
+    auto mix = [&h](const void *data, size_t len) {
+        const uint8_t *b = (const uint8_t *)data;
+        for (size_t i = 0; i < len; i++) { h ^= b[i]; h *= 16777619u; }
+    };
+    mix(&s_cfg.meshBeaconBroadcast, sizeof(s_cfg.meshBeaconBroadcast));
+    mix(&s_cfg.meshBeaconTargetPreset, sizeof(s_cfg.meshBeaconTargetPreset));
+    mix(&s_cfg.meshBeaconOfferPsk, sizeof(s_cfg.meshBeaconOfferPsk));
+    mix(&s_cfg.meshBeaconIntervalH, sizeof(s_cfg.meshBeaconIntervalH));
+    mix(s_cfg.meshBeaconMessage, strnlen(s_cfg.meshBeaconMessage, sizeof(s_cfg.meshBeaconMessage)));
+    return h;
+}
+
+// Beacon settings were saved: the payload is rebuilt on the next send, and the
+// first check is pushed out by kMbSettleMs. The saved last-sent time still
+// applies, so toggling broadcast off and on cannot get around the interval.
+static void meshBeaconSettingsChanged() {
+    s_mbPayloadValid = false;
+    s_mbSettingsSig  = meshBeaconSettingsSignature();
+    s_mbNotBeforeMs  = mbNonZeroMs(millis() + kMbSettleMs);
+}
+
+// Every config / channel-plan save. The offer (channel 0, preset, region) can
+// change without a beacon setting changing, so the payload is always dropped;
+// the settle hold only applies when a beacon setting itself moved, so an
+// unrelated save (a brightness nudge) does not keep pushing the beacon back.
+static void meshBeaconConfigSaved() {
+    s_mbPayloadValid = false;
+    if (meshBeaconSettingsSignature() != s_mbSettingsSig) meshBeaconSettingsChanged();
+}
+
+static bool meshBeaconGateOpen() {
+#if defined(LORA_TEST_MQTT_ONLY) && LORA_TEST_MQTT_ONLY
+    return false;
+#else
+    // Off while licensed: the beacon is sealed with the default channel key,
+    // and nothing may go out encrypted on amateur bands.
+    if (lic::active()) return false;
+    return s_cfg.meshBeaconBroadcast && s_radioReady && Radio.isReady() &&
+           s_myNodeId != 0 && s_cfg.deviceRole != relay::ROLE_CLIENT_HIDDEN;
+#endif
+}
+
+// Whether the target preset can run here: this radio can produce it, and its
+// bandwidth fits inside the current region's band. Never substituted.
+static bool meshBeaconTargetRunnable(uint8_t target) {
+    if (target >= PRESET_COUNT || !presetUsableOnThisRadio(target)) return false;
+    for (uint8_t i = 0; i < kRegionCount; i++) {
+        if (strcmp(kRegions[i].code, s_cfg.region) != 0) continue;
+        const float bandMhz = kRegions[i].freqEnd - kRegions[i].freqStart;
+        return kPresets[target].bw / 1000.0f <= bandMhz + 0.001f;
+    }
+    return false;
+}
+
+static uint32_t meshBeaconDueInMs(uint32_t nowMs) {
+    const uint32_t a = beaconDueInMs(nowMs, s_mbLastSentMs, s_cfg.meshBeaconIntervalH, s_mbNotBeforeMs);
+    const uint32_t b = beaconDueInMs(nowMs, s_mbLastSentMs, s_cfg.meshBeaconIntervalH, s_mbAirHoldUntilMs);
+    return a > b ? a : b;
+}
+
+// The offer, from the live setup. Cached until the next config save.
+static void meshBeaconBuildPayload() {
+    MeshBeaconTx &tx = s_mbTx;
+    memset(&tx, 0, sizeof(tx));
+    beaconCopyMessage(tx.message, s_cfg.meshBeaconMessage);
+
+    const ChannelKey &c0 = CHANNEL_KEYS[0];
+    const uint8_t pi = s_cfg.modemPreset < PRESET_COUNT ? s_cfg.modemPreset : PRESET_LONG_FAST;
+    const char *name = meshBeaconHomeChannelName();
+    strncpy(tx.offerChannelName, name, sizeof(tx.offerChannelName) - 1);
+    tx.offerChannelName[sizeof(tx.offerChannelName) - 1] = '\0';
+
+    // A private key in a public beacon is a public key: opt-in only. Never
+    // while licensed, where channels carry no key to offer.
+    if (!lic::active() && s_cfg.meshBeaconOfferPsk
+        && c0.keyLen > 0 && c0.keyLen <= sizeof(tx.offerPsk)) {
+        memcpy(tx.offerPsk, c0.key, c0.keyLen);
+        tx.offerPskLen = c0.keyLen;
+    }
+    tx.offerRegion = regionCodeToMeshtastic(s_cfg.region);
+    // Custom modem settings have no preset to offer: channel + region only.
+    if (s_cfg.loraUsePreset) {
+        const int mp = presetToMeshtastic(pi);
+        if (mp >= 0) {
+            tx.hasOfferPreset = true;
+            tx.offerPreset    = (uint8_t)mp;
+        }
+    }
+    // The slot only when a receiver would land elsewhere by deriving it from
+    // our region, bandwidth and the offered channel name.
+    const float derived = regionSlotFreq(s_cfg.region, s_cfg.loraBw, tx.offerChannelName);
+    if (fabsf(derived - s_cfg.loraFreq) > 0.0005f) {
+        const uint32_t count = regionSlotCount(s_cfg.region, s_cfg.loraBw);
+        for (uint32_t n = 0; n < count; n++) {
+            if (fabsf(regionSlotFreqNum(s_cfg.region, s_cfg.loraBw, n) - s_cfg.loraFreq) <= 0.0005f) {
+                tx.hasOfferSlot = true;
+                tx.offerSlot    = n + 1;   // 1-based, like channel_num
+                break;
+            }
+        }
+    }
+
+    s_mbPayloadLen   = encodeMeshBeacon(tx, s_mbPayload, sizeof(s_mbPayload));
+    s_mbPayloadValid = true;
+}
+
+// Recorded before the send, so a crash mid-send cannot cause a re-send. With a
+// valid clock the epoch is stored; without one 0 is stored, which boot reads
+// as "sent at an unknown time" and so waits a full interval.
+static void meshBeaconRecordSent(uint32_t nowMs) {
+    s_mbLastSentMs = mbNonZeroMs(nowMs);
+    s_mbLastEpoch  = clockIsSet() ? (uint32_t)time(nullptr) : 0;
+    Preferences p;
+    if (!p.begin("camillia", false)) return;
+    p.putUInt(kMbLastSentKey, s_mbLastEpoch);
+    p.end();
+}
+
+// Boot: maps the saved last-sent time into this session's millis() domain.
+static void meshBeaconBoot() {
+    uint32_t saved = 0;
+    bool     has   = false;
+    Preferences p;
+    if (p.begin("camillia", true)) {
+        has = p.isKey(kMbLastSentKey);
+        if (has) saved = p.getUInt(kMbLastSentKey, 0);
+        p.end();
+    }
+    const uint32_t now = millis();
+    s_mbSettingsSig = meshBeaconSettingsSignature();
+    s_mbNotBeforeMs = mbNonZeroMs(now + kMbSettleMs);
+    if (!has) return;
+
+    s_mbLastEpoch = saved;
+    if (saved != 0 && clockIsSet()) {
+        const uint32_t intervalS = (uint32_t)clampBeaconIntervalH(s_cfg.meshBeaconIntervalH) * 3600UL;
+        const uint32_t nowEpoch  = (uint32_t)time(nullptr);
+        uint32_t elapsed = nowEpoch > saved ? nowEpoch - saved : 0;
+        if (elapsed > intervalS) elapsed = intervalS;
+        s_mbLastSentMs = mbNonZeroMs(now - elapsed * 1000UL);
+    } else {
+        // No clock to measure the gap with: count it as sent just now, so a
+        // reboot errs towards waiting, never towards re-beaconing.
+        s_mbLastSentMs = mbNonZeroMs(now);
+    }
+    Serial.printf("[beacon] last sent epoch=%lu, next in %lu s\n", (unsigned long)saved,
+                  (unsigned long)(meshBeaconDueInMs(millis()) / 1000UL));
+}
+
+static MeshBeaconStatus meshBeaconStatus() {
+    MeshBeaconStatus st = { MeshBeaconStatus::OFF, 0, s_mbLastEpoch };
+    if (!meshBeaconGateOpen()) return st;
+    if (discoveryRadioParked()) { st.state = MeshBeaconStatus::HELD_SCAN; return st; }
+    if (!meshBeaconTargetRunnable(s_cfg.meshBeaconTargetPreset)) {
+        st.state = MeshBeaconStatus::HELD_PRESET;
+        return st;
+    }
+    st.state    = s_mbAirHoldUntilMs ? MeshBeaconStatus::HELD_AIRTIME : MeshBeaconStatus::WAITING;
+    st.nextInMs = meshBeaconDueInMs(millis());
+    return st;
+}
+
+static void serviceMeshBeacon() {
+    const uint32_t now = millis();
+    if (s_mbLastServiceMs != 0 && (uint32_t)(now - s_mbLastServiceMs) < kMbServiceGapMs) return;
+    s_mbLastServiceMs = mbNonZeroMs(now);
+
+    // Expired holds are cleared, gates or not, so one cannot read as live again
+    // after a millis() half-wrap.
+    if (s_mbNotBeforeMs && beaconDueInMs(now, 0, 1, s_mbNotBeforeMs) == 0) s_mbNotBeforeMs = 0;
+    if (s_mbAirHoldUntilMs && beaconDueInMs(now, 0, 1, s_mbAirHoldUntilMs) == 0) s_mbAirHoldUntilMs = 0;
+
+    if (!meshBeaconGateOpen()) return;
+    if (discoveryRadioParked()) return;   // HELD_SCAN: retried once the scan ends
+    const uint8_t target = s_cfg.meshBeaconTargetPreset;
+    if (!meshBeaconTargetRunnable(target)) return;   // HELD_PRESET
+    if (meshBeaconDueInMs(now) != 0) return;
+
+    // A ham-only target region needs no licensed guard here: the beacon only
+    // ever uses the current region, which cfgCoerceLicensed() keeps off ham
+    // bands unless licensed.
+    if (beaconRegionHasDutyCycle(s_cfg.region)) {
+        const float airTx = Radio.airUtilTxPercent();
+        if (airTx >= kMbAirUtilTxMaxPct) {
+            s_mbAirRetryMs     = nextAirtimeRetryMs(s_mbAirRetryMs);
+            s_mbAirHoldUntilMs = mbNonZeroMs(now + s_mbAirRetryMs);
+            Serial.printf("[beacon] held: TX air-util %.1f%% >= %.0f%% in %s, retry in %lu min\n",
+                          (double)airTx, (double)kMbAirUtilTxMaxPct, s_cfg.region,
+                          (unsigned long)(s_mbAirRetryMs / 60000UL));
+            return;
+        }
+    }
+    s_mbAirHoldUntilMs = 0;
+
+    if (!s_mbPayloadValid) meshBeaconBuildPayload();
+    if (s_mbPayloadLen == 0) return;   // nothing to say (cannot happen while the offer is automatic)
+
+    meshBeaconRecordSent(now);
+
+    // The target's public default channel: the default key, named after the
+    // preset. Value-initialised so useAead is false and the hash is plain
+    // computeChannelHash(name, key, 16).
+    const PresetParams &p = kPresets[target];
+    ChannelKey key{};
+    expandPsk(0x01, key.key);
+    key.keyLen = 16;
+    key.name   = p.channelName;
+    key.hash   = channelKeyHash(key);
+
+    const float freq = regionSlotFreq(s_cfg.region, p.bw, p.channelName);
+    const bool retune = !(fabsf(freq - s_cfg.loraFreq) <= 0.0005f &&
+                          fabsf(p.bw - s_cfg.loraBw) <= 0.01f &&
+                          p.sf == s_cfg.loraSf && p.cr == s_cfg.loraCr);
+    bool ok;
+    if (retune) {
+        TempTuneSnapshot snap = {};
+        tempTuneEnter(target, snap, /*renameCh0=*/false);
+        ok = Channels.sendMeshBeacon(s_myNodeId, s_mbPayload, s_mbPayloadLen, key);
+        tempTuneLeave(snap);   // unconditional: a failed TX must still come home
+    } else {
+        ok = Channels.sendMeshBeacon(s_myNodeId, s_mbPayload, s_mbPayloadLen, key);
+    }
+
+    if (ok) s_mbAirRetryMs = 0;
+    Serial.printf("[beacon] %s on %s %.3f MHz (%u bytes, offer ch=%s, psk=%s, retune=%s)\n",
+                  ok ? "sent" : "send FAILED", p.channelName, (double)freq,
+                  (unsigned)s_mbPayloadLen, s_mbTx.offerChannelName,
+                  s_mbTx.offerPskLen ? "yes" : "no", retune ? "yes" : "no");
+}
+
 void setup() {
 #if defined(DEVICE_TDISPLAY_P4)
     // Before anything else registers a shutdown handler; see the function.
@@ -62956,6 +65067,12 @@ void setup() {
                   (long)dispW, (long)dispH, UI_PIXEL_SCALE, UI_BOTTOM_SAFE_H);
 #endif
     s_lvDisplay = lv_display_create(dispW, dispH);
+#if defined(DEVICE_TANMATSU)
+    if (s_lvDisplay) {
+        lv_display_add_event_cb(s_lvDisplay, onRefrReadyReserveGutters,
+                                LV_EVENT_REFR_READY, nullptr);
+    }
+#endif
     if (!s_lvDisplay) {
         Serial.println("[lvgl] FATAL: display allocation failed");
         displayDev().fillScreen(TFT_WHITE);
@@ -62979,6 +65096,18 @@ void setup() {
         lv_palette_main(LV_PALETTE_RED),
         LV_THEME_DEFAULT_DARK,
         &lv_font_montserrat_24);
+#endif
+#if UI_COORD_SCALE > 1
+    // The theme's own padding, scrollbars and base face, at the layout scale
+    // the rest of the UI gets from hal/ui_coord_shim.h: twice LVGL's 130 DPI,
+    // and the 16 px base face, which the shim turns into 32.
+    lv_display_set_dpi(s_lvDisplay, LV_DPI_DEF * UI_COORD_SCALE);
+    (void)lv_theme_default_init(
+        s_lvDisplay,
+        lv_palette_main(LV_PALETTE_BLUE),
+        lv_palette_main(LV_PALETTE_RED),
+        LV_THEME_DEFAULT_DARK,
+        &lv_font_montserrat_16);
 #endif
 #if HAS_VNC_HOST
     vncHostInit((uint16_t)dispW, (uint16_t)dispH);
@@ -63189,6 +65318,10 @@ void setup() {
                               s_cfg.loraSf, s_cfg.loraCr, s_cfg.loraPower);
         }
     }
+
+    // After the radio and config: maps the saved MeshBeacon last-sent time into
+    // this session's millis() and arms the post-boot settle hold.
+    meshBeaconBoot();
 
     bootSplashStatus("Starting interface");
     buildUi();
@@ -64220,6 +66353,8 @@ void loop() {
     // Runs regardless of which surface is open: a sweep outlives its modal.
     LOOP_PHASE("discovery", serviceDiscoverySweep());
 #endif
+    // Cheap unless due; holds itself while a preset scan has the radio parked.
+    LOOP_PHASE("beacon", serviceMeshBeacon());
     // Append any nodes evicted from the full node table to the SD archive.
     // Placed before the screen-sleep return below so archiving keeps working
     // with the display off. No-op unless an eviction actually queued something.

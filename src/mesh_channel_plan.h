@@ -66,6 +66,9 @@ struct RegionPlan {
     float       spacing;      // MHz, gap between slots (0 for continuous spectrum)
     float       padding;      // MHz, guard at each end of a slot
     uint8_t     overrideSlot; // 1-based pinned slot; 0 = hash the channel name
+    // Appended; the classic rows leave them zero (false) by aggregate init.
+    bool        licensedOnly; // amateur band: selectable only in licensed mode
+    bool        tinyPresets;  // ham band plan wants Tiny, not Narrow (2 m)
 };
 
 extern const PresetParams kPresets[PRESET_COUNT];
@@ -160,3 +163,21 @@ float   regionSlotFreqNum(const char *code, float bwKhz, uint32_t slot);
 
 // Returns regulatory TX power ceiling for a region code, or MESH_POWER if unknown.
 uint8_t regionPower(const char *code);
+
+// The kRegions row for a code, or nullptr if unknown.
+const RegionPlan *regionPlan(const char *code);
+
+// Region exists and its band starts at or above lic::kRadioMinMhz.
+bool regionUsableOnThisRadio(const char *code);
+
+// Region exists and lic::regionSelectable() allows it: licensedOnly regions need
+// selfLicensed, and every region must be reachable by this radio.
+bool regionSelectable(const char *code, bool selfLicensed);
+
+// Non-ham regions allow every preset. Ham regions allow only Narrow Fast/Slow,
+// or Tiny Fast/Slow where the region sets tinyPresets (2 m).
+bool presetAllowedInRegion(const char *code, uint8_t preset);
+
+// PRESET_NARROW_SLOW for the 70 cm / 1.25 m ham regions, PRESET_TINY_FAST for
+// 2 m, PRESET_LONG_FAST otherwise.
+uint8_t regionDefaultPreset(const char *code);

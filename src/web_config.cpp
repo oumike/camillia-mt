@@ -6,6 +6,8 @@
 #include "vnc_host.h"
 #endif
 #include "mesh_channel_plan.h"
+#include "licensed_mode.h"
+#include "mesh_beacon.h"  // clampBeaconIntervalH(), beaconCopyMessage()
 #include "base64_util.h"
 #include "mesh_proto.h"   // myPubKey, for the identity chip in the header
 #include "admin_peers.h"
@@ -170,6 +172,16 @@ static bool           gRebootPending   = false;
 static int            gCommunityReq    = -1;
 static uint32_t       gCommunityAtMs   = 0;
 static uint32_t       gRebootAtMs      = 0;
+#if FEATURE_LICENSED_MODE
+// A licensed-mode transition from /save, run by webCfgLoop() once the redirect
+// has gone out: enterLicensedMode()/exitLicensedMode() save and reboot, so they
+// cannot run inside the handler. 1 = enter (or re-enter), 2 = exit.
+static uint8_t        gLicReq          = 0;
+static uint32_t       gLicAtMs         = 0;
+static char           gLicCall[lic::kCallSignMax + 1] = "";
+static char           gLicSuffix[40]   = "";
+static uint8_t        gLicPwr          = 0;
+#endif
 static bool           gWebBuffersReclaimed = false;
 
 static int compareVersionTags(const char *a, const char *b);
@@ -451,6 +463,8 @@ static void redirectHomeWithFlash(const char *msg = "") {
     if (msg && msg[0]) setFlashMsg(msg);
     redirect("/");
 }
+
+static void webCfgRunPending(bool now);
 
 static void scheduleReboot(uint32_t delayMs) {
     gRebootPending = true;
@@ -916,7 +930,15 @@ static const char kPresetJs[] =
         "'NZ_865':{s:864,e:868,p:22},'TH':{s:920,e:925,p:16},'UA_433':{s:433,e:434.7,p:10},'UA_868':{s:868,e:868.6,p:14},"
         "'MY_433':{s:433,e:435,p:20},'MY_919':{s:919,e:924,p:22},'SG_923':{s:917,e:925,p:20},'PH_433':{s:433,e:434.7,p:10},"
         "'PH_868':{s:868,e:869.4,p:14},'PH_915':{s:915,e:918,p:22},'KZ_433':{s:433.075,e:434.775,p:10},'KZ_863':{s:863,e:868,p:22},"
-        "'NP_865':{s:865,e:868,p:22},'BR_902':{s:902,e:907.5,p:22},'LORA_24':{s:2400,e:2483.5,p:10}};"
+        "'NP_865':{s:865,e:868,p:22},'BR_902':{s:902,e:907.5,p:22},'LORA_24':{s:2400,e:2483.5,p:10}"
+#if FEATURE_LICENSED_MODE
+        // Amateur-band rows of kRegions; the select offers them only while licensed.
+        ",'ITU1_2M':{s:144,e:146,p:22,pd:0.0022,os:26},'ITU2_2M':{s:144,e:148,p:22,pd:0.0022,os:51},"
+        "'ITU3_2M':{s:144,e:148,p:22,pd:0.0022,os:33},'ITU2_125CM':{s:220,e:225,p:22,pd:0.01875,os:37},"
+        "'ITU1_70CM':{s:430,e:440,p:22,pd:0.01875,os:37},'ITU2_70CM':{s:420,e:450,p:22,pd:0.01875,os:137},"
+        "'ITU3_70CM':{s:430,e:450,p:22,pd:0.01875,os:37}"
+#endif
+        "};"
         // Preset params {bw kHz, sf, cr, channel name for frequency-slot hash}.
         "var P={'Long Fast':{bw:250,sf:11,cr:5,cn:'LongFast'},'Long Moderate':{bw:125,sf:11,cr:8,cn:'LongMod'},"
         "'Long Slow':{bw:125,sf:12,cr:8,cn:'LongSlow'},'Long Turbo':{bw:500,sf:11,cr:8,cn:'LongTurbo'},"
@@ -3822,8 +3844,14 @@ static void sendConfigPage(const char *msg = "", bool lite = false) {
     // from here is a font-size-only change, which applies without restarting --
     // the wording hedges rather than promising a reboot that may not happen.
     html += "<form id='cfg-form' method='POST' action='/save'"
+#if FEATURE_LICENSED_MODE
+            // licOk() (Licensed mode section) asks the generic question too,
+            // or the licensed-mode one in its place when the box was flipped.
+            " onsubmit=\"return licOk()\">";
+#else
             " onsubmit=\"return confirm('Saving may restart the device to apply "
             "these changes. Continue?')\">";
+#endif
 
     // ── Node Identity ─────────────────────────────────────────
     section(html, lite, "Node Identity", "identity", "How this node appears to others on the mesh.");
@@ -3831,7 +3859,12 @@ static void sendConfigPage(const char *msg = "", bool lite = false) {
     // the byte cap is enforced by copyTruncate in the POST handler.
     html += "<label>Long Name (max 24 bytes)"
             "<input name='long' type='text' maxlength='24' value='";
-    appendAttr(html, gCfg->nodeLong); html += "'></label>";
+    appendAttr(html, gCfg->nodeLong); html += "'";
+#if FEATURE_LICENSED_MODE
+    // Composed from call sign and suffix below while licensed.
+    if (gCfg->licensedMode) html += " readonly";
+#endif
+    html += "></label>";
     html += "<label>Short Name (max 4 chars)"
             "<input name='short' type='text' maxlength='4' value='";
     appendAttr(html, gCfg->nodeShort); html += "'></label>";
@@ -3877,6 +3910,74 @@ static void sendConfigPage(const char *msg = "", bool lite = false) {
     }
     sectionEnd(html, lite);
     sendChunk(html);
+
+#if FEATURE_LICENSED_MODE
+    // ── Licensed (ham) mode ───────────────────────────────────
+    // Same transaction as the device's Licensed mode screen: enabling, disabling
+    // or changing the call sign saves and reboots (handlePostSave defers it).
+    section(html, lite, "Licensed (Ham) Mode", "licensed",
+            "Amateur radio operation under your own call sign.");
+    {
+        const bool licOn = gCfg->licensedMode;
+        // The suffix is whatever follows "CALL//" in the long name, as the
+        // device screen stages it.
+        char suffix[sizeof(gCfg->nodeLong)] = "";
+        const size_t callLen = strlen(gCfg->callSign);
+        if (callLen && strncmp(gCfg->nodeLong, gCfg->callSign, callLen) == 0
+            && gCfg->nodeLong[callLen] == '/' && gCfg->nodeLong[callLen + 1] == '/') {
+            utf8util::copyTruncate(suffix, sizeof(suffix), gCfg->nodeLong + callLen + 2);
+        }
+        html += "<input type='hidden' name='lic_present' value='1'>";
+        html += "<label><input type='checkbox' id='lic-en' name='lic_en' value='1'";
+        if (licOn) html += " checked";
+        html += "> Licensed mode</label>";
+        html += "<div class='row2'><label>Call Sign (max 15)"
+                "<input name='lic_call' type='text' maxlength='15' value='";
+        appendAttr(html, gCfg->callSign);
+        html += "'></label><label>Long Name Suffix"
+                "<input name='lic_suffix' type='text' maxlength='21' value='";
+        appendAttr(html, suffix);
+        html += "'></label></div>";
+        snprintf(tmp, sizeof(tmp), "%d", constrain((int)gCfg->loraPower, 1, (int)MESH_POWER));
+        html += "<label>Licensed TX Power (dBm, 1&ndash;22)"
+                "<input name='lic_pwr' type='number' min='1' max='22' value='";
+        html += tmp; html += "'></label>";
+        if (gCfg->licTxHold) {
+            html += "<label><input type='checkbox' name='lic_resume' value='1'>"
+                    " Resume transmitting</label>"
+                    "<p class='hint'>Transmit was stopped when the device left an "
+                    "amateur band. Tick this and save to transmit again.</p>";
+        }
+        html += "<p class='hint'>The long name becomes CALL//suffix. While licensed, "
+                "every channel key is removed and stays empty, encrypted DMs, remote "
+                "admin and relaying for unlicensed nodes stop, and NodeInfo goes out "
+                "every 10 min to identify the station. Turning this on or off, or "
+                "changing the call sign, reboots the device. You must hold an amateur "
+                "licence for the band you use. <b>Camillia does not verify your "
+                "licence.</b></p>";
+        // Texts match the device's Licensed mode confirmations.
+        html += "<script>function licOk(){var c=document.getElementById('lic-en');"
+                "if(c&&c.checked!=";
+        html += licOn ? "true" : "false";
+        html += ")return confirm(c.checked?'";
+        appendJsStr(html, "Every channel's key will be removed. Encrypted DMs, remote admin "
+                          "and relaying for unlicensed nodes will stop. The device will "
+                          "reboot. You must hold an amateur licence for the band you use. "
+                          "Camillia does not verify your licence.");
+        html += "':'";
+        appendJsStr(html, "Channel keys will not come back. The device will reboot.");
+        const RegionPlan *rp = regionPlan(gCfg->region);
+        if (rp && rp->licensedOnly) {
+            appendJsStr(html, " Region will change to " MY_REGION
+                              " and transmit stays off until you resume.");
+        }
+        html += "');"
+                "return confirm('Saving may restart the device to apply these changes. Continue?');}"
+                "</script>";
+    }
+    sectionEnd(html, lite);
+    sendChunk(html);
+#endif
 
     // ── Device ────────────────────────────────────────────────
     section(html, lite, "Device", "device", "Role, rebroadcasting and clock.");
@@ -3935,8 +4036,16 @@ static void sendConfigPage(const char *msg = "", bool lite = false) {
     // GPS Broadcast Interval lives in the Position section, next to the poll
     // interval it is easily confused with.
     snprintf(tmp, sizeof(tmp), "%lu", (unsigned long)gCfg->nodeInfoIntervalS);
-    html += "<label>NodeInfo Interval (s)<input name='nodeinfo_intv' type='number' min='60' value='";
-    html += tmp; html += "'></label>";
+#if FEATURE_LICENSED_MODE
+    if (gCfg->licensedMode) {
+        // Fixed at the station-ID interval; handlePostSave keeps the stored value.
+        html += "<label>NodeInfo Interval<input type='text' value='10 min while licensed' disabled></label>";
+    } else
+#endif
+    {
+        html += "<label>NodeInfo Interval (s)<input name='nodeinfo_intv' type='number' min='60' value='";
+        html += tmp; html += "'></label>";
+    }
     // Timezone dropdown
     {
         bool tzMatched = false;
@@ -4125,6 +4234,21 @@ static void sendConfigPage(const char *msg = "", bool lite = false) {
                  : "<div class='row2'><label>Region<select name='region' id='sel-rgn' onchange='applyPreset()'>";
     sendChunk(html);
     sendFlash(kRegionOptions);
+    // The amateur-band regions, offered as the device picker offers them.
+    {
+#if FEATURE_LICENSED_MODE
+        const bool licensed = gCfg->licensedMode;
+#else
+        const bool licensed = false;
+#endif
+        for (uint8_t i = 0; i < kRegionCount; i++) {
+            const RegionPlan &r = kRegions[i];
+            if (!r.licensedOnly || !regionSelectable(r.code, licensed)) continue;
+            snprintf(tmp, sizeof(tmp), "<option value='%s'>%s (%g&ndash;%g MHz, licensed)</option>",
+                     r.code, r.code, (double)r.freqStart, (double)r.freqEnd);
+            html += tmp;
+        }
+    }
     html += lite ? "</select></label><label>Modem Preset<select id='sel-pst' name='modem_preset'>"
                  : "</select></label><label>Modem Preset<select id='sel-pst' name='modem_preset' onchange='applyPreset()'>";
     sendChunk(html);
@@ -4271,7 +4395,12 @@ static void sendConfigPage(const char *msg = "", bool lite = false) {
         html += "'></label>";
         snprintf(tmp, sizeof(tmp), "ch%d_key", i);
         html += "<label>Key<input name='"; html += tmp;
-        html += "' type='text' value='"; html += b64buf; html += "'></label>";
+        html += "' type='text' value='"; html += b64buf; html += "'";
+#if FEATURE_LICENSED_MODE
+        // Keys stay empty while licensed; handlePostSave ignores this field then.
+        if (gCfg->licensedMode) html += " disabled";
+#endif
+        html += "></label>";
         snprintf(tmp, sizeof(tmp), "ch%d_role", i);
         html += "<label>Role<select name='"; html += tmp; html += "'>";
         for (int r = 0; r < 3; r++) {
@@ -4825,6 +4954,9 @@ static void sendConfigPage(const char *msg = "", bool lite = false) {
             "How brightly the keyboard expansion is lit, while it is attached and "
             "the screen is on. F7 on the keyboard still turns it on and off, and "
             "F11 steps through these same levels.</p>";
+#elif defined(DEVICE_TANMATSU)
+            "How brightly the keyboard is lit while the screen is on. It goes "
+            "dark when the screen sleeps and comes back at this level.</p>";
 #else
             "How brightly the keyboard stays lit. Off is what this board has "
             "always done - the backlight rested dark and lit only to flag an "
@@ -4862,6 +4994,19 @@ static void sendConfigPage(const char *msg = "", bool lite = false) {
         }
     }
     html += "</select></label>";
+#endif
+#if HAS_CHANNEL_PANEL_LOCK
+    {
+        const bool locked = cfgChannelPanelLocked(*gCfg);
+        html += "<label>Channel Panel<select name='channel_panel_lock'>"
+                "<option value='1'"; if ( locked) html += " selected"; html += ">Locked</option>"
+                "<option value='0'"; if (!locked) html += " selected"; html += ">Unlocked</option>"
+                "</select></label>";
+        html += "<p class='hint'>"
+                "Locked keeps the channel list beside the chat at all times. "
+                "Unlocked hides it in a drawer that slides in over the chat when "
+                "asked for. Takes effect immediately, no reboot.</p>";
+    }
 #endif
 #if HAS_NAV_BAR_TOGGLE
     html += "<label>Bottom Nav Bar<select name='nav_bar'>"
@@ -4993,8 +5138,77 @@ static void sendConfigPage(const char *msg = "", bool lite = false) {
             "Meshtastic 2.7 nodes can retune briefly to advertise a different mesh, "
             "naming a channel, preset and region. With this on, any such beacon that "
             "reaches this device is listed on the Beacons screen, under Live &rarr; "
-            "Tools. Receive-only &mdash; nothing "
-            "is transmitted, and an offer is never applied to your radio. Off by default.</p>";
+            "Tools. Listening transmits nothing, and an offer is never applied to "
+            "your radio. Off by default.</p>";
+
+    {
+        const uint8_t target = gCfg->meshBeaconTargetPreset < PRESET_COUNT
+            ? gCfg->meshBeaconTargetPreset : (uint8_t)PRESET_LONG_FAST;
+        html += "<div class='row2'>";
+        html += "<label>Broadcast<select name='mesh_beacon_broadcast'>"
+                "<option value='1'"; if ( gCfg->meshBeaconBroadcast) html += " selected"; html += ">Enabled</option>"
+                "<option value='0'"; if (!gCfg->meshBeaconBroadcast) html += " selected"; html += ">Disabled</option>"
+                "</select></label>";
+        html += "<label>Target preset<select name='mesh_beacon_target'>";
+        // Keep a stored target this radio cannot run selected, so a save of
+        // unrelated fields never substitutes the first listed preset for it.
+        if (!presetUsableOnThisRadio(target)) {
+            snprintf(tmp, sizeof(tmp), "%u", (unsigned)target);
+            html += "<option value='"; html += tmp; html += "' selected>";
+            appendAttr(html, kPresets[target].name);
+            html += " (not available on this radio)</option>";
+        }
+        for (uint8_t i = 0; i < PRESET_COUNT; i++) {
+            if (!presetUsableOnThisRadio(i)) continue;
+            snprintf(tmp, sizeof(tmp), "%u", (unsigned)i);
+            html += "<option value='"; html += tmp; html += "'";
+            if (i == target) html += " selected";
+            html += ">"; appendAttr(html, kPresets[i].name); html += "</option>";
+        }
+        html += "</select></label>";
+        html += "<label>Include key<select name='mesh_beacon_offer_psk'>"
+                "<option value='1'"; if ( gCfg->meshBeaconOfferPsk) html += " selected"; html += ">Enabled</option>"
+                "<option value='0'"; if (!gCfg->meshBeaconOfferPsk) html += " selected"; html += ">Disabled</option>"
+                "</select></label>";
+        html += "<label>Interval<select name='mesh_beacon_interval'>";
+        static const uint8_t kIntervalsH[] = {1, 2, 3, 6, 12, 24};
+        const uint8_t curH = clampBeaconIntervalH(gCfg->meshBeaconIntervalH);
+        for (uint8_t h : kIntervalsH) {
+            snprintf(tmp, sizeof(tmp), "%u", (unsigned)h);
+            html += "<option value='"; html += tmp; html += "'";
+            if (h == curH) html += " selected";
+            html += ">"; html += tmp; html += " h</option>";
+        }
+        html += "</select></label>";
+        html += "</div>";
+        html += "<label>Message<input name='mesh_beacon_message' type='text' maxlength='60' value='";
+        char msg[sizeof(gCfg->meshBeaconMessage)];
+        memcpy(msg, gCfg->meshBeaconMessage, sizeof(msg));
+        msg[sizeof(msg) - 1] = '\0';
+        appendAttr(html, msg);
+        html += "'></label>";
+
+        const ChannelKey &c0 = CHANNEL_KEYS[0];
+        const char *home = c0.name_buf[0] ? c0.name_buf : c0.name;
+        if (!home || !home[0]) {
+            const uint8_t pi = gCfg->modemPreset < PRESET_COUNT ? gCfg->modemPreset : (uint8_t)PRESET_LONG_FAST;
+            home = gCfg->loraUsePreset ? kPresets[pi].channelName : CUSTOM_CHANNEL_NAME;
+        }
+        html += "<p class='hint'>"
+                "With Broadcast on, this device briefly retunes to the target preset on "
+                "the default channel and sends a short beacon naming your primary channel, "
+                "preset and region. Your own radio settings are never changed. "
+                "With Include key on: <b>Anyone on ";
+        appendAttr(html, kPresets[target].channelName);
+        html += " can join ";
+        appendAttr(html, home);
+        html += ".</b></p>";
+        if (lic::active()) {
+            html += "<p class='hint'><b>Broadcast is off while licensed:</b> the beacon "
+                    "is encrypted with the default key, so none is sent until licensed "
+                    "mode is off.</p>";
+        }
+    }
 
     html += "<h3 class='cfg-sub'>Neighborhood Info</h3>";
     html += "<div class='row2'>";
@@ -5016,6 +5230,10 @@ static void sendConfigPage(const char *msg = "", bool lite = false) {
 
     // camillia chat server client
     html += "<h3 class='cfg-sub'>Chat Server</h3>";
+    if (lic::active()) {
+        html += "<p class='hint'><b>Off while licensed:</b> chat server traffic is "
+                "encrypted, so the client sends nothing until licensed mode is off.</p>";
+    }
     html += "<label>Catch-up<select name='cs_mode'>";
     {
         static const char *const kModes[3] = {"Off", "Automatic (boot + every 15 min)", "Manual only"};
@@ -5757,7 +5975,23 @@ static void sendConfigPage(const char *msg = "", bool lite = false) {
     html +=
         "<p><a href='/export'"
         " class='btn'>"
-        "&#11015; Export Config</a></p>"
+        "&#11015; Export Config</a></p>";
+    {
+        // Boards with a card slot: the same /camillia/config.yaml the
+        // on-device Export writes, and Import on the device reads back.
+        SdProbeStatus sd;
+        sdGetProbeStatus(sd);
+        if (sd.hasSlot) {
+            html +=
+                "<form method='POST' action='/export-sd'>"
+                "<button type='submit' class='btn'>"
+                "&#128190; Export Config to SD Card</button>"
+                "</form>"
+                "<p class='hint'>Writes <code>/camillia/config.yaml</code> to the "
+                "card in the device, replacing any copy already there.</p>";
+        }
+    }
+    html +=
         "<form method='POST' action='/import' enctype='multipart/form-data'"
         " onsubmit=\"return confirm('This will replace your settings with the "
         "uploaded file and reboot the device. Continue?')\""
@@ -8051,6 +8285,39 @@ static void handlePostSave() {
     // so it can be compared against the applied result.
     const RhinoConfig cfgBefore = *gCfg;
 
+#if FEATURE_LICENSED_MODE
+    // Licensed mode. Decided and validated before any field is written, so a
+    // refused call sign saves nothing: the error is shown and the form can be
+    // corrected. Enter (also a call-sign change while licensed, which re-enters
+    // to recompose the long name) and exit run after the redirect, from
+    // webCfgLoop(), because both reboot.
+    const bool licWas  = cfgBefore.licensedMode;
+    const bool licForm = server.hasArg("lic_present");
+    bool licEnter = false, licExit = false;
+    char licCall[lic::kCallSignMax + 1] = "";
+    char licSuffix[sizeof(gLicSuffix)] = "";
+    uint8_t licPwr = (uint8_t)constrain((int)gCfg->loraPower, 1, (int)MESH_POWER);
+    if (licForm) {
+        const bool want = server.hasArg("lic_en");
+        utf8util::copyTruncate(licSuffix, sizeof(licSuffix), server.arg("lic_suffix").c_str());
+        if (server.hasArg("lic_pwr")) {
+            licPwr = (uint8_t)constrain((int)server.arg("lic_pwr").toInt(), 1, (int)MESH_POWER);
+        }
+        if (want) {
+            const String call = server.arg("lic_call");
+            // Never truncated: an over-long call sign is refused, not shortened.
+            if (!lic::normalizeCallSign(call.c_str(), licCall, sizeof(licCall))) {
+                redirectHomeWithFlash(call.length()
+                    ? "Not saved: invalid call sign (1-15 letters, digits or /)."
+                    : "Not saved: enter a call sign to turn licensed mode on.");
+                return;
+            }
+            licEnter = !licWas || strcmp(licCall, cfgBefore.callSign) != 0;
+        } else {
+            licExit = licWas;
+        }
+    }
+#endif
     // Node identity
     String lng  = server.arg("long");
     String shrt = server.arg("short");
@@ -8088,6 +8355,9 @@ static void handlePostSave() {
     // Device
     gCfg->deviceRole        = cfgCoerceDeviceRole((uint8_t)server.arg("role").toInt());
     gCfg->rebroadcastMode   = (uint8_t)constrain(server.arg("rebroadcast").toInt(), 0,  4);
+#if FEATURE_LICENSED_MODE
+    if (!licWas)   // locked to the station-ID interval while licensed; not on the form
+#endif
     gCfg->nodeInfoIntervalS = (uint32_t)constrain(server.arg("nodeinfo_intv").toInt(),
                                                   (long)60, (long)CFG_BROADCAST_INTERVAL_MAX_S);
     gCfg->posIntervalS      = (uint32_t)constrain(server.arg("pos_intv").toInt(),
@@ -8182,6 +8452,9 @@ static void handlePostSave() {
         snprintf(field, sizeof(field), "ch%d_key", i);
         String kh = server.arg(field);
         kh.trim();
+#if FEATURE_LICENSED_MODE
+        if (licWas) kh = "";   // keys stay empty while licensed
+#endif
         if (kh.length() >= 2) {
             uint8_t kbuf[32];
             int klen = base64Decode(kh.c_str(), kbuf, 32);
@@ -8455,6 +8728,12 @@ static void handlePostSave() {
         gCfg->powerLedPct = cfgCoercePowerLedPct(server.arg("power_led_pct").toInt());
     }
 #endif
+#if HAS_CHANNEL_PANEL_LOCK
+    // onWebCfgSaved() rebuilds the screen around it; no reboot.
+    if (server.hasArg("channel_panel_lock")) {
+        cfgSetChannelPanelLocked(*gCfg, server.arg("channel_panel_lock") == "1");
+    }
+#endif
 #if HAS_NOTIFY_LED
     // Legacy compatibility for older cached pages that still post notify_led:
     // the new model is per-type control, so turning the old global toggle off
@@ -8570,6 +8849,46 @@ static void handlePostSave() {
     if (server.hasArg("mesh_beacon_listen")) {
         gCfg->meshBeaconListen = server.arg("mesh_beacon_listen").toInt() != 0;
     }
+    if (server.hasArg("mesh_beacon_broadcast")) {
+        gCfg->meshBeaconBroadcast = server.arg("mesh_beacon_broadcast").toInt() != 0;
+    }
+    if (server.hasArg("mesh_beacon_target")) {
+        const long t = server.arg("mesh_beacon_target").toInt();
+        // Out of range falls to LongFast in cfgCoerceMeshBeacon(); a preset this
+        // radio cannot run is kept unchanged rather than substituted.
+        if (t < 0 || t >= PRESET_COUNT) {
+            gCfg->meshBeaconTargetPreset = PRESET_COUNT;
+        } else if (presetUsableOnThisRadio((uint8_t)t)) {
+            gCfg->meshBeaconTargetPreset = (uint8_t)t;
+        }
+    }
+    if (server.hasArg("mesh_beacon_offer_psk")) {
+        gCfg->meshBeaconOfferPsk = server.arg("mesh_beacon_offer_psk").toInt() != 0;
+    }
+    if (server.hasArg("mesh_beacon_interval")) {
+        const long h = server.arg("mesh_beacon_interval").toInt();
+        gCfg->meshBeaconIntervalH = h < 0 ? 0 : (h > 255 ? 255 : (uint8_t)h);
+    }
+    if (server.hasArg("mesh_beacon_message")) {
+        const String m = server.arg("mesh_beacon_message");
+        beaconCopyMessage(gCfg->meshBeaconMessage, m.c_str());
+    }
+    cfgCoerceMeshBeacon(*gCfg);
+    cfgCoerceLicensed(*gCfg);
+    // That may have moved the region (or the preset with it); the radio
+    // fields were derived above from the pre-coercion values.
+    applyPresetParams(*gCfg);
+#if FEATURE_LICENSED_MODE
+    if (licForm && licWas && !licEnter && !licExit) {
+        // Staying licensed under the same call sign: the suffix and power are
+        // simply stored. The long name stays CALL//suffix.
+        gCfg->loraPower = licPwr;
+        lic::composeLongName(gCfg->callSign, licSuffix, gCfg->nodeLong, MESH_LONG_NAME_MAX_BYTES + 1);
+    }
+    if (licForm && !licEnter && gCfg->licTxHold && server.hasArg("lic_resume")) {
+        resumeTxAfterLicensedExit();
+    }
+#endif
     gCfg->neighborInfoIntervalS = neighborInfoIntervalS;
     if (server.hasArg("neighbor_info_lora")) {
         gCfg->neighborInfoOverLora = server.arg("neighbor_info_lora").toInt() != 0;
@@ -8689,6 +9008,22 @@ static void handlePostSave() {
 
     if (gOnSave) gOnSave();
 
+#if FEATURE_LICENSED_MODE
+    if (licEnter || licExit) {
+        // The rest of the form is already applied and saved by gOnSave above;
+        // enterLicensedMode()/exitLicensedMode() save again and reboot, after
+        // this redirect has reached the browser.
+        gLicReq = licEnter ? 1 : 2;
+        memcpy(gLicCall, licCall, sizeof(gLicCall));
+        memcpy(gLicSuffix, licSuffix, sizeof(gLicSuffix));
+        gLicPwr = licPwr;
+        gLicAtMs = millis() + 900;
+        redirectHomeWithFlash(licEnter ? "Saved. Entering licensed mode and rebooting..."
+                                       : "Saved. Leaving licensed mode and rebooting...");
+        return;
+    }
+#endif
+
     // Font size alone does not need a reboot — the save callback re-renders chat
     // and DMs at the new size, exactly as the on-device picker does. Rebooting
     // for it meant a ~10 second outage to change how big the text is.
@@ -8717,6 +9052,8 @@ static void handlePostSave() {
     cfgMasked.packetSigPolicy = cfgBefore.packetSigPolicy;
     // Read by the Tanmatsu status-light poll once a second.
     cfgMasked.powerLedPct = cfgBefore.powerLedPct;
+    // Channel panel: onWebCfgSaved() rebuilds the screen around it.
+    cfgMasked.channelPanelLock = cfgBefore.channelPanelLock;
     const bool fontChanged  = (gCfg->fontSize != cfgBefore.fontSize);
     const bool spellChanged = (gCfg->spellCheckEnabled != cfgBefore.spellCheckEnabled);
     const bool wardriveChanged = (gCfg->wardriveLogEnabled != cfgBefore.wardriveLogEnabled);
@@ -8724,10 +9061,12 @@ static void handlePostSave() {
     const bool kbLightTimeoutChanged = (gCfg->kbLightTimeoutS != cfgBefore.kbLightTimeoutS);
     const bool sigPolicyChanged = (gCfg->packetSigPolicy != cfgBefore.packetSigPolicy);
     const bool powerLedChanged = (gCfg->powerLedPct != cfgBefore.powerLedPct);
+    const bool channelPanelChanged = (gCfg->channelPanelLock != cfgBefore.channelPanelLock);
     const bool liveOnly = (memcmp(&cfgMasked, &cfgBefore, sizeof(RhinoConfig)) == 0)
                           && (fontChanged || spellChanged || wardriveChanged
                               || navAlignChanged || kbLightTimeoutChanged
-                              || sigPolicyChanged || powerLedChanged);
+                              || sigPolicyChanged || powerLedChanged
+                              || channelPanelChanged);
 
     if (liveOnly) {
         redirectHomeWithFlash(fontChanged ? "Saved. Font size applied." : "Saved.");
@@ -9266,6 +9605,10 @@ static void handlePostAnnounce() {
 
 static void handlePostChatServerCheck() {
     if (!isLoggedIn()) { redirect("/login"); return; }
+    if (lic::active()) {
+        redirectHomeWithFlash("Chat server is off while licensed.");
+        return;
+    }
     webCfgQueueChatServerCheck();
     redirectHomeWithFlash("Chat server check queued.");
 }
@@ -9339,8 +9682,14 @@ static void handlePostCommunityPreset() {
     gCommunityReq = idx;
     gCommunityAtMs = millis() + 900;
     char msg[160];
-    snprintf(msg, sizeof(msg), "Applying %s. The device reboots and this page will "
-             "not respond until it is back.", kCommunityPresets[idx].label);
+    if (lic::active()) {
+        // Shorter: the flash message is 128 bytes and the note must fit.
+        snprintf(msg, sizeof(msg), "Licensed mode: channel imported without its key. "
+                 "Applying %s; the device reboots.", kCommunityPresets[idx].label);
+    } else {
+        snprintf(msg, sizeof(msg), "Applying %s. The device reboots and this page will "
+                 "not respond until it is back.", kCommunityPresets[idx].label);
+    }
     redirectHomeWithFlash(msg);
 }
 
@@ -10097,6 +10446,17 @@ static void handleGetExport() {
     server.send(200, "text/x-yaml", yaml);
 }
 
+static void handlePostExportSd() {
+    if (!isLoggedIn()) { redirect("/login"); return; }
+    if (!gCfg) { server.send(500, "text/plain", "No config"); return; }
+    // The user just asked; a card inserted since the last failed probe must
+    // not be refused by the cooldown (same as the on-device Export).
+    sdForceRescan();
+    const bool ok = cfgExport(*gCfg);
+    redirectHomeWithFlash(ok ? "Config exported to /camillia/config.yaml on the SD card."
+                             : "Export to SD failed: no card mounted, or the write failed.");
+}
+
 // Static, not heap: 8 KB is more than AP mode could allocate contiguously, and
 // the buffer exists either way since both route sets share these handlers.
 static char   importBuf[8192];
@@ -10184,17 +10544,28 @@ static void handleImportDone() {
         prefs.end();
     }
 
+#if FEATURE_LICENSED_MODE
+    // Licensed now, or by the imported config: its channels come in keyless,
+    // stripped before gOnSave() persists them and puts them on the radio.
+    const bool licKeysStripped =
+        (lic::active() || gCfg->licensedMode) && licStripChannelsForImport();
+#else
+    const bool licKeysStripped = false;
+#endif
     if (gOnSave) gOnSave();
     scheduleReboot(900);
     // Plain text: both result paths HTML-escape the message when rendering it.
     const char *warn = cfgImportWarning();
+    // The licensed note goes first: the flash message is 128 bytes.
+    const char *licNote = licKeysStripped
+        ? " Licensed mode: channel imported without its key." : "";
+    char msg[sizeof(gFlashMsg)];
     if (warn && warn[0]) {
-        char msg[sizeof(gFlashMsg)];
-        snprintf(msg, sizeof(msg), "Import complete. %s. Rebooting now...", warn);
-        sendImportResult(msg);
+        snprintf(msg, sizeof(msg), "Import complete.%s %s. Rebooting now...", licNote, warn);
     } else {
-        sendImportResult("Import complete. Rebooting now...");
+        snprintf(msg, sizeof(msg), "Import complete.%s Rebooting now...", licNote);
     }
+    sendImportResult(msg);
 }
 
 // The full page's stylesheet. Cached for a year: the page links it as
@@ -10918,6 +11289,7 @@ static void registerCommonRoutes() {
     onRoute("/wardrive.csv",      HTTP_GET,  handleGetWardriveCsv);
     onRoute("/clear-wardrive",    HTTP_POST, handlePostClearWardrive);
     onRoute("/export",            HTTP_GET,  handleGetExport);
+    onRoute("/export-sd",         HTTP_POST, handlePostExportSd);
     onRoute("/import",            HTTP_POST, handleImportDone, handleImportUpload);
 #if HAS_UI_COLOR_OPTIONS
     onRoute("/reset-chat-colors", HTTP_POST, handlePostResetChatColors);
@@ -11006,6 +11378,9 @@ bool webCfgBegin(RhinoConfig *cfg, WebCfgSaveCb onSave,
     gTelemetryReq = false;
     gFlashMsg[0] = '\0';
     gRebootPending = false;
+#if FEATURE_LICENSED_MODE
+    gLicReq = 0;
+#endif
     gRebootAtMs = 0;
     clearReleaseCheckResult();
     gReleaseCheckState = RELEASE_CHECK_IDLE;
@@ -11228,8 +11603,9 @@ void webCfgEnd() {
     gFirstServiceMs = 0;
     sessionToken[0] = '\0';
     gFlashMsg[0] = '\0';
-    gRebootPending = false;
-    gRebootAtMs = 0;
+    // A queued licensed-mode transition or reboot is carried out, not dropped:
+    // the save that queued it has already been answered as done.
+    webCfgRunPending(true);
     clearReleaseCheckResult();
     gReleaseCheckState = RELEASE_CHECK_IDLE;
     server.stop();
@@ -11368,7 +11744,32 @@ void webCfgLoop() {
         Serial.printf("[web] idle %lus with no request - requesting shutdown\n",
                       (unsigned long)(gIdleTimeoutMs / 1000UL));
     }
-    if (gRebootPending && (int32_t)(millis() - gRebootAtMs) >= 0) {
+    webCfgRunPending(false);
+}
+
+// The licensed-mode transition and reboot queued by a handler. Normally run by
+// webCfgLoop() once their delay has passed; webCfgEnd() runs them at once
+// (now = true), as stopping the server must not cancel them.
+static void webCfgRunPending(bool now) {
+#if FEATURE_LICENSED_MODE
+    if (gLicReq && (now || (int32_t)(millis() - gLicAtMs) >= 0)) {
+        const uint8_t req = gLicReq;
+        gLicReq = 0;
+        server.stop();
+        delay(100);
+        if (req == 1) {
+            char err[96];
+            // Validated in handlePostSave(), so this reboots and does not return.
+            if (!enterLicensedMode(gLicCall, gLicSuffix, gLicPwr, err, sizeof(err))) {
+                Serial.printf("[web] licensed mode not entered: %s\n", err);
+                scheduleReboot(0);   // the rest of the save still needs it
+            }
+        } else {
+            exitLicensedMode();
+        }
+    }
+#endif
+    if (gRebootPending && (now || (int32_t)(millis() - gRebootAtMs) >= 0)) {
         gRebootPending = false;
         server.stop();
         delay(100);
