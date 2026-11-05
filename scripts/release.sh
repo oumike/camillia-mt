@@ -40,6 +40,7 @@ RELEASE_ENVS=(
     crowpanel-50
     p4-amoled-sx1262
     p4-amoled-lr2021
+    tanmatsu
 )
 
 DEFAULT_PIO_CORE_DIR="${PLATFORMIO_CORE_DIR:-$HOME/.platformio}"
@@ -47,7 +48,7 @@ P4_PIO_CORE_DIR="${CAMILLIA_P4_PIO_CORE_DIR:-${DEFAULT_PIO_CORE_DIR}-p4}"
 
 is_p4_env() {
     case "$1" in
-        p4-amoled-*) return 0 ;;
+        p4-amoled-*|tanmatsu) return 0 ;;
         *)           return 1 ;;
     esac
 }
@@ -81,21 +82,21 @@ env_flash_size() {
 
 env_chip() {
     case "$1" in
-        p4-amoled-*) echo "esp32p4" ;;
+        p4-amoled-*|tanmatsu) echo "esp32p4" ;;
         *)           echo "esp32s3" ;;
     esac
 }
 
 env_bootloader_offset() {
     case "$1" in
-        p4-amoled-*) echo "0x2000" ;;
+        p4-amoled-*|tanmatsu) echo "0x2000" ;;
         *)           echo "0x0" ;;
     esac
 }
 
 env_flash_mode() {
     case "$1" in
-        p4-amoled-*) echo "qio" ;;
+        p4-amoled-*|tanmatsu) echo "qio" ;;
         *)           echo "dio" ;;
     esac
 }
