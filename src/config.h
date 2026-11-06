@@ -84,7 +84,9 @@
 #define MESH_CR         5         // 4/5 coding rate (Meshtastic LONG_FAST default)
 #define MESH_SYNC       0x2B      // Meshtastic sync word
 #define MESH_PREAMBLE   16
+#ifndef MESH_POWER                // a board header may set a lower hardware max
 #define MESH_POWER      22        // dBm (hardware max; ribl_config requests 30)
+#endif
 #define MESH_HOP_LIMIT   7        // from ribl_config
 // SX1262 RX boosted gain. ~2 dB more sensitivity for ~2 mA more receive
 // current, paid continuously because the radio idles in RX. 1 keeps the
@@ -324,8 +326,8 @@
 #define CHAT_NAME_SHORT     0      // 4-char short name (e.g. "ABCD")
 #define CHAT_NAME_LONG      1      // full long name when the node has advertised one
 #define CHAT_NAME_MAX       CHAT_NAME_LONG
-#define MY_CHAT_NAME_STYLE  CHAT_NAME_SHORT
-#define MY_USER_MSG_COLOR   0xFF   // own-message color: 0..15 palette index, 0xFF=adaptive default
+#define MY_CHAT_NAME_STYLE  CHAT_NAME_LONG
+#define MY_USER_MSG_COLOR   0xFF   // own-message color: 0..15 palette index, 0xFE=custom, 0xFF=adaptive default
 
 // ── External BLE keyboard defaults ─────────────────────────────
 // Off, deliberately. A resident NimBLE stack costs 30-40 KB of internal DRAM,
@@ -391,6 +393,23 @@
 // shown, never applied. Off by default because it is an opt-in curiosity, not
 // something a device needs in order to work on its own mesh.
 #define MY_MESH_BEACON_LISTEN 0
+// Broadcast our own MeshBeacon on a target preset's default channel (port 37,
+// zero hops). Off by default: it transmits, and on a preset other than home it
+// briefly retunes the radio. The offer PSK switch decides whether the beacon
+// carries our primary channel's key; off by default because that key is
+// otherwise private. Interval is hours, one of {1,2,3,6,12,24}.
+#define MY_MESH_BEACON_BROADCAST  0
+#define MY_MESH_BEACON_TARGET     PRESET_LONG_FAST
+#define MY_MESH_BEACON_OFFER_PSK  0
+#define MY_MESH_BEACON_INTERVAL_H 1
+// Licensed (amateur) mode: off by default, and only an operator with a call
+// sign can turn it on. MY_CALL_SIGN "" means none entered yet.
+#ifndef MY_LICENSED_MODE
+#define MY_LICENSED_MODE 0
+#endif
+#ifndef MY_CALL_SIGN
+#define MY_CALL_SIGN ""
+#endif
 #define MY_NEIGHBORINFO_INTV 21600
 #define MY_NEIGHBORINFO_LORA 1
 #define NEIGHBORINFO_MIN_INTERVAL_S 14400
@@ -409,6 +428,15 @@
 #define FEATURE_DISCOVERY 0
 #else
 #define FEATURE_DISCOVERY 1
+#endif
+// Licensed (amateur) mode: call sign identity, ham-band regions, and the
+// licensed/unlicensed relay gate. Off on the Cardputer LoRa hat: its radio
+// reaches no amateur band worth having, and its heap is as tight as the
+// FEATURE_DISCOVERY note above describes.
+#if defined(DEVICE_CARDPUTER_LORA_HAT)
+#define FEATURE_LICENSED_MODE 0
+#else
+#define FEATURE_LICENSED_MODE 1
 #endif
 // Lock screen: a lit glance surface between the UI and a dark panel. Entered by
 // the board's existing screen-off gesture or idle timeout, left by its existing
@@ -678,6 +706,16 @@
 #define CFG_GRID_FOUR_WAY 0
 #endif
 
+// Popups drawn as grids (font size, alert sound, message colour, Node/Message
+// Actions) and the slider with a checkbox under it are walked as drawn: Up/Down
+// a row, Left/Right a column. The M9 pad and the Tanmatsu's arrows deliver all
+// four directions; elsewhere these step through the flat index.
+#if defined(DEVICE_M9) || defined(DEVICE_TANMATSU)
+#define UI_ARROW_GRID_NAV 1
+#else
+#define UI_ARROW_GRID_NAV 0
+#endif
+
 // The emoji tray draws its glyphs at 26 px (the 24 px emoji slot) in 38 px
 // cells rather than 20 px in 30, so they can be told apart at a glance. Needs
 // the 24 px tiny_ttf instance and its glyph cache, a few KB of LVGL pool:
@@ -716,6 +754,18 @@
 #define HAS_POWER_LED_LEVEL 1
 #else
 #define HAS_POWER_LED_LEVEL 0
+#endif
+
+// Display > Channel Panel: the channel list docked beside the chat (locked,
+// the default) or slid in as a drawer (unlocked). The boards whose landscape
+// layout has room for both: the Tanmatsu, and the large-panel T-Display P4
+// (landscape only; portrait always uses the drawer). With arrow keys, Left on
+// the chat screen undocks and Right docks again (pumpKeyboardInput()). The
+// Pager stays docked: its drawer code is compiled out (UI_CHANNEL_LIST_DROPDOWN).
+#if defined(DEVICE_TANMATSU) || (defined(DEVICE_TDISPLAY_P4) && UI_LARGE_PANEL_PROFILE)
+#define HAS_CHANNEL_PANEL_LOCK 1
+#else
+#define HAS_CHANNEL_PANEL_LOCK 0
 #endif
 // Percent; see kPowerLedLevels. Dim by default: it sits beside the screen.
 #define MY_POWER_LED_PCT 10
@@ -814,8 +864,11 @@
 // Pro's and gated the same way -- F7 decides lit or dark, the level is how
 // bright lit is. F11 steps the same levels. Its Settings row only appears with
 // the keyboard attached, and points at F11 rather than opening a picker.
+//
+// Tanmatsu: a 0..255 duty held by its coprocessor (TANMATSU_REG_KEYBOARD_
+// BACKLIGHT), lit with the screen and dark while it sleeps.
 #if defined(DEVICE_M9) || defined(DEVICE_TDECK) || defined(DEVICE_TDECK_PRO) \
-    || defined(DEVICE_TDISPLAY_P4)
+    || defined(DEVICE_TDISPLAY_P4) || defined(DEVICE_TANMATSU)
 #define HAS_KB_BACKLIGHT_LEVEL 1
 #else
 #define HAS_KB_BACKLIGHT_LEVEL 0
@@ -833,8 +886,13 @@
 // T-Deck Pro: full, because Alt+B already decides whether the keyboard is lit
 // at all and it has always come up lit at whatever the pin could give. The
 // level is only how bright that is, so full is "unchanged".
+//
+// Tanmatsu: Medium. Nothing set it before, and a full-duty keyboard under an
+// 800x480 panel is glaring in the dark.
 #if defined(DEVICE_TDECK)
 #define MY_KB_BACKLIGHT_LEVEL 0
+#elif defined(DEVICE_TANMATSU)
+#define MY_KB_BACKLIGHT_LEVEL 160
 #else
 #define MY_KB_BACKLIGHT_LEVEL 255
 #endif

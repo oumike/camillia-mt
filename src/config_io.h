@@ -196,7 +196,9 @@ struct RhinoConfig {
     uint8_t  chatNameStyle;      // 0=SHORT (4-char), 1=LONG (full node name) in chat
     bool     chatColorsEnabled;  // classic mode: use per-node text colors
     uint8_t  userMsgColor;       // own-message color: 0..15 = basic palette index,
+                                 // 0xFE = custom (userMsgCustomRgb),
                                  // 0xFF = adaptive default (theme yellow/amber)
+                                 // -- see src/user_msg_colors.h
 
     // Bluetooth
     bool     btEnabled;
@@ -761,10 +763,88 @@ struct RhinoConfig {
     // boundary, so this starts at exactly the previous sizeof(RhinoConfig) and
     // an upgrading device keeps the compiled default.
     uint8_t  powerLedPct;
+    // ── Channel panel lock (HAS_CHANNEL_PANEL_LOCK boards: Tanmatsu, P4 landscape) ──
+    // Locked docks the channel list beside the chat; unlocked makes it the
+    // sliding drawer. The arrow keys on the chat screen also change it. Read it through cfgChannelPanelLocked(). Locked is the
+    // default, so only kChannelPanelUnlocked means unlocked -- the pad byte
+    // this took from older builds, whatever it holds, reads as locked.
+    uint8_t  channelPanelLock;
     // For whoever appends next: the struct's trailing padding, spelled out.
     // Past it is the old sizeof(RhinoConfig).
-    uint8_t  _reservedPad20[3];
+    uint8_t  _reservedPad20[2];
+
+    // ── Custom own-message colour ────────────────────────────────────────────
+    // 0xRRGGBB, used when userMsgColor == USER_MSG_COLOR_CUSTOM. Kept while
+    // another colour is chosen, so switching back to Custom restores it.
+    //
+    // Safe at the end: _reservedPad20 above fills the old struct out to a 4-byte
+    // boundary, so this starts at exactly the previous sizeof(RhinoConfig) and
+    // an upgrading device keeps the compiled default.
+    uint32_t userMsgCustomRgb;
+
+    // ── Mesh beacon broadcast (all boards) ───────────────────────────────────
+    // Sends our own MeshBeacon (port 37) on meshBeaconTargetPreset's default
+    // channel every meshBeaconIntervalH hours. Read through
+    // cfgCoerceMeshBeacon(): target is a PRESET_* index (>= PRESET_COUNT reads
+    // as PRESET_LONG_FAST), interval one of {1,2,3,6,12,24}, message at most
+    // 60 bytes on a UTF-8 boundary. Offer PSK puts our primary key in the
+    // beacon; off unless chosen.
+    //
+    // Safe at the end: userMsgCustomRgb above is a uint32_t, so the old struct
+    // had no trailing padding and this starts at exactly the previous
+    // sizeof(RhinoConfig). An older blob stops short of it, so an upgrading
+    // device keeps the compiled defaults — and an all-zero tail reads as the
+    // defaults too: off, PRESET_LONG_FAST (== 0), no PSK, interval 0 -> 1 h.
+    bool     meshBeaconBroadcast;
+    uint8_t  meshBeaconTargetPreset;
+    bool     meshBeaconOfferPsk;
+    uint8_t  meshBeaconIntervalH;
+    char     meshBeaconMessage[61];
+    // For whoever appends next: the struct's trailing padding, spelled out.
+    // Past it is the old sizeof(RhinoConfig).
+    uint8_t  _reservedPad21[3];
+
+    // ── Licensed (amateur) mode ──────────────────────────────────────────────
+    // Read through cfgCoerceLicensed(): callSign is normalised (A-Z, 0-9, '/',
+    // 1..15 chars) or cleared, and licensedMode cannot stay on without one or on
+    // a build without FEATURE_LICENSED_MODE. While on, rebroadcastMode is forced
+    // to LOCAL_ONLY. licTxHold is set when a ham region had to be dropped (mode
+    // turned off, or the radio cannot reach the band), so the UI can say why the
+    // region changed; it is not exported to YAML.
+    //
+    // Safe at the end: _reservedPad21 fills the old struct out, so this starts
+    // at exactly the previous sizeof(RhinoConfig). An older blob stops short,
+    // and an upgrading device keeps the compiled defaults; an all-zero tail
+    // reads as off, no call sign, no hold.
+    bool     licensedMode;
+    char     callSign[16];
+    bool     licTxHold;
+    // For whoever appends next: the struct's trailing padding, spelled out.
+    // Past it is the old sizeof(RhinoConfig).
+    uint8_t  _reservedPad22[2];
 };
+
+// Brings the mesh beacon broadcast fields back into range: run after a blob
+// load and after a YAML import. Never substitutes a usable preset for one this
+// radio cannot run — that is the scheduler's call, not the loader's.
+void cfgCoerceMeshBeacon(RhinoConfig &cfg);
+
+// Licensed-mode backstop: run wherever cfgCoerceMeshBeacon() runs, before
+// applyPresetParams(). Clears an invalid call sign, drops licensed mode without
+// one (or without FEATURE_LICENSED_MODE), moves a region this config may not
+// use back to MY_REGION (setting licTxHold if it was a ham region), and forces
+// rebroadcastMode to LOCAL_ONLY while licensed. wasLicensed: the config was
+// licensed before this change (an import); if it no longer is, loraPower is
+// clamped to the region's limit, as exitLicensedMode() does.
+void cfgCoerceLicensed(RhinoConfig &cfg, bool wasLicensed = false);
+
+static constexpr uint8_t kChannelPanelUnlocked = 0xA5;
+inline bool cfgChannelPanelLocked(const RhinoConfig &c) {
+    return c.channelPanelLock != kChannelPanelUnlocked;
+}
+inline void cfgSetChannelPanelLocked(RhinoConfig &c, bool locked) {
+    c.channelPanelLock = locked ? 0 : kChannelPanelUnlocked;
+}
 
 // Vibration style codes, as cfgHapticStyle() returns them. Same values as
 // HapticStyle in src/hal/tdisplay_p4_haptic.h, which only the P4 compiles.

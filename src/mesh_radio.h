@@ -131,6 +131,11 @@ public:
     // Blocking transmit. Re-arms receive after. Returns false on error.
     bool transmit(const uint8_t *buf, size_t len);
 
+    // Licensed mode: while inhibited, transmit() returns false without keying
+    // the radio (N0CALL call sign, or held after leaving a ham-only region).
+    void setTxInhibit(bool inhibit) { _txInhibit = inhibit; }
+    bool txInhibited() const { return _txInhibit; }
+
     // Temporarily pause/resume receive mode (used by screenshot capture on
     // shared-SPI builds to avoid bus contention).
     void setRxPaused(bool paused);
@@ -172,6 +177,7 @@ private:
     bool    _ready = false;
     bool    _rxBoostedGain = (bool)MY_LORA_RX_BOOST;
     bool    _externalAntenna = false;   // T-Display P4 only; false = on-board
+    bool    _txInhibit = false;
 #if defined(DEVICE_TDISPLAY_P4)
     TDisplayP4RadioHal _hal;
     Module _module{&_hal, LORA_CS, TDisplayP4RadioHal::kDio1,

@@ -9,6 +9,35 @@
 // (page falls back to Camillia Dark) where no palette exists.
 bool webCfgThemeColors(WebThemeColors *out);
 
+// Licensed (amateur) mode transactions, defined in main_lvgl.cpp beside the
+// config and channel persistence they drive; declared here so web config can
+// reach them as the device UI does. "Am I licensed" is lic::active()
+// (licensed_mode.h), fixed at boot.
+//   enterLicensedMode: normalises the call sign, sets the long name, strips
+//     every channel key, disables "admin", forces LOCAL_ONLY, sets TX power
+//     (1..MESH_POWER), saves and reboots. Returns false with a reason in err
+//     (invalid call sign, or not built with FEATURE_LICENSED_MODE) and changes
+//     nothing; on success it does not return.
+//   exitLicensedMode: clears the flag; from a ham region moves to MY_REGION and
+//     holds TX (licTxHold); clamps power to the region; saves and reboots. The
+//     stripped channel keys are not restored.
+//   resumeTxAfterLicensedExit: clears licTxHold and lifts the TX inhibit; no
+//     reboot.
+//   licensedTxInhibited: the radio is refusing to transmit (licTxHold, or
+//     licensed as N0CALL).
+// enter (on success) and exit block ~0.5 s and reboot: send any HTTP reply first.
+bool enterLicensedMode(const char *callSign, const char *longSuffix, uint8_t txPower,
+                       char *err, size_t errCap);
+void exitLicensedMode();
+void resumeTxAfterLicensedExit();
+bool licensedTxInhibited();
+#if FEATURE_LICENSED_MODE
+// A config import on a licensed device, or one that turns licensed mode on:
+// makes every channel keyless and disables "admin", as entering the mode does.
+// Run before the import is persisted. True when a key or role was changed.
+bool licStripChannelsForImport();
+#endif
+
 // The Files tab: browse, upload, download, copy and delete on device storage.
 // Every board has storage today; the guard is for one that someday does not.
 // A tab on the full page; a section of the lite page on the Cardputer, which

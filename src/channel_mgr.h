@@ -133,6 +133,13 @@ public:
     bool sendDiscoverySweep(uint32_t myNodeId, const char *longName, const char *shortName,
                             uint8_t hopLimit = 3);
 
+    // MeshBeacon (port 37) broadcast. payload is the raw MeshBeacon message
+    // (encodeMeshBeacon output); this wraps it in Data and encrypts it with the
+    // caller's key, which must have key/keyLen/hash filled. Zero-hop, no
+    // want_ack, never uplinked to MQTT. The caller owns the radio tuning.
+    bool sendMeshBeacon(uint32_t myNodeId, const uint8_t *payload, size_t len,
+                        const ChannelKey &key);
+
     // Milliseconds until a NODEINFO *broadcast* is allowed again; 0 = now. Every
     // NODEINFO broadcast shares one 15 s window, so the periodic announce — which
     // fires on the first loop pass after boot — can hold off a sweep the user just

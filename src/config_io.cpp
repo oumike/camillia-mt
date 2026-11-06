@@ -1,5 +1,7 @@
 #include "config_io.h"
 #include "mesh_channel_plan.h"
+#include "mesh_beacon.h"      // beacon interval / message clamps
+#include "licensed_mode.h"    // call sign / ham-region rules
 #include "mesh_proto.h"      // myPubKey / myPrivKey — node identity in the backup
 #include "admin_peers.h"
 #include "base64_util.h"
@@ -26,6 +28,21 @@ static_assert(offsetof(RhinoConfig, chatServerFlags) == offsetof(RhinoConfig, we
               "chatServerFlags must take the first byte of the old _reservedPad16");
 static_assert(offsetof(RhinoConfig, _reservedPad16) == offsetof(RhinoConfig, webFilesEnabled) + 2,
               "one pad byte must remain where it was");
+// The beacon block is appended at the old sizeof(RhinoConfig), which ended on
+// the 4-byte userMsgCustomRgb; see the note in config_io.h.
+static_assert(offsetof(RhinoConfig, meshBeaconBroadcast) ==
+              offsetof(RhinoConfig, userMsgCustomRgb) + sizeof(uint32_t),
+              "mesh beacon fields must start at the previous sizeof(RhinoConfig)");
+// The licensed-mode block is appended at the old sizeof(RhinoConfig), which
+// _reservedPad21 spelled out; see the note in config_io.h.
+static_assert(offsetof(RhinoConfig, licensedMode) == offsetof(RhinoConfig, _reservedPad21) + 3,
+              "licensed-mode fields must start at the previous sizeof(RhinoConfig)");
+static_assert(offsetof(RhinoConfig, callSign) == offsetof(RhinoConfig, licensedMode) + 1,
+              "callSign must follow licensedMode");
+static_assert(offsetof(RhinoConfig, licTxHold) == offsetof(RhinoConfig, callSign) + 16,
+              "licTxHold must follow callSign[16]");
+static_assert(sizeof(RhinoConfig) == offsetof(RhinoConfig, _reservedPad22) + 2,
+              "_reservedPad22 must spell out all of the trailing padding");
 
 // ── Channel plan tables ──────────────────────────────────────────────────────
 const PresetParams kPresets[PRESET_COUNT] = {
@@ -108,6 +125,23 @@ const RegionPlan kRegions[] = {
     // hashing — its band is 250 kHz wide, so there is exactly one place to be.
     {"EU_866",   865.6f,     867.6f,    22,  0.4f,    0.0375f, 0},
     {"EU_N_868", 869.4f,     869.65f,   22,  0.0f,    0.0104f, 1},
+    // Amateur-band regions, from upstream 9bcf0f7 RadioInterface.cpp:286-349.
+    // licensedOnly: selectable only in licensed mode (cfgCoerceLicensed and
+    // regionSelectable enforce it). tinyPresets: the band plan expects the
+    // 15.6 kHz Tiny presets rather than Narrow. Power is the same hardware
+    // ceiling as the rows above, not a regulatory figure.
+    //
+    // The 2 m rows sit below kRadioMinMhz (150 MHz), the floor of every radio
+    // we currently build for, so regionUsableOnThisRadio() rejects them; they
+    // are carried so an imported or offered 2 m region is recognised.
+    //  code          start     end      pwr  spacing  padding   slot  licOnly tiny
+    {"ITU1_2M",    144.0f,   146.0f,  22,  0.0f,    0.0022f,  26,   true,   true},
+    {"ITU2_2M",    144.0f,   148.0f,  22,  0.0f,    0.0022f,  51,   true,   true},
+    {"ITU3_2M",    144.0f,   148.0f,  22,  0.0f,    0.0022f,  33,   true,   true},
+    {"ITU2_125CM", 220.0f,   225.0f,  22,  0.0f,    0.01875f, 37,   true,   false},
+    {"ITU1_70CM",  430.0f,   440.0f,  22,  0.0f,    0.01875f, 37,   true,   false},
+    {"ITU2_70CM",  420.0f,   450.0f,  22,  0.0f,    0.01875f, 137,  true,   false},
+    {"ITU3_70CM",  430.0f,   450.0f,  22,  0.0f,    0.01875f, 37,   true,   false},
 };
 const uint8_t kRegionCount = (uint8_t)(sizeof(kRegions) / sizeof(kRegions[0]));
 
@@ -243,6 +277,31 @@ uint8_t regionPower(const char *code) {
     return r ? r->power : MESH_POWER;
 }
 
+const RegionPlan *regionPlan(const char *code) { return regionLookup(code); }
+
+bool regionUsableOnThisRadio(const char *code) {
+    const RegionPlan *r = regionLookup(code);
+    return r && r->freqStart >= lic::kRadioMinMhz;
+}
+
+bool regionSelectable(const char *code, bool selfLicensed) {
+    const RegionPlan *r = regionLookup(code);
+    return r && lic::regionSelectable(r->licensedOnly, r->freqStart, selfLicensed);
+}
+
+bool presetAllowedInRegion(const char *code, uint8_t preset) {
+    const RegionPlan *r = regionLookup(code);
+    if (!r || !r->licensedOnly) return true;
+    if (r->tinyPresets) return preset == PRESET_TINY_FAST || preset == PRESET_TINY_SLOW;
+    return preset == PRESET_NARROW_FAST || preset == PRESET_NARROW_SLOW;
+}
+
+uint8_t regionDefaultPreset(const char *code) {
+    const RegionPlan *r = regionLookup(code);
+    if (!r || !r->licensedOnly) return PRESET_LONG_FAST;
+    return r->tinyPresets ? PRESET_TINY_FAST : PRESET_NARROW_SLOW;
+}
+
 // Name channel 0 is known by for the frequency-slot hash under custom settings.
 // Those sit on whatever the primary channel is actually called, the way
 // Meshtastic hashes the primary channel's name once a preset is no longer in
@@ -315,25 +374,23 @@ static const char *const kRegionFromMeshtastic[] = {
     "KZ_863",   // 24
     "NP_865",   // 25
     "BR_902",   // 26
-    // 27/28 are the ITU 2 m ham regions, 33-37 the rest of the ham block. They
-    // are deliberately absent: upstream marks them licensed_only, prompts for a
-    // call sign and blocks relaying between licensed and unlicensed users, and
-    // we have no concept of a licensed operator. Shipping them without that gate
-    // would hand someone a menu entry that transmits unlicensed on 2 m. nullptr
-    // means an inbound region code we simply do not adopt, which is the same
-    // thing regionCodeFromMeshtastic() already returns for anything past the end.
-    nullptr,    // 27 ITU1_2M    (ham, licensed only)
-    nullptr,    // 28 ITU2_2M    (ham, licensed only; renamed from ITU23_2M)
+    // 27/28 are the ITU 2 m ham regions, 33-37 the rest of the ham block.
+    // Upstream marks them licensed_only. They translate here like any other
+    // region, but adopting one is gated by cfgCoerceLicensed(): without
+    // licensed mode (or on a radio that cannot reach the band) the region is
+    // put back to MY_REGION rather than transmitted on.
+    "ITU1_2M",  // 27 (ham, licensed only)
+    "ITU2_2M",  // 28 (ham, licensed only; renamed from ITU23_2M)
     "EU_866",   // 29
     // 30 and 31 are enum reservations upstream with no band table behind them.
     nullptr,    // 30 EU_874     (reserved upstream, no band)
     nullptr,    // 31 EU_917     (reserved upstream, no band)
     "EU_N_868", // 32
-    nullptr,    // 33 ITU3_2M    (ham, licensed only)
-    nullptr,    // 34 ITU1_70CM  (ham, licensed only)
-    nullptr,    // 35 ITU2_70CM  (ham, licensed only)
-    nullptr,    // 36 ITU3_70CM  (ham, licensed only)
-    nullptr,    // 37 ITU2_125CM (ham, licensed only)
+    "ITU3_2M",    // 33 (ham, licensed only)
+    "ITU1_70CM",  // 34 (ham, licensed only)
+    "ITU2_70CM",  // 35 (ham, licensed only)
+    "ITU3_70CM",  // 36 (ham, licensed only)
+    "ITU2_125CM", // 37 (ham, licensed only)
 };
 
 const char *regionCodeFromMeshtastic(uint8_t meshtasticRegion) {
@@ -368,6 +425,11 @@ void applyPresetParams(RhinoConfig &cfg) {
     // for a custom bandwidth, and beats reconfiguring the radio into silence.
     if (!presetUsableOnThisRadio(cfg.modemPreset)) {
         cfg.modemPreset = PRESET_LONG_FAST;
+    }
+    // Ham regions only carry the presets their band plan expects (Narrow on
+    // 70 cm / 1.25 m, Tiny on 2 m); anything else snaps to the region default.
+    if (cfg.loraUsePreset && !presetAllowedInRegion(cfg.region, cfg.modemPreset)) {
+        cfg.modemPreset = regionDefaultPreset(cfg.region);
     }
 
     if (!cfg.loraUsePreset) {
@@ -674,6 +736,44 @@ const char *powerLedLevelName(uint8_t pct) {
         if (kPowerLedLevels[i].pct == pct) return kPowerLedLevels[i].label;
     }
     return TR_NOOP("Custom");
+}
+
+void cfgCoerceMeshBeacon(RhinoConfig &cfg) {
+    if (cfg.meshBeaconTargetPreset >= PRESET_COUNT) cfg.meshBeaconTargetPreset = PRESET_LONG_FAST;
+    cfg.meshBeaconIntervalH = clampBeaconIntervalH(cfg.meshBeaconIntervalH);
+    // A stored blob need not be terminated; cap it before reading it as a string.
+    cfg.meshBeaconMessage[sizeof(cfg.meshBeaconMessage) - 1] = '\0';
+    char msg[sizeof(cfg.meshBeaconMessage)];
+    beaconCopyMessage(msg, cfg.meshBeaconMessage);
+    memcpy(cfg.meshBeaconMessage, msg, sizeof(msg));
+}
+
+void cfgCoerceLicensed(RhinoConfig &cfg, bool wasLicensed) {
+#if !FEATURE_LICENSED_MODE
+    cfg.licensedMode = false;
+#endif
+    // A stored blob need not be terminated; cap it before reading it as a string.
+    cfg.callSign[sizeof(cfg.callSign) - 1] = '\0';
+    char call[sizeof(cfg.callSign)];
+    if (lic::normalizeCallSign(cfg.callSign, call, sizeof(call))) {
+        memcpy(cfg.callSign, call, sizeof(call));
+    } else {
+        memset(cfg.callSign, 0, sizeof(cfg.callSign));
+    }
+    if (cfg.licensedMode && !cfg.callSign[0]) cfg.licensedMode = false;
+
+    cfg.region[sizeof(cfg.region) - 1] = '\0';
+    // Only a known region is judged here: an unknown code has always fallen
+    // through to MESH_FREQ, and rewriting it is not this backstop's job.
+    const RegionPlan *r = regionPlan(cfg.region);
+    if (r && !regionSelectable(cfg.region, cfg.licensedMode)) {
+        if (r->licensedOnly) cfg.licTxHold = true;
+        utf8util::copyTruncate(cfg.region, sizeof(cfg.region), MY_REGION);
+    }
+
+    if (cfg.licensedMode) cfg.rebroadcastMode = lic::kRebroadcastLocalOnly;
+    cfg.loraPower = lic::powerAfterChange(wasLicensed, cfg.licensedMode, cfg.loraPower,
+                                          regionPower(cfg.region));
 }
 
 uint8_t cfgCoercePowerLedPct(int pct) {
@@ -1329,7 +1429,16 @@ void cfgInitDefaults(RhinoConfig &cfg) {
     cfg.notifyLightTimeoutS = cfgCoerceNotifyLightTimeout(MY_NOTIFY_LIGHT_TIMEOUT_S);
     cfg.kbLightTimeoutS     = cfgCoerceKbLightTimeout(MY_KB_LIGHT_TIMEOUT_S);
     cfg.powerLedPct         = cfgCoercePowerLedPct(MY_POWER_LED_PCT);
+    cfgSetChannelPanelLocked(cfg, true);
     cfg.meshBeaconListen  = (bool)MY_MESH_BEACON_LISTEN;
+    cfg.meshBeaconBroadcast    = (bool)MY_MESH_BEACON_BROADCAST;
+    cfg.meshBeaconTargetPreset = MY_MESH_BEACON_TARGET;
+    cfg.meshBeaconOfferPsk     = (bool)MY_MESH_BEACON_OFFER_PSK;
+    cfg.meshBeaconIntervalH    = clampBeaconIntervalH(MY_MESH_BEACON_INTERVAL_H);
+    cfg.meshBeaconMessage[0]   = '\0';
+    cfg.licensedMode = (bool)MY_LICENSED_MODE;
+    utf8util::copyTruncate(cfg.callSign, sizeof(cfg.callSign), MY_CALL_SIGN);
+    cfg.licTxHold    = false;
     cfg.debugAcks          = MY_DBG_ACKS;
     cfg.debugMessages      = MY_DBG_MESSAGES;
     cfg.debugGps           = MY_DBG_GPS;
@@ -1787,6 +1896,10 @@ void cfgToYaml(const RhinoConfig &cfg, String &out) {
     snprintf(tmp, sizeof(tmp), "    powerLedPercent: %u   # 0 = off\n",
              (unsigned)cfg.powerLedPct);
     out += tmp;
+    // Carried by every build so a backup moves between boards.
+    snprintf(tmp, sizeof(tmp), "    channelPanelLocked: %s\n",
+             cfgChannelPanelLocked(cfg) ? "true" : "false");
+    out += tmp;
     snprintf(tmp, sizeof(tmp), "    invertScroll: %s\n", cfg.invertScroll ? "true" : "false"); out += tmp;
     snprintf(tmp, sizeof(tmp), "    navBar: %s\n", cfg.navBarEnabled ? "true" : "false"); out += tmp;
     snprintf(tmp, sizeof(tmp), "    navAlign: %s\n", navAlignKey(cfgNavAlign(cfg))); out += tmp;
@@ -1973,13 +2086,29 @@ void cfgToYaml(const RhinoConfig &cfg, String &out) {
     snprintf(tmp, sizeof(tmp), "    enabled: %s\n", cfg.neighborInfoEnabled ? "true" : "false"); out += tmp;
     snprintf(tmp, sizeof(tmp), "    update_interval: %lu\n", (unsigned long)cfg.neighborInfoIntervalS); out += tmp;
     snprintf(tmp, sizeof(tmp), "    transmit_over_lora: %s\n", cfg.neighborInfoOverLora ? "true" : "false"); out += tmp;
-    // Receive-only module, so it has just the one switch. Sits with the other
-    // module toggles rather than under display, where it first landed.
+    // Sits with the other module toggles rather than under display, where the
+    // listen switch first landed.
     out += "  mesh_beacon:\n";
     snprintf(tmp, sizeof(tmp), "    listen_enabled: %s\n", cfg.meshBeaconListen ? "true" : "false"); out += tmp;
+    snprintf(tmp, sizeof(tmp), "    broadcast_enabled: %s\n", cfg.meshBeaconBroadcast ? "true" : "false"); out += tmp;
+    out += "    target_preset: ";
+    out += kPresets[cfg.meshBeaconTargetPreset < PRESET_COUNT ? cfg.meshBeaconTargetPreset : PRESET_LONG_FAST].name;
+    out += "\n";
+    snprintf(tmp, sizeof(tmp), "    offer_psk: %s\n", cfg.meshBeaconOfferPsk ? "true" : "false"); out += tmp;
+    {
+        // Written raw like owner; a control character would end the line early.
+        char msg[sizeof(cfg.meshBeaconMessage)];
+        memcpy(msg, cfg.meshBeaconMessage, sizeof(msg));
+        msg[sizeof(msg) - 1] = '\0';
+        for (char *c = msg; *c; c++) if ((unsigned char)*c < 0x20) *c = ' ';
+        out += "    message: "; out += msg; out += "\n";
+    }
+    snprintf(tmp, sizeof(tmp), "    interval_hours: %u\n", (unsigned)cfg.meshBeaconIntervalH); out += tmp;
     // owner
     out += "owner: ";       out += cfg.nodeLong;  out += "\n";
     out += "owner_short: "; out += cfg.nodeShort; out += "\n";
+    out += "owner_licensed: "; out += cfg.licensedMode ? "true" : "false"; out += "\n";
+    out += "owner_call_sign: "; out += cfg.callSign; out += "\n";
     // channels (our format — key stored as base64, e.g. "MA==" for 1-byte PSK 0x30)
     out += "channels:\n";
     char b64buf[48];
@@ -2156,6 +2285,8 @@ bool cfgImportFromBuf(const char *buf, size_t len, RhinoConfig &cfg) {
     const char *end            = buf + len;
 
     s_importRestoredKeys = false;
+    // Licensed before the import: if the import turns it off, power is clamped.
+    const bool wasLicensed = cfg.licensedMode || lic::active();
     s_importWarning[0] = '\0';
     if (!buf || !cfgYamlComplete(buf, len)) {
         Serial.println("[cfg] import refused: file is empty or truncated");
@@ -2244,6 +2375,17 @@ bool cfgImportFromBuf(const char *buf, size_t len, RhinoConfig &cfg) {
                     utf8util::copyTruncate(cfg.nodeLong, MESH_LONG_NAME_MAX_BYTES + 1, val);
                 else if (!strcmp(key, "owner_short"))
                     utf8util::copyTruncate(cfg.nodeShort, sizeof(cfg.nodeShort), val);
+                else if (!strcmp(key, "owner_licensed"))
+                    cfg.licensedMode = parseBoolValue(val);
+                else if (!strcmp(key, "owner_call_sign")) {
+                    // Too long is invalid, not truncated: a cut-down call sign
+                    // could still pass validation as someone else's. The rest
+                    // is validated and uppercased by cfgCoerceLicensed() below.
+                    if (strlen(val) >= sizeof(cfg.callSign))
+                        memset(cfg.callSign, 0, sizeof(cfg.callSign));
+                    else
+                        utf8util::copyTruncate(cfg.callSign, sizeof(cfg.callSign), val);
+                }
                 else if (!strcmp(key, "canned_messages"))
                     strncpy(cfg.cannedMessages, val, sizeof(cfg.cannedMessages) - 1);
                 else if (!strcmp(key, "wifi_ssid")) {
@@ -2378,7 +2520,11 @@ bool cfgImportFromBuf(const char *buf, size_t len, RhinoConfig &cfg) {
             }
         } else if (indent == 4) {
             if (!hasVal) {
-                // Deeper subsection header — ignore
+                // Deeper subsection header — ignore. Exception: an empty beacon
+                // message is exported as "message: " and must clear it on import.
+                if (!strcmp(section, "module_config") && !strcmp(subsection, "mesh_beacon") &&
+                    !strcmp(key, "message"))
+                    cfg.meshBeaconMessage[0] = '\0';
             } else if (!strcmp(section, "wifi_networks") && wifiNetIdx >= 0) {
                 // Continuation fields of the "- ssid:" item opened above.
                 if      (!strcmp(key, "pass"))
@@ -2552,6 +2698,8 @@ bool cfgImportFromBuf(const char *buf, size_t len, RhinoConfig &cfg) {
                     cfg.kbLightTimeoutS = cfgCoerceKbLightTimeout(atol(val));
                 else if (!strcmp(key, "powerLedPercent"))
                     cfg.powerLedPct = cfgCoercePowerLedPct(atoi(val));
+                else if (!strcmp(key, "channelPanelLocked"))
+                    cfgSetChannelPanelLocked(cfg, parseBoolValue(val));
                 else if (!strcmp(key, "chatBlinkSecs")) {
                     // Message Blink, retired: in backups from older builds.
                 }
@@ -2707,7 +2855,16 @@ bool cfgImportFromBuf(const char *buf, size_t len, RhinoConfig &cfg) {
                 else if (!strcmp(key, "update_interval"))    cfg.neighborInfoIntervalS = (uint32_t)atol(val);
                 else if (!strcmp(key, "transmit_over_lora")) cfg.neighborInfoOverLora = parseBoolValue(val);
             } else if (!strcmp(section, "module_config") && !strcmp(subsection, "mesh_beacon")) {
-                if (!strcmp(key, "listen_enabled")) cfg.meshBeaconListen = parseBoolValue(val);
+                if      (!strcmp(key, "listen_enabled"))    cfg.meshBeaconListen    = parseBoolValue(val);
+                else if (!strcmp(key, "broadcast_enabled")) cfg.meshBeaconBroadcast = parseBoolValue(val);
+                // presetFromName() already maps an unknown name to PRESET_LONG_FAST.
+                else if (!strcmp(key, "target_preset"))     cfg.meshBeaconTargetPreset = presetFromName(val);
+                else if (!strcmp(key, "offer_psk"))         cfg.meshBeaconOfferPsk  = parseBoolValue(val);
+                else if (!strcmp(key, "message"))           beaconCopyMessage(cfg.meshBeaconMessage, val);
+                else if (!strcmp(key, "interval_hours")) {
+                    const long h = atol(val);
+                    cfg.meshBeaconIntervalH = clampBeaconIntervalH((uint8_t)(h < 0 ? 0 : (h > 255 ? 255 : h)));
+                }
             } else if (!strcmp(section, "module_config") && !strcmp(subsection, "cannedMessage")) {
                 if (!strcmp(key, "enabled")) cfg.cannedEnabled = (!strcmp(val,"true"));
             } else if (!strcmp(section, "module_config") && !strcmp(subsection, "storeForward")) {
@@ -2807,6 +2964,8 @@ bool cfgImportFromBuf(const char *buf, size_t len, RhinoConfig &cfg) {
     // An imported YAML can name any role in kRoleNames; coerce the ones this
     // firmware does not offer (see cfgCoerceDeviceRole) down to CLIENT.
     cfg.deviceRole = cfgCoerceDeviceRole(cfg.deviceRole);
+    cfgCoerceMeshBeacon(cfg);
+    cfgCoerceLicensed(cfg, wasLicensed);
     // Re-derive freq/BW/SF/CR from region + preset; any imported loraFreq is
     // advisory and must not override the name-hashed channel slot.
     applyPresetParams(cfg);

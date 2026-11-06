@@ -498,6 +498,15 @@ bool NodeDB::isFavorite(uint32_t nodeId) const {
     return false;
 }
 
+lic::PeerStatus NodeDB::licenseStatus(uint32_t nodeId) const {
+    if (nodeId == 0xFFFFFFFF) return lic::PEER_UNKNOWN;
+    for (int i = 0; i < _count; i++) {
+        const NodeEntry &e = _nodes[i];
+        if (e.nodeId == nodeId) return lic::peerStatus(e.licensedKnown, e.isLicensed);
+    }
+    return lic::PEER_UNKNOWN;
+}
+
 const NodeEntry *NodeDB::resolveRelayByte(uint8_t lastByte, uint32_t selfId) const {
     const NodeEntry *match = nullptr;
     for (int i = 0; i < _count; i++) {
@@ -1427,6 +1436,8 @@ bool NodeDB::updateUser(uint32_t nodeId, const UserInfo &u) {
     e->nameFromCache = false;
     e->role = u.role;
     e->hasRole = true;
+    e->isLicensed = u.isLicensed;
+    e->licensedKnown = true;
     if (u.longName[0] && strncmp(e->longName, u.longName, sizeof(e->longName) - 1) != 0) {
         utf8util::copyTruncate(e->longName, sizeof(e->longName), u.longName);
         e->hasName = true;

@@ -46,7 +46,7 @@ SYMBOLS="61441,61448,61451,61452,61452,61453,61457,61459,61461,61465,61468,61473
 SIZES=("$@")
 if [[ ${#SIZES[@]} -eq 0 ]]; then
   # Every size lv_conf.h enables on any board.
-  SIZES=(8 10 12 14 16 18 20 24 28 32 40)
+  SIZES=(8 10 12 14 16 18 20 24 28 32 36 40 48)
 fi
 
 mkdir -p "$OUT"

@@ -3,8 +3,10 @@
 // Each case runs in a forked child under an alarm, so a decoder that loops
 // forever or faults is reported as a failure instead of hanging the run.
 // Crypto primitives are link-time stand-ins, not cryptographic coverage.
-// test-deps: ack_proof.cpp sha256_portable.cpp
+// test-deps: ack_proof.cpp sha256_portable.cpp mesh_beacon.cpp licensed_mode.cpp
 // test-cflags: -Ihost -DDEVICE_TDECK -Wno-missing-field-initializers
+#include "../src/licensed_mode.h"
+#include "../src/mesh_beacon.h"
 #include "../src/mesh_proto.h"
 #include "../src/xeddsa_sig.h"
 
@@ -20,8 +22,14 @@ uint8_t myPubKey[32];
 uint8_t myPrivKey[32];
 uint8_t myDeviceRole;
 void debugLogMessages(const char *, ...) {}
-uint32_t xeddsaSignerNodeId() { return 0; }
-bool xeddsaSign(const XeddsaSignedFields &, const uint8_t *, size_t, uint8_t *) { return false; }
+// A signer that always signs, with a fixed stand-in signature, so the signing
+// gate in encryptChannelPayload() can be seen from its output.
+static const uint32_t kSignerNode = 0x51600001;
+uint32_t xeddsaSignerNodeId() { return kSignerNode; }
+bool xeddsaSign(const XeddsaSignedFields &, const uint8_t *, size_t, uint8_t *sig) {
+    memset(sig, 0xAB, XEDDSA_SIGNATURE_BYTES);
+    return true;
+}
 
 static int g_fail = 0, g_run = 0;
 
@@ -208,6 +216,20 @@ static void testDecoderFieldsAndBoundaries() {
 }
 
 static void testApplicationRoundTrips() {
+    guarded("MeshBeacon: encoded offer with slot decodes", [] {
+        MeshBeaconTx tx{};
+        strcpy(tx.offerChannelName, "LongFast");
+        tx.offerRegion = 1;
+        tx.hasOfferPreset = true;
+        tx.hasOfferSlot = true;
+        tx.offerSlot = 20;
+        uint8_t buf[64];
+        MeshBeaconPayload b{};
+        const size_t n = encodeMeshBeacon(tx, buf, sizeof(buf));
+        return n && decodeMeshBeacon(buf, n, b) && b.hasOfferChannel
+            && !strcmp(b.offerChannelName, "LongFast") && b.offerRegion == 1
+            && b.hasOfferPreset && b.offerPreset == 0 && b.hasOfferSlot && b.offerSlot == 20;
+    });
     guarded("NodeInfo: names, role, key, and response policy survive", [] {
         uint8_t buf[256], mac[6] = {1, 2, 3, 4, 5, 6};
         memset(myPubKey, 0x42, sizeof(myPubKey));
@@ -219,6 +241,56 @@ static void testApplicationRoundTrips() {
         return n && d.port == NODEINFO_APP && d.wantResponse && d.env.hasBitfield
             && !strcmp(user.longName, "Test node") && !strcmp(user.shortName, "TEST")
             && user.hasPubKey && !memcmp(user.pubKey, myPubKey, 32) && user.role == 12;
+    });
+    guarded("NodeInfo: is_licensed round-trips and keeps the public key", [] {
+        uint8_t buf[256], mac[6] = {1, 2, 3, 4, 5, 6};
+        memset(myPubKey, 0x42, sizeof(myPubKey));
+        myDeviceRole = 0;
+        const size_t on = encodeNodeInfo(0x12345678, "K1ABC", "K1AB", mac, buf, sizeof(buf),
+                                         true, 0, true);
+        auto d = readData(buf, on);
+        UserInfo a{};
+        decodeUser(d.payload, d.len, a);
+        const size_t off = encodeNodeInfo(0x12345678, "K1ABC", "K1AB", mac, buf, sizeof(buf),
+                                          true, 0, false);
+        d = readData(buf, off);
+        UserInfo b{};
+        b.isLicensed = true;
+        decodeUser(d.payload, d.len, b);
+        return on && off && a.isLicensed && a.hasPubKey && !memcmp(a.pubKey, myPubKey, 32)
+            && !b.isLicensed && b.hasPubKey;
+    });
+    guarded("signing: unicast text unsigned while not licensed", [] {
+        lic::setActive(false);
+        uint8_t plain[128], out[256];
+        const size_t n = encodeTextMessageUnicast("hi", kSignerNode, 0x22222222, plain, sizeof(plain));
+        ChannelKey ck{};
+        const size_t m = encryptChannelPayload(ck, 1, kSignerNode, 0x22222222, plain, n, out, sizeof(out));
+        return n && m == n && !readData(out, m).env.hasSignature;
+    });
+    guarded("signing: unicast text signed while licensed", [] {
+        lic::setActive(true);
+        uint8_t plain[128], out[256];
+        const size_t n = encodeTextMessageUnicast("hi", kSignerNode, 0x22222222, plain, sizeof(plain));
+        ChannelKey ck{};
+        const size_t m = encryptChannelPayload(ck, 1, kSignerNode, 0x22222222, plain, n, out, sizeof(out));
+        return n && m == n + XEDDSA_SIGNATURE_FIELD_BYTES && readData(out, m).env.hasSignature;
+    });
+    guarded("signing: unicast routing stays unsigned while licensed", [] {
+        lic::setActive(true);
+        uint8_t plain[128], out[256];
+        const size_t n = encodeRouting(0x1234, kSignerNode, 0, plain, sizeof(plain));
+        ChannelKey ck{};
+        const size_t m = encryptChannelPayload(ck, 1, kSignerNode, 0x22222222, plain, n, out, sizeof(out));
+        return n && m == n && !readData(out, m).env.hasSignature;
+    });
+    guarded("signing: broadcast text signed while not licensed", [] {
+        lic::setActive(false);
+        uint8_t plain[128], out[256];
+        const size_t n = encodeTextMessage("hi", plain, sizeof(plain));
+        ChannelKey ck{};
+        const size_t m = encryptChannelPayload(ck, 1, kSignerNode, 0xFFFFFFFF, plain, n, out, sizeof(out));
+        return n && m == n + XEDDSA_SIGNATURE_FIELD_BYTES && readData(out, m).env.hasSignature;
     });
     guarded("shared NodeInfo: does not impersonate our role or public key", [] {
         uint8_t buf[256];
@@ -650,6 +722,28 @@ int main() {
         MeshHdr h = {}; h.to = 0xFFFFFFFF; h.from = 0x1234; h.id = 7; h.channel = ck.hash;
         uint8_t plain[64]; size_t pl = 0;
         return decryptPacket(h, kClear, plain, sizeof(kClear), pl) == 4;
+    });
+    guarded("decryptPacket: cleartext for another channel's hash is not filed on a keyless one", [] {
+        // A licensed sender's keyless "sumat": its hash is the name's alone,
+        // which no channel here carries. The receiver's AA== channel would
+        // read it, but nothing ties it to that channel.
+        ChannelKey &plainCh = CHANNEL_KEYS[2];
+        strcpy(plainCh.name_buf, "Plain");
+        plainCh.name = plainCh.name_buf;
+        plainCh.key[0] = 0x00;
+        plainCh.keyLen = 1;
+        plainCh.hash = channelKeyHash(plainCh);
+        ChannelKey other = {};
+        strcpy(other.name_buf, "sumat");
+        other.name = other.name_buf;
+        other.keyLen = 0;
+        MeshHdr h = {}; h.to = 0xFFFFFFFF; h.from = 0x1234; h.id = 7;
+        h.channel = channelKeyHash(other);
+        for (int i = 0; i < MAX_CHANNELS; i++) {
+            if (CHANNEL_KEYS[i].hash == h.channel) return false;   // test premise
+        }
+        uint8_t plain[64]; size_t pl = 0;
+        return decryptPacket(h, kClear, plain, sizeof(kClear), pl) == -1;
     });
 
     printf("%s  %d checks, %d failed\n", g_fail ? "FAILED" : "ok", g_run, g_fail);

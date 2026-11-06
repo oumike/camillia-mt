@@ -604,6 +604,11 @@ bool MeshRadio::pollRx(MeshPacket &pkt) {
     }
     _rxFlag = true;
 #endif
+#if defined(DEVICE_TANMATSU)
+    // Packets wait in the C6 RPC queue; a flag cleared around TX must not
+    // strand them there.
+    if (_radio.rxPending()) _rxFlag = true;
+#endif
     if (!_rxFlag) return false;
     _rxFlag = false;
     sRx.irqs++;
@@ -712,6 +717,15 @@ bool MeshRadio::pollRx(MeshPacket &pkt) {
 }
 
 bool MeshRadio::transmit(const uint8_t *buf, size_t len) {
+    if (_txInhibit) {
+        static uint32_t lastLogMs = 0;
+        uint32_t now = millis();
+        if (lastLogMs == 0 || now - lastLogMs >= 10000) {
+            lastLogMs = now ? now : 1;
+            Serial.println("[radio] tx inhibited");
+        }
+        return false;
+    }
 #if defined(LORA_TEST_MQTT_ONLY) && LORA_TEST_MQTT_ONLY
     // TEMP: LoRa TX disabled for MQTT-only testing. Report success so senders
     // still run their MQTT uplink and local-display paths.
@@ -736,6 +750,9 @@ bool MeshRadio::transmit(const uint8_t *buf, size_t len) {
 
     // If RX IRQ is still pending (common during burst traffic), drain and re-arm
     // before attempting TX so the radio is not left in a stale RX_DONE state.
+    // Not on the Tanmatsu: the C6 has already re-armed, and what is pending is
+    // a real packet in the RPC queue that pollRx() will still deliver.
+#if !defined(DEVICE_TANMATSU)
     if (_rxFlag) {
         size_t pendingLen = _radio.getPacketLength();
         if (pendingLen >= sizeof(MeshHdr) && pendingLen <= 256) {
@@ -746,6 +763,7 @@ bool MeshRadio::transmit(const uint8_t *buf, size_t len) {
         _armRx();
         delay(2);
     }
+#endif
 
     // Small settle window after RX improves turn-around reliability for quick replies.
     uint32_t nowMs = millis();

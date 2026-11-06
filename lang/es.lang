@@ -64,6 +64,7 @@
 %s\nIn use - will switch to the next configured WiFi network, or AP mode if none is available	%s\nEn uso: se cambiará a la siguiente red WiFi configurada, o al modo AP si no hay ninguna
 %s\nMessage history will be erased	%s\nSe borrará el historial de mensajes
 %s\nType %06u then Enter on the keyboard	%s\nEscribe %06u y luego Enter en el teclado
+%u h	%u h
 %u of %d	%u de %d
 %u sec	%u s
 (A)dmin	(A)dmin
@@ -89,6 +90,7 @@
 (Y)es	Sí (Y)
 (c) OpenStreetMap	(c) OpenStreetMap
 (no name)	(sin nombre)
+(none)	(ninguno)
 (not set)	(sin definir)
 (nothing)	(nada)
 (unknown)	(desconocido)
@@ -129,6 +131,7 @@ Analyzing terrain...	Analizando el terreno...
 Announce	Anunciar
 Antenna: %s	Antena: %s
 Any key / %s = Close	Cualquier tecla / %s = Cerrar
+Anyone on %s can join %s.	Cualquiera en %s puede unirse a %s.
 Apply	Aplicar
 Apr	abr
 April	abril
@@ -160,6 +163,7 @@ Battery low	Batería baja
 Battery trim: %s	Ajuste de batería: %s
 Battery: %.0f%%\nVoltage: %.2f V\nChUtil: %.1f%%\nAirTx: %.1f%%	Batería: %.0f%%\nTensión: %.2f V\nChUtil: %.1f%%\nAirTx: %.1f%%
 Battery\nVoltage\nChUtil\nAirTx\nTemp\nHumidity\nPressure	Batería\nTensión\nChUtil\nAirTx\nTemp.\nHumedad\nPresión
+Beacon message	Mensaje de la baliza
 Beacons	Balizas
 Bksp=Back  solid=ChUtil  dash=AirTx	Bksp=Atrás  continua=ChUtil  discontinua=AirTx
 Bksp=Back  solid=SNR  dash=RSSI	Bksp=Atrás  continua=SNR  discontinua=RSSI
@@ -174,6 +178,7 @@ Bottom buttons: Home, Chats, DM, Nodes, Tools, Config, Help.\nHome is the dashbo
 Brightness	Brillo
 Brightness: %u%%	Brillo: %u%%
 Brightness: %u%%  Lock: %u%%	Brillo: %u%%  Bloqueo: %u%%
+Broadcast	Emitir
 Brown	Marrón
 Bubbles	Burbujas
 C = Clear   %s = Back	C = Borrar   %s = Atrás
@@ -369,9 +374,11 @@ Include (A)rchived (SD card)	Incluir archivados (A) (SD)
 Include (F)avorites	Incluir favoritos (F)
 Include archived (SD card)	Incluir archivados (tarjeta SD)
 Include favorites	Incluir favoritos
+Include key	Incluir clave
 Indigo	Índigo
 Info	Info
 Install now? The device reboots to update.	¿Instalar ahora? El dispositivo se reinicia para actualizar.
+Interval	Intervalo
 Invalid base64 key	Clave base64 no válida
 Invalid date/time	Fecha/hora no válida
 Invert Scrolling: %s	Invertir desplazamiento: %s
@@ -410,7 +417,9 @@ Light reminds for %s	La luz recuerda durante %s
 Light reminds until read	La luz recuerda hasta leer
 Lime	Lima
 Link	Enlace
+Listen	Escuchar
 Listening   %d sender%s heard	Escuchando   %d emisor(es)%.0s oído(s)
+Listening for beacons is off.\n\nTurn on Listen under Mesh Beacons in Config (or under Modules in web config) to decode beacons from other meshes. An offer is never applied to your radio. Sending your own beacon is a separate setting.	La escucha de balizas está desactivada.\n\nActiva Escuchar en Balizas de malla en Configuración (o en Módulos de la config web) para decodificar balizas de otras redes. Nunca se aplica una oferta a tu radio. Enviar tu propia baliza es un ajuste aparte.
 Listening: off	Escucha: desactivada
 Live	En vivo
 Live Filter	Filtro en vivo
@@ -458,9 +467,10 @@ Match the voltage to a meter reading.\nPercent comes from the fuel gauge and doe
 Match the voltage to a meter reading.\nPercent follows it. 0% = uncalibrated.	Ajusta la tensión a la lectura de un multímetro.\nEl porcentaje la sigue. 0% = sin calibrar.
 May	mayo
 Medium	Mediano
-Mesh Beacons is off.\n\nTurn it on in Config (or under Modules in web config) to decode beacons from other meshes. Receive-only: nothing is transmitted, and an offer is never applied to your radio.	Balizas de malla está desactivado.\n\nActívalo en Configuración (o en Módulos de la config web) para decodificar balizas de otras redes. Solo recepción: no se transmite nada y nunca se aplica una oferta a tu radio.
+Mesh Beacons	Balizas de malla
 Mesh Beacons: %s	Balizas de la malla: %s
 Mesh beacons: %s	Balizas de la malla: %s
+Message	Mensaje
 Message (I)nfo	(I)nfo del mensaje
 Message Actions	Acciones del mensaje
 Message Info	Info del mensaje
@@ -495,6 +505,7 @@ N=Choose WiFi   Enter=Finish   Bksp=Back	N=Elegir WiFi   Enter=Terminar   Bksp=A
 NO LINE OF SIGHT	SIN LÍNEA DE VISIÓN
 NODEINFO + telemetry queued.	NODEINFO + telemetría en cola.
 No GPS fix	Sin señal GPS
+No beacons heard yet.\n\nA beacon is only audible while its sender has retuned onto this channel, preset and region, and it repeats on that node's own schedule - minutes to hours apart. This list keeps what it hears until you clear it. Sending your own beacon is a separate setting, under Mesh Beacons in Config.	Aún no se ha oído ninguna baliza.\n\nUna baliza solo se oye mientras su emisor está sintonizado en este canal, preajuste y región, y se repite según el calendario de ese nodo, con minutos u horas de separación. Esta lista guarda lo que oye hasta que la borres. Enviar tu propia baliza es un ajuste aparte, en Balizas de malla en Configuración.
 Only signed packets accepted (no 2.7 nodes)	Solo paquetes firmados (sin nodos 2.7)
 Send NODEINFO and telemetry to the mesh now?	¿Enviar NODEINFO y telemetría a la malla ahora?
 NODES	NODOS
@@ -522,7 +533,6 @@ No %s - not saving	Sin %s: no se guarda
 No %s traffic yet\n(filter is on - %s)	Aún no hay tráfico %s\n(filtro activo - %s)
 No SD card is mounted.	No hay tarjeta SD montada.
 No WiFi network configured	No hay red WiFi configurada
-No beacons heard yet.\n\nA beacon is only audible while its sender has retuned onto this channel, preset and region, and it repeats on that node's own schedule - minutes to hours apart. This list keeps what it hears until you clear it.	Aún no se ha oído ninguna baliza.\n\nUna baliza solo se oye mientras su emisor está sintonizado en este canal, preajuste y región, y se repite según el calendario de ese nodo, con minutos u horas de separación. Esta lista guarda lo que oye hasta que la borres.
 No elevation server set.\nWeb Config -> Elevation Server (LOS)	No hay servidor de elevación.\nConfig web -> Elevation Server (LOS)
 No hop path in reply	No hay ruta de saltos en la respuesta
 No keyboards found yet.\n\nPut the keyboard into pairing mode, then press Scan.\n\nOnly Bluetooth LE keyboards can pair - this hardware has no Bluetooth Classic radio.	Aún no se han encontrado teclados.\n\nPon el teclado en modo de emparejamiento y pulsa Escanear.\n\nSolo se pueden emparejar teclados Bluetooth LE: este hardware no tiene radio Bluetooth Classic.
@@ -765,9 +775,11 @@ Tap a node for actions   Nodes below = Back	Toca un nodo para acciones   Nodos a
 Tap a node to start a DM	Toca un nodo para empezar un MD
 Tap a preset to apply.	Toca un preajuste para aplicarlo.
 Tap a preset, then Scan	Toca un preajuste y luego Escanear
+Tap a row to change it.	Toca una fila para cambiarla.
 Tap a size to apply	Toca un tamaño para aplicarlo
 Tap one to apply.	Toca uno para aplicarlo.
 Tap to preview	Toca para ver
+Target preset	Preajuste destino
 Teal	Verde azulado
 Telemetry	Telemetría
 Temp: %.1f C\nHumidity: %.1f%%\nPressure: %.1f hPa	Temp: %.1f C\nHumedad: %.1f%%\nPresión: %.1f hPa
@@ -892,6 +904,11 @@ Y/Enter=Import   N/Bksp=Skip	Y/Enter=Importar   N/Bksp=Omitir
 Year	Año
 Yellow	Amarillo
 Yes	Sí
+Your beacon: %s not available in %s	Tu baliza: %s no disponible en %s
+Your beacon: %s · next in %u min · last %s	Tu baliza: %s · próxima en %u min · última %s
+Your beacon: held - Discovery scan	Tu baliza: en espera - escaneo de Descubrir
+Your beacon: held - airtime	Tu baliza: en espera - tiempo de aire
+Your beacon: off	Tu baliza: desactivada
 [%s] no match	[%s] sin coincidencias
 [radio] init failed	[radio] error al iniciar
 \n%lu min ago	\nhace %lu min
@@ -927,6 +944,7 @@ retry %lus	reintento %lus
 retry now	reintentar ahora
 sensor %.2f V    trim %s	sensor %.2f V    ajuste %s
 sensor: read failed	sensor: error de lectura
+slot %u	ranura %u
 stay on	siempre encendida
 tap Filter to change	toca Filtro para cambiar
 unknown	desconocido
@@ -936,3 +954,31 @@ unknown node (id ends ..%02x)	nodo desconocido (id acaba en ..%02x)
 unset	sin definir
 until read	hasta leer
 vague	aproximada
+Call sign	Indicativo
+Long name suffix	Sufijo del nombre largo
+TX power	Potencia TX
+Enable	Activar
+Disable	Desactivar
+Resume transmitting	Reanudar transmisión
+%u dBm	%u dBm
+Rebooting...	Reiniciando...
+Invalid call sign	Indicativo no válido
+Turn licensed mode off to change this.	Desactiva el modo con licencia para cambiar esto.
+Enter a call sign	Introduce un indicativo
+Every channel's key will be removed. Encrypted DMs, remote admin and relaying for unlicensed nodes will stop. The device will reboot. You must hold an amateur licence for the band you use. Camillia does not verify your licence.	Se eliminará la clave de todos los canales. Los MD cifrados, la administración remota y la retransmisión para nodos sin licencia dejarán de funcionar. El dispositivo se reiniciará. Debes tener una licencia de radioaficionado para la banda que uses. Camillia no verifica tu licencia.
+Channel keys will not come back. The device will reboot.	Las claves de los canales no volverán. El dispositivo se reiniciará.
+ Region will change to %s and transmit stays off until you resume.	 La región cambiará a %s y la transmisión seguirá desactivada hasta que la reanudes.
+Transmit resumed	Transmisión reanudada
+Licensed (ham) mode	Modo con licencia (radioaficionado)
+Licensed (ham) mode: %s	Modo con licencia (radioaficionado): %s
+Needs an antenna and front end for this band.	Necesita una antena y un front end para esta banda.
+ (licensed: local only)	 (con licencia: solo local)
+NodeInfo (licensed: 10 min)	NodeInfo (con licencia: 10 min)
+Licensed mode: channel imported without its key	Modo con licencia: canal importado sin su clave
+Licensed mode is not available on this device	El modo con licencia no está disponible en este dispositivo
+Lic drops %lu / NI mismatch %lu	Lic descartes %lu / NI discrepancias %lu
+Your beacon: off while licensed	Tu baliza: desactivada con licencia
+Off while licensed	Desactivado con licencia
+Chat server is off while licensed	El servidor de chat está desactivado con licencia
+Channels: Left or C, Up/Down to move,\nEnter picks. Right twice hides it.	Canales: Izquierda o C, Arriba/Abajo para mover,\nIntro elige. Derecha dos veces lo oculta.
+Channels: Left opens the list, Left\nagain docks it beside the chat.	Canales: Izquierda abre la lista, Izquierda\notra vez la fija junto al chat.

@@ -11,6 +11,8 @@
 #include "xeddsa_sig.h"
 #include "esp_mac.h"
 #include "storage.h"
+#include "mesh_beacon.h"
+#include "licensed_mode.h"
 #include <time.h>
 #include <stdlib.h>
 
@@ -1278,7 +1280,8 @@ static bool sendNodeInfoFrame(uint32_t myNodeId,
     uint8_t proto[256], cipher[256 + MESH_AEAD_OVERHEAD];
     uint32_t bitfield = okToMqtt ? 0x01 : 0;
     size_t protoLen = encodeNodeInfo(myNodeId, longName, shortName,
-                                     mac, proto, sizeof(proto), reqReply, bitfield);
+                                     mac, proto, sizeof(proto), reqReply, bitfield,
+                                     lic::active());
     if (protoLen == 0) return false;
 
     // Always send NODEINFO on LongFast (index 0) for maximum visibility
@@ -1394,6 +1397,43 @@ bool ChannelMgr::sendSharedNodeInfo(uint32_t myNodeId, uint32_t sharedNodeId,
         liveNodeLabel(sharedNodeId, who, sizeof(who), true);
         char live[64];
         snprintf(live, sizeof(live), "T SHR B %s %s", who, ok ? "OK" : "ER");
+        liveFeedAddLine(live, ok ? TFT_DARKGREY : TFT_RED);
+    }
+    return ok;
+}
+
+bool ChannelMgr::sendMeshBeacon(uint32_t myNodeId, const uint8_t *payload, size_t len,
+                                const ChannelKey &key) {
+    if (!Radio.isReady() || payload == nullptr || len == 0) return false;
+
+    uint8_t proto[256], cipher[256 + MESH_AEAD_OVERHEAD];
+    const size_t protoLen = encodeMeshBeaconData(payload, len, proto, sizeof(proto));
+    if (protoLen == 0) return false;
+
+    const uint32_t packetId = nextMeshPacketId();
+    const size_t cipherLen = encryptChannelPayload(key, packetId, myNodeId, 0xFFFFFFFF,
+                                                   proto, protoLen, cipher, sizeof(cipher));
+    if (cipherLen == 0) return false;
+
+    uint8_t frame[sizeof(MeshHdr) + sizeof(cipher)];
+    MeshHdr hdr = {};
+    hdr.to         = 0xFFFFFFFF;
+    hdr.from       = myNodeId;
+    hdr.id         = packetId;
+    hdr.channel    = key.hash;
+    hdr.flags      = meshOriginHopFlagsCapped(0);   // zero-hop, no want_ack
+    hdr.relay_node = (uint8_t)(myNodeId & 0xFF);
+    memcpy(frame, &hdr, sizeof(hdr));
+    memcpy(frame + sizeof(hdr), cipher, cipherLen);
+
+    // Never uplinked: the beacon goes out on a foreign preset, not our channel.
+    const bool ok = Radio.transmit(frame, sizeof(hdr) + cipherLen);
+    debugLogMessages("[beacon] tx id=%08X hash=0x%02X proto=%u bytes %s\n",
+                     (unsigned)packetId, (unsigned)key.hash, (unsigned)protoLen,
+                     ok ? "OK" : "FAILED");
+    {
+        char live[32];
+        snprintf(live, sizeof(live), "T BCN B %02X %s", (unsigned)key.hash, ok ? "OK" : "ER");
         liveFeedAddLine(live, ok ? TFT_DARKGREY : TFT_RED);
     }
     return ok;

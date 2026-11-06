@@ -109,10 +109,28 @@ bool tanmatsuCoprocRadioPowerCycle() {
     return true;
 }
 
-uint16_t tanmatsuCoprocBatteryMv() {
+namespace {
+bool readVbatOnce(uint16_t &mv) {
     uint8_t v[2] = {};
-    if (!tanmatsuCoprocRead(TANMATSU_REG_PMIC_ADC_VBAT, v, sizeof(v))) return 0;
-    return (uint16_t)(v[0] | (v[1] << 8));
+    if (!tanmatsuCoprocRead(TANMATSU_REG_PMIC_ADC_VBAT, v, sizeof(v))) return false;
+    mv = (uint16_t)(v[0] | (v[1] << 8));
+    // The PMIC's VBAT ADC spans 2.304-4.848 V; anything else is a bad read.
+    return mv >= 2304 && mv <= 4848;
+}
+}  // namespace
+
+uint16_t tanmatsuCoprocBatteryMv() {
+    // The coprocessor rewrites the two VBAT bytes from its own loop, so one read
+    // can pair the low byte of one sample with the high byte of the next -- off
+    // by up to 255 mV. Two reads that agree are taken; otherwise "unknown",
+    // which the filter holds through.
+    for (int attempt = 0; attempt < 3; ++attempt) {
+        uint16_t a = 0, b = 0;
+        if (!readVbatOnce(a) || !readVbatOnce(b)) continue;
+        const int diff = (int)a - (int)b;
+        if (diff >= -40 && diff <= 40) return (uint16_t)((a + b) / 2);
+    }
+    return 0;
 }
 
 bool tanmatsuCoprocChargeStatus(bool *batteryAttached, bool *usbPresent,

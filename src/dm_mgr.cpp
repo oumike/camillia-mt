@@ -9,6 +9,7 @@
 #include "debug_flags.h"
 #include "config.h"
 #include "utf8_utils.h"
+#include "licensed_mode.h"
 #include <esp_heap_caps.h>
 #include <string.h>
 #include <stdlib.h>   // strtoul(), used by loadAll()'s staged-file recovery
@@ -352,10 +353,27 @@ bool DmMgr::sendDm(uint32_t myNodeId, uint32_t toNodeId, const char *text,
     uint8_t usedHash = 0;
 
     // Direct DM interop policy: require PKI. Channel-key "legacy DM" paths are
-    // often rejected by modern Meshtastic nodes as NO_CHANNEL.
+    // often rejected by modern Meshtastic nodes as NO_CHANNEL -- except in
+    // licensed mode, where PKI is off (amateur rules forbid hiding content) and
+    // a DM goes plaintext on the primary channel, to = node, signed by
+    // encryptChannelPayload() (lic::shouldSign), as upstream ham nodes send it.
     debugLogMessages("[dm] node=%s  hasPubKey=%d\n",
                      node ? "found" : "null", node ? (int)node->hasPubKey : -1);
-    if (!node || !node->hasPubKey) {
+    if (lic::active()) {
+        const ChannelKey &ck = CHANNEL_KEYS[0];
+        hdr.channel = ck.hash;
+        hdr.flags   = meshOriginHopFlagsForChannel(0, 1 << 3);   // want_ack
+        usedChanIdx = 0;
+        usedHash    = ck.hash;
+        debugLogMessages("[dm] licensed: plaintext on primary channel\n");
+        payloadLen = encryptChannelPayload(ck, packetId, myNodeId, resolvedToNodeId,
+                                           proto, protoLen, cipher, sizeof(cipher));
+        if (payloadLen == 0) {
+            debugLogMessages("[dm] sendDm FAIL: channel encode failed\n");
+            liveFeedAddLine("T DM ER chan", TFT_RED);
+            return false;
+        }
+    } else if (!node || !node->hasPubKey) {
         debugLogMessages("[dm] sendDm FAIL: recipient pubkey missing\n");
         liveFeedAddLine("T DM ER noPK", TFT_RED);
 
@@ -373,19 +391,19 @@ bool DmMgr::sendDm(uint32_t myNodeId, uint32_t toNodeId, const char *text,
             sLastNodeInfoReqMs = now;
         }
         return false;
+    } else {
+        hdr.channel = 0; // PKI marker (channel 0 = not a channel-key hash)
+        usedHash = 0;
+        debugLogMessages("[dm] using PKI path\n");
+        if (!encryptPki(packetId, myNodeId, node->pubKey, proto, protoLen, cipher)) {
+            debugLogMessages("[dm] sendDm FAIL: PKI encrypt failed\n");
+            liveFeedAddLine("T DM ER pki", TFT_RED);
+            return false;
+        }
+        usedPki = true;
+        payloadLen = protoLen + 12; // ciphertext + tag(8) + extraNonce(4)
+        debugLogMessages("[dm] PKI encrypt OK, payloadLen=%u\n", (unsigned)payloadLen);
     }
-
-    hdr.channel = 0; // PKI marker (channel 0 = not a channel-key hash)
-    usedHash = 0;
-    debugLogMessages("[dm] using PKI path\n");
-    if (!encryptPki(packetId, myNodeId, node->pubKey, proto, protoLen, cipher)) {
-        debugLogMessages("[dm] sendDm FAIL: PKI encrypt failed\n");
-        liveFeedAddLine("T DM ER pki", TFT_RED);
-        return false;
-    }
-    usedPki = true;
-    payloadLen = protoLen + 12; // ciphertext + tag(8) + extraNonce(4)
-    debugLogMessages("[dm] PKI encrypt OK, payloadLen=%u\n", (unsigned)payloadLen);
 
     debugLogMessages("[dm] transmitting: frameLen=%u\n", (unsigned)(sizeof(MeshHdr) + payloadLen));
     uint8_t frame[sizeof(MeshHdr) + 280];

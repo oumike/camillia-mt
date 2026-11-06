@@ -22,6 +22,19 @@ struct EmojiSlot {
 // scaledChatFont / kMainScreenFont / kChannelChatFont). montserrat_16 is here
 // too because reply previews and some node rows use it.
 EmojiSlot s_slots[] = {
+#if UI_COORD_SCALE == 2
+    // The Tanmatsu's native-resolution UI (src/ui_coord_shim.h): every size
+    // main_lvgl.cpp names arrives here doubled (10 -> 20, 24 -> 48, ...), so
+    // the slots are the doubled faces, each with its emoji at twice the px.
+    { &lv_font_montserrat_16, 20, {}, nullptr, false },
+    { &lv_font_montserrat_20, 24, {}, nullptr, false },
+    { &lv_font_montserrat_24, 28, {}, nullptr, false },
+    { &lv_font_montserrat_28, 32, {}, nullptr, false },
+    { &lv_font_montserrat_32, 36, {}, nullptr, false },
+    { &lv_font_montserrat_36, 40, {}, nullptr, false },
+    { &lv_font_montserrat_40, 44, {}, nullptr, false },
+    { &lv_font_montserrat_48, 52, {}, nullptr, false },
+#else
 #if !(defined(DEVICE_CARDPUTER_LORA_HAT) || defined(DEVICE_TLORA_PAGER_TFT) \
       || defined(DEVICE_TDECK_PRO) || defined(DEVICE_TDISPLAY_P4))
     // Only relative 10 px bases and the CrowPanel draw Small at 8 px.
@@ -47,6 +60,7 @@ EmojiSlot s_slots[] = {
     // Its 24 px text a step up: Extra Large chat and the nav bar's icons.
     { &lv_font_montserrat_28, 30, {}, nullptr, false },
 #endif
+#endif  // UI_COORD_SCALE
 };
 constexpr int kSlotCount = (int)(sizeof(s_slots) / sizeof(s_slots[0]));
 
@@ -67,6 +81,9 @@ constexpr int kSlotCount = (int)(sizeof(s_slots) / sizeof(s_slots[0]));
 // miss — slower on scroll, never a failure — so a small cache is a fine trade.
 #if defined(DEVICE_CARDPUTER_LORA_HAT)
 constexpr size_t kEmojiCacheBytes = 1536;
+#elif UI_COORD_SCALE == 2
+// Glyphs four times the area, from a multi-megabyte PSRAM pool.
+constexpr size_t kEmojiCacheBytes = 16384;
 #else
 constexpr size_t kEmojiCacheBytes = 4096;
 #endif

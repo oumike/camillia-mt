@@ -59,6 +59,7 @@
 %s\nIn use - will switch to the next configured WiFi network, or AP mode if none is available	%s\nEn cours d'utilisation : passage au prochain réseau WiFi configuré, ou au mode AP s'il n'y en a aucun
 %s\nMessage history will be erased	%s\nL'historique des messages sera effacé
 %s\nType %06u then Enter on the keyboard	%s\nTapez %06u puis Enter sur le clavier
+%u h	%u h
 %u of %d	%u sur %d
 %u sec	%u s
 (A)nnounce	(A)nnoncer
@@ -80,6 +81,7 @@
 (W)eather	Météo (W)
 (Y)es	Oui (Y)
 (no name)	(sans nom)
+(none)	(aucun)
 (not set)	(non défini)
 (nothing)	(rien)
 (unknown)	(inconnu)
@@ -119,6 +121,7 @@ Analyzing terrain...	Analyse du terrain...
 Announce	Annoncer
 Antenna: %s	Antenne : %s
 Any key / %s = Close	Une touche / %s = Fermer
+Anyone on %s can join %s.	N'importe qui sur %s peut rejoindre %s.
 Apply	Appliquer
 Apr	avr
 April	avril
@@ -150,6 +153,7 @@ Battery low	Batterie faible
 Battery trim: %s	Correction batterie : %s
 Battery: %.0f%%\nVoltage: %.2f V\nChUtil: %.1f%%\nAirTx: %.1f%%	Batterie : %.0f%%\nTension : %.2f V\nChUtil : %.1f%%\nAirTx : %.1f%%
 Battery\nVoltage\nChUtil\nAirTx\nTemp\nHumidity\nPressure	Batterie\nTension\nChUtil\nAirTx\nTemp.\nHumidité\nPression
+Beacon message	Message de la balise
 Beacons	Balises
 Bksp=Back  solid=ChUtil  dash=AirTx	Bksp=Retour  plein=ChUtil  tirets=AirTx
 Bksp=Back  solid=SNR  dash=RSSI	Bksp=Retour  plein=SNR  tirets=RSSI
@@ -164,6 +168,7 @@ Bottom buttons: Home, Chats, DM, Nodes, Tools, Config, Help.\nHome is the dashbo
 Brightness	Luminosité
 Brightness: %u%%	Luminosité : %u%%
 Brightness: %u%%  Lock: %u%%	Luminosité : %u%%  Verrou : %u%%
+Broadcast	Diffuser
 Brown	Marron
 Bubbles	Bulles
 C = Clear   %s = Back	C = Effacer   %s = Retour
@@ -357,8 +362,10 @@ Include (A)rchived (SD card)	Inclure les archivés (A) (SD)
 Include (F)avorites	Inclure les favoris (F)
 Include archived (SD card)	Inclure les archivés (carte SD)
 Include favorites	Inclure les favoris
+Include key	Inclure la clé
 Info	Infos
 Install now? The device reboots to update.	Installer maintenant ? L'appareil redémarre pour la mise à jour.
+Interval	Intervalle
 Invalid base64 key	Clé base64 invalide
 Invalid date/time	Date/heure invalide
 Invert Scrolling: %s	Inverser le défilement : %s
@@ -396,7 +403,9 @@ Light reminds for %s	Le voyant rappelle pendant %s
 Light reminds until read	Le voyant rappelle jusqu'à lecture
 Lime	Citron vert
 Link	Liaison
+Listen	Écouter
 Listening   %d sender%s heard	À l'écoute   %d émetteur(s)%.0s entendu(s)
+Listening for beacons is off.\n\nTurn on Listen under Mesh Beacons in Config (or under Modules in web config) to decode beacons from other meshes. An offer is never applied to your radio. Sending your own beacon is a separate setting.	L'écoute des balises est désactivée.\n\nActivez Écouter sous Balises mesh dans Config (ou sous Modules dans la config web) pour décoder les balises d'autres réseaux. Aucune offre n'est jamais appliquée à votre radio. Envoyer votre propre balise est un réglage à part.
 Listening: off	Écoute : désactivée
 Live	Direct
 Live Filter	Filtre du direct
@@ -443,9 +452,10 @@ Match the voltage to a meter reading.\nPercent comes from the fuel gauge and doe
 Match the voltage to a meter reading.\nPercent follows it. 0% = uncalibrated.	Faites correspondre la tension à un multimètre.\nLe pourcentage suit. 0% = non calibré.
 May	mai
 Medium	Moyen
-Mesh Beacons is off.\n\nTurn it on in Config (or under Modules in web config) to decode beacons from other meshes. Receive-only: nothing is transmitted, and an offer is never applied to your radio.	Balises mesh est désactivé.\n\nActivez-le dans Config (ou sous Modules dans la config web) pour décoder les balises d'autres réseaux. Réception seule : rien n'est émis et aucune offre n'est appliquée à votre radio.
+Mesh Beacons	Balises mesh
 Mesh Beacons: %s	Balises du maillage : %s
 Mesh beacons: %s	Balises du maillage : %s
+Message	Message
 Message (I)nfo	(I)nfo du message
 Message Actions	Actions du message
 Message Info	Infos du message
@@ -479,6 +489,7 @@ N=Choose WiFi   Enter=Finish   Bksp=Back	N=Choisir WiFi   Enter=Terminer   Bksp=
 NO LINE OF SIGHT	PAS DE LIGNE DE VUE
 NODEINFO + telemetry queued.	NODEINFO + télémétrie en file d'attente.
 No GPS fix	Pas de fix GPS
+No beacons heard yet.\n\nA beacon is only audible while its sender has retuned onto this channel, preset and region, and it repeats on that node's own schedule - minutes to hours apart. This list keeps what it hears until you clear it. Sending your own beacon is a separate setting, under Mesh Beacons in Config.	Aucune balise entendue.\n\nUne balise n'est audible que lorsque son émetteur s'est réglé sur ce canal, ce préréglage et cette région, et elle se répète selon le calendrier du nœud - de quelques minutes à quelques heures. Cette liste garde ce qu'elle entend jusqu'à ce que vous l'effaciez. Envoyer votre propre balise est un réglage à part, sous Balises mesh dans Config.
 Only signed packets accepted (no 2.7 nodes)	Paquets signés uniquement (sans nœuds 2.7)
 Send NODEINFO and telemetry to the mesh now?	Envoyer NODEINFO et la télémétrie au maillage maintenant ?
 NODES	NŒUDS
@@ -507,7 +518,6 @@ No %s - not saving	Pas de %s - pas d'enregistrement
 No %s traffic yet\n(filter is on - %s)	Pas encore de trafic %s\n(filtre actif - %s)
 No SD card is mounted.	Aucune carte SD montée.
 No WiFi network configured	Aucun réseau WiFi configuré
-No beacons heard yet.\n\nA beacon is only audible while its sender has retuned onto this channel, preset and region, and it repeats on that node's own schedule - minutes to hours apart. This list keeps what it hears until you clear it.	Aucune balise entendue.\n\nUne balise n'est audible que lorsque son émetteur s'est réglé sur ce canal, ce préréglage et cette région, et elle se répète selon le calendrier du nœud - de quelques minutes à quelques heures. Cette liste garde ce qu'elle entend jusqu'à ce que vous l'effaciez.
 No elevation server set.\nWeb Config -> Elevation Server (LOS)	Aucun serveur d'altitude défini.\nConfig web -> Elevation Server (LOS)
 No hop path in reply	Pas de chemin de sauts dans la réponse
 No keyboards found yet.\n\nPut the keyboard into pairing mode, then press Scan.\n\nOnly Bluetooth LE keyboards can pair - this hardware has no Bluetooth Classic radio.	Aucun clavier trouvé.\n\nMettez le clavier en mode appairage, puis appuyez sur Scanner.\n\nSeuls les claviers Bluetooth LE peuvent s'appairer - ce matériel n'a pas de radio Bluetooth Classic.
@@ -741,9 +751,11 @@ Tap a node for actions   Nodes below = Back	Touchez un nœud pour les actions   
 Tap a node to start a DM	Touchez un nœud pour démarrer un MP
 Tap a preset to apply.	Touchez un préréglage pour l'appliquer.
 Tap a preset, then Scan	Touchez un préréglage, puis Scanner
+Tap a row to change it.	Touchez une ligne pour la modifier.
 Tap a size to apply	Touchez une taille pour l'appliquer
 Tap one to apply.	Touchez-en un pour l'appliquer.
 Tap to preview	Touchez pour prévisualiser
+Target preset	Préréglage cible
 Teal	Sarcelle
 Telemetry	Télémétrie
 Temp: %.1f C\nHumidity: %.1f%%\nPressure: %.1f hPa	Temp : %.1f C\nHumidité : %.1f%%\nPression : %.1f hPa
@@ -862,6 +874,11 @@ Y/Enter=Import   N/Bksp=Skip	Y/Enter=Importer   N/Bksp=Passer
 Year	Année
 Yellow	Jaune
 Yes	Oui
+Your beacon: %s not available in %s	Votre balise : %s indisponible en %s
+Your beacon: %s · next in %u min · last %s	Votre balise : %s · prochaine dans %u min · dernière %s
+Your beacon: held - Discovery scan	Votre balise : en attente - scan Découverte
+Your beacon: held - airtime	Votre balise : en attente - temps d'antenne
+Your beacon: off	Votre balise : désactivée
 [%s] no match	[%s] aucun résultat
 [radio] init failed	[radio] échec de l'init
 \n%lu min ago	\nil y a %lu min
@@ -897,6 +914,7 @@ retry %lus	nouvel essai %lus
 retry now	nouvel essai maintenant
 sensor %.2f V    trim %s	capteur %.2f V    corr. %s
 sensor: read failed	capteur : échec de lecture
+slot %u	créneau %u
 stay on	toujours allumé
 tap Filter to change	touchez Filtre pour changer
 unknown	inconnu
@@ -905,3 +923,31 @@ unknown error	erreur inconnue
 unknown node (id ends ..%02x)	nœud inconnu (id finissant par ..%02x)
 unset	non défini
 until read	jusqu'à lecture
+Call sign	Indicatif
+Long name suffix	Suffixe du nom long
+TX power	Puissance TX
+Enable	Activer
+Disable	Désactiver
+Resume transmitting	Reprendre l'émission
+%u dBm	%u dBm
+Rebooting...	Redémarrage...
+Invalid call sign	Indicatif invalide
+Turn licensed mode off to change this.	Désactivez le mode licencié pour modifier ceci.
+Enter a call sign	Saisissez un indicatif
+Every channel's key will be removed. Encrypted DMs, remote admin and relaying for unlicensed nodes will stop. The device will reboot. You must hold an amateur licence for the band you use. Camillia does not verify your licence.	La clé de chaque canal sera supprimée. Les MP chiffrés, l'administration à distance et le relais pour les nœuds non licenciés s'arrêteront. L'appareil va redémarrer. Vous devez détenir une licence de radioamateur pour la bande utilisée. Camillia ne vérifie pas votre licence.
+Channel keys will not come back. The device will reboot.	Les clés des canaux ne reviendront pas. L'appareil va redémarrer.
+ Region will change to %s and transmit stays off until you resume.	 La région passera à %s et l'émission restera coupée jusqu'à ce que vous la repreniez.
+Transmit resumed	Émission reprise
+Licensed (ham) mode	Mode licencié (radioamateur)
+Licensed (ham) mode: %s	Mode licencié (radioamateur) : %s
+Needs an antenna and front end for this band.	Nécessite une antenne et un étage d'entrée pour cette bande.
+ (licensed: local only)	 (licencié : local uniquement)
+NodeInfo (licensed: 10 min)	NodeInfo (licencié : 10 min)
+Licensed mode: channel imported without its key	Mode licencié : canal importé sans sa clé
+Licensed mode is not available on this device	Le mode licencié n'est pas disponible sur cet appareil
+Lic drops %lu / NI mismatch %lu	Lic rejets %lu / NI incohérences %lu
+Your beacon: off while licensed	Votre balise : désactivée en mode licencié
+Off while licensed	Désactivé en mode licencié
+Chat server is off while licensed	Le serveur de chat est désactivé en mode licencié
+Channels: Left or C, Up/Down to move,\nEnter picks. Right twice hides it.	Canaux : Gauche ou C, Haut/Bas pour choisir,\nEntrée valide. Droite deux fois le masque.
+Channels: Left opens the list, Left\nagain docks it beside the chat.	Canaux : Gauche ouvre la liste, Gauche\nencore l'ancre à côté du chat.

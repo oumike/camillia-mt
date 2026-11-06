@@ -9,6 +9,7 @@
 #include "xeddsa_sig.h"
 #include "ack_proof.h"
 #include "utf8_utils.h"
+#include "licensed_mode.h"
 
 // ── PSK expansion ─────────────────────────────────────────────
 // Meshtastic DEFAULT_KEY = kDkBase[0..14] + PSK_byte.
@@ -283,6 +284,7 @@ bool decodeUser(const uint8_t *buf, size_t len, UserInfo &out) {
     memset(out.pubKey, 0, 32);
     out.hasPubKey = false;
     out.role = 0;
+    out.isLicensed = false;
     size_t i = 0;
     while (i < len) {
         uint64_t tag; i = pbReadVarint(buf, len, i, tag); if (!i) break;
@@ -290,6 +292,9 @@ bool decodeUser(const uint8_t *buf, size_t len, UserInfo &out) {
         if (wtype == 0 && field == 7) {
             uint64_t v; i = pbReadVarint(buf, len, i, v); if (!i) break;
             out.role = (v <= 0xFF) ? (uint8_t)v : 0;
+        } else if (wtype == 0 && field == 6) {
+            uint64_t v; i = pbReadVarint(buf, len, i, v); if (!i) break;
+            out.isLicensed = v != 0;
         } else if (wtype == 2) {
             uint64_t sz; i = pbReadVarint(buf, len, i, sz); if (!i) break;
             if (!pbFits(i, sz, len)) break;
@@ -478,6 +483,9 @@ bool decodeMeshBeacon(const uint8_t *buf, size_t len, MeshBeaconPayload &out) {
             } else if (field == 4) {                // offer_preset
                 out.offerPreset = (uint8_t)v;
                 out.hasOfferPreset = true;
+            } else if (field == 5) {                // offer_slot
+                out.offerSlot = (uint32_t)v;
+                out.hasOfferSlot = true;
             }
         } else if (wt == 5) {
             if (i + 4 > len) break;
@@ -714,9 +722,19 @@ int decryptPacket(const MeshHdr &hdr, const uint8_t *cipher,
         if (CHANNEL_KEYS[i].hash != hdr.channel) continue;
         if (tryDecrypt(i)) return i;
     }
-    // Pass 2: fall back — try all keys (handles unknown/unregistered channels)
+    // Pass 2: fall back — try all keys (handles unknown/unregistered channels).
+    // Never a keyless channel: it "decrypts" anything, so only its hash can
+    // tie a packet to it. Without that a licensed node's cleartext on a
+    // channel we lack was filed on whichever no-key channel came first.
     for (int i = 0; i < MAX_CHANNELS; i++) {
         if (CHANNEL_KEYS[i].hash == hdr.channel) continue; // already tried
+        {
+            uint8_t exp[16];
+            const uint8_t *k = CHANNEL_KEYS[i].key;
+            uint8_t kl = CHANNEL_KEYS[i].keyLen;
+            resolveMeshKey(CHANNEL_KEYS[i].key, CHANNEL_KEYS[i].keyLen, exp, k, kl);
+            if (kl == 0) continue;
+        }
         if (tryDecrypt(i)) return i;
     }
     return -1;
@@ -732,17 +750,19 @@ bool encryptPayload(uint32_t packetId, uint32_t fromNode,
 }
 
 // Append Data.xeddsa_signature (field 10) to an encoded Data we originate, as
-// upstream's perhapsEncode() does: broadcasts only (unicasts are left to PKI),
-// and only when the signed packet still fits a LoRa frame. That rule is the one
-// a 2.8.1 receiver on the Balanced policy mirrors -- once it has seen us sign, it
-// drops an unsigned broadcast from us whose signed form would have fit -- so
-// every broadcast that fits has to be signed, not just some. Returns the signed
-// length in out, or 0 to send plain as it is.
+// upstream's perhapsEncode() does: every broadcast, and -- in licensed mode,
+// where DMs go plaintext instead of PKI -- unicasts too, except Routing and
+// Traceroute (lic::shouldSign()). Only when the signed packet still fits a
+// LoRa frame. That rule is the one a 2.8.1 receiver on the Balanced policy
+// mirrors -- once it has seen us sign, it drops an unsigned packet from us whose
+// signed form would have fit -- so every packet that qualifies and fits has to
+// be signed, not just some. Returns the signed length in out, or 0 to send
+// plain as it is.
 static size_t signBroadcastData(const ChannelKey &ck, uint32_t packetId,
                                 uint32_t fromNode, uint32_t toNode,
                                 const uint8_t *plain, size_t len,
                                 uint8_t *out, size_t outCap) {
-    if (toNode != 0xFFFFFFFF || fromNode == 0 || fromNode != xeddsaSignerNodeId()) return 0;
+    if (fromNode == 0 || fromNode != xeddsaSignerNodeId()) return 0;
     const size_t signedLen = len + XEDDSA_SIGNATURE_FIELD_BYTES;
     // Upstream's signedDataFits(): header + signed Data within the 255-byte
     // frame. On an AEAD channel the tag has to fit as well, or the packet could
@@ -758,6 +778,7 @@ static size_t signBroadcastData(const ChannelKey &ck, uint32_t packetId,
     decodeData(plain, len, portnum, pay, payLen, requestId, wantResponse,
                nullptr, nullptr, nullptr, nullptr, &env);
     if (portnum == 0 || env.hasSignature) return 0;
+    if (!lic::shouldSign(lic::active(), toNode == 0xFFFFFFFF, portnum)) return 0;
 
     XeddsaSignedFields f = {};
     f.from         = fromNode;
@@ -1078,7 +1099,7 @@ size_t encodeTextMessageUnicast(const char *text,
 size_t encodeNodeInfo(uint32_t nodeId, const char *longName,
                       const char *shortName, const uint8_t *mac6,
                       uint8_t *buf, size_t bufLen,
-                      bool wantResponse, uint32_t bitfield) {
+                      bool wantResponse, uint32_t bitfield, bool isLicensed) {
     // Build inner User message (extra 34 bytes for field 8 = public_key)
     uint8_t user[164]; size_t u = 0;
 
@@ -1105,9 +1126,13 @@ size_t encodeNodeInfo(uint32_t nodeId, const char *longName,
     u += pbWriteVarint(user + u, (5 << 3) | 0);
     u += pbWriteVarint(user + u, MY_HW_MODEL);
 
-    // field 6 = is_licensed: omit (defaults to false).
-    // Official Meshtastic firmware STRIPS the public key when is_licensed=true,
-    // so setting it here would break PKI DMs with standard nodes.
+    // field 6 = is_licensed (proto3 false is omitted). Upstream 2.8 keeps the
+    // public key on licensed nodes too: it still derives the node ID and checks
+    // signatures, so field 8 below is sent either way.
+    if (isLicensed) {
+        u += pbWriteVarint(user + u, (6 << 3) | 0);
+        u += pbWriteVarint(user + u, 1);
+    }
 
     // field 7 = role (Config.DeviceConfig.Role varint).
     if (myDeviceRole != 0) {  // CLIENT (0) is proto default, omit to save bytes

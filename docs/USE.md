@@ -740,8 +740,9 @@ neighbor report.
 ### Beacons
 
 Beacons are advertisements from *other* meshes — see [Mesh beacons](#mesh-beacons)
-for what they are and for the setting that turns listening on. This screen is
-where the ones this device heard are shown. It is available on every board,
+for what they are and for the settings that turn listening and broadcasting on.
+This screen is where the ones this device heard are shown, under a line on its
+own beacon. It is available on every board,
 Cardputer included: there is no neighbor table behind it, just the handful of
 records the receive path fills in.
 
@@ -753,12 +754,18 @@ it.
 
 - Open from Live → Tools → Beacons (B), or the Beacons cell on Heltec
 - Scroll with Up and Down input
+- The top line reports this device's own beacon: *Your beacon: off*, or the
+  target preset with when the next one is due and when the last one went
+  (*Your beacon: LongFast · next in 42 min · last 14:05*). When a beacon is
+  being held it says why — *held - Discovery scan*, *held - airtime*, or
+  *LongFast not available in* your region
 - One card per sender, newest first, holding everything that beacon carried: the
   sender (its name if this device happens to know it, otherwise the hex id), the
   message it sent, what it offered, the SNR, RSSI and hop count it arrived with,
   and when it was last heard
 - The offer line reads *channel / preset / region* — whichever parts the beacon
-  carried, `(nothing)` when it carried none. A `*` after a channel name means the
+  carried, `(nothing)` when it carried none, plus *slot N* when the sender is on
+  a non-default frequency slot. A `*` after a channel name means the
   offer included a key, and `AEAD` means the channel uses Meshtastic 2.8.1's
   authenticated encryption, so joining it means turning AEAD on for that channel
   here too (see [Authenticated channels (AEAD)](#authenticated-channels-aead)).
@@ -772,8 +779,8 @@ it.
   the one heard longest ago
 - Press C (Heltec: the Clear button) to clear. The list refills only as senders
   beacon again, which can be a long wait — nothing else is affected
-- The list also empties when Mesh Beacons is switched off, so an old offer can
-  never sit on screen after the feature has been turned off
+- The list also empties when Listen is switched off, so an old offer can never
+  sit on screen after listening has been turned off
 - Close with the device close key (see device sections below)
 
 ### Weather
@@ -1982,22 +1989,77 @@ graph from the next round of broadcasts.
 
 Meshtastic 2.7 nodes can briefly retune their radio to advertise a *different*
 mesh — a short message plus an optional offer naming a channel, preset and
-region. **Mesh Beacons** on the Config screen (and under Modules in web config)
-decides whether this device pays attention to them.
+region. This device can both listen for them and send its own. The **Mesh
+Beacons** row on the Config screen reads *Listen*, *Broadcast*, both, or *Off*,
+and opens a popup with every beacon setting; the same fields sit under Modules →
+Mesh Beacons in web config, beneath "Listen for beacons".
 
-- **Off by default.** Turning it on is the only thing that makes it do anything.
-- **Receive-only.** Nothing is transmitted. This device does not beacon.
-- An offer is **only ever shown, never applied** — nothing retunes your radio or
-  adds a channel on the say-so of a stranger's packet. Acting on one is manual.
-- Beacons that arrive are listed on the [Beacons](#beacons) screen, under
-  Live → Tools, with the sender, its message, whatever it offered, and how often
-  it has repeated.
-- Turning the setting off clears anything already collected.
-- The setting travels with config export and import, under
-  `module_config: mesh_beacon: listen_enabled`.
+- **Listen** — off by default. Beacons that arrive are listed on the
+  [Beacons](#beacons) screen, under Live → Tools, with the sender, its message,
+  whatever it offered, and how often it has repeated. An offer is **only ever
+  shown, never applied** — nothing retunes your radio or adds a channel on the
+  say-so of a stranger's packet. Acting on one is manual. Turning Listen off
+  clears anything already collected.
+- **Broadcast** — off by default. When on, this device advertises *its own*
+  mesh on another preset. It is off while
+  [licensed mode](#licensed-amateur-mode) is on.
+- **Target preset** — the preset the beacon is sent on, LongFast by default.
+  Only presets this radio can run are listed.
+- **Include key** — off by default. When on, the offer carries your primary
+  channel's key, and the popup warns "Anyone on *preset* can join *channel*."
+  That is literal: anyone who hears the beacon can join and read your primary
+  channel. Leave it off unless that is what you want.
+- **Message** — optional text sent with the beacon, up to 60 bytes.
+- **Interval** — 1, 2, 3, 6, 12 or 24 hours; 1 hour by default.
 
-A beacon can only be heard if the sender retuned onto *your* channel, preset and
-region — so an empty list usually just means nobody nearby is beaconing at you.
+**What is sent.** The message plus an offer naming your primary channel, your
+preset (left out when you run custom modem settings) and your region — and its
+key only with Include key on. When you are on a non-default frequency slot, the
+slot goes too. The beacon is a zero-hop broadcast on the target preset's public
+default channel with the default key. Nobody relays it, and it is never uplinked
+to MQTT.
+Meshtastic nodes older than 2.7.20 may drop it, since they discard zero-hop
+packets.
+
+**How it is sent.** At send time the radio retunes to the target preset for one
+packet, then goes straight back to your home preset, frequency and channel —
+about a second or two off your own mesh, once per interval. If the target
+matches your own radio there is no retune at all. Your saved config and channel
+plan are never changed; only the time of the last beacon is stored.
+
+**How often.** Once per interval. The first beacon goes about 2 minutes after
+boot, or after you save beacon settings — but never sooner than the interval
+allows, so toggling Broadcast cannot send extra beacons. Reboots don't reset
+the interval: the last beacon time is remembered, and if the clock isn't set yet
+the device counts the reboot as "just sent" and waits a full interval.
+
+**When it waits.** The Beacons screen's *Your beacon* line says why:
+
+- held during a Discovery preset scan, until the scan ends
+- held for airtime in EU_433 and EU_868 only, while this device's transmit
+  airtime is 5% or more; it retries after 5 minutes, doubling up to an hour
+- not sent at all when the target preset cannot run in your region — another
+  preset is never substituted
+- never sent when the role is CLIENT_HIDDEN
+
+Both directions travel with config export and import:
+
+```yaml
+module_config:
+  mesh_beacon:
+    listen_enabled: false
+    broadcast_enabled: false
+    target_preset: LONG_FAST
+    offer_psk: false
+    message: ""
+    interval_hours: 1
+```
+
+A beacon is only heard by nodes on the **same preset, region and default
+channel** it was sent on. Yours reaches nodes sitting on the target preset's
+public channel in your region; one sent to you is only heard if the sender
+retuned onto *your* channel, preset and region — so an empty list usually just
+means nobody nearby is beaconing at you.
 
 ### Store and Forward
 
@@ -2345,8 +2407,8 @@ Config also has a **Chat Names** action, which opens a picker (same navigation a
 Chat Style) to choose how sender names appear in channel chat:
 
 - **Short** — the node's 4-character short name (e.g. `ABCD`)
-- **Long** — the node's full advertised name when one is known, otherwise it
-  falls back to the short name / hex id
+- **Long** (default) — the node's full advertised name when one is known,
+  otherwise it falls back to the short name / hex id
 
 Unlike Chat Style, this applies **without a reboot**: bubble views re-render
 immediately, and new classic-chat lines use the chosen style going forward. The
@@ -2835,11 +2897,76 @@ pad their slots rather than packing them edge to edge: EU 866 gives four
 channels at 865.7, 866.3, 866.9 and 867.5 MHz, and EU Narrow 868 is a single
 pinned slot rather than a hashed one.
 
-The amateur-radio regions Meshtastic 2.8 added at 2 m, 70 cm and 125 cm are
-deliberately **not** offered. They are licensed-only, and the firmware has no
-concept of a licensed operator to gate them behind — no call sign, and no
-restriction on relaying between licensed and unlicensed users. Listing them
-would be handing you a menu entry that transmits unlicensed on an amateur band.
+The amateur-radio regions Meshtastic 2.8 added are licensed-only: they appear
+in the region pickers only while [licensed mode](#licensed-amateur-mode) is on.
+
+### Licensed (amateur) mode
+
+Licensed mode lets a licensed radio amateur run the node under amateur rules
+instead of licence-free ISM rules, and join a Meshtastic ham mesh as a licensed
+peer. It is off by default. Turn it on from **Licensed (ham) mode** on the
+Config screen, or the **Licensed (Ham) Mode** section of web config. It is
+**not available on the Cardputer** (`cardputer-cap`).
+
+**You are responsible for holding a licence for the band you use. Camillia does
+not verify your licence.** The hardware is designed for ISM bands, so check
+that your antenna and RF front end suit the amateur band before you transmit
+on it.
+
+**Turning it on.** Enter a call sign (1 to 15 letters, digits or `/`; it is
+uppercased, and an invalid or over-long one is rejected, never shortened), an
+optional long-name suffix and a TX power, then choose Enable. A confirmation
+lists what will change, and the device saves and reboots. In web config, tick
+Licensed mode, fill in the call sign and save; changing the call sign later
+also reboots.
+
+**What changes while it is on:**
+
+- **Identity.** Your long name becomes `CALL//suffix`, or just `CALL` with no
+  suffix, capped at 24 bytes like any long name. Your short name is left as it
+  was. NodeInfo marks you as licensed, and the header shows `HAM` and your call
+  sign next to the clock.
+- **No encryption.** Every channel's key is removed and stays empty; the key
+  fields are disabled. A channel named `admin` is disabled (except the primary).
+- **DMs** go as plaintext on the primary channel, signed, rather than PKI
+  encrypted. Incoming PKI-encrypted packets are not decrypted.
+- **Remote admin** is refused, since it needs PKI.
+- **MQTT downlink** is refused: packets from the broker are dropped, so they
+  are neither shown nor relayed onto the air.
+- **Relaying** is local-only (rebroadcast mode LOCAL_ONLY, whatever the role).
+  The node also never relays a packet it could not decode.
+- **Licensed and unlicensed nodes are kept apart**, as upstream does. A
+  NodeInfo whose licensed flag does not match yours is not stored, and traffic
+  to or from a node known to be unlicensed is dropped, neither shown nor
+  relayed. Nodes you know nothing about yet still pass.
+- **Station ID.** NodeInfo goes out every 10 minutes, whatever the configured
+  interval.
+- **Power** is the licensed TX power you set, from 1 dBm up to the board's
+  maximum. It is fixed on the device until you turn the mode off; web config
+  can change it while licensed.
+- **Mesh Beacon and chat server client are off.** Both send encrypted
+  traffic, so neither transmits while licensed. Listening for beacons still
+  works.
+- **Ham regions.** The 70 cm regions (ITU1, ITU2 and ITU3) and 1.25 m (ITU2,
+  220 to 225 MHz) become selectable, with the Narrow presets their band plan
+  expects. The 2 m regions are known to the firmware but never offered: no
+  current board's radio tunes below 150 MHz.
+
+**Testing with N0CALL.** Licensed mode can be entered with the call sign
+`N0CALL`. The node then runs licensed but its transmitter stays off, so you can
+look around without putting anything on the air.
+
+**Turning it off.** Choose Disable (or untick Licensed mode in web config); the
+device confirms, saves and reboots. Keep in mind:
+
+- **Channel keys do not come back.** Re-enter or re-import them yourself.
+- **On a ham region**, the region moves back to the board's default and
+  transmit stays off until you confirm. Use **Resume transmitting** in the
+  Licensed (ham) mode popup, or tick Resume transmitting in web config and
+  save.
+- TX power is clamped back down to the region's limit.
+- **Rebroadcast mode stays LOCAL_ONLY.** If you want the node to relay as
+  before, set it back under Device, Rebroadcast in web config.
 
 ### Custom LoRa modem settings
 

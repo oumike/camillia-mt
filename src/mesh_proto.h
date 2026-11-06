@@ -165,6 +165,8 @@ struct UserInfo {
     // Config.DeviceConfig.Role (field 7). proto3 omits CLIENT (0), so an absent
     // field reads as CLIENT, which is what it means.
     uint8_t role;
+    // User.is_licensed (field 6): the sender runs in licensed (amateur) mode.
+    bool    isLicensed;
 };
 
 struct PositionInfo {
@@ -222,6 +224,8 @@ struct MeshBeaconPayload {
     uint8_t  offerRegion;        // Meshtastic RegionCode enum; 0 = UNSET
     bool     hasOfferPreset;
     uint8_t  offerPreset;        // Meshtastic ModemPreset enum — NOT camillia's
+    bool     hasOfferSlot;
+    uint32_t offerSlot;          // offer_slot, field 5: 1-based frequency slot
     bool     valid;
 };
 
@@ -380,10 +384,12 @@ size_t encodeTextMessageUnicast(const char *text,
 // Encode a NODEINFO_APP Data message (User proto). Returns encoded length.
 // wantResponse=true asks the receiver to reply with their own NODEINFO (use for broadcasts).
 // bitfield: optional Data.bitfield value; bit 0 = OK_TO_MQTT.
+// isLicensed: write User.is_licensed (field 6); the public key is sent either way.
 size_t encodeNodeInfo(uint32_t nodeId, const char *longName,
                       const char *shortName, const uint8_t *mac6,
                       uint8_t *buf, size_t bufLen,
-                      bool wantResponse = true, uint32_t bitfield = 0);
+                      bool wantResponse = true, uint32_t bitfield = 0,
+                      bool isLicensed = false);
 
 // A NODEINFO_APP Data message describing *another* node, for the node actions'
 // Share: its id, names and, when known, public key (pubKey32 may be null). What

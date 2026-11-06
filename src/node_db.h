@@ -4,6 +4,7 @@
 #include "mesh_proto.h"
 #include "key_pin.h"
 #include "node_name_cache.h"
+#include "licensed_mode.h"
 
 struct NodeEntry {
     uint32_t nodeId;          // 0 = empty slot
@@ -50,6 +51,12 @@ struct NodeEntry {
     // one thing that depends on it (hop preservation, see relay_policy.h).
     uint8_t  role;
     bool     hasRole;
+    // User.is_licensed from the last NodeInfo heard this boot. licensedKnown is
+    // set by any decoded NodeInfo; a record made from the name cache or from a
+    // non-NodeInfo packet leaves it false, so its status reads as unknown. RAM
+    // only, like role.
+    bool     isLicensed;
+    bool     licensedKnown;
     int      chanIdx;         // channel last heard on
     uint8_t  chanHash;        // raw on-air channel hash last heard from this node
     bool     hasChanHash;
@@ -249,6 +256,9 @@ public:
     void updateTelemetry(uint32_t nodeId, const TelemetryInfo &t);
     bool setFavorite(uint32_t nodeId, bool favorite);
     bool isFavorite(uint32_t nodeId) const;
+    // Licensed-mode status of a peer: PEER_UNKNOWN for broadcast, a node not in
+    // the table, or one whose NodeInfo has not been heard this boot.
+    lic::PeerStatus licenseStatus(uint32_t nodeId) const;
     // The node a packet's one-byte relay_node names, among the nodes it could
     // plausibly be -- direct neighbours, favorites and router-type nodes, as
     // upstream's resolveUniqueLastByte() -- never `selfId`. Null when none of
