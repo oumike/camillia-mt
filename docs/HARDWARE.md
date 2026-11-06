@@ -41,7 +41,7 @@ and its [`src/hal/hw_*.h`](../src/hal/) pin map.
 | **Build env** | `p4-amoled-sx1262`, `p4-amoled-lr2021` |
 | **MCU** | ESP32-P4 V1.0 ECO2 (pre-rev.300), dual-core RISC-V at 360 MHz, 16 MB flash, 32 MB 200 MHz hex PSRAM |
 | **Toolchain** | pioarduino `55.03.312-1`, Arduino 3.3.12, ESP-IDF 5.5.5 |
-| **Display** | 4.1-inch RM69A10 AMOLED, 568x1232 RGB565, two-lane MIPI-DSI at 1000 Mbps/lane; DCS brightness; portrait default with runtime landscape/portrait selection |
+| **Display** | 4.1-inch RM69A10 AMOLED, 568x1232 RGB565, two-lane MIPI-DSI at 1000 Mbps/lane; DCS brightness; portrait default with runtime landscape/portrait selection. In landscape, Settings > Display > Channel Panel docks the channel list beside the chat (Locked, the default) or makes it a drawer (Unlocked); with the keyboard expansion, Right from the chat cursor undocks it, Left opens the drawer and Left again docks it |
 | **Touch** | GT9895 at `0x5D`; raw 1060x2400 coordinates scaled to panel space |
 | **Wireless** | ESP32-C6 over four-bit SDIO via ESP-Hosted 2.12.13; C6 firmware is a separate release asset and is not updated by P4 OTA |
 | **LoRa** | SX1262 or LR2021; both use SPI2 with CS24/BUSY6 and reset/IRQ through XL9535. The LR2021 build configures its internal DIO6/7/8/10 RF paths; SKY13453 selects the internal antenna or MMCX1 for either radio |
@@ -58,7 +58,7 @@ and its [`src/hal/hw_*.h`](../src/hal/) pin map.
 | --- | --- |
 | **Build env** | `tanmatsu` |
 | **MCU** | ESP32-P4 (ECO2, `esp32p4_es` profile) at 360 MHz, 16 MB flash, 32 MB PSRAM |
-| **Display** | 3.92-inch ST7701 IPS LCD, 480x800 over two-lane MIPI-DSI; backlight driven by the coprocessor. Settings > Display > Channel Panel docks the channel list beside the chat (Locked, the default; Left arrow or C moves into it, Up/Down and Enter switch channel, Right returns) or makes it a drawer (Unlocked) |
+| **Display** | 3.92-inch ST7701 IPS LCD, 480x800 over two-lane MIPI-DSI; backlight driven by the coprocessor. Settings > Display > Channel Panel docks the channel list beside the chat (Locked, the default) or makes it a drawer (Unlocked); the arrow keys change it too. Docked: Left or C moves into the list, Up/Down and Enter switch channel, Right returns to the chat, and Right again undocks and closes it. Undocked: Left opens the drawer, Left again docks it; Enter or Right picks the highlighted channel and closes the drawer. In the compose box the arrow keys move the caret |
 | **Coprocessor** | CH32V203 on I2C (`0x5F`): keyboard matrix, display and keyboard backlights, C6 power, battery, charger and power-off |
 | **Wireless** | ESP32-C6 over SDIO via ESP-Hosted. Wi-Fi works through it; BLE keyboard is not supported yet (NimBLE-Arduino 1.x needs an on-chip controller) |
 | **LoRa** | SX1262 attached to the C6, not the P4. Camillia drives it through the C6 firmware's LoRa RPC over ESP-Hosted (`src/hal/tanmatsu_lora.cpp`); the C6 is not reflashed |

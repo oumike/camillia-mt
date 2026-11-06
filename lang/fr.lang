@@ -949,3 +949,5 @@ Lic drops %lu / NI mismatch %lu	Lic rejets %lu / NI incohérences %lu
 Your beacon: off while licensed	Votre balise : désactivée en mode licencié
 Off while licensed	Désactivé en mode licencié
 Chat server is off while licensed	Le serveur de chat est désactivé en mode licencié
+Channels: Left or C, Up/Down to move,\nEnter picks. Right twice hides it.	Canaux : Gauche ou C, Haut/Bas pour choisir,\nEntrée valide. Droite deux fois le masque.
+Channels: Left opens the list, Left\nagain docks it beside the chat.	Canaux : Gauche ouvre la liste, Gauche\nencore l'ancre à côté du chat.

@@ -723,6 +723,28 @@ int main() {
         uint8_t plain[64]; size_t pl = 0;
         return decryptPacket(h, kClear, plain, sizeof(kClear), pl) == 4;
     });
+    guarded("decryptPacket: cleartext for another channel's hash is not filed on a keyless one", [] {
+        // A licensed sender's keyless "sumat": its hash is the name's alone,
+        // which no channel here carries. The receiver's AA== channel would
+        // read it, but nothing ties it to that channel.
+        ChannelKey &plainCh = CHANNEL_KEYS[2];
+        strcpy(plainCh.name_buf, "Plain");
+        plainCh.name = plainCh.name_buf;
+        plainCh.key[0] = 0x00;
+        plainCh.keyLen = 1;
+        plainCh.hash = channelKeyHash(plainCh);
+        ChannelKey other = {};
+        strcpy(other.name_buf, "sumat");
+        other.name = other.name_buf;
+        other.keyLen = 0;
+        MeshHdr h = {}; h.to = 0xFFFFFFFF; h.from = 0x1234; h.id = 7;
+        h.channel = channelKeyHash(other);
+        for (int i = 0; i < MAX_CHANNELS; i++) {
+            if (CHANNEL_KEYS[i].hash == h.channel) return false;   // test premise
+        }
+        uint8_t plain[64]; size_t pl = 0;
+        return decryptPacket(h, kClear, plain, sizeof(kClear), pl) == -1;
+    });
 
     printf("%s  %d checks, %d failed\n", g_fail ? "FAILED" : "ok", g_run, g_fail);
     return g_fail ? 1 : 0;

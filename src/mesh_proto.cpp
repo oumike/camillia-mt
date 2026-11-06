@@ -722,9 +722,19 @@ int decryptPacket(const MeshHdr &hdr, const uint8_t *cipher,
         if (CHANNEL_KEYS[i].hash != hdr.channel) continue;
         if (tryDecrypt(i)) return i;
     }
-    // Pass 2: fall back — try all keys (handles unknown/unregistered channels)
+    // Pass 2: fall back — try all keys (handles unknown/unregistered channels).
+    // Never a keyless channel: it "decrypts" anything, so only its hash can
+    // tie a packet to it. Without that a licensed node's cleartext on a
+    // channel we lack was filed on whichever no-key channel came first.
     for (int i = 0; i < MAX_CHANNELS; i++) {
         if (CHANNEL_KEYS[i].hash == hdr.channel) continue; // already tried
+        {
+            uint8_t exp[16];
+            const uint8_t *k = CHANNEL_KEYS[i].key;
+            uint8_t kl = CHANNEL_KEYS[i].keyLen;
+            resolveMeshKey(CHANNEL_KEYS[i].key, CHANNEL_KEYS[i].keyLen, exp, k, kl);
+            if (kl == 0) continue;
+        }
         if (tryDecrypt(i)) return i;
     }
     return -1;

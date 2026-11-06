@@ -222,7 +222,7 @@ int16_t TanmatsuLoraRpc::begin(float freq, float bw, uint8_t sf, uint8_t cr, uin
     _cfg.cr = cr;
     _cfg.syncWord = syncWord;
     _cfg.preamble = preambleLength;
-    _cfg.power = (uint8_t)power;
+    _cfg.power = (uint8_t)(power > MESH_POWER ? MESH_POWER : power);
     _cfg.rampTime = 40;
     _cfg.crc = true;
     _cfg.invertIq = false;
@@ -266,8 +266,9 @@ int16_t TanmatsuLoraRpc::setCodingRate(uint8_t cr) {
 }
 
 int16_t TanmatsuLoraRpc::setOutputPower(int8_t power) {
-    if (power < -9 || power > 22) return RADIOLIB_ERR_INVALID_OUTPUT_POWER;
-    _cfg.power = (uint8_t)power;
+    if (power < -9) return RADIOLIB_ERR_INVALID_OUTPUT_POWER;
+    // Saved configs may hold 22 from before the cap; send the ceiling instead.
+    _cfg.power = (uint8_t)(power > MESH_POWER ? MESH_POWER : power);
     return _pushConfig();
 }
 

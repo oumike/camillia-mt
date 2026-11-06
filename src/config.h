@@ -84,7 +84,9 @@
 #define MESH_CR         5         // 4/5 coding rate (Meshtastic LONG_FAST default)
 #define MESH_SYNC       0x2B      // Meshtastic sync word
 #define MESH_PREAMBLE   16
+#ifndef MESH_POWER                // a board header may set a lower hardware max
 #define MESH_POWER      22        // dBm (hardware max; ribl_config requests 30)
+#endif
 #define MESH_HOP_LIMIT   7        // from ribl_config
 // SX1262 RX boosted gain. ~2 dB more sensitivity for ~2 mA more receive
 // current, paid continuously because the radio idles in RX. 1 keeps the
@@ -755,9 +757,12 @@
 #endif
 
 // Display > Channel Panel: the channel list docked beside the chat (locked,
-// the default) or slid in as a drawer (unlocked). The Tanmatsu only, whose
-// 400 px-wide layout has room for both.
-#if defined(DEVICE_TANMATSU)
+// the default) or slid in as a drawer (unlocked). The boards whose landscape
+// layout has room for both: the Tanmatsu, and the large-panel T-Display P4
+// (landscape only; portrait always uses the drawer). With arrow keys, Left on
+// the chat screen undocks and Right docks again (pumpKeyboardInput()). The
+// Pager stays docked: its drawer code is compiled out (UI_CHANNEL_LIST_DROPDOWN).
+#if defined(DEVICE_TANMATSU) || (defined(DEVICE_TDISPLAY_P4) && UI_LARGE_PANEL_PROFILE)
 #define HAS_CHANNEL_PANEL_LOCK 1
 #else
 #define HAS_CHANNEL_PANEL_LOCK 0

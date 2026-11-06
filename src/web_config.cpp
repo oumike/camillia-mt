@@ -5005,7 +5005,12 @@ static void sendConfigPage(const char *msg = "", bool lite = false) {
         html += "<p class='hint'>"
                 "Locked keeps the channel list beside the chat at all times. "
                 "Unlocked hides it in a drawer that slides in over the chat when "
-                "asked for. Takes effect immediately, no reboot.</p>";
+                "asked for. With arrow keys, Left opens the drawer and Left again "
+                "locks it; Right from the chat unlocks it. "
+#if defined(DEVICE_TDISPLAY_P4)
+                "Landscape only: portrait always uses the drawer. "
+#endif
+                "Takes effect immediately, no reboot.</p>";
     }
 #endif
 #if HAS_NAV_BAR_TOGGLE

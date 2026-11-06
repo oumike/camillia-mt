@@ -980,3 +980,5 @@ Lic drops %lu / NI mismatch %lu	Lic descartes %lu / NI discrepancias %lu
 Your beacon: off while licensed	Tu baliza: desactivada con licencia
 Off while licensed	Desactivado con licencia
 Chat server is off while licensed	El servidor de chat está desactivado con licencia
+Channels: Left or C, Up/Down to move,\nEnter picks. Right twice hides it.	Canales: Izquierda o C, Arriba/Abajo para mover,\nIntro elige. Derecha dos veces lo oculta.
+Channels: Left opens the list, Left\nagain docks it beside the chat.	Canales: Izquierda abre la lista, Izquierda\notra vez la fija junto al chat.

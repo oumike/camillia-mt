@@ -126,6 +126,9 @@
 #define LORA_FEM_POWER_PIN                    -1
 #define LORA_FEM_ENABLE_PIN                   -1
 #define LORA_FEM_TX_MODE_PIN                  -1
+// TX power ceiling. Wadamesh caps this board at 20 dBm (MAX_LORA_TX_POWER);
+// asking the C6 for 22 left the radio not receiving there.
+#define MESH_POWER                            20
 // The C6 firmware owns the TCXO configuration; this value is unused.
 #define MESH_TCXO_V                         1.8f
 

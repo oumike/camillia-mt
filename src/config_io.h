@@ -763,9 +763,9 @@ struct RhinoConfig {
     // boundary, so this starts at exactly the previous sizeof(RhinoConfig) and
     // an upgrading device keeps the compiled default.
     uint8_t  powerLedPct;
-    // ── Channel panel lock (HAS_CHANNEL_PANEL_LOCK boards: the Tanmatsu) ────
+    // ── Channel panel lock (HAS_CHANNEL_PANEL_LOCK boards: Tanmatsu, P4 landscape) ──
     // Locked docks the channel list beside the chat; unlocked makes it the
-    // sliding drawer. Read it through cfgChannelPanelLocked(). Locked is the
+    // sliding drawer. The arrow keys on the chat screen also change it. Read it through cfgChannelPanelLocked(). Locked is the
     // default, so only kChannelPanelUnlocked means unlocked -- the pad byte
     // this took from older builds, whatever it holds, reads as locked.
     uint8_t  channelPanelLock;

@@ -8349,7 +8349,11 @@ static inline int navSideInsetRight() {
 // they ask this.
 static inline bool channelListIsDropdown() {
 #if defined(DEVICE_TDISPLAY_P4)
-    return uiPortrait() || !UI_LARGE_PANEL_PROFILE;
+    return uiPortrait() || !UI_LARGE_PANEL_PROFILE
+#if HAS_CHANNEL_PANEL_LOCK
+           || !cfgChannelPanelLocked(s_cfg)
+#endif
+           ;
 #elif HAS_CHANNEL_PANEL_LOCK
     // Display > Channel Panel: locked docks it beside the chat (buildUi()).
     // Read at build time; the setting rebuilds the screen when it changes.
@@ -8360,9 +8364,15 @@ static inline bool channelListIsDropdown() {
 }
 
 #if HAS_CHANNEL_PANEL_LOCK
-// The locked panel's keyboard cursor (s_channelColumnFocus).
+// The locked panel's keyboard cursor (s_channelColumnFocus). Keyboard-first
+// boards only: the touch-profile P4 keeps its own model, where Up/Down drive
+// the docked list whenever the chat cursor is off.
 static inline bool channelColumnDocked() {
+#if UI_TOUCH_ONLY_PROFILE
+    return false;
+#else
     return !channelListIsDropdown() && s_channelList != nullptr;
+#endif
 }
 
 static inline bool channelColumnFocused() {
@@ -8384,6 +8394,28 @@ static void setChannelColumnFocus(bool on) {
         s_cardputerDropdownSelection = -1;
     }
     refreshChannelGlow(true);
+}
+
+// Arrow keys: Left in the open drawer docks the panel, cursor on the row it
+// had; Right from the chat undocks it, drawer closed. This is the Channel
+// Panel setting itself, so Config and web config agree with it and it
+// survives a reboot. A rebuild, as from Config: the chat's width changes.
+static bool s_channelColumnFocusAfterRebuild = false;
+static int  s_channelColumnFocusSel = -1;
+
+static void setChannelPanelDockedFromKeys(bool docked, int focusSel = -1) {
+    if (cfgChannelPanelLocked(s_cfg) == docked) return;
+    if (s_pagerChatCursorMode) pagerExitChatCursorMode(true);
+    if (isChannelDropdownVisible()) setChannelDropdownVisible(false);
+    s_channelColumnFocus = false;
+    cfgSetChannelPanelLocked(s_cfg, docked);
+    persistConfigToPrefs();
+    // Picked up by processPendingUiRebuild() once the new column exists. The
+    // P4 needs none: its docked list takes Up/Down whenever the chat cursor
+    // is off, which it now is.
+    s_channelColumnFocusAfterRebuild = docked && !UI_TOUCH_ONLY_PROFILE;
+    s_channelColumnFocusSel = focusSel;
+    scheduleUiRebuild(false);
 }
 #endif
 
@@ -44517,11 +44549,13 @@ static const char *legendTransportText() {
 // Messages button on the M9.
 static const char *legendChannelListTextRaw() {
 #if UI_CHANNEL_LIST_DROPDOWN
-#if HAS_CHANNEL_PANEL_LOCK
+#if HAS_CHANNEL_PANEL_LOCK && !UI_TOUCH_ONLY_PROFILE
     if (!channelListIsDropdown()) {
-        return TR("Channels: Left arrow or C, Up/Down to\n"
-                  "move, Enter picks one, Right goes back.");
+        return TR("Channels: Left or C, Up/Down to move,\n"
+                  "Enter picks. Right twice hides it.");
     }
+    return TR("Channels: Left opens the list, Left\n"
+              "again docks it beside the chat.");
 #endif
     if (!channelListIsDropdown()) return "";
 #if defined(DEVICE_M9)
@@ -50944,7 +50978,8 @@ static void pumpKeyboardInput() {
         }
 
 #if defined(DEVICE_TLORA_PAGER_TFT) || defined(DEVICE_M9) || defined(DEVICE_MESH_DECK) \
-    || defined(DEVICE_TDISPLAY_P4) || (defined(DEVICE_TDECK) && HAS_TRACKBALL)
+    || defined(DEVICE_TDISPLAY_P4) || defined(DEVICE_TANMATSU) \
+    || (defined(DEVICE_TDECK) && HAS_TRACKBALL)
         // Steps the caret through the message being typed.
         //
         // It sits ahead of the per-screen handlers because compose is reachable
@@ -50972,7 +51007,7 @@ static void pumpKeyboardInput() {
             }
 #endif
 #if defined(DEVICE_M9) || defined(DEVICE_MESH_DECK) || defined(DEVICE_TDISPLAY_P4) \
-    || defined(DEVICE_TDECK)
+    || defined(DEVICE_TDECK) || defined(DEVICE_TANMATSU)
 #if HAS_SCROLL_INVERT
             // T-Deck: the trackball rolls the caret the way the ball moves, so
             // the list-scroll invert applied where trackball input enters the
@@ -51014,7 +51049,7 @@ static void pumpKeyboardInput() {
             //
             // The T-Display P4's keyboard expansion is here for the same reason:
             // its arrow keys arrive as these four tokens (kTloraTapMap), and its
-            // compose box wraps too.
+            // compose box wraps too. So do the Tanmatsu's arrow keys (kTmKeymap).
             if (k == KEY_PREV_CHAN) { lv_textarea_cursor_left(s_composeInput);  continue; }
             if (k == KEY_NEXT_CHAN) { lv_textarea_cursor_right(s_composeInput); continue; }
             if (k == KEY_SCROLL_UP) { lv_textarea_cursor_up(s_composeInput);    continue; }
@@ -51927,10 +51962,14 @@ static void pumpKeyboardInput() {
         if (!s_composeModal) {
 #if !UI_TOUCH_ONLY_PROFILE
 #if HAS_CHANNEL_PANEL_LOCK
-            // Locked channel panel, keyboard only: Left steps into the docked
-            // column and its cursor takes Up/Down; Enter switches to the row,
-            // Right/Esc/Backspace go back to the chat untouched. Any other key
-            // drops the cursor and carries on, so shortcuts still work.
+            // Channel panel, keyboard only. Docked: Left or C steps into the
+            // column, whose cursor takes Up/Down; Enter switches to the row
+            // and Right/Esc/Backspace go back to the chat. Right again, from
+            // the chat, undocks and closes it. Undocked: Left opens the drawer;
+            // Left in the drawer docks it, cursor kept on its row; Enter or
+            // Right there picks the row and hides the drawer (below). Any
+            // other key drops the column cursor and carries on, so shortcuts
+            // still work.
             if (channelColumnFocused()) {
                 if (k == KEY_SCROLL_UP || k == KEY_SCROLL_DN) {
                     int next = s_cardputerDropdownSelection;
@@ -51952,21 +51991,30 @@ static void pumpKeyboardInput() {
                     setChannelColumnFocus(false);
                     continue;
                 }
-                if (k == KEY_PREV_CHAN) continue;
+                if (k == KEY_PREV_CHAN) continue;   // already at the left edge
                 if (k == KEY_NEXT_CHAN || isModalCloseKey(k)
                     || k == KEY_BACKSPACE || k == KEY_BACKSPACE_HOLD) {
                     setChannelColumnFocus(false);
                     continue;
                 }
                 setChannelColumnFocus(false);
-            } else if (k == KEY_PREV_CHAN && channelColumnDocked()
-                       && chatScreenIsForeground()) {
-                if (s_pagerChatCursorMode) {
-                    pagerExitChatCursorMode(true);
-                    refreshChatView(true);
-                }
-                setChannelColumnFocus(true);
+            } else if (channelColumnDocked() && chatScreenIsForeground()
+                       && (k == KEY_PREV_CHAN || k == KEY_NEXT_CHAN)) {
+                if (k == KEY_PREV_CHAN) setChannelColumnFocus(true);
+                else                    setChannelPanelDockedFromKeys(false);
                 continue;
+            } else if (channelListIsDropdown() && chatScreenIsForeground()) {
+                if (isChannelDropdownVisible()) {
+                    if (k == KEY_PREV_CHAN) {
+                        setChannelPanelDockedFromKeys(true, s_cardputerDropdownSelection);
+                        continue;
+                    }
+                    if (k == KEY_NEXT_CHAN) k = KEY_ENTER;   // picks the row, as Enter
+                } else if (k == KEY_PREV_CHAN) {
+                    setChannelDropdownVisible(true);
+                    refreshChannelGlow(true);
+                    continue;
+                }
             }
 #endif
             if (isChannelDropdownVisible()) {
@@ -52054,6 +52102,15 @@ static void pumpKeyboardInput() {
             // picking a channel opened a new message on it instead of the
             // channel itself. Enter now closes the drawer onto the chat.
             if (isChannelDropdownVisible()) {
+#if defined(DEVICE_TDISPLAY_P4) && HAS_CHANNEL_PANEL_LOCK
+                // Landscape: Left in the drawer docks the list; Right closes the
+                // drawer onto the chat, as Enter does.
+                if (!uiPortrait() && k == KEY_PREV_CHAN) {
+                    setChannelPanelDockedFromKeys(true);
+                    continue;
+                }
+                if (!uiPortrait() && k == KEY_NEXT_CHAN) k = KEY_ENTER;
+#endif
                 if (k == KEY_SCROLL_UP || k == KEY_SCROLL_DN) {
                     // Claimed here so a message cursor left on from before the
                     // drawer opened cannot take the arrows away from the list.
@@ -52082,9 +52139,26 @@ static void pumpKeyboardInput() {
 #if defined(DEVICE_TDISPLAY_P4)
                     // Landscape docks the channel list beside the chat, so the
                     // keyboard expansion's arrows move between the two: Right
-                    // from the list puts the cursor on the newest message,
-                    // Left from the chat hands Up/Down back to the list.
+                    // from the list puts the cursor on the newest message, and
+                    // Right again undocks the list (Display > Channel Panel),
+                    // closed. Undocked, Left opens the drawer, and Left in the
+                    // drawer docks it (handled with the drawer's keys above).
                     // Portrait's list is a drawer, with no side to move to.
+#if HAS_CHANNEL_PANEL_LOCK
+                    if (!uiPortrait() && chatScreenIsForeground()) {
+                        if (k == KEY_NEXT_CHAN && !channelListIsDropdown()
+                            && s_pagerChatCursorMode) {
+                            setChannelPanelDockedFromKeys(false);
+                            continue;
+                        }
+                        if (k == KEY_PREV_CHAN && channelListIsDropdown()
+                            && !isChannelDropdownVisible()) {
+                            setChannelDropdownVisible(true);
+                            refreshChannelGlow(true);
+                            continue;
+                        }
+                    }
+#endif
                     if (!uiPortrait() && s_activeChannel >= 0
                         && s_activeChannel < MESH_CHANNELS) {
                         if (k == KEY_NEXT_CHAN && !s_pagerChatCursorMode) {
@@ -62276,7 +62350,7 @@ static void buildUi() {
     // 2 px of border per side, and anything shorter clips the glyphs.
     const int channelNavBtnH =
         max(kMainScreenChannelBtnHeight, (int)lv_font_get_line_height(channelNavFont) + 8);
-#elif HAS_CHANNEL_PANEL_LOCK
+#elif HAS_CHANNEL_PANEL_LOCK && defined(DEVICE_TANMATSU)
     // Docked rows shrink with their font: 2 px padding and up to 2 px of border
     // a side around an 11-unit line still clears in 20.
     const int channelNavBtnH = channelListIsDropdown() ? kMainScreenChannelBtnHeight : 20;
@@ -62513,7 +62587,7 @@ static void buildUi() {
         lv_obj_set_size(s_chatShortcutBar, legendBarW, chatLegendH);
         lv_obj_align(s_chatShortcutBar, LV_ALIGN_TOP_LEFT, 0, chatY + chatH + 3);
 #else
-#if HAS_CHANNEL_PANEL_LOCK
+#if HAS_CHANNEL_PANEL_LOCK && !UI_TOUCH_ONLY_PROFILE
         if (!channelListIsDropdown()) {
             // Docked column: under it as well as the chat, the Pager's way.
             // Kept to the chat's width, the key hints ran out of room and
@@ -63003,6 +63077,15 @@ static void processPendingUiRebuild() {
     s_uiRebuildReopenCfg = false;
 
     rebuildUiForThemeChange(reopenCfg);
+#if HAS_CHANNEL_PANEL_LOCK
+    if (s_channelColumnFocusAfterRebuild) {
+        s_channelColumnFocusAfterRebuild = false;
+        const int sel = s_channelColumnFocusSel;
+        s_channelColumnFocusSel = -1;
+        s_cardputerDropdownSelection = (sel >= 0 && sel < MESH_CHANNELS) ? sel : s_activeChannel;
+        setChannelColumnFocus(true);
+    }
+#endif
 }
 
 // In-place normalise a serial CLI line: trim whitespace, collapse runs of
