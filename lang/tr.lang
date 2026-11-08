@@ -458,6 +458,7 @@ Mon	Pzt
 Month	Ay
 Move  Enter=Apply  %s=Back	Taşı  Enter=Uygula  %s=Geri
 Move  Enter=Apply  %s=Cancel	Taşı  Enter=Uygula  %s=İptal
+Move  Enter=Apply  M=No MQTT  %s=Back	Taşı  Enter=Uygula  M=MQTT yok  %s=Geri
 Move  Enter=Change  %s=Cancel	Taşı  Enter=Değiştir  %s=İptal
 Move  Enter=Edit  %s=Back	Taşı  Enter=Düzenle  %s=Geri
 Move  Enter=OK  %s=Cancel	Taşı  Enter=Tamam  %s=İptal
@@ -480,6 +481,8 @@ N=Choose WiFi   Enter=Finish   Bksp=Back	N=WiFi seç   Enter=Bitir   Bksp=Geri
 NO LINE OF SIGHT	GÖRÜŞ HATTI YOK
 NODEINFO + telemetry queued.	NODEINFO + telemetri kuyruğa alındı.
 No GPS fix	GPS konumu yok
+No MQTT	MQTT yok
+No MQTT: %s	MQTT yok: %s
 Only signed packets accepted (no 2.7 nodes)	Yalnızca imzalı paketler (2.7 düğümü yok)
 Send NODEINFO and telemetry to the mesh now?	NODEINFO ve telemetri şimdi ağa gönderilsin mi?
 NODES	DÜĞÜMLER
@@ -891,6 +894,8 @@ low	düşük
 missing	eksik
 never	asla
 no key	anahtar yok
+non-MQTT	MQTT dışı
+non-MQTT %s	MQTT dışı %s
 not seen	görülmedi
 off	kapalı
 on	açık

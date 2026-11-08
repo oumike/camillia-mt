@@ -457,6 +457,7 @@ Mon	ma
 Month	Kuukausi
 Move  Enter=Apply  %s=Back	Siirrä  Enter=Käytä  %s=Takaisin
 Move  Enter=Apply  %s=Cancel	Siirrä  Enter=Käytä  %s=Peruuta
+Move  Enter=Apply  M=No MQTT  %s=Back	Siirrä  Enter=Käytä  M=Ei MQTT  %s=Takaisin
 Move  Enter=Change  %s=Cancel	Siirrä  Enter=Muuta  %s=Peruuta
 Move  Enter=Edit  %s=Back	Siirrä  Enter=Muokkaa  %s=Takaisin
 Move  Enter=OK  %s=Cancel	Siirrä  Enter=OK  %s=Peruuta
@@ -479,6 +480,8 @@ N=Choose WiFi   Enter=Finish   Bksp=Back	N=Valitse WiFi   Enter=Valmis   Bksp=Ta
 NO LINE OF SIGHT	EI NÄKÖYHTEYTTÄ
 NODEINFO + telemetry queued.	NODEINFO + telemetria jonossa.
 No GPS fix	Ei GPS-paikannusta
+No MQTT	Ei MQTT
+No MQTT: %s	Ei MQTT: %s
 Only signed packets accepted (no 2.7 nodes)	Vain allekirjoitetut paketit (ei 2.7-solmuja)
 Send NODEINFO and telemetry to the mesh now?	Lähetetäänkö NODEINFO ja telemetria verkkoon nyt?
 NODES	SOLMUT
@@ -890,6 +893,8 @@ low	matala
 missing	puuttuu
 never	ei koskaan
 no key	ei avainta
+non-MQTT	ei-MQTT
+non-MQTT %s	ei-MQTT %s
 not seen	ei nähty
 off	pois
 on	päällä
