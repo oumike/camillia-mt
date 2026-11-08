@@ -205,11 +205,3 @@ private:
 };
 
 extern MeshRadio Radio;
-
-#if defined(DEVICE_TANMATSU)
-// TEMP diagnostic (missed-message hunt): a line to Serial and to
-// /camillia-trace.log on the SD card, stamped with the wall clock. Buffered in
-// RAM; diagTraceFlush() from the main loop appends it to the card every 10 s.
-void diagTrace(const char *fmt, ...) __attribute__((format(printf, 1, 2)));
-void diagTraceFlush(uint32_t nowMs);
-#endif

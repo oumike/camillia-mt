@@ -1,91 +1,4 @@
 #include "mesh_radio.h"
-#if defined(DEVICE_TANMATSU)
-#include <stdarg.h>
-#include <time.h>
-#include <freertos/FreeRTOS.h>
-#include "storage.h"
-
-// TEMP diagnostic: see diagTrace() in mesh_radio.h.
-namespace {
-constexpr size_t kTraceBufCap = 16384;
-constexpr const char *kTracePath = "/camillia-trace.log";
-constexpr const char *kTraceOldPath = "/camillia-trace.old.log";
-constexpr size_t kTraceRotateBytes = 4u * 1024u * 1024u;
-char        sTraceBuf[kTraceBufCap];
-size_t      sTraceLen = 0;
-uint32_t    sTraceDropped = 0;
-uint32_t    sTraceLastFlushMs = 0;
-portMUX_TYPE sTraceMux = portMUX_INITIALIZER_UNLOCKED;
-} // namespace
-
-void diagTrace(const char *fmt, ...) {
-    char line[256];
-    char stamp[24] = "--:--:--";
-    const time_t now = time(nullptr);
-    if (now > 1700000000) {
-        struct tm tmv;
-        localtime_r(&now, &tmv);
-        strftime(stamp, sizeof(stamp), "%H:%M:%S", &tmv);
-    }
-    int n = snprintf(line, sizeof(line), "%s ", stamp);
-    va_list ap;
-    va_start(ap, fmt);
-    n += vsnprintf(line + n, sizeof(line) - n, fmt, ap);
-    va_end(ap);
-    if (n >= (int)sizeof(line)) n = sizeof(line) - 1;
-    if (n > 0 && line[n - 1] != '\n' && n < (int)sizeof(line) - 1) {
-        line[n++] = '\n';
-        line[n] = '\0';
-    }
-    Serial.print(line);
-    portENTER_CRITICAL(&sTraceMux);
-    if (sTraceLen + n <= kTraceBufCap) {
-        memcpy(sTraceBuf + sTraceLen, line, n);
-        sTraceLen += n;
-    } else {
-        sTraceDropped++;
-    }
-    portEXIT_CRITICAL(&sTraceMux);
-}
-
-void diagTraceFlush(uint32_t nowMs) {
-    if ((uint32_t)(nowMs - sTraceLastFlushMs) < 10000UL) return;
-    sTraceLastFlushMs = nowMs;
-    if (!storageMounted()) return;
-    static char chunk[kTraceBufCap];
-    size_t len;
-    uint32_t dropped;
-    portENTER_CRITICAL(&sTraceMux);
-    len = sTraceLen;
-    memcpy(chunk, sTraceBuf, len);
-    sTraceLen = 0;
-    dropped = sTraceDropped;
-    sTraceDropped = 0;
-    portEXIT_CRITICAL(&sTraceMux);
-    if (len == 0 && dropped == 0) return;
-    storageOnWriter([&]() {
-        fs::FS &fs = storageFs();
-        File f = fs.open(kTracePath, FILE_APPEND);
-        if (!f) return;
-        if (f.size() > kTraceRotateBytes) {
-            f.close();
-            fs.remove(kTraceOldPath);
-            fs.rename(kTracePath, kTraceOldPath);
-            f = fs.open(kTracePath, FILE_APPEND);
-            if (!f) return;
-        }
-        if (dropped) f.printf("[trace] %lu line(s) lost: buffer full\n", (unsigned long)dropped);
-        f.write((const uint8_t *)chunk, len);
-        static bool reported = false;
-        if (!reported) {
-            reported = true;
-            Serial.printf("[trace] writing %s on the SD card: %lu bytes\n", kTracePath,
-                          (unsigned long)f.size());
-        }
-        f.close();
-    });
-}
-#endif
 #include <SPI.h>
 #include <Wire.h>
 
@@ -555,9 +468,6 @@ bool MeshRadio::init(uint8_t txPower, bool rxBoostedGain) {
                   MESH_FREQ, MESH_SF, MESH_BW, MESH_CR, (int)txPower,
                   (boostState != RADIOLIB_ERR_NONE) ? "FAILED"
                                                     : (_rxBoostedGain ? "1" : "0"));
-#if defined(DEVICE_TANMATSU)
-    diagTrace("[trace] boot: radio ready, firmware %s\n", APP_VERSION);   // TEMP diagnostic
-#endif
     if (boostState != RADIOLIB_ERR_NONE) {
         Serial.printf("[radio] setRxBoostedGainMode failed: %d\n", boostState);
     }
@@ -804,17 +714,6 @@ bool MeshRadio::pollRx(MeshPacket &pkt) {
     }
 
     sLastRxDoneMs = millis();
-#if defined(DEVICE_TANMATSU)
-    // TEMP diagnostic: missed-message hunt on the Tanmatsu.
-    diagTrace("[rx-trace] t=%lu from=%08lx to=%08lx id=%08lx ch=%02x hop=%u/%u len=%u rssi=%.1f snr=%.1f raw=%u/%d/%u dec=%d port=%lu\n",
-                  (unsigned long)millis(), (unsigned long)pkt.hdr.from, (unsigned long)pkt.hdr.to,
-                  (unsigned long)pkt.hdr.id, (unsigned)pkt.hdr.channel,
-                  (unsigned)(pkt.hdr.flags & 7), (unsigned)(pkt.hdr.flags >> 5),
-                  (unsigned)pkt.rawLen, pkt.rssi, pkt.snr,
-                  (unsigned)_radio.lastRawStats()[0], (int)(int8_t)_radio.lastRawStats()[1],
-                  (unsigned)_radio.lastRawStats()[2], pkt.decrypted ? 1 : 0,
-                  (unsigned long)pkt.portnum);
-#endif
     _armRx();
     return true;
 }
@@ -908,16 +807,6 @@ bool MeshRadio::transmit(const uint8_t *buf, size_t len) {
     if (state == RADIOLIB_ERR_NONE) {
         airNote((uint32_t)(_radio.getTimeOnAir(len) / 1000UL), true);
     }
-#if defined(DEVICE_TANMATSU)
-    // TEMP diagnostic: when the radio was deaf for its own transmit.
-    if (len >= sizeof(MeshHdr)) {
-        MeshHdr th;
-        memcpy(&th, buf, sizeof(th));
-        diagTrace("[tx-trace] t=%lu from=%08lx id=%08lx len=%u air=%lums state=%d\n",
-                      (unsigned long)millis(), (unsigned long)th.from, (unsigned long)th.id,
-                      (unsigned)len, (unsigned long)(_radio.getTimeOnAir(len) / 1000UL), state);
-    }
-#endif
     _rxFlag = false;    // discard TX_DONE ISR trigger
     _armRx();
     return state == RADIOLIB_ERR_NONE;

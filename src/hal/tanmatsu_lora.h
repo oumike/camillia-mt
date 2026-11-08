@@ -53,8 +53,6 @@ public:
     int16_t readData(uint8_t *data, size_t len);
     float getRSSI() const { return _lastRssi; }
     float getSNR() const { return _lastSnr; }
-    // The C6's raw stat bytes for the last packet read: rssi, snr, signal rssi.
-    const uint8_t *lastRawStats() const { return _lastRaw; }
     RadioLibTime_t getTimeOnAir(size_t len) const;   // microseconds
 
 private:
@@ -91,6 +89,5 @@ private:
     uint32_t _dropsLogged = 0;
     float    _lastRssi = 0.0f;
     float    _lastSnr = 0.0f;
-    uint8_t  _lastRaw[3] = {};
     void   (*_dio1)(void) = nullptr;
 };
