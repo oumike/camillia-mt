@@ -15139,6 +15139,15 @@ static void openComposePrompt(uint32_t replyPacketId,
     const lv_coord_t composeInputPadTop = 1;
     const lv_coord_t composeModalBottomPad = 4;
     const lv_coord_t composeModalRowPad = 1;
+#elif defined(DEVICE_TANMATSU)
+    const lv_font_t *composeBodyFont = emojiFont(&lv_font_montserrat_12);
+    // Two lines, wrapping, so a message reads as you type it instead of
+    // scrolling sideways out of one. The modal grows by the same amount
+    // (modalH below), so nothing else in it gives up room.
+    const lv_coord_t composeInputH = (lv_coord_t)((lv_font_get_line_height(composeBodyFont) * 2) + 6);
+    const lv_coord_t composeInputPadTop = 1;
+    const lv_coord_t composeModalBottomPad = 4;
+    const lv_coord_t composeModalRowPad = 3;
 #else
     const lv_font_t *composeBodyFont = emojiFont(&lv_font_montserrat_12);
     const lv_coord_t composeInputH = (lv_coord_t)(lv_font_get_line_height(composeBodyFont) + 8);
@@ -15377,6 +15386,10 @@ static void openComposePrompt(uint32_t replyPacketId,
     // whole display and the room goes to the message.
     modalW = lv_disp_get_hor_res(NULL);
     modalH = lv_disp_get_ver_res(NULL);
+#elif defined(DEVICE_TANMATSU)
+    // The shared size, plus what the second input line adds over the
+    // one-line box it was sized for.
+    modalH += (int)(composeInputH - (lv_font_get_line_height(composeBodyFont) + 8));
 #endif
 
     s_composeModal = lv_obj_create(s_rootScreen);
@@ -15523,7 +15536,7 @@ static void openComposePrompt(uint32_t replyPacketId,
     lv_obj_set_style_pad_left(s_composeInput, 3, 0);
     lv_obj_set_style_pad_right(s_composeInput, 3, 0);
 #if defined(DEVICE_TLORA_PAGER_TFT) || defined(DEVICE_TDECK) || defined(DEVICE_TDECK_PRO) || defined(DEVICE_CARDPUTER_LORA_HAT) \
-    || defined(DEVICE_MESH_DECK) || defined(DEVICE_M9)
+    || defined(DEVICE_MESH_DECK) || defined(DEVICE_M9) || defined(DEVICE_TANMATSU)
     // Wrap instead of scrolling sideways. The min/max height above pins the box
     // to its fixed number of lines, so a longer message scrolls inside it
     // rather than growing the box into the legend.
@@ -66311,6 +66324,14 @@ static void serviceFreshMarks() {
     if (s_prevChan >= 0 && s_prevChan != chan) {
         Channels.clearFresh(s_prevChan);
         freshDotsClear(s_chatDots, (uint32_t)s_prevChan);
+        // Leaving a channel that was in front means it has been read, however
+        // soon. Its unread mark used to wait out freshSeenMs() like the dots,
+        // so moving to another channel sooner left the one just read flagged
+        // until you went back to it.
+        if (s_channelNeedsAttention[s_prevChan]) {
+            s_channelNeedsAttention[s_prevChan] = false;
+            refreshChannelGlow(true);
+        }
     }
     if (s_prevPeer != 0 && s_prevPeer != peer) {
         DMs.clearFresh(s_prevPeer);
