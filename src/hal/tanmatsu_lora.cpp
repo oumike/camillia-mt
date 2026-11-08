@@ -68,6 +68,7 @@ volatile size_t   sReplyLen = 0;
 uint8_t           sTxBuf[sizeof(Header) + 256];
 bool              sHostedUp = false;
 bool              sCallbackRegistered = false;
+volatile uint32_t sRxDropped = 0;       // queue full when a packet arrived
 void            (*sDio1)(void) = nullptr;
 
 } // namespace
@@ -130,10 +131,27 @@ void TanmatsuLoraRpc::_onPeerData(uint32_t msgId, const uint8_t *data, size_t le
         RxItem item;
         item.len = wire.length;
         if (item.len > payloadLen - 4) item.len = (uint16_t)(payloadLen - 4);
-        item.rssi = wire.rssiRaw / -2.0f;
-        item.snr = wire.snrRaw / 4.0f;
+        // The stats are not what their names say. The C6 radio firmware
+        // (esp32-component-tanmatsu-lora lora.c, over esp32-component-sx126x)
+        // reads GetPacketStatus one byte off, so every field is shifted:
+        //   rssi_pkt_raw        = SNR register * -2, into a uint8_t: always
+        //                         negative, so it saturates to 0
+        //   snr_pkt_raw         = signal-RSSI register / -2: the signal RSSI
+        //                         in dBm, as an int8
+        //   signal_rssi_pkt_raw = a byte past the reply: 0
+        // Read against the air: nearby nodes come out at -38..-56 here, and
+        // the one corrupted packet seen at -119 -- right for RSSI, and as SNR
+        // (raw / 4, the old decode) -29.8 dB, below what SF11 can decode.
+        // The real SNR is lost on the C6; 0 keeps the relay delay
+        // (relayDelayMsec) neutral rather than skewed by a wrong number.
+        item.rssi = (float)wire.snrRaw;
+        item.snr = 0.0f;
         memcpy(item.data, wire.data, item.len);
-        if (xQueueSend(sRxQueue, &item, 0) == pdTRUE && sDio1) sDio1();
+        if (xQueueSend(sRxQueue, &item, 0) == pdTRUE) {
+            if (sDio1) sDio1();
+        } else {
+            sRxDropped++;   // reported from service(); this runs on the SDIO task
+        }
         return;
     }
 
@@ -182,7 +200,10 @@ int16_t TanmatsuLoraRpc::reset() {
     if (!sLock) {
         sLock = xSemaphoreCreateMutex();
         sDone = xSemaphoreCreateBinary();
-        sRxQueue = xQueueCreate(8, sizeof(RxItem));
+        // 16 rather than 8: the queue only fills while the main loop is held
+        // up (a flash write, a long redraw), and a busy mesh at short presets
+        // can deliver several packets a second.
+        sRxQueue = xQueueCreate(16, sizeof(RxItem));
     }
     if (!sCallbackRegistered) {
         if (esp_hosted_register_custom_callback(kMsgLora, _onPeerData, nullptr) != ESP_OK) {
@@ -284,14 +305,37 @@ int16_t TanmatsuLoraRpc::_setMode(uint32_t mode) {
 }
 
 int16_t TanmatsuLoraRpc::standby() {
+    _wantRx = false;
     return _setMode(kModeStandbyRc);
 }
 
 int16_t TanmatsuLoraRpc::startReceive() {
+    _wantRx = true;
     // The C6 stays in RX across received packets, so re-arming after each one
     // would be a wasted round trip.
     if (_mode == kModeRx) return RADIOLIB_ERR_NONE;
-    return _setMode(kModeRx);
+    _lastArmTryMs = millis();
+    const int16_t state = _setMode(kModeRx);
+    if (state != RADIOLIB_ERR_NONE) {
+        _armFailures++;
+        Serial.printf("[tanmatsu] RX arm failed: %d (failures=%lu); retrying\n", state,
+                      (unsigned long)_armFailures);
+    }
+    return state;
+}
+
+void TanmatsuLoraRpc::service(uint32_t nowMs) {
+    const uint32_t dropped = sRxDropped;
+    if (dropped != _dropsLogged) {
+        Serial.printf("[tanmatsu] RX queue full: %lu packet(s) dropped so far\n",
+                      (unsigned long)dropped);
+        _dropsLogged = dropped;
+    }
+    // A config push (frequency, gain, ...) also leaves the C6 in standby, so
+    // this covers a missed re-arm after one of those too.
+    if (!_begun || !_wantRx || _mode == kModeRx) return;
+    if ((uint32_t)(nowMs - _lastArmTryMs) < 1000UL) return;
+    (void)startReceive();
 }
 
 int16_t TanmatsuLoraRpc::transmit(uint8_t *data, size_t len, uint8_t) {

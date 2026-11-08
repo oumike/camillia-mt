@@ -605,6 +605,8 @@ bool MeshRadio::pollRx(MeshPacket &pkt) {
     _rxFlag = true;
 #endif
 #if defined(DEVICE_TANMATSU)
+    // Puts RX back if a re-arm request to the C6 was lost (see service()).
+    _radio.service(millis());
     // Packets wait in the C6 RPC queue; a flag cleared around TX must not
     // strand them there.
     if (_radio.rxPending()) _rxFlag = true;

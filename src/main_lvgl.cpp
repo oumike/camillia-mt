@@ -59765,9 +59765,29 @@ static bool resolveAnnouncePosition(int32_t &latI, int32_t &lonI, int32_t &altM)
 // that belongs to the radio — but it is paid in ~0.7 s slices with everything
 // else serviced in between, instead of one five-second stall.
 //
+// And not on consecutive passes either: a pass is ~40 ms, so the sweep was
+// still one solid block of transmitting -- eleven sharing channels kept a
+// Tanmatsu deaf for 7.5 s, and two messages sent meanwhile were never heard,
+// relayed copies included. A gap between packets (kPosSweepGapMs) leaves the
+// radio listening between them, long enough for a message or a relay of one.
+//
 // The position is snapshotted when the sweep starts rather than re-read per
 // channel: one announce should report one position, not a different fix to each
 // channel as the device moves.
+//
+// The gap is shared by every announce -- node info, telemetry and neighbor
+// info as well as the sweep -- since at boot they all fall due together and
+// went out as one more back-to-back block (2.9 s, which cost a message too).
+// Anything due while the gate is closed simply stays due for a later pass.
+static constexpr uint32_t kAnnounceGapMs = 3000;
+static constexpr uint32_t kAnnounceJitterMs = 1000;   // so nodes don't announce in step
+static uint32_t s_announceQuietUntilMs = 0;
+static inline bool announceGateOpen(uint32_t nowMs) {
+    return (int32_t)(nowMs - s_announceQuietUntilMs) >= 0;
+}
+static inline void announceGateClose() {
+    s_announceQuietUntilMs = millis() + kAnnounceGapMs + (uint32_t)random(kAnnounceJitterMs);
+}
 struct PosAnnounceSweep {
     bool     active;
     int      nextChan;
@@ -59818,6 +59838,7 @@ static void serviceNodeInfoAnnounce(uint32_t nowMs) {
             finishPositionAnnounce(nowMs);
             return;
         }
+        if (!announceGateOpen(nowMs)) return;   // listening between announces
         const int chan = s_posSweep.nextChan++;
         s_posSweep.attempted++;
         bool ok = false;
@@ -59825,6 +59846,7 @@ static void serviceNodeInfoAnnounce(uint32_t nowMs) {
                        s_myNodeId, s_posSweep.latI, s_posSweep.lonI, s_posSweep.altM,
                        s_cfg.okToMqtt, chan, s_cfg.positionPrecision));
         if (ok) s_posSweep.sent++;
+        announceGateClose();
         return;   // one packet per pass, whatever else is due
     }
 
@@ -59850,6 +59872,7 @@ static void serviceNodeInfoAnnounce(uint32_t nowMs) {
         return;
     }
 
+    if (nodeInfoDue && !announceGateOpen(nowMs)) return;   // stays due
     if (nodeInfoDue) {
         // Its own phase, like tx:telemetry below. Radio.transmit() blocks for
         // the packet's airtime -- over a second at SF11 -- and without this the
@@ -59863,6 +59886,7 @@ static void serviceNodeInfoAnnounce(uint32_t nowMs) {
                                         0xFFFFFFFF,
                                         false,
                                         s_cfg.okToMqtt));
+        announceGateClose();
         if (ok) scheduleAnnounceNext(s_nextNodeInfoTxMs, s_nodeInfoTxFails, nowMs, nodeInfoIntervalS);
         else scheduleAnnounceRetry(s_nextNodeInfoTxMs, s_nodeInfoTxFails, nowMs, nodeInfoIntervalS);
     }
@@ -59949,15 +59973,19 @@ static void serviceTelemetryAnnounce(uint32_t nowMs) {
         if (forceTelemetry) webCfgQueueTelemetry();
         return;
     }
+    if (!announceGateOpen(nowMs)) return;   // stays due; see kAnnounceGapMs
 
     if (devDue) {
         bool ok = false;
         LOOP_PHASE("tx:telemetry", ok = Channels.sendTelemetryDevice(s_myNodeId, s_cfg.okToMqtt));
+        announceGateClose();
         if (ok) scheduleAnnounceNext(s_nextDeviceTelemetryTxMs, s_deviceTelemetryTxFails, nowMs, s_cfg.telDeviceIntervalS);
         else scheduleAnnounceRetry(s_nextDeviceTelemetryTxMs, s_deviceTelemetryTxFails, nowMs, s_cfg.telDeviceIntervalS);
     }
 
 #if HAS_ENV_SENSOR_TELEMETRY
+    // Device telemetry may just have closed the gate; this stays due if so.
+    if (envDue && !announceGateOpen(millis())) return;
     if (envDue) {
         // Timed separately: this is the probe sweep, and the first measurement
         // that covered serviceTelemetryAnnounce() as a whole read 20 s, which is
@@ -60001,6 +60029,7 @@ static void serviceTelemetryAnnounce(uint32_t nowMs) {
                                                     env.humidityPct,
                                                     env.pressureHpa,
                                                     s_cfg.okToMqtt);
+        announceGateClose();
         if (ok) scheduleAnnounceNext(s_nextEnvTelemetryTxMs, s_envTelemetryTxFails, nowMs, s_cfg.telEnvIntervalS);
         else scheduleAnnounceRetry(s_nextEnvTelemetryTxMs, s_envTelemetryTxFails, nowMs, s_cfg.telEnvIntervalS);
     }
@@ -60107,11 +60136,13 @@ static void serviceNeighborInfoAnnounce(uint32_t nowMs) {
         return;
     }
 
+    if (!announceGateOpen(nowMs)) return;   // stays due; see kAnnounceGapMs
     bool ok = Channels.sendNeighborInfo(s_myNodeId,
                                         s_cfg.neighborInfoIntervalS,
                                         neighbors,
                                         neighborCount,
                                         s_cfg.okToMqtt);
+    announceGateClose();
     if (ok) scheduleAnnounceNext(s_nextNeighborInfoTxMs, s_neighborInfoTxFails, nowMs, s_cfg.neighborInfoIntervalS);
     else scheduleAnnounceRetry(s_nextNeighborInfoTxMs, s_neighborInfoTxFails, nowMs, s_cfg.neighborInfoIntervalS);
 }

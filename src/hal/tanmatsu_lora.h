@@ -41,6 +41,12 @@ public:
 
     int16_t standby();
     int16_t startReceive();
+    // Called every pass from MeshRadio::pollRx(). Receive is one RPC to the C6,
+    // and every caller ignores its result: a single lost or timed-out request
+    // left the radio in standby, deaf until this node next transmitted. While
+    // RX is wanted and not confirmed this retries it, about once a second, and
+    // reports packets the RX queue had to drop.
+    void service(uint32_t nowMs);
     int16_t transmit(uint8_t *data, size_t len, uint8_t addr = 0);
 
     size_t getPacketLength(bool update = true);
@@ -77,6 +83,10 @@ private:
     float    _bwKhz = 250.0f;
     uint32_t _mode = 0;
     bool     _begun = false;
+    bool     _wantRx = false;      // startReceive() asked, standby() has not since
+    uint32_t _lastArmTryMs = 0;
+    uint32_t _armFailures = 0;
+    uint32_t _dropsLogged = 0;
     float    _lastRssi = 0.0f;
     float    _lastSnr = 0.0f;
     void   (*_dio1)(void) = nullptr;
