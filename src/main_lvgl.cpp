@@ -56922,6 +56922,10 @@ static void appendRxText(int chanIdx, uint32_t fromNode, const char *text, uint3
 #endif
 
     Channels.addMessage(chanIdx, prefix, text, TFT_WHITE, packetId, false, fromNode, true);
+#if defined(DEVICE_TANMATSU)
+    diagTrace("[rx-trace] shown chan=%d from=%08lx id=%08lx \"%.40s\"\n",   // TEMP diagnostic
+              chanIdx, (unsigned long)fromNode, (unsigned long)packetId, text ? text : "");
+#endif
     // Being the active channel is not the same as being on screen. Behind the
     // glance overlay the chat view is not visible, so the channel the firmware
     // was last on has to notify like any other -- treating it as read is what
@@ -58802,6 +58806,10 @@ static bool processMeshPacket(const MeshPacket &rxPkt) {
     MeshPacket pkt = rxPkt;
 
     if (isDuplicate(pkt.hdr.from, pkt.hdr.id)) {
+#if defined(DEVICE_TANMATSU)
+        diagTrace("[rx-trace] dup from=%08lx id=%08lx\n",   // TEMP diagnostic
+                      (unsigned long)pkt.hdr.from, (unsigned long)pkt.hdr.id);
+#endif
         if (s_rxFromRadio) relayHeardDuplicate(pkt);
         return false;
     }
@@ -58871,7 +58879,13 @@ static bool processMeshPacket(const MeshPacket &rxPkt) {
     // Before the node list hears of the packet: one the policy drops does not
     // mark its sender as heard, any more than it is relayed or shown.
     const SigPolicyResult sig = checkPacketSignature(pkt);
-    if (!sig.accept) return false;
+    if (!sig.accept) {
+#if defined(DEVICE_TANMATSU)
+        diagTrace("[rx-trace] sig-reject from=%08lx id=%08lx\n",   // TEMP diagnostic
+                      (unsigned long)pkt.hdr.from, (unsigned long)pkt.hdr.id);
+#endif
+        return false;
+    }
 
     // Licensed NodeInfo, once the signature policy has accepted it.
     if (licNodeInfo == 2) {
@@ -66457,6 +66471,7 @@ void loop() {
 #endif
 #if defined(DEVICE_TANMATSU)
     LOOP_PHASE("tm:leds", tanmatsuServiceStatusLeds());
+    diagTraceFlush(millis());   // TEMP diagnostic: trace lines to the SD card
 #endif
 #if HAS_KB_BLINK
     LOOP_PHASE("kbblink", serviceKbBlink());

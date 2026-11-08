@@ -4,6 +4,7 @@
 
 #include "tanmatsu_lora.h"
 #include "tanmatsu_coproc.h"
+#include "../mesh_radio.h"   // diagTrace (TEMP diagnostic)
 
 #include <math.h>
 #include <string.h>
@@ -51,6 +52,7 @@ struct RxItem {
     uint16_t len;
     float    rssi;
     float    snr;
+    uint8_t  raw[3];   // the C6's three stat bytes as sent, for diagnostics
     uint8_t  data[256];
 };
 
@@ -146,6 +148,9 @@ void TanmatsuLoraRpc::_onPeerData(uint32_t msgId, const uint8_t *data, size_t le
         // (relayDelayMsec) neutral rather than skewed by a wrong number.
         item.rssi = (float)wire.snrRaw;
         item.snr = 0.0f;
+        item.raw[0] = wire.rssiRaw;
+        item.raw[1] = (uint8_t)wire.snrRaw;
+        item.raw[2] = wire.signalRssiRaw;
         memcpy(item.data, wire.data, item.len);
         if (xQueueSend(sRxQueue, &item, 0) == pdTRUE) {
             if (sDio1) sDio1();
@@ -318,7 +323,7 @@ int16_t TanmatsuLoraRpc::startReceive() {
     const int16_t state = _setMode(kModeRx);
     if (state != RADIOLIB_ERR_NONE) {
         _armFailures++;
-        Serial.printf("[tanmatsu] RX arm failed: %d (failures=%lu); retrying\n", state,
+        diagTrace("[tanmatsu] RX arm failed: %d (failures=%lu); retrying\n", state,
                       (unsigned long)_armFailures);
     }
     return state;
@@ -327,7 +332,7 @@ int16_t TanmatsuLoraRpc::startReceive() {
 void TanmatsuLoraRpc::service(uint32_t nowMs) {
     const uint32_t dropped = sRxDropped;
     if (dropped != _dropsLogged) {
-        Serial.printf("[tanmatsu] RX queue full: %lu packet(s) dropped so far\n",
+        diagTrace("[tanmatsu] RX queue full: %lu packet(s) dropped so far\n",
                       (unsigned long)dropped);
         _dropsLogged = dropped;
     }
@@ -373,6 +378,7 @@ int16_t TanmatsuLoraRpc::readData(uint8_t *data, size_t len) {
     memcpy(data, item.data, n);
     _lastRssi = item.rssi;
     _lastSnr = item.snr;
+    memcpy(_lastRaw, item.raw, sizeof(_lastRaw));
     // MeshRadio clears its flag per packet; keep it raised while more wait.
     if (uxQueueMessagesWaiting(sRxQueue) > 0 && _dio1) _dio1();
     return RADIOLIB_ERR_NONE;
