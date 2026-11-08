@@ -15139,6 +15139,15 @@ static void openComposePrompt(uint32_t replyPacketId,
     const lv_coord_t composeInputPadTop = 1;
     const lv_coord_t composeModalBottomPad = 4;
     const lv_coord_t composeModalRowPad = 1;
+#elif defined(DEVICE_TANMATSU)
+    const lv_font_t *composeBodyFont = emojiFont(&lv_font_montserrat_12);
+    // Two lines, wrapping, so a message reads as you type it instead of
+    // scrolling sideways out of one. The modal grows by the same amount
+    // (modalH below), so nothing else in it gives up room.
+    const lv_coord_t composeInputH = (lv_coord_t)((lv_font_get_line_height(composeBodyFont) * 2) + 6);
+    const lv_coord_t composeInputPadTop = 1;
+    const lv_coord_t composeModalBottomPad = 4;
+    const lv_coord_t composeModalRowPad = 3;
 #else
     const lv_font_t *composeBodyFont = emojiFont(&lv_font_montserrat_12);
     const lv_coord_t composeInputH = (lv_coord_t)(lv_font_get_line_height(composeBodyFont) + 8);
@@ -15377,6 +15386,10 @@ static void openComposePrompt(uint32_t replyPacketId,
     // whole display and the room goes to the message.
     modalW = lv_disp_get_hor_res(NULL);
     modalH = lv_disp_get_ver_res(NULL);
+#elif defined(DEVICE_TANMATSU)
+    // The shared size, plus what the second input line adds over the
+    // one-line box it was sized for.
+    modalH += (int)(composeInputH - (lv_font_get_line_height(composeBodyFont) + 8));
 #endif
 
     s_composeModal = lv_obj_create(s_rootScreen);
@@ -15523,7 +15536,7 @@ static void openComposePrompt(uint32_t replyPacketId,
     lv_obj_set_style_pad_left(s_composeInput, 3, 0);
     lv_obj_set_style_pad_right(s_composeInput, 3, 0);
 #if defined(DEVICE_TLORA_PAGER_TFT) || defined(DEVICE_TDECK) || defined(DEVICE_TDECK_PRO) || defined(DEVICE_CARDPUTER_LORA_HAT) \
-    || defined(DEVICE_MESH_DECK) || defined(DEVICE_M9)
+    || defined(DEVICE_MESH_DECK) || defined(DEVICE_M9) || defined(DEVICE_TANMATSU)
     // Wrap instead of scrolling sideways. The min/max height above pins the box
     // to its fixed number of lines, so a longer message scrolls inside it
     // rather than growing the box into the legend.
@@ -27229,6 +27242,114 @@ static void navBarSetActive(lv_obj_t *bar, int activeTarget) {
 }
 #endif
 
+#if UI_TOUCH_NAV_BAR && defined(DEVICE_TANMATSU)
+// The Tanmatsu's six coloured function keys carry shapes, not "F1".."F6" --
+// red cross, orange triangle, yellow square, green circle, blue club, purple
+// diamond, left to right -- so the nav bar names each key by its shape. No font
+// here has those glyphs, so they are drawn: a bare object whose user data is
+// the shape, painted in its own DRAW_MAIN.
+enum TmKeyShape : uint8_t {
+    TM_SHAPE_CROSS = 1,
+    TM_SHAPE_TRIANGLE,
+    TM_SHAPE_SQUARE,
+    TM_SHAPE_CIRCLE,
+    TM_SHAPE_CLUB,
+    TM_SHAPE_DIAMOND,
+};
+
+static void tmDrawDisc(lv_layer_t *layer, int32_t cx, int32_t cy, int32_t r,
+                       lv_color_t color) {
+    lv_draw_rect_dsc_t d;
+    lv_draw_rect_dsc_init(&d);
+    d.bg_color = color;
+    d.bg_opa = LV_OPA_COVER;
+    d.radius = LV_RADIUS_CIRCLE;
+    d.border_width = 0;
+    const lv_area_t a = {cx - r, cy - r, cx + r, cy + r};
+    lv_draw_rect(layer, &d, &a);
+}
+
+static void tmDrawTri(lv_layer_t *layer, int32_t x0, int32_t y0, int32_t x1,
+                      int32_t y1, int32_t x2, int32_t y2, lv_color_t color) {
+    lv_draw_triangle_dsc_t d;
+    lv_draw_triangle_dsc_init(&d);
+    d.color = color;
+    d.opa = LV_OPA_COVER;
+    d.p[0].x = x0; d.p[0].y = y0;
+    d.p[1].x = x1; d.p[1].y = y1;
+    d.p[2].x = x2; d.p[2].y = y2;
+    lv_draw_triangle(layer, &d);
+}
+
+static void onTmKeyShapeDraw(lv_event_t *e) {
+    lv_obj_t *obj = (lv_obj_t *)lv_event_get_target(e);
+    lv_layer_t *layer = lv_event_get_layer(e);
+    if (!obj || !layer) return;
+    // Panel pixels, not layout ones: the parenthesised name steps around the
+    // coordinate shim, and everything below is drawn at full resolution.
+    lv_area_t a;
+    (lv_obj_get_coords)(obj, &a);
+    const int32_t w = lv_area_get_width(&a), h = lv_area_get_height(&a);
+    const int32_t s = (w < h ? w : h);
+    const int32_t cx = a.x1 + w / 2, cy = a.y1 + h / 2;
+    const int32_t r = s / 2;
+    const int32_t x0 = cx - r, y0 = cy - r, x1 = x0 + s - 1, y1 = y0 + s - 1;
+
+    switch ((intptr_t)lv_obj_get_user_data(obj)) {
+        case TM_SHAPE_CROSS: {
+            lv_draw_line_dsc_t d;
+            lv_draw_line_dsc_init(&d);
+            d.color = lv_color_hex(0xFF5A5A);
+            d.width = s / 5 > 2 ? s / 5 : 2;
+            d.round_start = 1;
+            d.round_end = 1;
+            const int32_t in = d.width / 2;
+            d.p1.x = x0 + in; d.p1.y = y0 + in; d.p2.x = x1 - in; d.p2.y = y1 - in;
+            lv_draw_line(layer, &d);
+            d.p1.x = x1 - in; d.p1.y = y0 + in; d.p2.x = x0 + in; d.p2.y = y1 - in;
+            lv_draw_line(layer, &d);
+            break;
+        }
+        case TM_SHAPE_TRIANGLE:
+            tmDrawTri(layer, cx, y0, x1, y1, x0, y1, lv_color_hex(0xFF9F40));
+            break;
+        case TM_SHAPE_SQUARE: {
+            lv_draw_rect_dsc_t d;
+            lv_draw_rect_dsc_init(&d);
+            d.bg_color = lv_color_hex(0xFFD84A);
+            d.bg_opa = LV_OPA_COVER;
+            d.radius = 1;
+            d.border_width = 0;
+            const int32_t in = s / 10;
+            const lv_area_t sq = {x0 + in, y0 + in, x1 - in, y1 - in};
+            lv_draw_rect(layer, &d, &sq);
+            break;
+        }
+        case TM_SHAPE_CIRCLE:
+            tmDrawDisc(layer, cx, cy, r, lv_color_hex(0x4CD964));
+            break;
+        case TM_SHAPE_CLUB: {
+            // Three lobes and a flared stem, like the key's print.
+            const lv_color_t c = lv_color_hex(0x4DA3FF);
+            const int32_t lr = s * 23 / 100;
+            tmDrawDisc(layer, cx, y0 + lr, lr, c);
+            tmDrawDisc(layer, x0 + lr, cy + lr / 3, lr, c);
+            tmDrawDisc(layer, x1 - lr, cy + lr / 3, lr, c);
+            tmDrawTri(layer, cx, cy - lr / 2, cx + lr, y1, cx - lr, y1, c);
+            break;
+        }
+        case TM_SHAPE_DIAMOND: {
+            const lv_color_t c = lv_color_hex(0xB57CFF);
+            tmDrawTri(layer, cx, y0, x1, cy, x0, cy, c);
+            tmDrawTri(layer, x0, cy, x1, cy, cx, y1, c);
+            break;
+        }
+        default:
+            break;
+    }
+}
+#endif
+
 static void populateHeltecBottomNav(lv_obj_t *bar, int activeTarget) {
 #if UI_TOUCH_NAV_BAR
     if (!bar) return;
@@ -27487,6 +27608,42 @@ static void populateHeltecBottomNav(lv_obj_t *bar, int activeTarget) {
                 lv_obj_set_style_text_font(hint, &lv_font_montserrat_10, 0);
                 lv_obj_set_style_text_color(hint, lv_color_hex(0x8FB5E6), 0);
                 lv_label_set_text(hint, fkey);
+            }
+        }
+#elif defined(DEVICE_TANMATSU)
+        // The shape on the function key that reaches each cell (kTmKeymap:
+        // F1..F6 are Home, Chats, DMs, Nodes, Tools, Config), small beside the
+        // glyph -- or under it in the side column, which has height to give
+        // and no width. Help has no coloured key, so no shape.
+        {
+            intptr_t shape = 0;
+            switch (kItems[i].target) {
+                case HELTEC_NAV_HOME:  shape = TM_SHAPE_CROSS;    break;
+                case HELTEC_NAV_CHAT:  shape = TM_SHAPE_TRIANGLE; break;
+                case HELTEC_NAV_DM:    shape = TM_SHAPE_SQUARE;   break;
+                case HELTEC_NAV_NODES: shape = TM_SHAPE_CIRCLE;   break;
+                case HELTEC_NAV_TOOLS: shape = TM_SHAPE_CLUB;     break;
+                case HELTEC_NAV_CFG:   shape = TM_SHAPE_DIAMOND;  break;
+                default: break;
+            }
+            if (shape) {
+                lv_obj_set_flex_flow(btn, sideColumn ? LV_FLEX_FLOW_COLUMN
+                                                     : LV_FLEX_FLOW_ROW);
+                lv_obj_set_flex_align(btn, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER,
+                                      LV_FLEX_ALIGN_CENTER);
+                if (sideColumn) {
+                    lv_obj_set_style_pad_row(btn, 1, 0);
+                } else {
+                    lv_obj_set_style_pad_column(btn, 3, 0);
+                }
+                lv_obj_t *hint = lv_obj_create(btn);
+                lv_obj_remove_style_all(hint);
+                // Not clickable, so a press on the shape is a press on the cell.
+                lv_obj_remove_flag(hint, LV_OBJ_FLAG_CLICKABLE);
+                lv_obj_remove_flag(hint, LV_OBJ_FLAG_SCROLLABLE);
+                lv_obj_set_size(hint, 7, 7);   // 14 panel pixels on this board
+                lv_obj_set_user_data(hint, (void *)shape);
+                lv_obj_add_event_cb(hint, onTmKeyShapeDraw, LV_EVENT_DRAW_MAIN, nullptr);
             }
         }
 #endif
@@ -49283,7 +49440,12 @@ static void pumpKeyboardInput() {
                          // Not multi-column, but it has two rows and the pad's
                          // Up/Down is what moves between them — so the value
                          // needs Left/Right, which the fold would eat.
-                         || s_cfgBrightModal;
+                         || s_cfgBrightModal
+                         // The Config section grid: two or three columns, so
+                         // Up/Down move a row and Left/Right a button
+                         // (CFG_GRID_FOUR_WAY). Once a section is open its
+                         // rows are one list and the fold applies again.
+                         || (s_cfgModal && cfgGridShown());
         // Compose is exempt too: it drives a caret, so it wants all four
         // directions. Collapsing here is irreversible — it happens before
         // `rawKey` is taken below, so no handler downstream can tell Left from
@@ -66162,6 +66324,14 @@ static void serviceFreshMarks() {
     if (s_prevChan >= 0 && s_prevChan != chan) {
         Channels.clearFresh(s_prevChan);
         freshDotsClear(s_chatDots, (uint32_t)s_prevChan);
+        // Leaving a channel that was in front means it has been read, however
+        // soon. Its unread mark used to wait out freshSeenMs() like the dots,
+        // so moving to another channel sooner left the one just read flagged
+        // until you went back to it.
+        if (s_channelNeedsAttention[s_prevChan]) {
+            s_channelNeedsAttention[s_prevChan] = false;
+            refreshChannelGlow(true);
+        }
     }
     if (s_prevPeer != 0 && s_prevPeer != peer) {
         DMs.clearFresh(s_prevPeer);
