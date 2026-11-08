@@ -2614,6 +2614,7 @@ static void refreshHeaderTime(bool force = false);
 static void refreshHeaderStatus(bool force = false);
 static void refreshDmAlertIndicator();
 static void refreshChatAlertIndicator();
+static bool chatPanelInFront();
 static void layoutHeaderInlineItems();
 static lv_obj_t *buildScreenHeader(lv_obj_t *modal, const char *text);
 static void layoutScreenHeader(ScreenHeader &h);
@@ -56591,7 +56592,19 @@ static void refreshDmAlertIndicator() {
 // cells wide has no room to spend on a status icon that repeats what one of the
 // cells could say itself. Boards without one get the bell beside the envelope.
 static void refreshChatAlertIndicator() {
-    const bool unread = anyChannelNeedsAttention();
+    // Not the channel being read. Its own mark waits out freshSeenMs() and
+    // clears on leaving (serviceFreshMarks()), but the channel list never shows
+    // it for the active row, and neither should this: the alert used to keep
+    // blinking for a conversation that was open in front of the user.
+    int reading = -1;
+    if (!glanceOverlayHidesUi() && !openDmPeerNodeId() && chatPanelInFront()
+        && s_activeChannel >= 0 && s_activeChannel < MESH_CHANNELS) {
+        reading = s_activeChannel;
+    }
+    bool unread = false;
+    for (int i = 0; i < MESH_CHANNELS && !unread; i++) {
+        unread = s_channelNeedsAttention[i] && i != reading;
+    }
     const bool blink = unread && (((millis() / 500UL) & 1UL) == 0UL);
 
 #if UI_TOUCH_NAV_BAR
