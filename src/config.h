@@ -696,11 +696,12 @@
 // out of a section before it closes Config.
 #define UI_CFG_SECTIONS 1
 
-// Boards whose keyboard has all four arrows reaching Config as distinct keys:
-// there the grid moves like a grid, Up/Down a row and Left/Right a button.
-// Elsewhere Left/Right are folded onto Up/Down (M9) or there is only a wheel,
-// and the grid is walked in reading order instead (cfgMoveSelection()).
-#if defined(DEVICE_TDISPLAY_P4) || defined(DEVICE_TANMATSU)
+// Boards whose keyboard or pad has all four arrows reaching Config as distinct
+// keys: there the grid moves like a grid, Up/Down a row and Left/Right a button.
+// The M9's pad folds Left/Right onto Up/Down elsewhere but not on the grid
+// (m9FourWaySelection), since walking it in reading order sent Down sideways.
+// Boards with only a wheel walk the grid in reading order (cfgMoveSelection()).
+#if defined(DEVICE_TDISPLAY_P4) || defined(DEVICE_TANMATSU) || defined(DEVICE_M9)
 #define CFG_GRID_FOUR_WAY 1
 #else
 #define CFG_GRID_FOUR_WAY 0

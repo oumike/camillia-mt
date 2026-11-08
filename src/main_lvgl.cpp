@@ -49427,7 +49427,12 @@ static void pumpKeyboardInput() {
                          // Not multi-column, but it has two rows and the pad's
                          // Up/Down is what moves between them — so the value
                          // needs Left/Right, which the fold would eat.
-                         || s_cfgBrightModal;
+                         || s_cfgBrightModal
+                         // The Config section grid: two or three columns, so
+                         // Up/Down move a row and Left/Right a button
+                         // (CFG_GRID_FOUR_WAY). Once a section is open its
+                         // rows are one list and the fold applies again.
+                         || (s_cfgModal && cfgGridShown());
         // Compose is exempt too: it drives a caret, so it wants all four
         // directions. Collapsing here is irreversible — it happens before
         // `rawKey` is taken below, so no handler downstream can tell Left from
