@@ -357,6 +357,7 @@ Import failed - enter a name	Import selhal - zadejte jméno
 Imported OK - rebooting...	Import OK - restartuji...
 Include (A)rchived (SD card)	Včetně archivovaných (A) (SD)
 Include (F)avorites	Včetně oblíbených (F)
+Include MQTT Live Data	Zahrnout živá data MQTT
 Include archived (SD card)	Včetně archivovaných (SD karta)
 Include favorites	Včetně oblíbených
 Indigo	Indigová
@@ -459,7 +460,7 @@ Mon	po
 Month	Měsíc
 Move  Enter=Apply  %s=Back	Pohyb  Enter=Použít  %s=Zpět
 Move  Enter=Apply  %s=Cancel	Pohyb  Enter=Použít  %s=Zrušit
-Move  Enter=Apply  M=No MQTT  %s=Back	Pohyb  Enter=Použít  M=Bez MQTT  %s=Zpět
+Move  Enter=Apply  M=MQTT  %s=Back	Pohyb  Enter=Použít  M=MQTT  %s=Zpět
 Move  Enter=Change  %s=Cancel	Pohyb  Enter=Změnit  %s=Zrušit
 Move  Enter=Edit  %s=Back	Pohyb  Enter=Upravit  %s=Zpět
 Move  Enter=OK  %s=Cancel	Pohyb  Enter=OK  %s=Zrušit
@@ -482,7 +483,6 @@ N=Choose WiFi   Enter=Finish   Bksp=Back	N=Vybrat WiFi   Enter=Dokončit   Bksp=
 NO LINE OF SIGHT	BEZ PŘÍMÉ VIDITELNOSTI
 NODEINFO + telemetry queued.	NODEINFO + telemetrie ve frontě.
 No GPS fix	Bez fixu GPS
-No MQTT	Bez MQTT
 No MQTT: %s	Bez MQTT: %s
 Only signed packets accepted (no 2.7 nodes)	Jen podepsané pakety (bez uzlů 2.7)
 Send NODEINFO and telemetry to the mesh now?	Odeslat nyní NODEINFO a telemetrii do sítě?

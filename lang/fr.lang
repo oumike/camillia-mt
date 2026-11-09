@@ -360,6 +360,7 @@ Import failed - enter a name	Échec de l'import - saisissez un nom
 Imported OK - rebooting...	Import réussi - redémarrage...
 Include (A)rchived (SD card)	Inclure les archivés (A) (SD)
 Include (F)avorites	Inclure les favoris (F)
+Include MQTT Live Data	Inclure les données MQTT en direct
 Include archived (SD card)	Inclure les archivés (carte SD)
 Include favorites	Inclure les favoris
 Include key	Inclure la clé
@@ -467,7 +468,7 @@ Mon	lun
 Month	Mois
 Move  Enter=Apply  %s=Back	Déplacer  Enter=Appliquer  %s=Retour
 Move  Enter=Apply  %s=Cancel	Déplacer  Enter=Appliquer  %s=Annuler
-Move  Enter=Apply  M=No MQTT  %s=Back	Déplacer  Enter=Appliquer  M=Sans MQTT  %s=Retour
+Move  Enter=Apply  M=MQTT  %s=Back	Déplacer  Enter=Appliquer  M=MQTT  %s=Retour
 Move  Enter=Change  %s=Cancel	Déplacer  Enter=Changer  %s=Annuler
 Move  Enter=Edit  %s=Back	Déplacer  Enter=Modifier  %s=Retour
 Move  Enter=OK  %s=Cancel	Déplacer  Enter=OK  %s=Annuler
@@ -490,7 +491,6 @@ N=Choose WiFi   Enter=Finish   Bksp=Back	N=Choisir WiFi   Enter=Terminer   Bksp=
 NO LINE OF SIGHT	PAS DE LIGNE DE VUE
 NODEINFO + telemetry queued.	NODEINFO + télémétrie en file d'attente.
 No GPS fix	Pas de fix GPS
-No MQTT	Sans MQTT
 No MQTT: %s	Sans MQTT : %s
 No beacons heard yet.\n\nA beacon is only audible while its sender has retuned onto this channel, preset and region, and it repeats on that node's own schedule - minutes to hours apart. This list keeps what it hears until you clear it. Sending your own beacon is a separate setting, under Mesh Beacons in Config.	Aucune balise entendue.\n\nUne balise n'est audible que lorsque son émetteur s'est réglé sur ce canal, ce préréglage et cette région, et elle se répète selon le calendrier du nœud - de quelques minutes à quelques heures. Cette liste garde ce qu'elle entend jusqu'à ce que vous l'effaciez. Envoyer votre propre balise est un réglage à part, sous Balises mesh dans Config.
 Only signed packets accepted (no 2.7 nodes)	Paquets signés uniquement (sans nœuds 2.7)

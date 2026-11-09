@@ -356,6 +356,7 @@ Import failed - enter a name	Sikertelen import - adj meg egy nevet
 Imported OK - rebooting...	Import OK - újraindítás...
 Include (A)rchived (SD card)	Archiváltakkal együtt (A) (SD)
 Include (F)avorites	Kedvencekkel együtt (F)
+Include MQTT Live Data	Élő MQTT-adatok mutatása
 Include archived (SD card)	Archiváltakkal együtt (SD kártya)
 Include favorites	Kedvencekkel együtt
 Indigo	Indigó
@@ -458,7 +459,7 @@ Mon	H
 Month	Hónap
 Move  Enter=Apply  %s=Back	Mozgatás  Enter=Alkalmaz  %s=Vissza
 Move  Enter=Apply  %s=Cancel	Mozgatás  Enter=Alkalmaz  %s=Mégse
-Move  Enter=Apply  M=No MQTT  %s=Back	Mozgatás  Enter=Alkalmaz  M=MQTT nélkül  %s=Vissza
+Move  Enter=Apply  M=MQTT  %s=Back	Mozgatás  Enter=Alkalmaz  M=MQTT  %s=Vissza
 Move  Enter=Change  %s=Cancel	Mozgatás  Enter=Módosítás  %s=Mégse
 Move  Enter=Edit  %s=Back	Mozgatás  Enter=Szerkesztés  %s=Vissza
 Move  Enter=OK  %s=Cancel	Mozgatás  Enter=OK  %s=Mégse
@@ -481,7 +482,6 @@ N=Choose WiFi   Enter=Finish   Bksp=Back	N=WiFi kiválasztása   Enter=Befejezé
 NO LINE OF SIGHT	NINCS RÁLÁTÁS
 NODEINFO + telemetry queued.	NODEINFO + telemetria sorba állítva.
 No GPS fix	Nincs GPS-fix
-No MQTT	MQTT nélkül
 No MQTT: %s	MQTT nélkül: %s
 Only signed packets accepted (no 2.7 nodes)	Csak aláírt csomagok (2.7-es csomópont nélkül)
 Send NODEINFO and telemetry to the mesh now?	Elküldöd most a NODEINFO-t és a telemetriát a hálózatra?

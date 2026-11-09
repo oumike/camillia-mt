@@ -357,6 +357,7 @@ Import failed - enter a name	Uvoz nije uspio - unesite ime
 Imported OK - rebooting...	Uvoz OK - ponovno pokretanje...
 Include (A)rchived (SD card)	Uključi arhivirane (A) (SD)
 Include (F)avorites	Uključi favorite (F)
+Include MQTT Live Data	Uključi MQTT podatke uživo
 Include archived (SD card)	Uključi arhivirane (SD kartica)
 Include favorites	Uključi favorite
 Install now? The device reboots to update.	Instalirati sada? Uređaj se ponovno pokreće radi ažuriranja.
@@ -458,7 +459,7 @@ Mon	pon
 Month	Mjesec
 Move  Enter=Apply  %s=Back	Pomak  Enter=Primijeni  %s=Natrag
 Move  Enter=Apply  %s=Cancel	Pomak  Enter=Primijeni  %s=Odustani
-Move  Enter=Apply  M=No MQTT  %s=Back	Pomak  Enter=Primijeni  M=Bez MQTT  %s=Natrag
+Move  Enter=Apply  M=MQTT  %s=Back	Pomak  Enter=Primijeni  M=MQTT  %s=Natrag
 Move  Enter=Change  %s=Cancel	Pomak  Enter=Promijeni  %s=Odustani
 Move  Enter=Edit  %s=Back	Pomak  Enter=Uredi  %s=Natrag
 Move  Enter=OK  %s=Cancel	Pomak  Enter=OK  %s=Odustani
@@ -481,7 +482,6 @@ N=Choose WiFi   Enter=Finish   Bksp=Back	N=Odaberi WiFi   Enter=Završi   Bksp=N
 NO LINE OF SIGHT	NEMA LINIJE VIDLJIVOSTI
 NODEINFO + telemetry queued.	NODEINFO + telemetrija u redu čekanja.
 No GPS fix	Nema GPS fiksa
-No MQTT	Bez MQTT
 No MQTT: %s	Bez MQTT: %s
 Only signed packets accepted (no 2.7 nodes)	Samo potpisani paketi (bez čvorova 2.7)
 Send NODEINFO and telemetry to the mesh now?	Poslati sada NODEINFO i telemetriju u mrežu?

@@ -354,6 +354,7 @@ Import failed - enter a name	Import eșuat - introdu un nume
 Imported OK - rebooting...	Importat cu succes - repornire...
 Include (A)rchived (SD card)	Include arhivatele (A) (SD)
 Include (F)avorites	Include favoritele (F)
+Include MQTT Live Data	Include datele MQTT live
 Include archived (SD card)	Include arhivatele (card SD)
 Include favorites	Include favoritele
 Install now? The device reboots to update.	Instalezi acum? Dispozitivul repornește pentru actualizare.
@@ -451,7 +452,7 @@ Mon	lun
 Month	Lună
 Move  Enter=Apply  %s=Back	Mută  Enter=Aplică  %s=Înapoi
 Move  Enter=Apply  %s=Cancel	Mută  Enter=Aplică  %s=Anulare
-Move  Enter=Apply  M=No MQTT  %s=Back	Mută  Enter=Aplică  M=Fără MQTT  %s=Înapoi
+Move  Enter=Apply  M=MQTT  %s=Back	Mută  Enter=Aplică  M=MQTT  %s=Înapoi
 Move  Enter=Change  %s=Cancel	Mută  Enter=Schimbă  %s=Anulare
 Move  Enter=Edit  %s=Back	Mută  Enter=Editează  %s=Înapoi
 Move  Enter=OK  %s=Cancel	Mută  Enter=OK  %s=Anulare
@@ -474,7 +475,6 @@ N=Choose WiFi   Enter=Finish   Bksp=Back	N=Alege WiFi   Enter=Termină   Bksp=Î
 NO LINE OF SIGHT	FĂRĂ LINIE DE VEDERE
 NODEINFO + telemetry queued.	NODEINFO + telemetrie în coadă.
 No GPS fix	Fără fix GPS
-No MQTT	Fără MQTT
 No MQTT: %s	Fără MQTT: %s
 Only signed packets accepted (no 2.7 nodes)	Doar pachete semnate (fără noduri 2.7)
 Send NODEINFO and telemetry to the mesh now?	Trimiți acum NODEINFO și telemetria în rețea?

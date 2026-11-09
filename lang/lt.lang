@@ -356,6 +356,7 @@ Import failed - enter a name	Importuoti nepavyko - įveskite vardą
 Imported OK - rebooting...	Importuota - paleidžiama iš naujo...
 Include (A)rchived (SD card)	Įtraukti archyvuotus (A) (SD)
 Include (F)avorites	Įtraukti mėgstamus (F)
+Include MQTT Live Data	Įtraukti MQTT tiesioginius duomenis
 Include archived (SD card)	Įtraukti archyvuotus (SD kortelė)
 Include favorites	Įtraukti mėgstamus
 Install now? The device reboots to update.	Įdiegti dabar? Įrenginys bus paleistas iš naujo atnaujinimui.
@@ -457,7 +458,7 @@ Mon	pr
 Month	Mėnuo
 Move  Enter=Apply  %s=Back	Judinti  Enter=Taikyti  %s=Atgal
 Move  Enter=Apply  %s=Cancel	Judinti  Enter=Taikyti  %s=Atšaukti
-Move  Enter=Apply  M=No MQTT  %s=Back	Judinti  Enter=Taikyti  M=Be MQTT  %s=Atgal
+Move  Enter=Apply  M=MQTT  %s=Back	Judinti  Enter=Taikyti  M=MQTT  %s=Atgal
 Move  Enter=Change  %s=Cancel	Judinti  Enter=Keisti  %s=Atšaukti
 Move  Enter=Edit  %s=Back	Judinti  Enter=Redaguoti  %s=Atgal
 Move  Enter=OK  %s=Cancel	Judinti  Enter=OK  %s=Atšaukti
@@ -480,7 +481,6 @@ N=Choose WiFi   Enter=Finish   Bksp=Back	N=Pasirinkti WiFi   Enter=Baigti   Bksp
 NO LINE OF SIGHT	NĖRA MATOMUMO LINIJOS
 NODEINFO + telemetry queued.	NODEINFO + telemetrija eilėje.
 No GPS fix	Nėra GPS fiksacijos
-No MQTT	Be MQTT
 No MQTT: %s	Be MQTT: %s
 Only signed packets accepted (no 2.7 nodes)	Tik pasirašyti paketai (be 2.7 mazgų)
 Send NODEINFO and telemetry to the mesh now?	Siųsti NODEINFO ir telemetriją į tinklą dabar?

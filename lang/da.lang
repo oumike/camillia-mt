@@ -351,6 +351,7 @@ Import failed - enter a name	Import mislykkedes - indtast et navn
 Imported OK - rebooting...	Import OK - genstarter...
 Include (A)rchived (SD card)	Medtag arkiverede (A) (SD)
 Include (F)avorites	Medtag favoritter (F)
+Include MQTT Live Data	Medtag MQTT-livedata
 Include archived (SD card)	Medtag arkiverede (SD-kort)
 Include favorites	Medtag favoritter
 Install now? The device reboots to update.	Installér nu? Enheden genstarter for at opdatere.
@@ -448,7 +449,7 @@ Mon	man
 Month	Måned
 Move  Enter=Apply  %s=Back	Flyt  Enter=Anvend  %s=Tilbage
 Move  Enter=Apply  %s=Cancel	Flyt  Enter=Anvend  %s=Annullér
-Move  Enter=Apply  M=No MQTT  %s=Back	Flyt  Enter=Anvend  M=Uden MQTT  %s=Tilbage
+Move  Enter=Apply  M=MQTT  %s=Back	Flyt  Enter=Anvend  M=MQTT  %s=Tilbage
 Move  Enter=Change  %s=Cancel	Flyt  Enter=Skift  %s=Annullér
 Move  Enter=Edit  %s=Back	Flyt  Enter=Redigér  %s=Tilbage
 Move  Enter=OK  %s=Cancel	Flyt  Enter=OK  %s=Annullér
@@ -471,7 +472,6 @@ N=Choose WiFi   Enter=Finish   Bksp=Back	N=Vælg WiFi   Enter=Afslut   Bksp=Tilb
 NO LINE OF SIGHT	INGEN FRI SIGT
 NODEINFO + telemetry queued.	NODEINFO + telemetri sat i kø.
 No GPS fix	Ingen GPS-fix
-No MQTT	Uden MQTT
 No MQTT: %s	Uden MQTT: %s
 Only signed packets accepted (no 2.7 nodes)	Kun signerede pakker (ingen 2.7-noder)
 Send NODEINFO and telemetry to the mesh now?	Send NODEINFO og telemetri til nettet nu?

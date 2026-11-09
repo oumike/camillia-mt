@@ -354,6 +354,7 @@ Import failed - enter a name	Import ebaõnnestus - sisestage nimi
 Imported OK - rebooting...	Import OK - taaskäivitan...
 Include (A)rchived (SD card)	Kaasa arhiveeritud (A) (SD)
 Include (F)avorites	Kaasa lemmikud (F)
+Include MQTT Live Data	Kaasa MQTT otseandmed
 Include archived (SD card)	Kaasa arhiveeritud (SD-kaart)
 Include favorites	Kaasa lemmikud
 Install now? The device reboots to update.	Kas paigaldada kohe? Seade taaskäivitub uuendamiseks.
@@ -455,7 +456,7 @@ Mon	E
 Month	Kuu
 Move  Enter=Apply  %s=Back	Liiguta  Enter=Rakenda  %s=Tagasi
 Move  Enter=Apply  %s=Cancel	Liiguta  Enter=Rakenda  %s=Tühista
-Move  Enter=Apply  M=No MQTT  %s=Back	Liiguta  Enter=Rakenda  M=MQTT-ta  %s=Tagasi
+Move  Enter=Apply  M=MQTT  %s=Back	Liiguta  Enter=Rakenda  M=MQTT  %s=Tagasi
 Move  Enter=Change  %s=Cancel	Liiguta  Enter=Muuda  %s=Tühista
 Move  Enter=Edit  %s=Back	Liiguta  Enter=Redigeeri  %s=Tagasi
 Move  Enter=OK  %s=Cancel	Liiguta  Enter=OK  %s=Tühista
@@ -478,7 +479,6 @@ N=Choose WiFi   Enter=Finish   Bksp=Back	N=Vali WiFi   Enter=Lõpeta   Bksp=Taga
 NO LINE OF SIGHT	OTSENÄHTAVUST POLE
 NODEINFO + telemetry queued.	NODEINFO + telemeetria järjekorras.
 No GPS fix	GPS-fiks puudub
-No MQTT	MQTT-ta
 No MQTT: %s	MQTT-ta: %s
 Only signed packets accepted (no 2.7 nodes)	Ainult allkirjastatud paketid (2.7 sõlmedeta)
 Send NODEINFO and telemetry to the mesh now?	Kas saata NODEINFO ja telemeetria kohe võrku?
