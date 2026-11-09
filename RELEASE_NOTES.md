@@ -10,3 +10,10 @@
 - Tanmatsu: the radio's incoming packet buffer is now twice as large, so fewer packets are dropped on a busy mesh.
 
 Pull request: #147
+
+
+### Update (v6.4.4)
+### Changed
+- Live filter: the MQTT toggle at the top of the filter picker is now called "Include MQTT Live Data" and reads On by default, which means MQTT traffic is shown. Turn it Off to hide MQTT traffic, the same as the old "No MQTT: On" setting. The M key still toggles it, and the header still reads "No MQTT: <type>" while MQTT is hidden. All boards.
+
+Pull request: #148
