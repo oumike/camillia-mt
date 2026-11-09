@@ -457,6 +457,7 @@ Mon	po
 Month	Mesiac
 Move  Enter=Apply  %s=Back	Pohyb  Enter=Použiť  %s=Späť
 Move  Enter=Apply  %s=Cancel	Pohyb  Enter=Použiť  %s=Zrušiť
+Move  Enter=Apply  M=No MQTT  %s=Back	Pohyb  Enter=Použiť  M=Bez MQTT  %s=Späť
 Move  Enter=Change  %s=Cancel	Pohyb  Enter=Zmeniť  %s=Zrušiť
 Move  Enter=Edit  %s=Back	Pohyb  Enter=Upraviť  %s=Späť
 Move  Enter=OK  %s=Cancel	Pohyb  Enter=OK  %s=Zrušiť
@@ -479,6 +480,8 @@ N=Choose WiFi   Enter=Finish   Bksp=Back	N=Vybrať WiFi   Enter=Dokončiť   Bks
 NO LINE OF SIGHT	BEZ PRIAMEJ VIDITEĽNOSTI
 NODEINFO + telemetry queued.	NODEINFO + telemetria vo fronte.
 No GPS fix	Bez fixu GPS
+No MQTT	Bez MQTT
+No MQTT: %s	Bez MQTT: %s
 Only signed packets accepted (no 2.7 nodes)	Len podpísané pakety (bez uzlov 2.7)
 Send NODEINFO and telemetry to the mesh now?	Odoslať teraz NODEINFO a telemetriu do siete?
 NODES	UZLY
@@ -886,6 +889,8 @@ low	nízky
 missing	chýba
 never	nikdy
 no key	bez kľúča
+non-MQTT	mimo MQTT
+non-MQTT %s	mimo MQTT %s
 not seen	nezachytené
 off	vyp.
 on	zap.

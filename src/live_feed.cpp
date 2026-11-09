@@ -8,13 +8,17 @@ void liveFeedAddPrefixed(const char *prefix,
                          const char *text,
                          uint16_t color,
                          uint32_t packetId,
-                         bool trackAck) {
+                         bool trackAck,
+                         bool viaMqtt) {
     Channels.addMessage(CHAN_LIVE,
                         (prefix && prefix[0]) ? prefix : "",
                         text ? text : "",
                         color,
                         packetId,
-                        trackAck);
+                        trackAck,
+                        0,
+                        false,
+                        viaMqtt);
 }
 
 void liveFeedAddLine(const char *text, uint16_t color) {

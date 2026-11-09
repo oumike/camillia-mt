@@ -203,6 +203,7 @@ void ChannelMgr::_pushLine(int chanIdx, Channel &ch, const char *text, uint16_t 
     dl.epoch        = epoch;
     dl.senderNodeId = senderNodeId;
     dl.fresh        = _pushFresh;
+    dl.viaMqtt      = _pushViaMqtt;
     if (_pushFresh) ch.freshSeq++;
     ch.count++;
     ch.revision++;
@@ -215,7 +216,7 @@ void ChannelMgr::_pushLine(int chanIdx, Channel &ch, const char *text, uint16_t 
 
 int ChannelMgr::addMessage(int chanIdx, const char *prefix, const char *text,
                             uint16_t color, uint32_t packetId, bool trackAck,
-                            uint32_t senderNodeId, bool fresh) {
+                            uint32_t senderNodeId, bool fresh, bool viaMqtt) {
     if (chanIdx < 0 || chanIdx >= MAX_CHANNELS) return -1;
     if (!_chans[chanIdx].lines) return -1;
     int firstLine = _chans[chanIdx].count;
@@ -224,8 +225,10 @@ int ChannelMgr::addMessage(int chanIdx, const char *prefix, const char *text,
     time_t nowEpoch = time(nullptr);
     uint32_t epoch = (nowEpoch >= 1700000000) ? (uint32_t)nowEpoch : 0;
     _pushFresh = fresh;
+    _pushViaMqtt = viaMqtt;
     _wordWrap(chanIdx, prefix, text, color, packetId, trackAck, epoch, senderNodeId);
     _pushFresh = false;
+    _pushViaMqtt = false;
     if (chanIdx != _active) _chans[chanIdx].unread = true;
     return firstLine;
 }

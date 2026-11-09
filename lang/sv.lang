@@ -448,6 +448,7 @@ Mon	mån
 Month	Månad
 Move  Enter=Apply  %s=Back	Flytta  Enter=Verkställ  %s=Tillbaka
 Move  Enter=Apply  %s=Cancel	Flytta  Enter=Verkställ  %s=Avbryt
+Move  Enter=Apply  M=No MQTT  %s=Back	Flytta  Enter=Verkställ  M=Utan MQTT  %s=Tillbaka
 Move  Enter=Change  %s=Cancel	Flytta  Enter=Ändra  %s=Avbryt
 Move  Enter=Edit  %s=Back	Flytta  Enter=Redigera  %s=Tillbaka
 Move  Enter=OK  %s=Cancel	Flytta  Enter=OK  %s=Avbryt
@@ -470,6 +471,8 @@ N=Choose WiFi   Enter=Finish   Bksp=Back	N=Välj WiFi   Enter=Slutför   Bksp=Ti
 NO LINE OF SIGHT	INGEN FRI SIKT
 NODEINFO + telemetry queued.	NODEINFO + telemetri köade.
 No GPS fix	Ingen GPS-fix
+No MQTT	Utan MQTT
+No MQTT: %s	Utan MQTT: %s
 Only signed packets accepted (no 2.7 nodes)	Bara signerade paket (inga 2.7-noder)
 Send NODEINFO and telemetry to the mesh now?	Skicka NODEINFO och telemetri till nätet nu?
 NODES	NODER
@@ -875,6 +878,8 @@ low	låg
 missing	saknas
 never	aldrig
 no key	ingen nyckel
+non-MQTT	icke-MQTT
+non-MQTT %s	icke-MQTT %s
 not seen	inte sedd
 off	av
 on	på

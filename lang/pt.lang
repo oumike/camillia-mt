@@ -456,6 +456,7 @@ Mon	seg
 Month	Mês
 Move  Enter=Apply  %s=Back	Mover  Enter=Aplicar  %s=Voltar
 Move  Enter=Apply  %s=Cancel	Mover  Enter=Aplicar  %s=Cancelar
+Move  Enter=Apply  M=No MQTT  %s=Back	Mover  Enter=Aplicar  M=Sem MQTT  %s=Voltar
 Move  Enter=Change  %s=Cancel	Mover  Enter=Mudar  %s=Cancelar
 Move  Enter=Edit  %s=Back	Mover  Enter=Editar  %s=Voltar
 Move  Enter=OK  %s=Cancel	Mover  Enter=OK  %s=Cancelar
@@ -478,6 +479,8 @@ N=Choose WiFi   Enter=Finish   Bksp=Back	N=Escolher WiFi   Enter=Concluir   Bksp
 NO LINE OF SIGHT	SEM LINHA DE VISADA
 NODEINFO + telemetry queued.	NODEINFO + telemetria na fila.
 No GPS fix	Sem fix GPS
+No MQTT	Sem MQTT
+No MQTT: %s	Sem MQTT: %s
 Only signed packets accepted (no 2.7 nodes)	Só pacotes assinados (sem nós 2.7)
 Send NODEINFO and telemetry to the mesh now?	Enviar NODEINFO e telemetria para a malha agora?
 NODES	NÓS
@@ -883,6 +886,8 @@ low	baixa
 missing	ausente
 never	nunca
 no key	sem chave
+non-MQTT	não MQTT
+non-MQTT %s	não MQTT %s
 not seen	não vista
 off	desligado
 on	ligado

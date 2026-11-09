@@ -20275,6 +20275,16 @@ enum LiveFilter : uint8_t {
 // not a setting. Reopening Live starts on All, so a filter left on days ago can
 // never masquerade as a quiet mesh. (Also why there is no new config field.)
 static uint8_t s_liveFilter = LIVE_FILTER_ALL;
+// The primary filter, layered under the kind filter above rather than being one
+// of its rows: on, the feed drops every line whose packet came through a broker
+// (via_mqtt set, whether downlinked here or relayed onto the air by a node that
+// downlinked it), and the kind filter then narrows what is left. Lines this node
+// wrote itself -- transmits, errors, notices -- never carry the flag and stay.
+// Session-local for the same reason as s_liveFilter.
+static bool s_liveNoMqtt = false;
+// The picker's selection index for the No MQTT toggle above the kind grid.
+static constexpr int kLiveFilterNoMqttSel = -1;
+static lv_obj_t *s_liveFilterNoMqttRow = nullptr;
 
 // The picker itself, built on the same grid metrics as Tools. It is a sibling of
 // Tools rather than an entry in it: Tools opens other screens and closes itself,
@@ -28438,6 +28448,7 @@ static void closeLiveFilterModal() {
     }
     s_liveFilterBackdrop = nullptr;
     s_liveFilterModal = nullptr;
+    s_liveFilterNoMqttRow = nullptr;
     memset(s_liveFilterRows, 0, sizeof(s_liveFilterRows));
 }
 
@@ -28463,6 +28474,7 @@ static void closeLiveModal() {
     // The filter is a way of looking at the feed, not a setting: leaving Live
     // puts it back to All so it can never be silently in force next time.
     s_liveFilter = LIVE_FILTER_ALL;
+    s_liveNoMqtt = false;
 }
 
 static void chartPushSample(ChartHist &h, float value) {
@@ -34741,6 +34753,7 @@ static void refreshLiveView(bool force) {
         // Filtered out before anything is created, so a hidden line costs no
         // LVGL pool memory and does not count against the low-memory cutoff
         // below — the point of filtering a busy feed is to render less of it.
+        if (s_liveNoMqtt && dl->viaMqtt) continue;
         if (s_liveFilter != LIVE_FILTER_ALL
             && !liveFilterMatches(s_liveFilter, classifyLiveTraffic(*dl))) {
             continue;
@@ -34819,11 +34832,19 @@ static void refreshLiveView(bool force) {
         // exactly like a dead radio, and the difference is one word.
         if (s_liveClearFlashUntilMs != 0) {
             lv_label_set_text(empty, TR("Live feed cleared"));
-        } else if (s_liveFilter == LIVE_FILTER_ALL) {
+        } else if (s_liveFilter == LIVE_FILTER_ALL && !s_liveNoMqtt) {
             lv_label_set_text(empty, TR("No live traffic yet"));
         } else {
+            char what[40];
+            if (s_liveNoMqtt && s_liveFilter == LIVE_FILTER_ALL) {
+                snprintf(what, sizeof(what), "%s", TR("non-MQTT"));
+            } else if (s_liveNoMqtt) {
+                snprintf(what, sizeof(what), TR("non-MQTT %s"), liveFilterName(s_liveFilter));
+            } else {
+                snprintf(what, sizeof(what), "%s", liveFilterName(s_liveFilter));
+            }
             lv_label_set_text_fmt(empty, TR("No %s traffic yet\n(filter is on - %s)"),
-                                  liveFilterName(s_liveFilter),
+                                  what,
 #if UI_TOUCH_ONLY_PROFILE
                                   TR("tap Filter to change")
 #else
@@ -35473,6 +35494,13 @@ static void refreshLiveFilterSelection() {
     // Ten rows do not fit the shortest panel, so the grid scrolls; keeping
     // the selection in view is what makes arrowing past the fold work.
     paintPickerRows(s_liveFilterRows, LIVE_FILTER_COUNT, s_liveFilterSelection, PICKER_SCROLL_VIEW);
+    if (lvObjValid(s_liveFilterNoMqttRow)) {
+        paintPickerRow(s_liveFilterNoMqttRow, s_liveFilterSelection == kLiveFilterNoMqttSel);
+    }
+}
+
+static void liveFilterNoMqttRowText(char *out, size_t outLen) {
+    snprintf(out, outLen, "%s: %s", TR("No MQTT"), s_liveNoMqtt ? TR("On") : TR("Off"));
 }
 
 // The chip in the Live header. Rewritten in place rather than rebuilt, so
@@ -35482,7 +35510,28 @@ static void refreshLiveFilterHeader() {
         s_liveFilterHeaderLabel = nullptr;
         return;
     }
-    lv_label_set_text_fmt(s_liveFilterHeaderLabel, TR("Filter: %s"), liveFilterName(s_liveFilter));
+    // "No MQTT:" stands in for "Filter:" rather than adding to it, so the chip
+    // stays about the width it was.
+    lv_label_set_text_fmt(s_liveFilterHeaderLabel, s_liveNoMqtt ? TR("No MQTT: %s") : TR("Filter: %s"),
+                          liveFilterName(s_liveFilter));
+}
+
+// Flips the No MQTT filter in place. Unlike picking a kind it leaves the picker
+// open, since the point is to combine it with one.
+static void liveFilterToggleNoMqtt() {
+    s_liveNoMqtt = !s_liveNoMqtt;
+    refreshLiveFilterHeader();
+    if (lvObjValid(s_liveFilterNoMqttRow)) {
+        lv_obj_t *lbl = lv_obj_get_child(s_liveFilterNoMqttRow, 0);
+        if (lbl) {
+            char text[32];
+            liveFilterNoMqttRowText(text, sizeof(text));
+            lv_label_set_text(lbl, text);
+        }
+    }
+    s_lastRenderedLiveCount = -1;
+    s_lastRenderedLiveScrollOff = -1;
+    refreshLiveView(true);
 }
 
 static void liveFilterApply(int filter) {
@@ -35564,11 +35613,43 @@ static void openLiveFilterModal() {
     lv_obj_set_style_text_font(hint, &lv_font_montserrat_10, 0);
     lv_obj_set_style_text_color(hint, lv_color_hex(0xA7C7FF), 0);
     lv_obj_set_style_text_align(hint, LV_TEXT_ALIGN_CENTER, 0);
-    lv_label_set_text_fmt(hint, TR("Move  Enter=Apply  %s=Back"), modalCloseKeyLabel());
+    lv_label_set_text_fmt(hint, TR("Move  Enter=Apply  M=No MQTT  %s=Back"), modalCloseKeyLabel());
 #endif
 
     const lv_color_t rowTextColor = (s_cfg.uiMode == UI_MODE_LIGHT)
                                         ? lv_color_hex(0x13233D) : lv_color_hex(0xD9E8FF);
+
+    // The No MQTT toggle: full width above the kind grid, because it combines
+    // with whichever kind is picked rather than being one of them.
+    {
+        lv_obj_t *row = lv_btn_create(s_liveFilterModal);
+    #if defined(DEVICE_TDECK_PRO)
+        lv_obj_remove_style_all(row);
+        lv_obj_add_flag(row, LV_OBJ_FLAG_CLICKABLE);
+    #endif
+        s_liveFilterNoMqttRow = row;
+        lv_obj_set_width(row, lv_pct(100));
+        lv_obj_set_height(row, kChanModalRowH);
+        lv_obj_set_style_radius(row, 4, 0);
+        lv_obj_set_style_pad_left(row, 5, 0);
+        lv_obj_set_style_pad_right(row, 5, 0);
+        lv_obj_set_style_pad_top(row, 1, 0);
+        lv_obj_set_style_pad_bottom(row, 1, 0);
+        lv_obj_set_style_shadow_width(row, 0, 0);
+        lv_obj_add_event_cb(row, [](lv_event_t *e) { LV_UNUSED(e); liveFilterToggleNoMqtt(); },
+                            LV_EVENT_CLICKED, nullptr);
+
+        lv_obj_t *lbl = lv_label_create(row);
+        lv_obj_set_width(lbl, lv_pct(100));
+        lv_obj_set_style_text_font(lbl, kChanModalRowFont, 0);
+        lv_obj_set_style_text_color(lbl, rowTextColor, 0);
+        lv_obj_set_style_text_align(lbl, LV_TEXT_ALIGN_CENTER, 0);
+        lv_label_set_long_mode(lbl, LV_LABEL_LONG_CLIP);
+        char text[32];
+        liveFilterNoMqttRowText(text, sizeof(text));
+        lv_label_set_text(lbl, text);
+        lv_obj_center(lbl);
+    }
 
     lv_obj_t *grid = lv_obj_create(s_liveFilterModal);
     lv_obj_set_width(grid, lv_pct(100));
@@ -35583,7 +35664,9 @@ static void openLiveFilterModal() {
         // between them; the rest of the panel is the grid's to use. The touch
         // build has neither hint nor footer — its X floats over the corner — so
         // the grid gets that height back.
-        constexpr int kFilterChromeH = UI_TOUCH_ONLY_PROFILE ? 30 : 52;
+        // Plus the No MQTT row above the grid.
+        constexpr int kFilterChromeH = (UI_TOUCH_ONLY_PROFILE ? 30 : 52)
+                                       + kChanModalRowH + kChanModalGap;
         int gridMaxH = h - 2 * kChanModalPad - kFilterChromeH;
         const int minGridH = 2 * (kChanModalRowH + kChanModalGap);
         if (gridMaxH < minGridH) gridMaxH = minGridH;
@@ -42140,7 +42223,7 @@ static void openDestructiveConfirm(DestructiveConfirmAction action, uint32_t nod
                  signedByNew ? TR(" (signed by new key)") : "");
     } else if (action == DESTRUCTIVE_CONFIRM_LIVE_CLEAR) {
         snprintf(titleText, sizeof(titleText), TR("Clear entire live feed?"));
-        if (s_liveFilter == LIVE_FILTER_ALL) {
+        if (s_liveFilter == LIVE_FILTER_ALL && !s_liveNoMqtt) {
             snprintf(bodyText, sizeof(bodyText), TR("All live traffic will be erased"));
         } else {
             snprintf(bodyText, sizeof(bodyText),
@@ -52007,8 +52090,16 @@ static void pumpKeyboardInput() {
                 closeLiveFilterModal();
                 continue;
             }
+            if (k == 'm' || k == 'M') {
+                liveFilterToggleNoMqtt();
+                continue;
+            }
             if (k == KEY_ENTER || k == KEY_ROLLER) {
-                liveFilterApply(s_liveFilterSelection);
+                if (s_liveFilterSelection == kLiveFilterNoMqttSel) {
+                    liveFilterToggleNoMqtt();
+                } else {
+                    liveFilterApply(s_liveFilterSelection);
+                }
                 continue;
             }
             int delta = 0;
@@ -52024,9 +52115,21 @@ static void pumpKeyboardInput() {
                 }
             }
             if (delta != 0) {
-                int next = s_liveFilterSelection + delta;
-                if (next < 0) next = 0;
-                if (next >= LIVE_FILTER_COUNT) next = LIVE_FILTER_COUNT - 1;
+                int next;
+                const bool vertical = (delta == 1 || delta == -1);
+                if (s_liveFilterSelection == kLiveFilterNoMqttSel) {
+                    // The toggle spans both columns: down enters the grid at
+                    // its top-left, sideways does nothing.
+                    next = (delta == 1) ? 0 : kLiveFilterNoMqttSel;
+                } else if (vertical && delta == -1
+                           && s_liveFilterSelection % kLiveFilterRowsPerCol == 0) {
+                    // Up off the top row of either column lands on the toggle.
+                    next = kLiveFilterNoMqttSel;
+                } else {
+                    next = s_liveFilterSelection + delta;
+                    if (next < 0) next = 0;
+                    if (next >= LIVE_FILTER_COUNT) next = LIVE_FILTER_COUNT - 1;
+                }
                 if (next != s_liveFilterSelection) {
                     s_liveFilterSelection = next;
                     refreshLiveFilterSelection();
@@ -52049,6 +52152,10 @@ static void pumpKeyboardInput() {
             }
             if (k == 'f' || k == 'F') {
                 openLiveFilterModal();
+                continue;
+            }
+            if (k == 'm' || k == 'M') {
+                liveFilterToggleNoMqtt();
                 continue;
             }
             // Up reveals content above, down reveals below — scrollListClamped's
@@ -56999,7 +57106,8 @@ static void appendLiveRxSummary(const MeshPacket &pkt, int chanIdx, const char *
              liveDestTag(pkt.hdr.to),
              (portTag && portTag[0]) ? portTag : "D",
              chanIdx);
-    liveFeedAddPrefixed(timePrefix, line, TFT_DARKGREY, 0, false);
+    liveFeedAddPrefixed(timePrefix, line, TFT_DARKGREY, 0, false,
+                        (pkt.hdr.flags & 0x10) != 0);
 }
 
 static void appendLiveRxEncrypted(const MeshPacket &pkt) {
@@ -57010,7 +57118,8 @@ static void appendLiveRxEncrypted(const MeshPacket &pkt) {
     liveBuildPrefix(timePrefix, sizeof(timePrefix));
     liveNodeLabel(pkt.hdr.from, who, sizeof(who), false);
     snprintf(line, sizeof(line), "R %s ENC h%02X", who, pkt.hdr.channel);
-    liveFeedAddPrefixed(timePrefix, line, TFT_DARKGREY, 0, false);
+    liveFeedAddPrefixed(timePrefix, line, TFT_DARKGREY, 0, false,
+                        (pkt.hdr.flags & 0x10) != 0);
 }
 
 #if HAS_ADMIN_TERMINAL
@@ -59765,9 +59874,29 @@ static bool resolveAnnouncePosition(int32_t &latI, int32_t &lonI, int32_t &altM)
 // that belongs to the radio — but it is paid in ~0.7 s slices with everything
 // else serviced in between, instead of one five-second stall.
 //
+// And not on consecutive passes either: a pass is ~40 ms, so the sweep was
+// still one solid block of transmitting -- eleven sharing channels kept a
+// Tanmatsu deaf for 7.5 s, and two messages sent meanwhile were never heard,
+// relayed copies included. A gap between packets (kPosSweepGapMs) leaves the
+// radio listening between them, long enough for a message or a relay of one.
+//
 // The position is snapshotted when the sweep starts rather than re-read per
 // channel: one announce should report one position, not a different fix to each
 // channel as the device moves.
+//
+// The gap is shared by every announce -- node info, telemetry and neighbor
+// info as well as the sweep -- since at boot they all fall due together and
+// went out as one more back-to-back block (2.9 s, which cost a message too).
+// Anything due while the gate is closed simply stays due for a later pass.
+static constexpr uint32_t kAnnounceGapMs = 3000;
+static constexpr uint32_t kAnnounceJitterMs = 1000;   // so nodes don't announce in step
+static uint32_t s_announceQuietUntilMs = 0;
+static inline bool announceGateOpen(uint32_t nowMs) {
+    return (int32_t)(nowMs - s_announceQuietUntilMs) >= 0;
+}
+static inline void announceGateClose() {
+    s_announceQuietUntilMs = millis() + kAnnounceGapMs + (uint32_t)random(kAnnounceJitterMs);
+}
 struct PosAnnounceSweep {
     bool     active;
     int      nextChan;
@@ -59818,6 +59947,7 @@ static void serviceNodeInfoAnnounce(uint32_t nowMs) {
             finishPositionAnnounce(nowMs);
             return;
         }
+        if (!announceGateOpen(nowMs)) return;   // listening between announces
         const int chan = s_posSweep.nextChan++;
         s_posSweep.attempted++;
         bool ok = false;
@@ -59825,6 +59955,7 @@ static void serviceNodeInfoAnnounce(uint32_t nowMs) {
                        s_myNodeId, s_posSweep.latI, s_posSweep.lonI, s_posSweep.altM,
                        s_cfg.okToMqtt, chan, s_cfg.positionPrecision));
         if (ok) s_posSweep.sent++;
+        announceGateClose();
         return;   // one packet per pass, whatever else is due
     }
 
@@ -59850,6 +59981,7 @@ static void serviceNodeInfoAnnounce(uint32_t nowMs) {
         return;
     }
 
+    if (nodeInfoDue && !announceGateOpen(nowMs)) return;   // stays due
     if (nodeInfoDue) {
         // Its own phase, like tx:telemetry below. Radio.transmit() blocks for
         // the packet's airtime -- over a second at SF11 -- and without this the
@@ -59863,6 +59995,7 @@ static void serviceNodeInfoAnnounce(uint32_t nowMs) {
                                         0xFFFFFFFF,
                                         false,
                                         s_cfg.okToMqtt));
+        announceGateClose();
         if (ok) scheduleAnnounceNext(s_nextNodeInfoTxMs, s_nodeInfoTxFails, nowMs, nodeInfoIntervalS);
         else scheduleAnnounceRetry(s_nextNodeInfoTxMs, s_nodeInfoTxFails, nowMs, nodeInfoIntervalS);
     }
@@ -59949,15 +60082,19 @@ static void serviceTelemetryAnnounce(uint32_t nowMs) {
         if (forceTelemetry) webCfgQueueTelemetry();
         return;
     }
+    if (!announceGateOpen(nowMs)) return;   // stays due; see kAnnounceGapMs
 
     if (devDue) {
         bool ok = false;
         LOOP_PHASE("tx:telemetry", ok = Channels.sendTelemetryDevice(s_myNodeId, s_cfg.okToMqtt));
+        announceGateClose();
         if (ok) scheduleAnnounceNext(s_nextDeviceTelemetryTxMs, s_deviceTelemetryTxFails, nowMs, s_cfg.telDeviceIntervalS);
         else scheduleAnnounceRetry(s_nextDeviceTelemetryTxMs, s_deviceTelemetryTxFails, nowMs, s_cfg.telDeviceIntervalS);
     }
 
 #if HAS_ENV_SENSOR_TELEMETRY
+    // Device telemetry may just have closed the gate; this stays due if so.
+    if (envDue && !announceGateOpen(millis())) return;
     if (envDue) {
         // Timed separately: this is the probe sweep, and the first measurement
         // that covered serviceTelemetryAnnounce() as a whole read 20 s, which is
@@ -60001,6 +60138,7 @@ static void serviceTelemetryAnnounce(uint32_t nowMs) {
                                                     env.humidityPct,
                                                     env.pressureHpa,
                                                     s_cfg.okToMqtt);
+        announceGateClose();
         if (ok) scheduleAnnounceNext(s_nextEnvTelemetryTxMs, s_envTelemetryTxFails, nowMs, s_cfg.telEnvIntervalS);
         else scheduleAnnounceRetry(s_nextEnvTelemetryTxMs, s_envTelemetryTxFails, nowMs, s_cfg.telEnvIntervalS);
     }
@@ -60107,11 +60245,13 @@ static void serviceNeighborInfoAnnounce(uint32_t nowMs) {
         return;
     }
 
+    if (!announceGateOpen(nowMs)) return;   // stays due; see kAnnounceGapMs
     bool ok = Channels.sendNeighborInfo(s_myNodeId,
                                         s_cfg.neighborInfoIntervalS,
                                         neighbors,
                                         neighborCount,
                                         s_cfg.okToMqtt);
+    announceGateClose();
     if (ok) scheduleAnnounceNext(s_nextNeighborInfoTxMs, s_neighborInfoTxFails, nowMs, s_cfg.neighborInfoIntervalS);
     else scheduleAnnounceRetry(s_nextNeighborInfoTxMs, s_neighborInfoTxFails, nowMs, s_cfg.neighborInfoIntervalS);
 }

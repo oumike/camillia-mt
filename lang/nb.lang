@@ -448,6 +448,7 @@ Mon	man
 Month	Måned
 Move  Enter=Apply  %s=Back	Flytt  Enter=Bruk  %s=Tilbake
 Move  Enter=Apply  %s=Cancel	Flytt  Enter=Bruk  %s=Avbryt
+Move  Enter=Apply  M=No MQTT  %s=Back	Flytt  Enter=Bruk  M=Uten MQTT  %s=Tilbake
 Move  Enter=Change  %s=Cancel	Flytt  Enter=Endre  %s=Avbryt
 Move  Enter=Edit  %s=Back	Flytt  Enter=Rediger  %s=Tilbake
 Move  Enter=OK  %s=Cancel	Flytt  Enter=OK  %s=Avbryt
@@ -470,6 +471,8 @@ N=Choose WiFi   Enter=Finish   Bksp=Back	N=Velg WiFi   Enter=Fullfør   Bksp=Til
 NO LINE OF SIGHT	IKKE FRI SIKT
 NODEINFO + telemetry queued.	NODEINFO + telemetri satt i kø.
 No GPS fix	Ingen GPS-fix
+No MQTT	Uten MQTT
+No MQTT: %s	Uten MQTT: %s
 Only signed packets accepted (no 2.7 nodes)	Bare signerte pakker (ingen 2.7-noder)
 Send NODEINFO and telemetry to the mesh now?	Sende NODEINFO og telemetri til nettet nå?
 NODES	NODER
@@ -877,6 +880,8 @@ low	lav
 missing	mangler
 never	aldri
 no key	ingen nøkkel
+non-MQTT	ikke-MQTT
+non-MQTT %s	ikke-MQTT %s
 not seen	ikke sett
 off	av
 on	på

@@ -12,6 +12,7 @@ struct DisplayLine {
     uint32_t epoch;       // wall-clock seconds when this line was added (0 = unknown)
     uint32_t senderNodeId; // originating node; own node = me, 0 = local/system line
     bool     fresh;        // received and not yet seen: the chat view blinks it (RAM only)
+    bool     viaMqtt;      // Live feed: the packet behind it reached a broker (via_mqtt set) (RAM only)
 };
 
 struct Channel {
@@ -56,7 +57,8 @@ public:
     // Returns the line index of the first added line.
     int addMessage(int chanIdx, const char *prefix, const char *text,
                    uint16_t color, uint32_t packetId = 0,
-                   bool trackAck = false, uint32_t senderNodeId = 0, bool fresh = false);
+                   bool trackAck = false, uint32_t senderNodeId = 0, bool fresh = false,
+                   bool viaMqtt = false);
 
     // Chat server replays (cs_client): whether a channel already shows a message,
     // the newest message the node received from someone else, and inserting a
@@ -234,6 +236,7 @@ private:
     bool       _persistLoading = false;
     bool       _persistDirReady = false;
     bool       _pushFresh = false;   // what _pushLine stamps into DisplayLine::fresh
+    bool       _pushViaMqtt = false; // ... and into DisplayLine::viaMqtt
     // millis() when each channel first went dirty / was last touched. Zero in
     // _dirtySinceMs means clean. Sized for the persisted channels only: CHAN_LIVE
     // and anything above MESH_CHANNELS is never written to storage.

@@ -451,6 +451,7 @@ Mon	lun
 Month	Lună
 Move  Enter=Apply  %s=Back	Mută  Enter=Aplică  %s=Înapoi
 Move  Enter=Apply  %s=Cancel	Mută  Enter=Aplică  %s=Anulare
+Move  Enter=Apply  M=No MQTT  %s=Back	Mută  Enter=Aplică  M=Fără MQTT  %s=Înapoi
 Move  Enter=Change  %s=Cancel	Mută  Enter=Schimbă  %s=Anulare
 Move  Enter=Edit  %s=Back	Mută  Enter=Editează  %s=Înapoi
 Move  Enter=OK  %s=Cancel	Mută  Enter=OK  %s=Anulare
@@ -473,6 +474,8 @@ N=Choose WiFi   Enter=Finish   Bksp=Back	N=Alege WiFi   Enter=Termină   Bksp=Î
 NO LINE OF SIGHT	FĂRĂ LINIE DE VEDERE
 NODEINFO + telemetry queued.	NODEINFO + telemetrie în coadă.
 No GPS fix	Fără fix GPS
+No MQTT	Fără MQTT
+No MQTT: %s	Fără MQTT: %s
 Only signed packets accepted (no 2.7 nodes)	Doar pachete semnate (fără noduri 2.7)
 Send NODEINFO and telemetry to the mesh now?	Trimiți acum NODEINFO și telemetria în rețea?
 NODES	NODURI
@@ -885,6 +888,8 @@ low	mică
 missing	lipsește
 never	niciodată
 no key	fără cheie
+non-MQTT	non-MQTT
+non-MQTT %s	non-MQTT %s
 not seen	nevăzută
 off	oprit
 on	pornit

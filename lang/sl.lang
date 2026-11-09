@@ -456,6 +456,7 @@ Mon	pon
 Month	Mesec
 Move  Enter=Apply  %s=Back	Premik  Enter=Uporabi  %s=Nazaj
 Move  Enter=Apply  %s=Cancel	Premik  Enter=Uporabi  %s=Prekliči
+Move  Enter=Apply  M=No MQTT  %s=Back	Premik  Enter=Uporabi  M=Brez MQTT  %s=Nazaj
 Move  Enter=Change  %s=Cancel	Premik  Enter=Spremeni  %s=Prekliči
 Move  Enter=Edit  %s=Back	Premik  Enter=Uredi  %s=Nazaj
 Move  Enter=OK  %s=Cancel	Premik  Enter=OK  %s=Prekliči
@@ -478,6 +479,8 @@ N=Choose WiFi   Enter=Finish   Bksp=Back	N=Izberi WiFi   Enter=Končaj   Bksp=Na
 NO LINE OF SIGHT	NI VIDNE ČRTE
 NODEINFO + telemetry queued.	NODEINFO + telemetrija v čakalni vrsti.
 No GPS fix	Ni položaja GPS
+No MQTT	Brez MQTT
+No MQTT: %s	Brez MQTT: %s
 Only signed packets accepted (no 2.7 nodes)	Samo podpisani paketi (brez vozlišč 2.7)
 Send NODEINFO and telemetry to the mesh now?	Pošljem zdaj NODEINFO in telemetrijo v omrežje?
 NODES	VOZLIŠČA
@@ -888,6 +891,8 @@ low	nizko
 missing	manjka
 never	nikoli
 no key	ni ključa
+non-MQTT	ne-MQTT
+non-MQTT %s	ne-MQTT %s
 not seen	ni videno
 off	izkl.
 on	vkl.

@@ -457,6 +457,7 @@ Mon	pr
 Month	Mēnesis
 Move  Enter=Apply  %s=Back	Pārvietot  Enter=Lietot  %s=Atpakaļ
 Move  Enter=Apply  %s=Cancel	Pārvietot  Enter=Lietot  %s=Atcelt
+Move  Enter=Apply  M=No MQTT  %s=Back	Pārvietot  Enter=Lietot  M=Bez MQTT  %s=Atpakaļ
 Move  Enter=Change  %s=Cancel	Pārvietot  Enter=Mainīt  %s=Atcelt
 Move  Enter=Edit  %s=Back	Pārvietot  Enter=Rediģēt  %s=Atpakaļ
 Move  Enter=OK  %s=Cancel	Pārvietot  Enter=OK  %s=Atcelt
@@ -479,6 +480,8 @@ N=Choose WiFi   Enter=Finish   Bksp=Back	N=Izvēlēties WiFi   Enter=Pabeigt   B
 NO LINE OF SIGHT	NAV REDZAMĪBAS LĪNIJAS
 NODEINFO + telemetry queued.	NODEINFO + telemetrija rindā.
 No GPS fix	Nav GPS fiksācijas
+No MQTT	Bez MQTT
+No MQTT: %s	Bez MQTT: %s
 Only signed packets accepted (no 2.7 nodes)	Tikai parakstītas paketes (bez 2.7 mezgliem)
 Send NODEINFO and telemetry to the mesh now?	Sūtīt NODEINFO un telemetriju uz tīklu tagad?
 NODES	MEZGLI
@@ -890,6 +893,8 @@ low	zems
 missing	trūkst
 never	nekad
 no key	nav atslēgas
+non-MQTT	ne-MQTT
+non-MQTT %s	ne-MQTT %s
 not seen	nav redzēts
 off	izsl.
 on	iesl.
