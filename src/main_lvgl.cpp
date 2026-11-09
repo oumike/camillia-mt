@@ -35500,7 +35500,10 @@ static void refreshLiveFilterSelection() {
 }
 
 static void liveFilterNoMqttRowText(char *out, size_t outLen) {
-    snprintf(out, outLen, "%s: %s", TR("No MQTT"), s_liveNoMqtt ? TR("On") : TR("Off"));
+    // Worded as what is shown, so the default reads On: the row says whether
+    // MQTT traffic is in the feed, and s_liveNoMqtt is its inverse.
+    snprintf(out, outLen, "%s: %s", TR("Include MQTT Live Data"),
+             s_liveNoMqtt ? TR("Off") : TR("On"));
 }
 
 // The chip in the Live header. Rewritten in place rather than rebuilt, so
@@ -35524,7 +35527,7 @@ static void liveFilterToggleNoMqtt() {
     if (lvObjValid(s_liveFilterNoMqttRow)) {
         lv_obj_t *lbl = lv_obj_get_child(s_liveFilterNoMqttRow, 0);
         if (lbl) {
-            char text[32];
+            char text[64];
             liveFilterNoMqttRowText(text, sizeof(text));
             lv_label_set_text(lbl, text);
         }
@@ -35613,7 +35616,7 @@ static void openLiveFilterModal() {
     lv_obj_set_style_text_font(hint, &lv_font_montserrat_10, 0);
     lv_obj_set_style_text_color(hint, lv_color_hex(0xA7C7FF), 0);
     lv_obj_set_style_text_align(hint, LV_TEXT_ALIGN_CENTER, 0);
-    lv_label_set_text_fmt(hint, TR("Move  Enter=Apply  M=No MQTT  %s=Back"), modalCloseKeyLabel());
+    lv_label_set_text_fmt(hint, TR("Move  Enter=Apply  M=MQTT  %s=Back"), modalCloseKeyLabel());
 #endif
 
     const lv_color_t rowTextColor = (s_cfg.uiMode == UI_MODE_LIGHT)
@@ -35645,7 +35648,7 @@ static void openLiveFilterModal() {
         lv_obj_set_style_text_color(lbl, rowTextColor, 0);
         lv_obj_set_style_text_align(lbl, LV_TEXT_ALIGN_CENTER, 0);
         lv_label_set_long_mode(lbl, LV_LABEL_LONG_CLIP);
-        char text[32];
+        char text[64];
         liveFilterNoMqttRowText(text, sizeof(text));
         lv_label_set_text(lbl, text);
         lv_obj_center(lbl);

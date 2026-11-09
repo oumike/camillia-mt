@@ -352,6 +352,7 @@ Import failed - enter a name	Importazione fallita - inserisci un nome
 Imported OK - rebooting...	Importato - riavvio...
 Include (A)rchived (SD card)	Includi archiviati (A) (SD)
 Include (F)avorites	Includi preferiti (F)
+Include MQTT Live Data	Includi dati live MQTT
 Include archived (SD card)	Includi archiviati (scheda SD)
 Include favorites	Includi preferiti
 Indigo	Indaco
@@ -453,7 +454,7 @@ Mon	lun
 Month	Mese
 Move  Enter=Apply  %s=Back	Sposta  Enter=Applica  %s=Indietro
 Move  Enter=Apply  %s=Cancel	Sposta  Enter=Applica  %s=Annulla
-Move  Enter=Apply  M=No MQTT  %s=Back	Sposta  Enter=Applica  M=No MQTT  %s=Indietro
+Move  Enter=Apply  M=MQTT  %s=Back	Sposta  Enter=Applica  M=MQTT  %s=Indietro
 Move  Enter=Change  %s=Cancel	Sposta  Enter=Cambia  %s=Annulla
 Move  Enter=Edit  %s=Back	Sposta  Enter=Modifica  %s=Indietro
 Move  Enter=OK  %s=Cancel	Sposta  Enter=OK  %s=Annulla
@@ -476,7 +477,6 @@ N=Choose WiFi   Enter=Finish   Bksp=Back	N=Scegli WiFi   Enter=Termina   Bksp=In
 NO LINE OF SIGHT	NESSUNA LINEA DI VISTA
 NODEINFO + telemetry queued.	NODEINFO + telemetria in coda.
 No GPS fix	Nessun fix GPS
-No MQTT	No MQTT
 No MQTT: %s	No MQTT: %s
 Only signed packets accepted (no 2.7 nodes)	Solo pacchetti firmati (niente nodi 2.7)
 Send NODEINFO and telemetry to the mesh now?	Inviare ora NODEINFO e telemetria alla mesh?

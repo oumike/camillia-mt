@@ -347,6 +347,7 @@ Import failed - enter a name	Import mislukt - voer een naam in
 Imported OK - rebooting...	Import OK - herstarten...
 Include (A)rchived (SD card)	Gearchiveerde meenemen (A) (SD)
 Include (F)avorites	Favorieten meenemen (F)
+Include MQTT Live Data	MQTT-livegegevens tonen
 Include archived (SD card)	Gearchiveerde meenemen (SD-kaart)
 Include favorites	Favorieten meenemen
 Install now? The device reboots to update.	Nu installeren? Het apparaat herstart om bij te werken.
@@ -446,7 +447,7 @@ Mon	ma
 Month	Maand
 Move  Enter=Apply  %s=Back	Bewegen  Enter=Toepassen  %s=Terug
 Move  Enter=Apply  %s=Cancel	Bewegen  Enter=Toepassen  %s=Annuleren
-Move  Enter=Apply  M=No MQTT  %s=Back	Bewegen  Enter=Toepassen  M=Geen MQTT  %s=Terug
+Move  Enter=Apply  M=MQTT  %s=Back	Bewegen  Enter=Toepassen  M=MQTT  %s=Terug
 Move  Enter=Change  %s=Cancel	Bewegen  Enter=Wijzigen  %s=Annuleren
 Move  Enter=Edit  %s=Back	Bewegen  Enter=Bewerken  %s=Terug
 Move  Enter=OK  %s=Cancel	Bewegen  Enter=OK  %s=Annuleren
@@ -469,7 +470,6 @@ N=Choose WiFi   Enter=Finish   Bksp=Back	N=Kies wifi   Enter=Voltooien   Bksp=Te
 NO LINE OF SIGHT	GEEN ZICHTLIJN
 NODEINFO + telemetry queued.	NODEINFO + telemetrie in de wachtrij.
 No GPS fix	Geen GPS-fix
-No MQTT	Geen MQTT
 No MQTT: %s	Geen MQTT: %s
 Only signed packets accepted (no 2.7 nodes)	Alleen ondertekende pakketten (geen 2.7-nodes)
 Send NODEINFO and telemetry to the mesh now?	NODEINFO en telemetrie nu naar de mesh sturen?

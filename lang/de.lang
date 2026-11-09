@@ -343,6 +343,7 @@ Import failed - enter a name	Import fehlgeschlagen - Namen eingeben
 Imported OK - rebooting...	Import OK - Neustart...
 Include (A)rchived (SD card)	Archivierte einbeziehen (A) (SD)
 Include (F)avorites	Favoriten einbeziehen (F)
+Include MQTT Live Data	MQTT-Live-Daten einbeziehen
 Include archived (SD card)	Archivierte einbeziehen (SD-Karte)
 Include favorites	Favoriten einbeziehen
 Install now? The device reboots to update.	Jetzt installieren? Das Gerät startet zum Aktualisieren neu.
@@ -438,7 +439,7 @@ Mon	Mo
 Month	Monat
 Move  Enter=Apply  %s=Back	Bewegen  Enter=Übernehmen  %s=Zurück
 Move  Enter=Apply  %s=Cancel	Bewegen  Enter=Übernehmen  %s=Abbrechen
-Move  Enter=Apply  M=No MQTT  %s=Back	Bewegen  Enter=Übernehmen  M=Ohne MQTT  %s=Zurück
+Move  Enter=Apply  M=MQTT  %s=Back	Bewegen  Enter=Übernehmen  M=MQTT  %s=Zurück
 Move  Enter=Change  %s=Cancel	Bewegen  Enter=Ändern  %s=Abbrechen
 Move  Enter=Edit  %s=Back	Bewegen  Enter=Bearbeiten  %s=Zurück
 Move  Enter=OK  %s=Cancel	Bewegen  Enter=OK  %s=Abbrechen
@@ -461,7 +462,6 @@ N=Choose WiFi   Enter=Finish   Bksp=Back	N=WLAN wählen   Enter=Fertig   Bksp=Zu
 NO LINE OF SIGHT	KEINE SICHTVERBINDUNG
 NODEINFO + telemetry queued.	NODEINFO + Telemetrie eingereiht.
 No GPS fix	Kein GPS-Fix
-No MQTT	Ohne MQTT
 No MQTT: %s	Ohne MQTT: %s
 Only signed packets accepted (no 2.7 nodes)	Nur signierte Pakete (keine 2.7-Knoten)
 Send NODEINFO and telemetry to the mesh now?	NODEINFO und Telemetrie jetzt ans Mesh senden?
