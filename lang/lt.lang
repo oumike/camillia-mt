@@ -913,5 +913,6 @@ unknown date	nežinoma data
 unknown error	nežinoma klaida
 unknown node (id ends ..%02x)	nežinomas mazgas (id baigiasi ..%02x)
 unset	nenustatyta
+unsigned name change refused - remove the node to accept it	nepasirašytas vardo pakeitimas atmestas - pašalinkite mazgą, kad jį priimtumėte
 until read	kol perskaitoma
 vague	apytikslė

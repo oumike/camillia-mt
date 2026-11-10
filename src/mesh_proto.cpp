@@ -10,6 +10,7 @@
 #include "ack_proof.h"
 #include "utf8_utils.h"
 #include "licensed_mode.h"
+#include "sig_policy.h"
 
 // ── PSK expansion ─────────────────────────────────────────────
 // Meshtastic DEFAULT_KEY = kDkBase[0..14] + PSK_byte.
@@ -749,26 +750,31 @@ bool encryptPayload(uint32_t packetId, uint32_t fromNode,
     return aesCtr(key, keyLen, packetId, fromNode, plain, cipher, len);
 }
 
+// The signature policy in force (SigPolicy). On Balanced and Strict, NodeInfo
+// and Position unicasts are signed as well (sigSignsUnicastPort()).
+static uint8_t s_signPolicy = SIG_POLICY_COMPATIBLE;
+void meshSetSignPolicy(uint8_t policy) { s_signPolicy = sigPolicyCoerce(policy); }
+
 // Append Data.xeddsa_signature (field 10) to an encoded Data we originate, as
-// upstream's perhapsEncode() does: every broadcast, and -- in licensed mode,
-// where DMs go plaintext instead of PKI -- unicasts too, except Routing and
-// Traceroute (lic::shouldSign()). Only when the signed packet still fits a
-// LoRa frame. That rule is the one a 2.8.1 receiver on the Balanced policy
-// mirrors -- once it has seen us sign, it drops an unsigned packet from us whose
-// signed form would have fit -- so every packet that qualifies and fits has to
-// be signed, not just some. Returns the signed length in out, or 0 to send
-// plain as it is.
+// upstream's perhapsEncode() does: every broadcast but a traceroute; in
+// licensed mode, where DMs go plaintext instead of PKI, unicasts too, except
+// Routing (lic::shouldSign()); and on Balanced/Strict, NodeInfo and Position
+// unicasts. Never on an AES-CCM channel, whose tag already authenticates the
+// packet. Only when the signed packet still fits a LoRa frame.
+//
+// Broadcasts are signed on Compatible too, where 2.8.2 itself signs nothing: a
+// 2.8.1 node on Balanced that has seen us sign drops our unsigned broadcasts,
+// and going quiet on signatures would cut us off from those. Returns the signed
+// length in out, or 0 to send plain as it is.
 static size_t signBroadcastData(const ChannelKey &ck, uint32_t packetId,
                                 uint32_t fromNode, uint32_t toNode,
                                 const uint8_t *plain, size_t len,
                                 uint8_t *out, size_t outCap) {
     if (fromNode == 0 || fromNode != xeddsaSignerNodeId()) return 0;
+    if (channelUsesAead(ck)) return 0;
     const size_t signedLen = len + XEDDSA_SIGNATURE_FIELD_BYTES;
-    // Upstream's signedDataFits(): header + signed Data within the 255-byte
-    // frame. On an AEAD channel the tag has to fit as well, or the packet could
-    // not be sent at all; unsigned, it still reaches Compatible receivers.
-    const size_t aead = channelUsesAead(ck) ? MESH_AEAD_OVERHEAD : 0;
-    if (MESH_HEADER_BYTES + signedLen + aead > MESH_MAX_FRAME_BYTES || signedLen > outCap) return 0;
+    // Upstream's signedDataFits(): header + signed Data within the 255-byte frame.
+    if (MESH_HEADER_BYTES + signedLen > MESH_MAX_FRAME_BYTES || signedLen > outCap) return 0;
 
     uint32_t portnum = 0, requestId = 0;
     bool wantResponse = false;
@@ -778,7 +784,8 @@ static size_t signBroadcastData(const ChannelKey &ck, uint32_t packetId,
     decodeData(plain, len, portnum, pay, payLen, requestId, wantResponse,
                nullptr, nullptr, nullptr, nullptr, &env);
     if (portnum == 0 || env.hasSignature) return 0;
-    if (!lic::shouldSign(lic::active(), toNode == 0xFFFFFFFF, portnum)) return 0;
+    if (!lic::shouldSign(lic::active(), toNode == 0xFFFFFFFF, portnum)
+        && !sigSignsUnicastPort(s_signPolicy, portnum)) return 0;
 
     XeddsaSignedFields f = {};
     f.from         = fromNode;
@@ -1402,9 +1409,10 @@ size_t encodeNeighborInfo(uint32_t nodeId,
     p += pbWriteVarint(info + p, (1 << 3) | 0);
     p += pbWriteVarint(info + p, nodeId);
 
-    // NeighborInfo.last_sent_by_id
-    p += pbWriteVarint(info + p, (2 << 3) | 0);
-    p += pbWriteVarint(info + p, nodeId);
+    // NeighborInfo.last_sent_by_id is left out, as 2.8.2 senders leave it out
+    // (meshtastic/firmware#12090): receivers take the transmitter from the
+    // header (the sender if heard direct, else relay_node), and the field only
+    // ever repeated node_id here.
 
     // NeighborInfo.node_broadcast_interval_secs
     p += pbWriteVarint(info + p, (3 << 3) | 0);

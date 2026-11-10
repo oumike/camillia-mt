@@ -880,5 +880,6 @@ unknown date	unbekanntes Datum
 unknown error	unbekannter Fehler
 unknown node (id ends ..%02x)	unbekannter Knoten (ID endet auf ..%02x)
 unset	nicht gesetzt
+unsigned name change refused - remove the node to accept it	unsignierte Namensänderung abgelehnt - Knoten entfernen, um sie anzunehmen
 until read	bis gelesen
 vague	ungefähr

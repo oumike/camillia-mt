@@ -97,6 +97,44 @@ MeshRadio Radio;
 static constexpr bool kVerboseRadioIo = false;
 static uint32_t sLastRxDoneMs = 0;
 
+// Boards where this file drives the radio's IRQ status register itself, and so
+// can tell a frame is arriving before it is complete. Not the Tanmatsu (the C6
+// owns the chip and its IRQs) nor the LR2021 (different IRQ API).
+#if !defined(DEVICE_TANMATSU) && !MESH_RADIO_IS_LR2021
+#  define MESH_RADIO_SENSES_RX 1
+#else
+#  define MESH_RADIO_SENSES_RX 0
+#endif
+
+#if MESH_RADIO_SENSES_RX
+#  if MESH_RADIO_IS_LR11XX
+static constexpr uint32_t kIrqPreamble  = RADIOLIB_LR11X0_IRQ_PREAMBLE_DETECTED;
+static constexpr uint32_t kIrqHeaderOk  = RADIOLIB_LR11X0_IRQ_SYNC_WORD_HEADER_VALID;
+static constexpr uint32_t kIrqHeaderErr = RADIOLIB_LR11X0_IRQ_HEADER_ERR;
+static constexpr uint32_t kIrqRxDone    = RADIOLIB_LR11X0_IRQ_RX_DONE;
+#  else
+static constexpr uint32_t kIrqPreamble  = RADIOLIB_SX126X_IRQ_PREAMBLE_DETECTED;
+static constexpr uint32_t kIrqHeaderOk  = RADIOLIB_SX126X_IRQ_HEADER_VALID;
+static constexpr uint32_t kIrqHeaderErr = RADIOLIB_SX126X_IRQ_HEADER_ERR;
+static constexpr uint32_t kIrqRxDone    = RADIOLIB_SX126X_IRQ_RX_DONE;
+#  endif
+#endif
+
+// A frame that finished arriving just as transmit() was about to key up. It
+// used to be read into a scratch buffer and thrown away, so a packet that landed
+// between the last pollRx() and our own transmit was simply lost. It is held
+// here instead and handed up by the next pollRx(), RSSI and SNR as measured.
+namespace {
+struct RxStash {
+    bool    valid;
+    size_t  len;
+    float   rssi;
+    float   snr;
+    uint8_t buf[256];
+};
+RxStash sRxStash = {};
+}  // namespace
+
 // ── Airtime accounting (rolling 1-hour window, one bucket per minute) ─────────
 // Feeds DeviceMetrics channel_utilization / air_util_tx telemetry. busyMs counts
 // both our transmissions and packets we heard; txMs counts only our TX.
@@ -147,7 +185,21 @@ int MeshRadio::_armRx() {
         Serial.printf("[radio] restoreRxMaxPayload failed: %d\n", (int)restoreState);
     }
 #endif
+#if MESH_RADIO_SENSES_RX
+    // Default RX flags plus PREAMBLE_DETECTED, latched in the IRQ status (not
+    // routed to DIO1), so transmit() can see a frame that is still arriving.
+#  if MESH_RADIO_IS_LR11XX
+    constexpr uint32_t kRxTimeoutInf = RADIOLIB_LR11X0_RX_TIMEOUT_INF;
+#  else
+    constexpr uint32_t kRxTimeoutInf = RADIOLIB_SX126X_RX_TIMEOUT_INF;
+#  endif
+    const int state = _radio.startReceive(
+        kRxTimeoutInf,
+        RADIOLIB_IRQ_RX_DEFAULT_FLAGS | (1UL << RADIOLIB_IRQ_PREAMBLE_DETECTED),
+        RADIOLIB_IRQ_RX_DEFAULT_MASK, 0);
+#else
     const int state = _radio.startReceive();
+#endif
 #if defined(DEVICE_TDISPLAY_P4)
     // Reading the XL9535 input ports acknowledges the active-low expander IRQ
     // after the radio IRQ returns low, readying it for the next edge.
@@ -497,8 +549,9 @@ bool MeshRadio::reconfigure(float freq, float bw, uint8_t sf, uint8_t cr, uint8_
     // back in pollRx() afterwards — where the packet would be handed up as if it
     // had arrived on the new ones. That is how a Discovery preset scan can open
     // with a packet from the preset it just left. Same discard transmit() makes
-    // before it keys up.
+    // before it keys up. A frame transmit() saved is from the old settings too.
     _rxFlag = false;
+    sRxStash.valid = false;
     state = _armRx();
     if (state != RADIOLIB_ERR_NONE) ok = false;
 
@@ -588,11 +641,65 @@ int MeshRadio::_readPacketLr11xx(uint8_t *buf, size_t bufCap, size_t &outLen) {
 }
 #endif
 
+// Reads the frame the radio is holding into buf. True for a good frame, with
+// len, rssi and snr filled in; false for one that was damaged or unreadable,
+// which has been counted and the receiver re-armed.
+bool MeshRadio::_readFrame(uint8_t *buf, size_t &len, float &rssi, float &snr) {
+    sRx.irqs++;
+#if MESH_RADIO_IS_LR11XX
+    len = 0;
+    const int readState = _readPacketLr11xx(buf, 256, len);
+    if (readState != RADIOLIB_ERR_NONE) {
+        if (readState == RADIOLIB_ERR_CRC_MISMATCH) sRx.crcErr++;
+        else if (len == 0)                          sRx.badLen++;
+        else                                        sRx.readErr++;
+        // standby() before re-arming, not startReceive() alone: on this family a
+        // corrupted packet can leave the receiver shifted, and every packet after
+        // it arrives damaged until the radio has been through standby. Ported
+        // from MeshCore's LR1110 driver, which hit the same thing.
+        _radio.standby();
+        _armRx();
+        return false;
+    }
+#else
+    len = _radio.getPacketLength();
+    if (len < sizeof(MeshHdr) || len > 256) {
+        sRx.badLen++;
+        _armRx();
+        return false;
+    }
+
+    if (_radio.readData(buf, len) != RADIOLIB_ERR_NONE) {
+        sRx.readErr++;
+        _armRx();
+        return false;
+    }
+#endif
+    sRx.good++;
+    rssi = _radio.getRSSI();
+    snr  = _radio.getSNR();
+    airNote((uint32_t)(_radio.getTimeOnAir(len) / 1000UL), false);  // heard packet → channel busy
+    return true;
+}
+
 bool MeshRadio::pollRx(MeshPacket &pkt) {
 #if defined(LORA_TEST_MQTT_ONLY) && LORA_TEST_MQTT_ONLY
     (void)pkt;
     return false;   // TEMP: LoRa RX disabled for MQTT-only testing
 #endif
+    uint8_t buf[256];
+    size_t len = 0;
+    float rssi = 0.0f, snr = 0.0f;
+    // A frame transmit() saved before keying up goes first: it arrived before
+    // anything the radio holds now.
+    const bool fromStash = sRxStash.valid;
+    if (fromStash) {
+        sRxStash.valid = false;
+        len  = sRxStash.len;
+        rssi = sRxStash.rssi;
+        snr  = sRxStash.snr;
+        memcpy(buf, sRxStash.buf, len);
+    } else {
 #if defined(DEVICE_TDISPLAY_P4)
     // The expander IRQ gives prompt wake-up, while this level read also covers
     // an edge that occurred while interrupts were masked or the CPU slept.
@@ -613,39 +720,8 @@ bool MeshRadio::pollRx(MeshPacket &pkt) {
 #endif
     if (!_rxFlag) return false;
     _rxFlag = false;
-    sRx.irqs++;
-
-    uint8_t buf[256];
-#if MESH_RADIO_IS_LR11XX
-    size_t len = 0;
-    const int readState = _readPacketLr11xx(buf, sizeof(buf), len);
-    if (readState != RADIOLIB_ERR_NONE) {
-        if (readState == RADIOLIB_ERR_CRC_MISMATCH) sRx.crcErr++;
-        else if (len == 0)                          sRx.badLen++;
-        else                                        sRx.readErr++;
-        // standby() before re-arming, not startReceive() alone: on this family a
-        // corrupted packet can leave the receiver shifted, and every packet after
-        // it arrives damaged until the radio has been through standby. Ported
-        // from MeshCore's LR1110 driver, which hit the same thing.
-        _radio.standby();
-        _armRx();
-        return false;
-    }
-#else
-    size_t len = _radio.getPacketLength();
-    if (len < sizeof(MeshHdr) || len > 256) {
-        sRx.badLen++;
-        _armRx();
-        return false;
-    }
-
-    if (_radio.readData(buf, len) != RADIOLIB_ERR_NONE) {
-        sRx.readErr++;
-        _armRx();
-        return false;
-    }
-#endif
-    sRx.good++;
+    if (!_readFrame(buf, len, rssi, snr)) return false;
+    }   // !fromStash
 
     if (kVerboseRadioIo) {
         // Dump raw header bytes for wire-format verification
@@ -654,10 +730,8 @@ bool MeshRadio::pollRx(MeshPacket &pkt) {
         Serial.println();
     }
 
-    airNote((uint32_t)(_radio.getTimeOnAir(len) / 1000UL), false);  // heard packet → channel busy
-
-    pkt.rssi  = _radio.getRSSI();
-    pkt.snr   = _radio.getSNR();
+    pkt.rssi  = rssi;
+    pkt.snr   = snr;
     pkt.rxMs  = millis();
     memcpy(&pkt.hdr, buf, sizeof(MeshHdr));
     pkt.portnum = 0;
@@ -714,7 +788,9 @@ bool MeshRadio::pollRx(MeshPacket &pkt) {
     }
 
     sLastRxDoneMs = millis();
-    _armRx();
+    // A stashed frame was read before the transmit, which has re-armed since;
+    // re-arming again would only risk cutting off a frame arriving now.
+    if (!fromStash) _armRx();
     return true;
 }
 
@@ -750,20 +826,63 @@ bool MeshRadio::transmit(const uint8_t *buf, size_t len) {
         Serial.println();
     }
 
-    // If RX IRQ is still pending (common during burst traffic), drain and re-arm
-    // before attempting TX so the radio is not left in a stale RX_DONE state.
-    // Not on the Tanmatsu: the C6 has already re-armed, and what is pending is
-    // a real packet in the RPC queue that pollRx() will still deliver.
-#if !defined(DEVICE_TANMATSU)
-    if (_rxFlag) {
-        size_t pendingLen = _radio.getPacketLength();
-        if (pendingLen >= sizeof(MeshHdr) && pendingLen <= 256) {
-            uint8_t dump[256];
-            (void)_radio.readData(dump, pendingLen);
+#if MESH_RADIO_SENSES_RX
+    // Listen before talk. standby() below aborts whatever the receiver is in the
+    // middle of, so keying up while a frame is arriving both loses that frame
+    // and talks over it for everyone else in range. Wait for it to finish --
+    // bounded, because a preamble or header flag can stay latched over a frame
+    // that died, and a stale flag must not hold TX forever.
+    {
+        // Longest frame on the current settings; a preamble with no header yet
+        // only gets long enough for the header to follow.
+        const uint32_t frameMaxMs    = (uint32_t)(_radio.getTimeOnAir(255) / 1000UL) + 20;
+        const uint32_t preambleMaxMs = (uint32_t)(_radio.getTimeOnAir(16) / 1000UL) + 20;
+        const uint32_t t0 = millis();
+        bool waited = false;
+        for (;;) {
+            const uint32_t irq = _radio.getIrqFlags();
+            if (irq & kIrqRxDone) { _rxFlag = true; break; }   // complete: kept below
+            const bool header = (irq & kIrqHeaderOk) != 0;
+            const bool pre    = (irq & kIrqPreamble) != 0;
+            if ((irq & kIrqHeaderErr) && !header) {
+                // A frame whose header failed: nothing more is coming.
+                (void)_radio.clearIrqFlags(kIrqHeaderErr | kIrqPreamble);
+                break;
+            }
+            if (!header && !pre) break;
+            const uint32_t limit = header ? frameMaxMs : preambleMaxMs;
+            if (millis() - t0 >= limit) {
+                (void)_radio.clearIrqFlags(kIrqHeaderOk | kIrqPreamble | kIrqHeaderErr);
+                Serial.printf("[radio] TX: RX busy flag stale after %lu ms, sending\n",
+                              (unsigned long)(millis() - t0));
+                break;
+            }
+            waited = true;
+            delay(2);
         }
+        if (waited && kVerboseRadioIo) {
+            Serial.printf("[radio] TX held %lu ms for a frame in flight\n",
+                          (unsigned long)(millis() - t0));
+        }
+    }
+
+    // A frame that completed before we key up is a real packet: keep it for the
+    // next pollRx() rather than discarding it, which is what used to happen.
+    if (_rxFlag) {
         _rxFlag = false;
-        _armRx();
-        delay(2);
+        if (!sRxStash.valid) {
+            size_t len2 = 0;
+            float rssi = 0.0f, snr = 0.0f;
+            if (_readFrame(sRxStash.buf, len2, rssi, snr)) {
+                sRxStash.len  = len2;
+                sRxStash.rssi = rssi;
+                sRxStash.snr  = snr;
+                sRxStash.valid = true;
+            }
+        }
+        // else: one is already waiting and this one is left in the radio's
+        // buffer; standby does not clear it, but the TX does. Rare enough (two
+        // frames inside one loop pass) not to need a queue.
     }
 #endif
 

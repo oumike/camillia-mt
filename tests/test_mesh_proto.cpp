@@ -335,7 +335,7 @@ static void testApplicationRoundTrips() {
         const auto d = readData(buf, n);
         NeighborInfoPayload info{};
         decodeNeighborInfo(d.payload, d.len, info);
-        return n && d.port == NEIGHBORINFO_APP && info.nodeId == 42 && info.lastSentById == 42
+        return n && d.port == NEIGHBORINFO_APP && info.nodeId == 42 && info.lastSentById == 0
             && info.nodeBroadcastIntervalS == 900 && info.neighborCount == 2
             && info.neighbors[0].nodeId == 7 && info.neighbors[0].snr == -3.25f
             && info.neighbors[1].nodeId == 8 && info.neighbors[1].snr == 2.5f

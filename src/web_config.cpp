@@ -9073,6 +9073,7 @@ static void handlePostSave() {
                               || sigPolicyChanged || powerLedChanged
                               || channelPanelChanged);
 
+    if (sigPolicyChanged) meshSetSignPolicy(gCfg->packetSigPolicy);
     if (liveOnly) {
         redirectHomeWithFlash(fontChanged ? "Saved. Font size applied." : "Saved.");
         return;

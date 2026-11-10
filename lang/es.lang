@@ -957,6 +957,7 @@ unknown date	fecha desconocida
 unknown error	error desconocido
 unknown node (id ends ..%02x)	nodo desconocido (id acaba en ..%02x)
 unset	sin definir
+unsigned name change refused - remove the node to accept it	cambio de nombre sin firma rechazado - elimina el nodo para aceptarlo
 until read	hasta leer
 vague	aproximada
 Call sign	Indicativo

@@ -927,6 +927,7 @@ unknown date	date inconnue
 unknown error	erreur inconnue
 unknown node (id ends ..%02x)	nœud inconnu (id finissant par ..%02x)
 unset	non défini
+unsigned name change refused - remove the node to accept it	changement de nom non signé refusé - supprimez le nœud pour l'accepter
 until read	jusqu'à lecture
 Call sign	Indicatif
 Long name suffix	Suffixe du nom long

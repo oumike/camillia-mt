@@ -908,5 +908,6 @@ unknown date	dată necunoscută
 unknown error	eroare necunoscută
 unknown node (id ends ..%02x)	nod necunoscut (id-ul se termină în ..%02x)
 unset	nesetat
+unsigned name change refused - remove the node to accept it	schimbare de nume nesemnată refuzată - eliminați nodul pentru a o accepta
 until read	până la citire
 vague	aproximativă

@@ -898,5 +898,6 @@ unknown date	okänt datum
 unknown error	okänt fel
 unknown node (id ends ..%02x)	okänd nod (id slutar på ..%02x)
 unset	ej angivet
+unsigned name change refused - remove the node to accept it	osignerad namnändring avvisad - ta bort noden för att godta den
 until read	tills läst
 vague	ungefärlig

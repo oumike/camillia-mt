@@ -913,5 +913,6 @@ unknown date	tuntematon päivämäärä
 unknown error	tuntematon virhe
 unknown node (id ends ..%02x)	tuntematon solmu (id päättyy ..%02x)
 unset	ei asetettu
+unsigned name change refused - remove the node to accept it	allekirjoittamaton nimenmuutos hylätty - poista solmu hyväksyäksesi sen
 until read	luettuun asti
 vague	likimääräinen

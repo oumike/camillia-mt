@@ -913,5 +913,6 @@ unknown date	nezināms datums
 unknown error	nezināma kļūda
 unknown node (id ends ..%02x)	nezināms mezgls (id beidzas ar ..%02x)
 unset	nav iestatīts
+unsigned name change refused - remove the node to accept it	neparakstīta vārda maiņa noraidīta - noņemiet mezglu, lai to pieņemtu
 until read	līdz izlasīšanai
 vague	aptuvena

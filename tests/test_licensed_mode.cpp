@@ -74,6 +74,8 @@ static void test_should_sign() {
     CHECK(lic::shouldSign(true, false, 1));
     CHECK(!lic::shouldSign(true, false, 5));
     CHECK(!lic::shouldSign(true, false, 70));
+    CHECK(!lic::shouldSign(true, true, 70));    // never a traceroute, even broadcast
+    CHECK(!lic::shouldSign(false, true, 70));
 }
 
 static void test_accept_nodeinfo() {

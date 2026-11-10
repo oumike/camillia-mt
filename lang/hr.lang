@@ -913,5 +913,6 @@ unknown date	nepoznat datum
 unknown error	nepoznata pogreška
 unknown node (id ends ..%02x)	nepoznat čvor (id završava s ..%02x)
 unset	nije postavljeno
+unsigned name change refused - remove the node to accept it	nepotpisana promjena imena odbijena - uklonite čvor da je prihvatite
 until read	do čitanja
 vague	približno

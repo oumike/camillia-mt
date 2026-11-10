@@ -2205,15 +2205,28 @@ static bool decodeIdentityKey(const char *val, uint8_t out[32]) {
 // True when pub is the X25519 public key of priv, the same check
 // initPkiIdentity() makes at boot. Like that check, a byte-reversed pub is
 // accepted and corrected in place.
-static bool importedKeypairValid(uint8_t pub[32], const uint8_t priv[32]) {
+//
+// An unclamped priv is accepted when pub matches it as given, and then clamped,
+// with pub re-derived from the clamped key: the pair is genuine, but used as it
+// is, its signatures would never verify (curve25519ClampPrivKey()). *clamped
+// says so, because the node's public key -- and with it its node number --
+// changes.
+static bool importedKeypairValid(uint8_t pub[32], uint8_t priv[32], bool *clamped) {
+    if (clamped) *clamped = false;
     bool nonZero = false;
     for (int i = 0; i < 32 && !nonZero; i++) nonZero = (priv[i] != 0);
     if (!nonZero) return false;
     uint8_t derived[32];
     if (!Curve25519::eval(derived, priv, nullptr)) return false;
-    if (!memcmp(derived, pub, 32)) return true;
-    for (int i = 0; i < 32; i++) {
-        if (derived[i] != pub[31 - i]) return false;
+    bool match = !memcmp(derived, pub, 32);
+    if (!match) {
+        match = true;
+        for (int i = 0; i < 32 && match; i++) match = (derived[i] == pub[31 - i]);
+        if (!match) return false;
+    }
+    if (curve25519ClampPrivKey(priv)) {
+        if (!Curve25519::eval(derived, priv, nullptr)) return false;
+        if (clamped) *clamped = true;
     }
     memcpy(pub, derived, 32);
     return true;
@@ -2973,10 +2986,16 @@ bool cfgImportFromBuf(const char *buf, size_t len, RhinoConfig &cfg) {
     // caller persists the pair to NVS, so a garbage or mismatched one would
     // replace the node identity for good. On failure myPubKey/myPrivKey keep
     // the existing identity.
-    if (gotPubKey && gotPrivKey && importedKeypairValid(impPub, impPriv)) {
+    bool keyClamped = false;
+    if (gotPubKey && gotPrivKey && importedKeypairValid(impPub, impPriv, &keyClamped)) {
         memcpy(myPubKey, impPub, 32);
         memcpy(myPrivKey, impPriv, 32);
         s_importRestoredKeys = true;
+        if (keyClamped) {
+            snprintf(s_importWarning, sizeof(s_importWarning), "%s",
+                     "Identity key was not clamped; fixed, so the public key and node number change");
+            Serial.printf("[cfg] import: %s\n", s_importWarning);
+        }
     } else if (sawKeyLine) {
         snprintf(s_importWarning, sizeof(s_importWarning), "%s",
                  "Identity keys in file invalid or incomplete; kept existing identity");

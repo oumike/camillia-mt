@@ -887,5 +887,6 @@ unknown date	onbekende datum
 unknown error	onbekende fout
 unknown node (id ends ..%02x)	onbekende node (id eindigt op ..%02x)
 unset	niet ingesteld
+unsigned name change refused - remove the node to accept it	niet-ondertekende naamwijziging geweigerd - verwijder de node om die te accepteren
 until read	tot gelezen
 vague	vaag
