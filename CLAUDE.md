@@ -8,7 +8,9 @@ for the change checklist.
 
 ## Every change goes through a pull request
 
-Nothing is pushed to `main` directly. A release is one pull request into `main`,
+Only the user and GitHub Actions push to `main` directly. Claude pushes to
+`main` only when the user gives a direct command to do so for that specific
+change; otherwise every change goes through a PR. A release is one pull request into `main`,
 merged by `scripts/release.sh` (see "Releasing" below). CI (`build.yml`) builds
 every environment on each push to a PR.
 
