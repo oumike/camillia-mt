@@ -1,19 +1,17 @@
 ### New
-- Live has a new No MQTT filter that hides every message and packet that travelled over MQTT. Turn it on or off by pressing M on the Live screen, or with the No MQTT row at the top of the filter picker. It works together with the type filter (Text, DMs, Position…), so you can show, say, only radio-heard text messages. While it's on, the header reads "No MQTT: <type>". Your own transmissions and notices always stay visible, and the filter switches off when you leave Live.
+- MQTT gateways now forward direct messages relayed between two other nodes to the `PKI` topic. The messages stay end-to-end encrypted. This needs MQTT and encrypted uplink to be turned on.
 
 ### Changed
-- Your node's own announcements (node info, telemetry, neighbor info and position updates) are now spaced 3–4 seconds apart instead of going out back to back. This leaves the radio listening between them, so incoming messages are no longer missed while your node announces itself, especially at boot. A full position sweep now takes about 3.5 seconds per location-sharing channel instead of going out all at once. Airtime is unchanged; it is only spread out.
+- When a packet is arriving, the node now waits for it to finish before transmitting. You should miss fewer messages around your own sends. This applies to all boards except the Tanmatsu and the LR2021 T-Display P4.
+- The signature policies now follow Meshtastic 2.8.2.
+- The Balanced policy no longer drops unsigned broadcasts. Instead, if a node has signed before, it can no longer change its name or role with an unsigned update, and a Live line tells you when this happens. To accept such a change, remove the node.
+- On Balanced and Strict, node info and position replies sent to a single node are now signed. Nothing is signed on AES-CCM channels.
+- A signed node info update from a known node is now rejected if it doesn't advertise the key that signed it, or if that key doesn't match the node's ID.
 
 ### Fixed
-- Tanmatsu: signal strength (RSSI) now shows real values instead of −0.0 on every packet. SNR is reported as 0 because the radio does not provide it.
-- Tanmatsu: if the radio fails to return to listening after a transmit or a settings change, it now retries about once a second. Before, it could stay deaf until the next transmit.
-- Tanmatsu: the radio's incoming packet buffer is now twice as large, so fewer packets are dropped on a busy mesh.
+- Packets that finished arriving just before this node transmitted were thrown away. They are now delivered.
+- The Strict policy dropped every acknowledgement, so direct messages showed as failed. Strict now accepts acknowledgements, key verification, and packets on AES-CCM channels.
+- Traceroutes signed by Meshtastic 2.8.0 or 2.8.1 nodes were dropped. Signatures on traceroutes are now ignored under every policy, and this node no longer signs its own traceroutes.
+- Identity keys restored from a backup or YAML import could produce signatures that every peer rejected. These keys are now repaired automatically. A node with such a key gets a new public key on first boot, and possibly a new node number, and importing one shows a warning saying so.
 
-Pull request: #147
-
-
-### Update (v6.4.4)
-### Changed
-- Live filter: the MQTT toggle at the top of the filter picker is now called "Include MQTT Live Data" and reads On by default, which means MQTT traffic is shown. Turn it Off to hide MQTT traffic, the same as the old "No MQTT: On" setting. The M key still toggles it, and the header still reads "No MQTT: <type>" while MQTT is hidden. All boards.
-
-Pull request: #148
+Pull request: #150
