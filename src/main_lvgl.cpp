@@ -3073,7 +3073,7 @@ static void openDestructiveConfirm(DestructiveConfirmAction action, uint32_t nod
 static void openMessageActionMenu(uint32_t packetId, uint32_t senderNodeId);
 // Apply the packet signature policy (s_cfg.packetSigPolicy, src/sig_policy.h)
 // to a decrypted packet: check its Data.xeddsa_signature against the sender's
-// stored public key, then decide whether to accept it the way a 2.8.1 node on
+// stored public key, then decide whether to accept it the way a 2.8.2 node on
 // the same policy would. Called once per packet from processMeshPacket(), after
 // any PKI decrypt and before anything else touches it — node list, relay, MQTT
 // uplink — so RF, MQTT and PKI traffic are all judged the same way, and a
@@ -3083,17 +3083,26 @@ static void openMessageActionMenu(uint32_t packetId, uint32_t senderNodeId);
 // it is relayed opaquely, as upstream does.
 static void noteKeyConflictRaised(uint32_t nodeId);
 
+// True for a packet that came in on an AES-CCM channel, whose tag already
+// authenticates it: 2.8.2 neither signs on one nor asks for a signature there.
+static bool packetOnAeadChannel(const MeshPacket &pkt) {
+    return pkt.chanIdx >= 0 && pkt.chanIdx < MESH_CHANNELS
+        && channelUsesAead(CHANNEL_KEYS[pkt.chanIdx]);
+}
+
 static SigPolicyResult checkPacketSignature(const MeshPacket &pkt) {
     if (!pkt.decrypted) return {true, false};
+    // Accepted under every policy with any signature ignored, as 2.8.2 does:
+    // every hop rewrites the route, so a signature from the origin cannot
+    // verify past the first relay. Only 2.8.0/2.8.1 ever signed one.
+    if (pkt.portnum == TRACEROUTE_APP) return {true, false};
 
     SigPolicyInput in = {};
     in.policy       = s_cfg.packetSigPolicy;
     in.bootstrap    = SIG_BOOTSTRAP_NA;
     in.pkiEncrypted = (pkt.chanIdx == -2);
-    in.broadcast    = (pkt.hdr.to == 0xFFFFFFFF);
-    in.dataLen      = pkt.env.dataLen;
-    in.unicastSignable = lic::active() && !in.broadcast
-                         && lic::shouldSign(true, false, pkt.portnum);
+    in.exempt       = pkt.portnum == ROUTING_APP || pkt.portnum == KEY_VERIFICATION_APP
+                   || packetOnAeadChannel(pkt);
 
     NodeEntry *n = Nodes.find(pkt.hdr.from);
     const bool haveKey = n && n->hasPubKey;
@@ -3120,6 +3129,18 @@ static SigPolicyResult checkPacketSignature(const MeshPacket &pkt) {
         // itself: a failure drops the packet, so every one has to be judged.
         in.check = xeddsaVerify(n->pubKey, f, pkt.payload, pkt.payloadLen, pkt.env.signature)
                        ? SIG_CHECK_VERIFIED : SIG_CHECK_FAILED;
+        // A signed NodeInfo from a node we know has to advertise the key that
+        // signed it, and that key has to hash to the sender's node number --
+        // the same test first contact gets below. Otherwise the signature
+        // vouches for a packet whose content claims another identity.
+        if (in.check == SIG_CHECK_VERIFIED && pkt.portnum == NODEINFO_APP) {
+            UserInfo u = {};
+            if (decodeUser(pkt.payload, pkt.payloadLen, u) && u.hasPubKey
+                && (memcmp(u.pubKey, n->pubKey, 32) != 0
+                    || meshCrc32(u.pubKey, 32) != pkt.hdr.from)) {
+                in.check = SIG_CHECK_FAILED;
+            }
+        }
         // A node that was reset or reflashed signs its NodeInfo with its new
         // key, which fails against the pinned one. The packet is still dropped
         // below; the key is only parked as a conflict for the user to judge,
@@ -12232,6 +12253,7 @@ static void applyLoadedConfigInvariants() {
     s_cfg.positionPrecision = positionPrecisionCoerce(s_cfg.positionPrecision);
     // A stray byte must not become Strict and silence the mesh.
     s_cfg.packetSigPolicy = sigPolicyCoerce(s_cfg.packetSigPolicy);
+    meshSetSignPolicy(s_cfg.packetSigPolicy);
     // An off-list value would show on the row as "Never" while behaving as
     // something else entirely, and the row could not cycle back to it.
     s_cfg.notifyLightTimeoutS = cfgCoerceNotifyLightTimeout((long)s_cfg.notifyLightTimeoutS);
@@ -12825,6 +12847,18 @@ static void initPkiIdentity() {
     bool valid = false;
     if (loaded) {
         uint8_t derivedPub[32] = {0};
+        // A key stored unclamped (restored from a backup made before the import
+        // clamped it) signs with a different key than its public key claims;
+        // every peer rejects its signatures. Clamp and re-derive, as upstream's
+        // regeneratePublicKey() now does. The node gets a new public key and,
+        // where the ID is the key hash, a new node number.
+        if (curve25519ClampPrivKey(myPrivKey)
+            && Curve25519::eval(derivedPub, myPrivKey, nullptr)) {
+            memcpy(myPubKey, derivedPub, 32);
+            persistPkiPair(prefs, myPubKey, myPrivKey);
+            Serial.println("[pki] stored private key was not clamped: clamped it, "
+                           "public key and node number change");
+        }
         if (Curve25519::eval(derivedPub, myPrivKey, nullptr)) {
             if (memcmp(derivedPub, myPubKey, 32) == 0) {
                 valid = true;
@@ -19978,6 +20012,7 @@ static void applySigPolicySelection(int policy) {
     if (policy < 0 || policy >= SIG_POLICY_COUNT) return;
     const bool changed = ((uint8_t)policy != sigPolicyCoerce(s_cfg.packetSigPolicy));
     s_cfg.packetSigPolicy = (uint8_t)policy;
+    meshSetSignPolicy(s_cfg.packetSigPolicy);
     if (changed) markConfigDirty();
     snprintf(s_cfgStatus, sizeof(s_cfgStatus), "%s", TR(kSigPolicyDesc[policy]));
     closeSigPolicyModal();
@@ -42025,6 +42060,25 @@ static void showKeyChangeToast(const char *text) {
 // A node just offered a key that differs from the pinned one. Log it, put a
 // line in Live, and float a short toast -- throttled, because whoever can spoof
 // one NodeInfo can spoof a stream of them with a fresh key each time.
+// An unsigned NodeInfo tried to change a known signer's name or role and was
+// refused (sigRefusesUnsignedIdentity). Most often the node really did rename
+// and its NodeInfo lost the signature on a pre-2.8 relay, so the user is told
+// how to accept it -- at most once an hour, as upstream's ClientNotification.
+static void noteRefusedUnsignedIdentity(uint32_t nodeId, const UserInfo &u) {
+    static uint32_t sLastNoteMs = 0;
+    Serial.printf("[xeddsa] refused unsigned name/role change for !%08lx (\"%s\")\n",
+                  (unsigned long)nodeId, u.longName);
+    const uint32_t now = millis();
+    if (sLastNoteMs != 0 && (uint32_t)(now - sLastNoteMs) < 3600000UL) return;
+    sLastNoteMs = now ? now : 1;
+    char who[48];
+    nodesActionTitleLabel(nodeId, who, sizeof(who));
+    char line[128];
+    snprintf(line, sizeof(line), "[sig] %s: %s", who,
+             TR("unsigned name change refused - remove the node to accept it"));
+    liveFeedAddLine(line, TFT_ORANGE);
+}
+
 static void noteKeyConflictRaised(uint32_t nodeId) {
     char who[48];
     nodesActionTitleLabel(nodeId, who, sizeof(who));
@@ -59036,6 +59090,23 @@ static bool processMeshPacket(const MeshPacket &rxPkt) {
         CHANNEL_KEYS[pkt.chanIdx].uplinkEnabled) {
         mqttBridgePublish(pkt, CHANNEL_KEYS[pkt.chanIdx].name);
     }
+    // A PKI DM between two other nodes, relayed here but not ours to read: a
+    // gateway publishes it to the PKI topic still end-to-end encrypted, as
+    // upstream does (meshtastic/firmware#12110), so DMs between nodes this
+    // gateway bridges reach the broker. Same gates as above, plus the channel
+    // hash 0 that marks PKI, a unicast neither to nor from us, and room for the
+    // tag and nonce. Only with encrypted uplink: there is no plaintext to send
+    // a JSON/decoded consumer. isDuplicate() above already let only the first
+    // copy through.
+    else if (pkt.hdr.channel == 0 && !pkt.decrypted
+             && pkt.hdr.to != 0xFFFFFFFF && pkt.hdr.to != s_myNodeId
+             && pkt.hdr.from != s_myNodeId && s_myNodeId != 0
+             && !(pkt.hdr.flags & 0x10)
+             && !discoveryRadioParked()
+             && s_cfg.mqttEnabled && s_cfg.mqttEncryption
+             && pkt.rawLen > 12) {
+        mqttBridgePublish(pkt, "PKI");
+    }
 
     bool wantsAck = ((pkt.hdr.flags & (1 << 3)) != 0);
     bool addressedToMe = (pkt.hdr.to == s_myNodeId)
@@ -59316,10 +59387,33 @@ static bool processMeshPacket(const MeshPacket &rxPkt) {
                     }
                     debugLogMessages("[lic] NodeInfo mismatch from=%08lx (is_licensed=%d)\n",
                                      (unsigned long)pkt.hdr.from, (int)u.isLicensed);
-                } else if (Nodes.updateUser(pkt.hdr.from, u)) {
-                    // Key pinned on first use; a different one only raises a
-                    // conflict for the user (NodeDB::updateUser).
-                    noteKeyConflictRaised(pkt.hdr.from);
+                } else {
+                    // Balanced/Strict: an unsigned NodeInfo may not rename or
+                    // re-role a node that has signed before. The rest of it is
+                    // still taken; the name and role stay as they were.
+                    NodeEntry *known = Nodes.find(pkt.hdr.from);
+                    if (known && sigRefusesUnsignedIdentity(s_cfg.packetSigPolicy,
+                                                            pkt.env.hasSignature,
+                                                            known->hasPubKey && known->xeddsaVerified,
+                                                            packetOnAeadChannel(pkt))) {
+                        const bool renames =
+                            (u.longName[0] && known->longName[0]
+                             && strncmp(u.longName, known->longName, sizeof(known->longName) - 1) != 0)
+                            || (u.shortName[0] && known->shortName[0]
+                                && strncmp(u.shortName, known->shortName, sizeof(known->shortName) - 1) != 0);
+                        const bool reroles = known->hasRole && u.role != known->role;
+                        if (renames || reroles) {
+                            noteRefusedUnsignedIdentity(pkt.hdr.from, u);
+                            utf8util::copyTruncate(u.longName, sizeof(u.longName), known->longName);
+                            utf8util::copyTruncate(u.shortName, sizeof(u.shortName), known->shortName);
+                            if (known->hasRole) u.role = known->role;
+                        }
+                    }
+                    if (Nodes.updateUser(pkt.hdr.from, u)) {
+                        // Key pinned on first use; a different one only raises a
+                        // conflict for the user (NodeDB::updateUser).
+                        noteKeyConflictRaised(pkt.hdr.from);
+                    }
                 }
             }
             // Answer a discovery ping. Discovery is symmetric: we sweep the mesh

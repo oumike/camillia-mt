@@ -1,9 +1,9 @@
 #pragma once
-// Meshtastic 2.8.1's packet signature policy (SecurityConfig.packet_signature_policy,
+// Meshtastic 2.8.2's packet signature policy (SecurityConfig.packet_signature_policy,
 // field 9): which received packets a node accepts, given what their XEdDSA
-// signature said. Mirrors checkXeddsaReceivePolicy() in upstream's Router.cpp,
-// so a Camillia node set to a policy drops exactly what a stock 2.8.1 node on
-// that policy drops.
+// signature said. Mirrors checkXeddsaReceivePolicy() in upstream's Router.cpp
+// (meshtastic/firmware#12191), so a Camillia node set to a policy drops exactly
+// what a stock 2.8.2 node on that policy drops.
 //
 // Kept free of Arduino and of the packet structs so the decision can be tested
 // on the host (tests/test_sig_policy.cpp). The caller does the crypto and
@@ -18,13 +18,14 @@ enum SigPolicy : uint8_t {
     // one, and a signed first-contact NodeInfo that does not check out.
     // Upstream's default, and ours.
     SIG_POLICY_COMPATIBLE = 0,
-    // As Compatible, and also drops an unsigned broadcast from a node that has
-    // signed before, when that broadcast had room for a signature. That is a
-    // downgrade: a signer always signs broadcasts that fit.
+    // Accepts what Compatible does, but an unsigned NodeInfo may not change the
+    // name or role of a node that has signed before (sigRefusesUnsignedIdentity).
+    // 2.8.1's Balanced also dropped unsigned broadcasts from a known signer;
+    // 2.8.2 removed that, since a pre-2.8 relay strips signatures in transit.
     SIG_POLICY_BALANCED   = 1,
-    // Accept only packets with a verified signature, or that arrived
-    // PKI-encrypted. Everything else is dropped, including any node whose key
-    // we do not hold yet.
+    // Accept only packets with a verified signature, that arrived PKI-encrypted,
+    // or that are exempt (SigPolicyInput::exempt). Everything else is dropped,
+    // including any node whose key we do not hold yet.
     SIG_POLICY_STRICT     = 2,
 };
 #define SIG_POLICY_COUNT 3
@@ -69,12 +70,11 @@ struct SigPolicyInput {
     SigBootstrap bootstrap;       // only read when check == SIG_CHECK_NO_KEY
     bool         pkiEncrypted;    // decrypted with the sender's PKI key
     bool         knownSigner;     // this sender has passed a signature check before
-    bool         broadcast;       // addressed to everyone
-    size_t       dataLen;         // encoded Data, unsigned (for the downgrade rule)
-    // A unicast the sender would have signed: we are licensed, so licensed
-    // peers sign their plaintext DMs (lic::shouldSign()). Last, so existing
-    // aggregate initialisers stay valid.
-    bool         unicastSignable;
+    // Never signed by a 2.8.2 sender, so Strict cannot ask for a signature:
+    // routing (ACK/NAK), key verification, and anything on an AES-CCM channel,
+    // whose tag already authenticates it. (Traceroutes are exempt from
+    // signature checks altogether; the caller skips them before this.)
+    bool         exempt;
 };
 
 struct SigPolicyResult {
@@ -104,17 +104,28 @@ inline SigPolicyResult sigPolicyDecide(const SigPolicyInput &in) {
     }
 
     // Unsigned. PKI decryption already proves who sent it.
-    if (in.pkiEncrypted) return {true, false};
+    if (in.pkiEncrypted || in.exempt) return {true, false};
+    // Only Strict drops unsigned packets. Balanced guards identity instead,
+    // at the NodeInfo (sigRefusesUnsignedIdentity()).
     if (policy == SIG_POLICY_STRICT) return {false, false};
-    if (policy == SIG_POLICY_COMPATIBLE) return {true, false};
-
-    // Balanced: drop only what a signer always signs, a broadcast -- or, when
-    // we are licensed (DMs go plaintext and are signed), a signable unicast --
-    // whose signed encoding would have fitted in a LoRa frame.
-    if (in.knownSigner && (in.broadcast || in.unicastSignable)) {
-        // XEDDSA_SIGNATURE_FIELD_BYTES (66) + MESH_HEADER_BYTES (16) <=
-        // MESH_MAX_FRAME_BYTES (255), as upstream's canonicalSignableSize() test.
-        if (in.dataLen + 66 + 16 <= 255) return {false, false};
-    }
     return {true, false};
+}
+
+// Balanced and Strict: an unsigned NodeInfo may not change the name or role of
+// a node that has signed before (upstream NodeDB::refusesUnsignedIdentity()).
+// Everything else in it is still taken. An AES-CCM channel authenticates the
+// packet itself, so it is not refused there.
+inline bool sigRefusesUnsignedIdentity(uint8_t policy, bool packetSigned,
+                                       bool knownSigner, bool aeadChannel) {
+    if (sigPolicyCoerce(policy) == SIG_POLICY_COMPATIBLE) return false;
+    return !packetSigned && knownSigner && !aeadChannel;
+}
+
+// Unicasts a 2.8.2 node on Balanced or Strict signs although they are not
+// broadcasts: NodeInfo (4) and Position (3) replies, so an identity or a
+// location can be checked however it was asked for. Broadcasts and licensed-
+// mode DMs are decided by lic::shouldSign().
+inline bool sigSignsUnicastPort(uint8_t policy, uint32_t portnum) {
+    if (sigPolicyCoerce(policy) == SIG_POLICY_COMPATIBLE) return false;
+    return portnum == 3 || portnum == 4;
 }

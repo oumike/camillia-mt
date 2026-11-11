@@ -164,6 +164,10 @@ private:
     // site that forgets is a radio that silently stops hearing long packets.
     int _armRx();
 
+    // Reads the frame the radio holds, counting it in the RX health stats. On a
+    // bad frame returns false with the receiver re-armed.
+    bool _readFrame(uint8_t *buf, size_t &len, float &rssi, float &snr);
+
 #if MESH_RADIO_IS_LR11XX
     // Wrap-safe replacement for RadioLib's readData() on this family; see the
     // comment on the definition for the ring-buffer bug it exists to fix.

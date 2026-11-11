@@ -79,6 +79,9 @@ bool allowRelay(bool selfLicensed, bool decoded, PeerStatus from, PeerStatus to)
 }
 
 bool shouldSign(bool selfLicensed, bool broadcast, uint32_t portnum) {
+    // Every hop rewrites a traceroute's route, so no signature survives the
+    // first relay; 2.8.2 never signs one and ignores any it receives.
+    if (portnum == kPortTraceroute) return false;
     if (broadcast) return true;
     return selfLicensed && portnum != kPortRouting && portnum != kPortTraceroute;
 }

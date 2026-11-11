@@ -900,5 +900,6 @@ unknown date	ukjent dato
 unknown error	ukjent feil
 unknown node (id ends ..%02x)	ukjent node (id slutter på ..%02x)
 unset	ikke satt
+unsigned name change refused - remove the node to accept it	usignert navneendring avvist - fjern noden for å godta den
 until read	til lest
 vague	omtrentlig

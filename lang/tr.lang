@@ -914,5 +914,6 @@ unknown date	bilinmeyen tarih
 unknown error	bilinmeyen hata
 unknown node (id ends ..%02x)	bilinmeyen düğüm (kimlik ..%02x ile bitiyor)
 unset	ayarlanmamış
+unsigned name change refused - remove the node to accept it	imzasız ad değişikliği reddedildi - kabul etmek için düğümü kaldırın
 until read	okunana kadar
 vague	yaklaşık

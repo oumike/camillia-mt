@@ -914,5 +914,6 @@ unknown date	ismeretlen dátum
 unknown error	ismeretlen hiba
 unknown node (id ends ..%02x)	ismeretlen csomópont (az id vége ..%02x)
 unset	nincs beállítva
+unsigned name change refused - remove the node to accept it	aláíratlan névváltozás elutasítva - az elfogadáshoz távolítsa el a csomópontot
 until read	olvasásig
 vague	hozzávetőleges

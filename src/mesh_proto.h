@@ -290,6 +290,23 @@ uint8_t computeChannelHash(const char *name, const uint8_t *key, uint8_t keyLen)
 // key (keyLen 0, or PSK index 0) is ignored: there is nothing to authenticate
 // with, and upstream clears the flag in that case.
 bool    channelUsesAead(const ChannelKey &ck);
+// The packet signature policy (SigPolicy) outgoing packets are signed under.
+// Set from config at boot and whenever it changes.
+void    meshSetSignPolicy(uint8_t policy);
+
+// Clamps a Curve25519 private key in place (RFC 7748: clear the low three bits
+// and the top bit, set bit 254). Returns true when that changed it. Curve25519::
+// eval() uses the scalar as given while XEdDSA clamps it, so an unclamped key
+// derives a public key that does not match the one it signs with, and every
+// signature it makes fails at the receiver (meshtastic/firmware#12095).
+inline bool curve25519ClampPrivKey(uint8_t k[32]) {
+    const uint8_t b0 = (uint8_t)(k[0] & 248);
+    const uint8_t b31 = (uint8_t)((k[31] & 127) | 64);
+    const bool changed = (b0 != k[0]) || (b31 != k[31]);
+    k[0] = b0;
+    k[31] = b31;
+    return changed;
+}
 
 // The hash this channel goes by on the air: computeChannelHash(), XORed with
 // 0xAE when the channel uses AEAD (Channels::generateHash() in 2.8.1), so an

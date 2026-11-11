@@ -911,5 +911,6 @@ unknown date	tundmatu kuupäev
 unknown error	tundmatu viga
 unknown node (id ends ..%02x)	tundmatu sõlm (id lõpeb ..%02x)
 unset	määramata
+unsigned name change refused - remove the node to accept it	allkirjata nimemuutus keelduti - nõustumiseks eemalda sõlm
 until read	kuni lugemiseni
 vague	ligikaudne

@@ -10,8 +10,6 @@ static SigPolicyInput in(uint8_t policy, SigCheck check) {
     i.policy = policy;
     i.check = check;
     i.bootstrap = SIG_BOOTSTRAP_NA;
-    i.broadcast = true;
-    i.dataLen = 40;
     return i;
 }
 
@@ -50,32 +48,43 @@ static void testUnsigned() {
     CHECK(!accepts(i));
     i.pkiEncrypted = true;
     CHECK(accepts(i));                          // PKI is authenticated already
+    i.pkiEncrypted = false;
+    i.exempt = true;
+    CHECK(accepts(i));                          // ACK, key verification, AES-CCM
+    CHECK(!sigPolicyDecide(i).markSigner);
 
-    // Balanced: unsigned from a non-signer is fine.
+    // Balanced (2.8.2): unsigned is accepted, from a known signer too. Its
+    // guard is on identity, not on the packet.
     i = in(SIG_POLICY_BALANCED, SIG_CHECK_UNSIGNED);
     CHECK(accepts(i));
-    // From a known signer, a broadcast that would have fitted signed is a downgrade.
     i.knownSigner = true;
-    CHECK(!accepts(i));
-    i.dataLen = 255 - 16 - 66;                  // exactly fits: still a downgrade
-    CHECK(!accepts(i));
-    i.dataLen = 255 - 16 - 66 + 1;              // too long to sign: accepted
-    CHECK(accepts(i));
-    // A unicast is not something a signer signs.
-    i.dataLen = 40;
-    i.broadcast = false;
-    CHECK(accepts(i));
-    // Unless the sender signs unicasts too (licensed mode): then an unsigned
-    // one that would have fitted is a downgrade like a broadcast.
-    i.unicastSignable = true;
-    CHECK(!accepts(i));
-    i.unicastSignable = false;
-    CHECK(accepts(i));
-    // Nor a PKI DM.
-    i.broadcast = true;
-    i.pkiEncrypted = true;
     CHECK(accepts(i));
     CHECK(!sigPolicyDecide(i).markSigner);
+
+    // An exempt packet still drops when its signature fails.
+    i = in(SIG_POLICY_STRICT, SIG_CHECK_FAILED);
+    i.exempt = true;
+    CHECK(!accepts(i));
+}
+
+static void testIdentityRefusal() {
+    // Compatible never refuses.
+    CHECK(!sigRefusesUnsignedIdentity(SIG_POLICY_COMPATIBLE, false, true, false));
+    for (uint8_t p = SIG_POLICY_BALANCED; p <= SIG_POLICY_STRICT; p++) {
+        CHECK(sigRefusesUnsignedIdentity(p, false, true, false));
+        CHECK(!sigRefusesUnsignedIdentity(p, true, true, false));    // signed
+        CHECK(!sigRefusesUnsignedIdentity(p, false, false, false));  // never signed
+        CHECK(!sigRefusesUnsignedIdentity(p, false, true, true));    // AES-CCM channel
+    }
+    CHECK(!sigRefusesUnsignedIdentity(9, false, true, false));       // out of range: Compatible
+}
+
+static void testUnicastSigning() {
+    CHECK(!sigSignsUnicastPort(SIG_POLICY_COMPATIBLE, 4));
+    CHECK(sigSignsUnicastPort(SIG_POLICY_BALANCED, 4));
+    CHECK(sigSignsUnicastPort(SIG_POLICY_STRICT, 3));
+    CHECK(!sigSignsUnicastPort(SIG_POLICY_STRICT, 1));
+    CHECK(!sigSignsUnicastPort(SIG_POLICY_STRICT, 70));
 }
 
 static void testCoerce() {
@@ -92,6 +101,8 @@ static void testCoerce() {
 int main() {
     testSignedAllPolicies();
     testUnsigned();
+    testIdentityRefusal();
+    testUnicastSigning();
     testCoerce();
     printf(g_fail ? "FAILED\n" : "ok\n");
     return g_fail;

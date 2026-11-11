@@ -910,5 +910,6 @@ unknown date	neznámé datum
 unknown error	neznámá chyba
 unknown node (id ends ..%02x)	neznámý uzel (id končí na ..%02x)
 unset	nenastaveno
+unsigned name change refused - remove the node to accept it	nepodepsaná změna jména odmítnuta - pro přijetí uzel odeberte
 until read	do přečtení
 vague	přibližná

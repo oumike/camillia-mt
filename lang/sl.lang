@@ -911,5 +911,6 @@ unknown date	neznan datum
 unknown error	neznana napaka
 unknown node (id ends ..%02x)	neznano vozlišče (id se konča z ..%02x)
 unset	ni nastavljeno
+unsigned name change refused - remove the node to accept it	nepodpisana sprememba imena zavrnjena - za sprejem odstranite vozlišče
 until read	do branja
 vague	približno

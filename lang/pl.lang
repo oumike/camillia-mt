@@ -911,5 +911,6 @@ unknown date	nieznana data
 unknown error	nieznany błąd
 unknown node (id ends ..%02x)	nieznany węzeł (id kończy się na ..%02x)
 unset	nie ustawiono
+unsigned name change refused - remove the node to accept it	niepodpisana zmiana nazwy odrzucona - usuń węzeł, aby ją przyjąć
 until read	do odczytu
 vague	przybliżona

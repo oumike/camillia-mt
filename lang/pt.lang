@@ -906,5 +906,6 @@ unknown date	data desconhecida
 unknown error	erro desconhecido
 unknown node (id ends ..%02x)	nó desconhecido (id termina em ..%02x)
 unset	não definido
+unsigned name change refused - remove the node to accept it	alteração de nome sem assinatura recusada - remova o nó para aceitá-la
 until read	até ler
 vague	aproximada
