@@ -57,6 +57,34 @@ concurrency:
 # pair.
 
 jobs:
+  # The CONTRIBUTING.md rules a machine can check: sign-off on every commit,
+  # an SPDX header on every new source file, and exact versions for every
+  # dependency fail the job. Untranslated new strings are listed as warnings
+  # only, since translations are optional. Pull requests only: pushes to main
+  # come from the maintainer and from release automation.
+  guidelines:
+    name: Contribution guidelines
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Check the pull request against CONTRIBUTING.md
+        run: >
+          python3 tools/pr_guidelines.py
+          ${{ github.event.pull_request.base.sha }}
+          ${{ github.event.pull_request.head.sha }}
+
   # Hardware-free tests, including malformed packets and output-buffer bounds.
   # ASan/UBSan failures must stop the build just like failed assertions.
   # Keep clang++ aligned with the local macOS runner's -Werror diagnostics.
