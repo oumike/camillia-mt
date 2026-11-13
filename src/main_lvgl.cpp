@@ -61445,14 +61445,11 @@ static void chatMakeIrcRow(lv_obj_t *list, const lv_font_t *font,
     lv_obj_set_flex_flow(row, LV_FLEX_FLOW_ROW);
     lv_obj_set_flex_align(row, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_START);
 #if defined(DEVICE_TDECK) || defined(DEVICE_M9)
-    int padL = 1;
-    const int padR = 0;
+    const int padL = 1, padR = 0;
 #else
-    int padL = 2;
-    const int padR = 4;
+    const int padL = 2, padR = 4;
 #endif
     const ChatReplyDeco *deco = s_chatDeco;
-    if (deco && deco->replyId) padL += kChatReplyIndent;
     const int gap = 4;   // the lock screen's gap between time and sender
     lv_obj_set_style_pad_left(row, padL, 0);
     lv_obj_set_style_pad_right(row, padR, 0);
