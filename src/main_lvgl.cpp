@@ -62050,8 +62050,12 @@ static void refreshChatView(bool force) {
 #endif
                     lv_obj_t *q = chatMakeReplyQuote(s_chatList, deco,
                                                      scaledChatFont(kChannelChatFont), quoteColor,
-                                                     s_chatBubbleListW - kChatReplyIndent - 8);
-                    lv_obj_set_style_margin_left(q, kChatReplyIndent + 2, 0);
+                                                     s_chatBubbleListW - 8);
+#if defined(DEVICE_TDECK) || defined(DEVICE_M9)
+                    lv_obj_set_style_margin_left(q, 1, 0);
+#else
+                    lv_obj_set_style_margin_left(q, 2, 0);
+#endif
                     lv_obj_set_style_margin_top(q, 1, 0);
                 }
 #endif
@@ -62089,10 +62093,10 @@ static void refreshChatView(bool force) {
                 lv_obj_set_style_bg_opa(msg, LV_OPA_TRANSP, 0);
 #endif
 #if defined(DEVICE_TDECK) || defined(DEVICE_M9)
-                lv_obj_set_style_pad_left(msg, 1 + (isReply ? kChatReplyIndent : 0), 0);
+                lv_obj_set_style_pad_left(msg, 1, 0);
                 lv_obj_set_style_pad_right(msg, 0, 0);
 #else
-                lv_obj_set_style_pad_left(msg, 2 + (isReply ? kChatReplyIndent : 0), 0);
+                lv_obj_set_style_pad_left(msg, 2, 0);
                 lv_obj_set_style_pad_right(msg, 4, 0);
 #endif
                 lv_obj_set_style_pad_top(msg, 0, 0);
