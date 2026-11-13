@@ -7819,7 +7819,7 @@ static void sendConfigPage(const char *msg = "", bool lite = false) {
                         // scrolls there. Reactions are chips under the original.
                         "function chatBubble(pid,mine,txt,rp,chips){"
                             "if(pid!==0)chatPreview[pid]=txt;"
-                            "var s='<div'+(pid!==0?' id=\"cm-'+pid+'\"':'')+' class=\"chat-msg'+(mine?' mine':'')+(rp?' rp':'')+'\">';"
+                            "var s='<div'+(pid!==0?' id=\"cm-'+pid+'\"':'')+' class=\"chat-msg'+(mine?' mine':'')+'\">';"
                             "if(rp){var o=chatPreview[rp];"
                                 "s+='<div class=\"chat-quote\" onclick=\"chatJump('+rp+')\">\\u21AA '+(o?chatEsc(chatWho(o))+': '+chatEsc(chatStrip(o).substring(0,60)):'earlier message')+'</div>';}"
                             "s+='<div class=\"chat-body\">'+chatEsc(txt)+'</div>';"

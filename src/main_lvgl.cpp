@@ -61102,10 +61102,6 @@ static void chatMakeReactionChips(lv_obj_t *parent, const ChatReplyDeco &d,
     }
 }
 
-// How far a reply sits in from the messages around it. One level only: a
-// reply to a reply sits at the same depth.
-static const int kChatReplyIndent = 10;
-
 // Create one message bubble (row wrapper + colored container + optional name tag
 // + body) in the chat list. Right-aligned + accent for our own messages,
 // left-aligned + node color for others. Updates the scroll anchor pointers.
@@ -61128,23 +61124,7 @@ static void chatMakeBubble(lv_obj_t *list, uint32_t sender, bool isMe,
                           LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_START);
     stylePaperMessageRow(rowW);
 
-    // A reply from someone else sits one step in, hung off a small elbow. Ours
-    // are right-aligned already, so the quote alone marks them.
     const ChatReplyDeco *deco = s_chatDeco;
-    if (deco && deco->replyId && !isMe) {
-        lv_obj_set_style_pad_column(rowW, 2, 0);
-        lv_obj_t *elbow = lv_obj_create(rowW);
-        lv_obj_remove_style_all(elbow);
-        lv_obj_clear_flag(elbow, LV_OBJ_FLAG_CLICKABLE);
-        lv_obj_set_size(elbow, kChatReplyIndent - 2,
-                        lv_font_get_line_height(scaledChatFont(kChannelChatFont)) / 2 + 2);
-        lv_obj_set_style_border_side(elbow, (lv_border_side_t)(LV_BORDER_SIDE_LEFT | LV_BORDER_SIDE_BOTTOM), 0);
-        lv_obj_set_style_border_width(elbow, 1, 0);
-        lv_obj_set_style_border_color(elbow, chatReplyBarColor(*deco), 0);
-        lv_obj_set_style_border_opa(elbow, LV_OPA_COVER, 0);
-        lv_obj_set_style_radius(elbow, 2, 0);
-        lv_obj_set_style_margin_left(elbow, 2, 0);
-    }
 
     // New message: the dot to the bubble's left, centred on it. Ours are never
     // new, so it is always on the left-aligned side.
