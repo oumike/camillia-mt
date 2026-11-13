@@ -123,7 +123,15 @@ bash tests/run.sh
 ```
 
 CI builds every environment on each push to a pull request, and a PR must have
-a passing Build before it can be merged.
+a passing Build before it can be merged. The Build also checks a PR against the
+rules above that a machine can check: a missing sign-off, a new source file
+without an SPDX header, or a dependency without an exact version fails it, and
+new strings that lack a translation are listed as warnings. Run the same check
+locally before pushing:
+
+```
+python3 tools/pr_guidelines.py origin/main HEAD
+```
 
 ## Translations
 

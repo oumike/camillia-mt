@@ -4561,11 +4561,17 @@ static inline void pagerAudioStartPlayback() {
     pagerAudioSetMute(false);
 }
 
+static void pagerAudioWriteSilence(uint16_t durationMs);
+
+// Longer than the I2S DMA queue: 6 buffers x 256 frames at 44.1 kHz = 34.8 ms.
+static constexpr uint16_t kPagerI2SDrainMs = 40;
+
 static inline void pagerAudioStopPlayback() {
-    // Push a short silence tail before ending to reduce stop pops.
-    int16_t tail[1024] = {0};
-    size_t tailWritten = 0;
-    (void)i2s_write(kPagerI2SPort, tail, sizeof(tail), &tailWritten, 20 / portTICK_PERIOD_MS);
+    // Drain before muting. i2s_write() returns once a block is in the DMA queue,
+    // not once it has played, so up to ~35 ms of the last note is still queued
+    // here. The old 512-frame (11.6 ms) tail was shorter than that queue, and the
+    // mute and i2s_zero_dma_buffer() below cut the end of the note off.
+    pagerAudioWriteSilence(kPagerI2SDrainMs);
     // Mute while the output is silent, then drop the gain (now inaudible) and
     // leave the DAC muted for idle so it can't emit stray clicks between sounds.
     pagerAudioSetMute(true);
@@ -4662,44 +4668,6 @@ static void pagerAudioPlayTone(uint16_t freqHz, uint16_t durationMs) {
     }
 }
 
-static void pagerAudioPlayAlertPattern() {
-    if (!pagerAudioEnsureReady()) return;
-    pagerAudioStartPlayback();
-    static const uint16_t kNotesHz[] = {880, 740, 660};
-    static const uint16_t kDurMs[] = {68, 68, 112};
-    static const size_t kNoteCount = sizeof(kNotesHz) / sizeof(kNotesHz[0]);
-    for (size_t i = 0; i < kNoteCount; i++) {
-        pagerAudioPlayTone(kNotesHz[i], kDurMs[i]);
-        if (i + 1 < kNoteCount) pagerAudioWriteSilence(8);
-    }
-    pagerAudioStopPlayback();
-}
-
-static void pagerAudioPlayChirpyPattern() {
-    if (!pagerAudioEnsureReady()) return;
-    pagerAudioStartPlayback();
-    static const uint16_t kNotesHz[] = {1047, 1319, 1568, 1319};
-    static const uint16_t kDurMs[] = {36, 36, 40, 70};
-    static const size_t kNoteCount = sizeof(kNotesHz) / sizeof(kNotesHz[0]);
-    for (size_t i = 0; i < kNoteCount; i++) {
-        pagerAudioPlayTone(kNotesHz[i], kDurMs[i]);
-        if (i + 1 < kNoteCount) pagerAudioWriteSilence(6);
-    }
-    pagerAudioStopPlayback();
-}
-
-static void pagerAudioPlayBassPattern() {
-    if (!pagerAudioEnsureReady()) return;
-    pagerAudioStartPlayback();
-    static const uint16_t kNotesHz[] = {392, 330, 262};
-    static const uint16_t kDurMs[] = {92, 86, 130};
-    static const size_t kNoteCount = sizeof(kNotesHz) / sizeof(kNotesHz[0]);
-    for (size_t i = 0; i < kNoteCount; i++) {
-        pagerAudioPlayTone(kNotesHz[i], kDurMs[i]);
-        if (i + 1 < kNoteCount) pagerAudioWriteSilence(10);
-    }
-    pagerAudioStopPlayback();
-}
 } // namespace
 #endif
 
@@ -4784,10 +4752,41 @@ static inline void tdeckAudioStartPlayback() {
     i2s_zero_dma_buffer(kTdeckI2SPort);
 }
 
+// Real silence frames, so a rest between notes is heard. A delay() here would
+// not be: ~35 ms of the previous note is still queued in DMA when
+// tdeckAudioPlayTone() returns, so the delay elapses while it plays and the
+// notes run together.
+static void tdeckAudioWriteSilence(uint16_t durationMs) {
+    if (!tdeckAudioEnsureReady() || durationMs == 0) return;
+
+    static constexpr uint32_t kSampleRate = 44100;
+    static constexpr int kChunkFrames = 120;
+    int16_t zeroPcm[kChunkFrames * 2] = {0};
+
+    uint32_t framesRemaining = ((uint32_t)durationMs * kSampleRate) / 1000U;
+    while (framesRemaining > 0) {
+        int framesNow = (framesRemaining > (uint32_t)kChunkFrames)
+                        ? kChunkFrames
+                        : (int)framesRemaining;
+        size_t written = 0;
+        esp_err_t err = i2s_write(kTdeckI2SPort, zeroPcm,
+                                  (size_t)(framesNow * 2 * (int)sizeof(int16_t)),
+                                  &written, portMAX_DELAY);
+        if (err != ESP_OK) {
+            Serial.printf("[audio] tdeck i2s silence write failed err=%d\n", (int)err);
+            break;
+        }
+        framesRemaining -= (uint32_t)framesNow;
+    }
+}
+
+// Longer than the I2S DMA queue: 6 buffers x 256 frames at 44.1 kHz = 34.8 ms.
+static constexpr uint16_t kTdeckI2SDrainMs = 40;
+
 static inline void tdeckAudioStopPlayback() {
-    int16_t tail[128] = {0};
-    size_t tailWritten = 0;
-    (void)i2s_write(kTdeckI2SPort, tail, sizeof(tail), &tailWritten, 20 / portTICK_PERIOD_MS);
+    // Drain before zeroing: the old 64-frame tail left up to ~35 ms of the last
+    // note in the DMA queue, and i2s_zero_dma_buffer() erased it unplayed.
+    tdeckAudioWriteSilence(kTdeckI2SDrainMs);
     i2s_zero_dma_buffer(kTdeckI2SPort);
 }
 
@@ -4849,51 +4848,11 @@ static void tdeckAudioPlayTone(uint16_t freqHz, uint16_t durationMs) {
     }
 }
 
-static void tdeckPlayAlertPattern() {
-    if (!tdeckAudioEnsureReady()) return;
-    tdeckAudioStartPlayback();
-    static const uint16_t kNotesHz[] = {1760, 1480, 1320};
-    static const uint16_t kDurMs[] = {34, 34, 56};
-    static const size_t kNoteCount = sizeof(kNotesHz) / sizeof(kNotesHz[0]);
-    for (size_t i = 0; i < kNoteCount; i++) {
-        tdeckAudioPlayTone(kNotesHz[i], kDurMs[i]);
-        if (i + 1 < kNoteCount) delay(10);
-    }
-    tdeckAudioStopPlayback();
-}
-
-static void tdeckPlayChirpyPattern() {
-    if (!tdeckAudioEnsureReady()) return;
-    tdeckAudioStartPlayback();
-    static const uint16_t kNotesHz[] = {2093, 2637, 3136, 2637};
-    static const uint16_t kDurMs[] = {20, 20, 22, 34};
-    static const size_t kNoteCount = sizeof(kNotesHz) / sizeof(kNotesHz[0]);
-    for (size_t i = 0; i < kNoteCount; i++) {
-        tdeckAudioPlayTone(kNotesHz[i], kDurMs[i]);
-        if (i + 1 < kNoteCount) delay(6);
-    }
-    tdeckAudioStopPlayback();
-}
-
-static void tdeckPlayBassPattern() {
-    if (!tdeckAudioEnsureReady()) return;
-    tdeckAudioStartPlayback();
-    static const uint16_t kNotesHz[] = {784, 659, 523};
-    static const uint16_t kDurMs[] = {54, 50, 74};
-    static const size_t kNoteCount = sizeof(kNotesHz) / sizeof(kNotesHz[0]);
-    for (size_t i = 0; i < kNoteCount; i++) {
-        tdeckAudioPlayTone(kNotesHz[i], kDurMs[i]);
-        if (i + 1 < kNoteCount) delay(12);
-    }
-    tdeckAudioStopPlayback();
-}
 } // namespace
 #endif
 
 #if defined(DEVICE_CARDPUTER_LORA_HAT)
 namespace {
-static bool sCardputerAudioReady = false;
-
 // Re-applied on every play rather than once: the volume setting can change
 // between notifications, and M5's speaker keeps whatever it was last given.
 static inline void cardputerAudioEnsureReady() {
@@ -4902,40 +4861,29 @@ static inline void cardputerAudioEnsureReady() {
         const float scaled = 180.0f * notifyVolumeScale();
         cardputerSpeakerSetVolume((uint8_t)(scaled > 255.0f ? 255.0f : scaled));
     }
-    sCardputerAudioReady = true;
-}
-
-static void cardputerPlayTonePattern(const uint16_t *notesHz,
-                                     const uint16_t *durMs,
-                                     size_t noteCount,
-                                     uint16_t gapMs) {
-    cardputerAudioEnsureReady();
-    for (size_t i = 0; i < noteCount; i++) {
-        (void)cardputerSpeakerTone((float)notesHz[i], durMs[i], 0, true);
-        delay((uint32_t)durMs[i]);
-        if (i + 1 < noteCount && gapMs) delay(gapMs);
-    }
-}
-
-static void cardputerPlayAlertPattern() {
-    static const uint16_t kNotesHz[] = {1568, 1319, 1175};
-    static const uint16_t kDurMs[] = {34, 34, 56};
-    cardputerPlayTonePattern(kNotesHz, kDurMs, sizeof(kNotesHz) / sizeof(kNotesHz[0]), 10);
-}
-
-static void cardputerPlayChirpyPattern() {
-    static const uint16_t kNotesHz[] = {1976, 2489, 2960, 2489};
-    static const uint16_t kDurMs[] = {20, 20, 22, 34};
-    cardputerPlayTonePattern(kNotesHz, kDurMs, sizeof(kNotesHz) / sizeof(kNotesHz[0]), 6);
-}
-
-static void cardputerPlayBassPattern() {
-    static const uint16_t kNotesHz[] = {659, 554, 440};
-    static const uint16_t kDurMs[] = {54, 50, 74};
-    cardputerPlayTonePattern(kNotesHz, kDurMs, sizeof(kNotesHz) / sizeof(kNotesHz[0]), 12);
 }
 } // namespace
 #endif
+
+// ── Notification melodies ────────────────────────────────────────────────────
+// Each alert style is one list of notes, played by whichever audio path the
+// board has. A rest is a note of frequency 0, so gaps are part of the melody
+// and every path plays them the same way: real silence frames on I2S, a
+// zero-duty note on the buzzer, a wait on the Cardputer speaker.
+struct AlertNote {
+    uint16_t hz;      // 0 = rest
+    uint16_t durMs;
+};
+
+struct AlertMelody {
+    const AlertNote *notes;
+    size_t count;
+};
+
+template <size_t N>
+static constexpr AlertMelody alertMelody(const AlertNote (&notes)[N]) {
+    return AlertMelody{notes, N};
+}
 
 #if (BOARD_BUZZER >= 0)
 namespace {
@@ -4960,47 +4908,107 @@ namespace {
 // A rest is a note of frequency 0: ledcWriteTone() takes the duty to zero for
 // the duration, so gaps queue exactly like notes and keep their place in the
 // sequence. Without them the notes run together and the shape is lost.
-struct BuzzerNote {
-    uint16_t hz;      // 0 = rest
-    uint16_t durMs;
-};
-
-template <size_t N>
-static void buzzerPlayNotes(const BuzzerNote (&notes)[N]) {
-    for (size_t i = 0; i < N; i++) {
-        tone(BOARD_BUZZER, notes[i].hz, notes[i].durMs);
+static void buzzerPlayMelody(const AlertMelody &m) {
+    for (size_t i = 0; i < m.count; i++) {
+        tone(BOARD_BUZZER, m.notes[i].hz, m.notes[i].durMs);
     }
 }
 
 // Two-tone descending chime — the "you have mail" shape, and the one that
 // carries best across a room.
-static void buzzerPlayAlertPattern() {
-    static const BuzzerNote kNotes[] = {
-        {2637, 70}, {0, 30}, {1976, 110},
-    };
-    buzzerPlayNotes(kNotes);
-}
+static const AlertNote kBuzzerDefault[] = {
+    {2637, 70}, {0, 30}, {1976, 110},
+};
 
 // Three rising chirps at the top of the part's range: short, bright, and the
 // most obviously different from Default when heard back to back in the picker.
-static void buzzerPlayChirpyPattern() {
-    static const BuzzerNote kNotes[] = {
-        {2637, 28}, {0, 22}, {3136, 28}, {0, 22}, {3951, 46},
-    };
-    buzzerPlayNotes(kNotes);
-}
+static const AlertNote kBuzzerChirpy[] = {
+    {2637, 28}, {0, 22}, {3136, 28}, {0, 22}, {3951, 46},
+};
 
 // Low and unhurried. Two notes rather than three, each roughly twice the length
 // of the Chirpy ones, so it reads as a different sound and not just a quieter
 // one — which is all a true low note would have been on this hardware.
-static void buzzerPlayBassPattern() {
-    static const BuzzerNote kNotes[] = {
-        {1109, 90}, {0, 60}, {880, 150},
-    };
-    buzzerPlayNotes(kNotes);
-}
+static const AlertNote kBuzzerBass[] = {
+    {1109, 90}, {0, 60}, {880, 150},
+};
 } // namespace
 #endif
+
+#if HAS_AUDIO_ALERTS && (BOARD_BUZZER < 0)
+// ── Speaker melodies (Pager, Wio Tracker L2, T-Display P4, Tanmatsu, T-Deck,
+// Cardputer) ─────────────────────────────────────────────────────────────────
+// One set for every board with a real speaker, so a style sounds the same on
+// all of them. These used to be three sets: the T-Deck's an octave above the
+// Pager's at half the length, the Cardputer's somewhere between. These are the
+// Pager's, which is what most builds already played. The passive buzzer keeps
+// its own (above): its piezo cannot reproduce this register.
+static const AlertNote kSpeakerDefault[] = {
+    {880, 68}, {0, 8}, {740, 68}, {0, 8}, {660, 112},
+};
+static const AlertNote kSpeakerChirpy[] = {
+    {1047, 36}, {0, 6}, {1319, 36}, {0, 6}, {1568, 40}, {0, 6}, {1319, 70},
+};
+static const AlertNote kSpeakerBass[] = {
+    {392, 92}, {0, 10}, {330, 86}, {0, 10}, {262, 130},
+};
+
+// Blocks until the melody has played; the buzzer path is the only one that
+// queues notes and returns.
+static void speakerPlayMelody(const AlertMelody &m) {
+#if defined(DEVICE_TLORA_PAGER_TFT) || defined(DEVICE_WIO_TRACKER_L2) \
+    || defined(DEVICE_TDISPLAY_P4) || defined(DEVICE_TANMATSU)
+    if (!pagerAudioEnsureReady()) return;
+    pagerAudioStartPlayback();
+    for (size_t i = 0; i < m.count; i++) {
+        if (m.notes[i].hz) pagerAudioPlayTone(m.notes[i].hz, m.notes[i].durMs);
+        else               pagerAudioWriteSilence(m.notes[i].durMs);
+    }
+    pagerAudioStopPlayback();
+#elif defined(DEVICE_TDECK)
+    if (!tdeckAudioEnsureReady()) return;
+    tdeckAudioStartPlayback();
+    for (size_t i = 0; i < m.count; i++) {
+        if (m.notes[i].hz) tdeckAudioPlayTone(m.notes[i].hz, m.notes[i].durMs);
+        else               tdeckAudioWriteSilence(m.notes[i].durMs);
+    }
+    tdeckAudioStopPlayback();
+#elif defined(DEVICE_CARDPUTER_LORA_HAT)
+    cardputerAudioEnsureReady();
+    for (size_t i = 0; i < m.count; i++) {
+        // M5's tone() returns at once, so the wait is what spaces the notes.
+        if (m.notes[i].hz) (void)cardputerSpeakerTone((float)m.notes[i].hz, m.notes[i].durMs, 0, true);
+        delay((uint32_t)m.notes[i].durMs);
+    }
+#endif
+}
+#endif
+
+// The sound for one alert style, and nothing else: no LED, keyboard blink or
+// vibration, which belong to an arriving message. The style picker and the
+// volume slider preview through this, so trying a sound no longer flashes the
+// notification lights or buzzes the motor.
+static void playAlertSound(uint8_t mode) {
+#if (BOARD_BUZZER >= 0)
+    switch (mode) {
+        case MSG_ALERT_SOUND_OFF:    return;
+        case MSG_ALERT_SOUND_CHIRPY: buzzerPlayMelody(alertMelody(kBuzzerChirpy)); break;
+        case MSG_ALERT_SOUND_BASS:   buzzerPlayMelody(alertMelody(kBuzzerBass)); break;
+        case MSG_ALERT_SOUND_DEFAULT:
+        default:                     buzzerPlayMelody(alertMelody(kBuzzerDefault)); break;
+    }
+#elif HAS_AUDIO_ALERTS
+    switch (mode) {
+        case MSG_ALERT_SOUND_OFF:    return;
+        case MSG_ALERT_SOUND_CHIRPY: speakerPlayMelody(alertMelody(kSpeakerChirpy)); break;
+        case MSG_ALERT_SOUND_BASS:   speakerPlayMelody(alertMelody(kSpeakerBass)); break;
+        case MSG_ALERT_SOUND_DEFAULT:
+        default:                     speakerPlayMelody(alertMelody(kSpeakerDefault)); break;
+    }
+#else
+    (void)mode;
+#endif
+}
 
 enum : uint8_t {
     MSG_ALERT_VISUAL_CHANNEL = 0,
@@ -5038,11 +5046,10 @@ static bool lightNotifyWindowOpen() {
 }
 #endif
 
-static void triggerMessageAlert(bool bypassRateLimit = false,
-                                uint8_t visualSource = MSG_ALERT_VISUAL_CHANNEL) {
+static void triggerMessageAlert(uint8_t visualSource) {
     static uint32_t lastAlertMs = 0;
     uint32_t nowMs = millis();
-    if (!bypassRateLimit && nowMs - lastAlertMs < 120) {
+    if (nowMs - lastAlertMs < 120) {
         debugLogMessages("[alert] suppressed (rate limit, %lums since last)\n",
                          (unsigned long)(nowMs - lastAlertMs));
         return;
@@ -5062,14 +5069,14 @@ static void triggerMessageAlert(bool bypassRateLimit = false,
 
 #if HAS_NOTIFY_LED
     // Blink the front LED for any new message, channel or DM. Deliberately
-    // above the sound branches below, each of which returns early when the
-    // alert tone is off — a silent device is exactly when a visual cue matters,
+    // ahead of the sound below, which is skipped when the alert tone is
+    // off — a silent device is exactly when a visual cue matters,
     // and it is the only notification available while the screen is asleep.
     meshDeckLedNotify(visualSource == MSG_ALERT_VISUAL_DM);
 #endif
 
 #if HAS_HAPTIC
-    // Above the sound branches, which return early when the tone is off: a
+    // Ahead of the sound, which is skipped when the tone is off: a
     // silent device is exactly when a buzz matters. Started before the tone,
     // whose blocking I2S writes would otherwise delay it -- the motor runs on
     // the chip while they play. Once for a channel message, twice for a DM.
@@ -5078,100 +5085,22 @@ static void triggerMessageAlert(bool bypassRateLimit = false,
 #endif
 
 #if HAS_KB_BLINK
-    // Above the sound branches for the same reason as the Mesh Deck LED: each of
-    // them returns early when the alert tone is off, and a silent device is
-    // exactly when a visual cue matters. Called for every message; it decides
+    // Ahead of the sound, for the same reason as the Mesh Deck LED: a device
+    // with the alert tone off is exactly when a visual cue matters. Called for every message; it decides
     // for itself whether the current board permits a pulse while awake.
     kbBlinkNotify(visualSource == MSG_ALERT_VISUAL_DM);
 #endif
 
-#if defined(DEVICE_TLORA_PAGER_TFT) || defined(DEVICE_WIO_TRACKER_L2) \
-    || defined(DEVICE_TDISPLAY_P4) || defined(DEVICE_TANMATSU)
-    if (s_cfg.msgAlertSound == MSG_ALERT_SOUND_OFF) return;
-
-    switch (s_cfg.msgAlertSound) {
-        case MSG_ALERT_SOUND_CHIRPY:
-            pagerAudioPlayChirpyPattern();
-            break;
-        case MSG_ALERT_SOUND_BASS:
-            pagerAudioPlayBassPattern();
-            break;
-        case MSG_ALERT_SOUND_OFF:
-            return;
-        case MSG_ALERT_SOUND_DEFAULT:
-        default:
-            pagerAudioPlayAlertPattern();
-            break;
-    }
-#elif defined(DEVICE_TDECK)
-    if (s_cfg.msgAlertSound == MSG_ALERT_SOUND_OFF) return;
-
-    switch (s_cfg.msgAlertSound) {
-        case MSG_ALERT_SOUND_CHIRPY:
-            tdeckPlayChirpyPattern();
-            break;
-        case MSG_ALERT_SOUND_BASS:
-            tdeckPlayBassPattern();
-            break;
-        case MSG_ALERT_SOUND_OFF:
-            return;
-        case MSG_ALERT_SOUND_DEFAULT:
-        default:
-            tdeckPlayAlertPattern();
-            break;
-    }
-#elif defined(DEVICE_CARDPUTER_LORA_HAT)
-    if (s_cfg.msgAlertSound == MSG_ALERT_SOUND_OFF) return;
-
-    switch (s_cfg.msgAlertSound) {
-        case MSG_ALERT_SOUND_CHIRPY:
-            cardputerPlayChirpyPattern();
-            break;
-        case MSG_ALERT_SOUND_BASS:
-            cardputerPlayBassPattern();
-            break;
-        case MSG_ALERT_SOUND_OFF:
-            return;
-        case MSG_ALERT_SOUND_DEFAULT:
-        default:
-            cardputerPlayAlertPattern();
-            break;
-    }
-#elif (BOARD_BUZZER >= 0)
-    if (s_cfg.msgAlertSound == MSG_ALERT_SOUND_OFF) return;
-
-    switch (s_cfg.msgAlertSound) {
-        case MSG_ALERT_SOUND_CHIRPY:
-            buzzerPlayChirpyPattern();
-            break;
-        case MSG_ALERT_SOUND_BASS:
-            buzzerPlayBassPattern();
-            break;
-        case MSG_ALERT_SOUND_OFF:
-            return;
-        case MSG_ALERT_SOUND_DEFAULT:
-        default:
-            buzzerPlayAlertPattern();
-            break;
-    }
-#endif
+    playAlertSound(s_cfg.msgAlertSound);
 }
 
 #if HAS_VOLUME_CONTROL
-// Sample tone for the volume slider. Deliberately not triggerMessageAlert():
-// that returns early when notification sound is OFF, which would leave the
-// volume control silent for exactly the people most likely to be turning it
-// back up. Plays the default pattern whatever the alert style is set to — the
+// Sample tone for the volume slider. Plays even when notification sound is OFF,
+// which would otherwise leave the volume control silent for exactly the people
+// most likely to be turning it back up. Plays the default pattern whatever the alert style is set to — the
 // slider is about level, not about which sound.
 static void playVolumePreviewTone() {
-#if defined(DEVICE_TLORA_PAGER_TFT) || defined(DEVICE_WIO_TRACKER_L2) \
-    || defined(DEVICE_TDISPLAY_P4) || defined(DEVICE_TANMATSU)
-    pagerAudioPlayAlertPattern();
-#elif defined(DEVICE_TDECK)
-    tdeckPlayAlertPattern();
-#elif defined(DEVICE_CARDPUTER_LORA_HAT)
-    cardputerPlayAlertPattern();
-#endif
+    playAlertSound(MSG_ALERT_SOUND_DEFAULT);
 }
 #endif
 
@@ -5179,37 +5108,21 @@ static void playSplashStartupRiff() {
     if (!s_cfg.splashMelodyEnabled) return;
 
     // Middle-octave riff: E, F, F#, F, E, D#, E
+#if HAS_AUDIO_ALERTS && (BOARD_BUZZER < 0)
+    // Quarter notes with a sixteenth rest between.
+    static const AlertNote kRiff[] = {
+        {330, 220}, {0, 55}, {349, 220}, {0, 55}, {370, 220}, {0, 55}, {349, 220}, {0, 55},
+        {330, 220}, {0, 55}, {311, 220}, {0, 55}, {330, 220},
+    };
+    speakerPlayMelody(alertMelody(kRiff));
+#elif (BOARD_BUZZER >= 0)
     static const uint16_t kNotesHz[] = {330, 349, 370, 349, 330, 311, 330};
     static const uint16_t kQuarterMs = 220;
     static const uint16_t kPause16thMs = 55;
-    static const uint16_t kDurMs[] = {
-        kQuarterMs, kQuarterMs, kQuarterMs, kQuarterMs, kQuarterMs, kQuarterMs, kQuarterMs
-    };
     static const size_t kCount = sizeof(kNotesHz) / sizeof(kNotesHz[0]);
-
-#if defined(DEVICE_TLORA_PAGER_TFT) || defined(DEVICE_WIO_TRACKER_L2) \
-    || defined(DEVICE_TDISPLAY_P4) || defined(DEVICE_TANMATSU)
-    if (!pagerAudioEnsureReady()) return;
-    pagerAudioStartPlayback();
     for (size_t i = 0; i < kCount; i++) {
-        pagerAudioPlayTone(kNotesHz[i], kDurMs[i]);
-        if (i + 1 < kCount) pagerAudioWriteSilence(kPause16thMs);
-    }
-    pagerAudioStopPlayback();
-#elif defined(DEVICE_TDECK)
-    if (!tdeckAudioEnsureReady()) return;
-    tdeckAudioStartPlayback();
-    for (size_t i = 0; i < kCount; i++) {
-        tdeckAudioPlayTone(kNotesHz[i], kDurMs[i]);
-        if (i + 1 < kCount) delay(kPause16thMs);
-    }
-    tdeckAudioStopPlayback();
-#elif defined(DEVICE_CARDPUTER_LORA_HAT)
-    cardputerPlayTonePattern(kNotesHz, kDurMs, kCount, kPause16thMs);
-#elif (BOARD_BUZZER >= 0)
-    for (size_t i = 0; i < kCount; i++) {
-        tone(BOARD_BUZZER, kNotesHz[i], kDurMs[i]);
-        delay((uint32_t)kDurMs[i] + (i + 1 < kCount ? kPause16thMs : 0));
+        tone(BOARD_BUZZER, kNotesHz[i], kQuarterMs);
+        delay((uint32_t)kQuarterMs + (i + 1 < kCount ? kPause16thMs : 0));
     }
 #endif
 }
@@ -22292,7 +22205,7 @@ static void previewAlertSoundSelection(int mode) {
     s_alertSoundSelection = mode;
     s_cfg.msgAlertSound = (uint8_t)mode;
     refreshAlertSoundSelection();
-    triggerMessageAlert(true);   // bypass the rate limit; this is an explicit preview
+    playAlertSound((uint8_t)mode);   // the sound only; no lights or vibration
 }
 
 static void applyAlertSoundSelection(int mode) {
@@ -58815,7 +58728,7 @@ static int csPostItems(int chanIdx, const csp::BatchHeader &h, const csp::Item *
     if (posted && !channelIsMuted(chanIdx)) {
         const bool chanOnScreen = (chanIdx == s_activeChannel) && !glanceOverlayHidesUi();
         if (!chanOnScreen && chanIdx < MESH_CHANNELS) s_channelNeedsAttention[chanIdx] = true;
-        triggerMessageAlert(false, MSG_ALERT_VISUAL_CHANNEL);
+        triggerMessageAlert(MSG_ALERT_VISUAL_CHANNEL);
     }
     return posted;
 }
@@ -59227,8 +59140,7 @@ static bool processMeshPacket(const MeshPacket &rxPkt) {
                 }
 
                 if (isDirectToMe || !channelIsMuted(chanIdx)) {
-                    triggerMessageAlert(false,
-                                        isDirectToMe ? MSG_ALERT_VISUAL_DM
+                    triggerMessageAlert(isDirectToMe ? MSG_ALERT_VISUAL_DM
                                                      : MSG_ALERT_VISUAL_CHANNEL);
                 }
                 if (wantsAck && isDirectToMe) {
