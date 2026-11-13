@@ -307,6 +307,16 @@
 #define CHAT_STYLE_OUTLINE  2      // per-node colored outlined bubbles (transparent fill)
 #define CHAT_STYLE_IRC      3      // lock-screen notice rows: time, name, text
 #define CHAT_STYLE_MAX      CHAT_STYLE_IRC
+
+// How a channel reply names the message it answers: a quoted snippet over the
+// reply, or on the smallest panels, where a quote would cost a whole line, a
+// compact "↪@Name" in the reply's own header.
+#if defined(DEVICE_CARDPUTER_LORA_HAT) || defined(DEVICE_HELTEC_V4_EXPANSION) \
+    || defined(DEVICE_HELTEC_R8) || defined(DEVICE_M9)
+#define CHAT_REPLY_TAG_STYLE 1
+#else
+#define CHAT_REPLY_TAG_STYLE 0
+#endif
 #if defined(DEVICE_TDECK_PRO)
 #define MY_CHAT_STYLE       CHAT_STYLE_OUTLINE
 #define MY_CHAT_COLORS_EN   0

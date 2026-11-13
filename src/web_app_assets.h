@@ -237,6 +237,14 @@ text-align:left;font-size:.92em;cursor:pointer}
 background:var(--bg);padding:.6em;display:flex;flex-direction:column;gap:.45em}
 .chat-msg{border:1px solid var(--line);border-radius:10px;background:var(--panel);padding:.45em .6em;max-width:88%}
 .chat-msg.mine{align-self:flex-end;background:var(--panel-2);border-color:var(--accent)}
+.chat-msg.rp{margin-left:1.1em;position:relative}
+.chat-msg.rp:not(.mine)::before{content:'';position:absolute;left:-.85em;top:.2em;width:.6em;height:.7em;
+border-left:1px solid var(--dim);border-bottom:1px solid var(--dim);border-bottom-left-radius:4px}
+.chat-msg.flash{outline:2px solid var(--accent)}
+.chat-quote{margin-bottom:.3em;padding:.1em .5em;border-left:3px solid var(--accent);font-size:.8em;color:var(--dim);
+cursor:pointer;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.chat-chips{margin-top:.3em;display:flex;flex-wrap:wrap;gap:.25em}
+.chat-chip{font-size:.8em;padding:0 .45em;border:1px solid var(--line);border-radius:999px;background:var(--panel-2)}
 .chat-body{font-size:.92em;white-space:pre-wrap;word-break:break-word}
 .chat-actions{margin-top:.3em;display:flex;flex-wrap:wrap;gap:.25em;align-items:center}
 .chat-tap,.chat-mini{margin:0;padding:.1em .5em;font-size:.8em;font-weight:400;background:var(--panel-2);color:var(--text);

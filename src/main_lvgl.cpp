@@ -13186,6 +13186,7 @@ static void collectChatRows(const DisplayLine **rows, int &rowCount) {
         const DisplayLine *dl = Channels.getLine(s_activeChannel, row);
         if (!dl) break;
         if (shouldHideChatLine(dl->text)) continue;
+        if (dl->reaction) continue;   // tallied as chips under the original
         rows[rowCount++] = dl;
     }
 }
@@ -56981,7 +56982,8 @@ static void openMsgSenderInfoModal(uint32_t from, uint32_t packetId) {
 }
 #endif  // HAS_MESSAGE_ACTIONS
 
-static void appendRxText(int chanIdx, uint32_t fromNode, const char *text, uint32_t packetId, bool viaMqtt) {
+static void appendRxText(int chanIdx, uint32_t fromNode, const char *text, uint32_t packetId, bool viaMqtt,
+                         uint32_t replyId = 0, uint32_t emoji = 0) {
     char timePrefix[12];
     char sender[48];
     char prefix[80];
@@ -56998,7 +57000,11 @@ static void appendRxText(int chanIdx, uint32_t fromNode, const char *text, uint3
     snprintf(prefix, sizeof(prefix), "%s  %s[%s] ", transportIcon, timePrefix, sender);
 #endif
 
-    Channels.addMessage(chanIdx, prefix, text, TFT_WHITE, packetId, false, fromNode, true);
+    // A tapback is folded into a chip on the message it reacts to, so it has
+    // no line of its own to mark new.
+    const bool reaction = (emoji != 0 && replyId != 0);
+    Channels.addMessage(chanIdx, prefix, text, TFT_WHITE, packetId, false, fromNode, !reaction,
+                        false, replyId, reaction);
     // Being the active channel is not the same as being on screen. Behind the
     // glance overlay the chat view is not visible, so the channel the firmware
     // was last on has to notify like any other -- treating it as read is what
@@ -59136,7 +59142,8 @@ static bool processMeshPacket(const MeshPacket &rxPkt) {
                     }
 #endif
                 } else {
-                    appendRxText(chanIdx, pkt.hdr.from, textBuf, pkt.hdr.id, viaMqtt);
+                    appendRxText(chanIdx, pkt.hdr.from, textBuf, pkt.hdr.id, viaMqtt,
+                                 pkt.env.replyId, pkt.env.emoji);
                 }
 
                 if (isDirectToMe || !channelIsMuted(chanIdx)) {
@@ -60878,6 +60885,227 @@ static void chatMakeBubbleHeaderPro(lv_obj_t *b, const char *metaTag, const char
 }
 #endif
 
+// ── Replies and reactions in channel chat ──────────────────────────────────
+//
+// A reply carries the packet id it answers (DisplayLine::replyId). A reaction
+// (tapback) is a reply with the emoji flag: it is hidden as a line of its own
+// and tallied as a chip under the message it reacts to instead.
+//
+// The renderers read the current message's decoration from s_chatDeco, set by
+// refreshChatViewBubbles() and the classic loop around each message. DM threads
+// never set it, so their bubbles and rows are drawn exactly as before.
+struct ChatReplyDeco {
+    uint32_t replyId;        // nonzero: this message answers replyId
+    bool     found;          // the original is still in this channel's history
+    bool     origIsMe;
+    uint32_t origSender;
+    char     origName[40];
+    char     snippet[48];
+    uint8_t  chipCount;
+    char     chipEmoji[6][16];
+    uint8_t  chipN[6];
+};
+static const ChatReplyDeco *s_chatDeco = nullptr;
+
+struct ChatReactionTally {
+    uint32_t target;
+    char     emoji[16];
+    uint8_t  count;
+};
+static ChatReactionTally s_chatReactions[32];
+static int s_chatReactionCount = 0;
+
+// Tally the active channel's reactions once per render pass.
+static void chatCollectReactions() {
+    s_chatReactionCount = 0;
+    for (int row = 0; row < MAX_MSG_LINES; row++) {
+        const DisplayLine *dl = Channels.getLine(s_activeChannel, row);
+        if (!dl) break;
+        if (!dl->reaction || dl->replyId == 0) continue;
+        if (dl->text[0] == ' ' && dl->text[1] == ' ') continue;   // continuation
+        char emoji[16];
+        const char *e = chatStripPrefix(dl->text);
+        while (*e == ' ') e++;
+        utf8util::copyTruncate(emoji, sizeof(emoji), e);
+        if (!emoji[0]) continue;
+        int k = 0;
+        for (; k < s_chatReactionCount; k++) {
+            if (s_chatReactions[k].target == dl->replyId
+                && strcmp(s_chatReactions[k].emoji, emoji) == 0) break;
+        }
+        if (k < s_chatReactionCount) {
+            if (s_chatReactions[k].count < 99) s_chatReactions[k].count++;
+        } else if (s_chatReactionCount < (int)(sizeof(s_chatReactions) / sizeof(s_chatReactions[0]))) {
+            ChatReactionTally &t = s_chatReactions[s_chatReactionCount++];
+            t.target = dl->replyId;
+            memcpy(t.emoji, emoji, sizeof(t.emoji));
+            t.count = 1;
+        }
+    }
+}
+
+// Fill the decoration for one message. rows are the visible (collected) rows,
+// msg its first line, ownId its packet id. False when there is nothing to draw.
+static bool chatBuildReplyDeco(const DisplayLine *const *rows, int rowCount,
+                               const DisplayLine *msg, uint32_t ownId,
+                               ChatReplyDeco &d) {
+    memset(&d, 0, sizeof(d));
+    if (!msg) return false;
+
+    if (ownId != 0) {
+        for (int k = 0; k < s_chatReactionCount && d.chipCount < 6; k++) {
+            if (s_chatReactions[k].target != ownId) continue;
+            memcpy(d.chipEmoji[d.chipCount], s_chatReactions[k].emoji, sizeof(d.chipEmoji[0]));
+            d.chipN[d.chipCount] = s_chatReactions[k].count;
+            d.chipCount++;
+        }
+    }
+
+    if (msg->replyId != 0 && !msg->reaction) {
+        d.replyId = msg->replyId;
+        // Lowest index in a packet group is its first (prefix) line.
+        for (int r = 0; r < rowCount; r++) {
+            const DisplayLine *o = rows[r];
+            if (!o || o->packetId != msg->replyId) continue;
+            d.found = true;
+            d.origSender = o->senderNodeId;
+            d.origIsMe = (s_myNodeId != 0 && o->senderNodeId == s_myNodeId);
+            if (d.origIsMe) {
+                snprintf(d.origName, sizeof(d.origName), "%s", TR("You"));
+            } else if (o->senderNodeId != 0) {
+                chatSenderLabel(o->senderNodeId, d.origName, sizeof(d.origName));
+            }
+            const char *s = chatStripPrefix(o->text);
+            while (*s == ' ') s++;
+            const size_t kSnip = 28;
+            size_t len = strlen(s);
+            if (len > kSnip) {
+                size_t cut = kSnip;
+                while (cut > 0 && ((uint8_t)s[cut] & 0xC0) == 0x80) cut--;
+                snprintf(d.snippet, sizeof(d.snippet), "%.*s...", (int)cut, s);
+            } else {
+                snprintf(d.snippet, sizeof(d.snippet), "%s", s);
+            }
+            for (char *p = d.snippet; *p; p++) {
+                if (*p == '\n' || *p == '\r') *p = ' ';
+            }
+            break;
+        }
+    }
+    return d.replyId != 0 || d.chipCount != 0;
+}
+
+static lv_color_t chatReplyBarColor(const ChatReplyDeco &d) {
+#if defined(DEVICE_TDECK_PRO)
+    LV_UNUSED(d);
+    return lv_color_make(0, 0, 0);
+#else
+    if (d.found && s_cfg.chatColorsEnabled && d.origSender != 0) {
+        return tftColorToLv(d.origIsMe ? userMessageAccentColor565()
+                                       : nodeBubbleColor565(d.origSender));
+    }
+    return (s_cfg.uiMode == UI_MODE_LIGHT) ? lv_color_hex(0x7C8799) : lv_color_hex(0x8A97AD);
+#endif
+}
+
+// "↪@Name" for the compact style; "↪@…" when the original has scrolled away.
+static void chatReplyTagText(const ChatReplyDeco &d, char *out, size_t outLen) {
+    if (d.found && d.origName[0]) snprintf(out, outLen, "\xE2\x86\xAA@%s", d.origName);
+    else snprintf(out, outLen, "\xE2\x86\xAA@...");
+}
+
+// The quote block: a coloured left bar beside "↪ Name: snippet" on one line.
+static lv_obj_t *chatMakeReplyQuote(lv_obj_t *parent, const ChatReplyDeco &d,
+                                    const lv_font_t *font, lv_color_t textColor,
+                                    lv_coord_t maxW) {
+    lv_obj_t *q = lv_obj_create(parent);
+    lv_obj_remove_style_all(q);
+    lv_obj_clear_flag(q, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_clear_flag(q, LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_set_size(q, LV_SIZE_CONTENT, LV_SIZE_CONTENT);
+    lv_obj_set_style_border_side(q, LV_BORDER_SIDE_LEFT, 0);
+    lv_obj_set_style_border_width(q, 3, 0);
+    lv_obj_set_style_border_color(q, chatReplyBarColor(d), 0);
+    lv_obj_set_style_border_opa(q, LV_OPA_COVER, 0);
+    lv_obj_set_style_pad_left(q, 4, 0);
+
+    char text[112];
+    if (d.found) {
+        snprintf(text, sizeof(text), "\xE2\x86\xAA %s: %s",
+                 d.origName[0] ? d.origName : "?", d.snippet);
+    } else {
+        snprintf(text, sizeof(text), "\xE2\x86\xAA %s", TR("earlier message"));
+    }
+    lv_obj_t *lbl = lv_label_create(q);
+    lv_obj_set_style_text_font(lbl, font, 0);
+    lv_obj_set_style_text_color(lbl, textColor, 0);
+#if !defined(DEVICE_TDECK_PRO)
+    lv_obj_set_style_text_opa(lbl, LV_OPA_70, 0);
+#endif
+    setLabelTextEmojiSafe(lbl, text);
+    const lv_coord_t room = maxW - 7;
+    lv_point_t sz;
+    lv_text_get_size(&sz, lv_label_get_text(lbl), font, 0, 0, LV_COORD_MAX, LV_TEXT_FLAG_NONE);
+    if (room > 16 && sz.x > room) {
+        lv_label_set_long_mode(lbl, LV_LABEL_LONG_DOT);
+        lv_obj_set_width(lbl, room);
+    }
+    return q;
+}
+
+// " 👍2 ❤️" — the reaction tally as text, for the styles drawn as one text run.
+static void chatReactionText(const ChatReplyDeco &d, char *out, size_t outLen) {
+    size_t w = 0;
+    if (outLen) out[0] = '\0';
+    for (int k = 0; k < d.chipCount && w + 1 < outLen; k++) {
+        if (d.chipN[k] > 1) {
+            w += (size_t)snprintf(out + w, outLen - w, "  %s%u", d.chipEmoji[k], (unsigned)d.chipN[k]);
+        } else {
+            w += (size_t)snprintf(out + w, outLen - w, "  %s", d.chipEmoji[k]);
+        }
+        if (w >= outLen) { out[outLen - 1] = '\0'; break; }
+    }
+}
+
+// Reaction chips under a bubble's body: small outlined pills, one per emoji.
+static void chatMakeReactionChips(lv_obj_t *parent, const ChatReplyDeco &d,
+                                  const lv_font_t *font, lv_color_t color) {
+    if (d.chipCount == 0) return;
+    lv_obj_t *row = lv_obj_create(parent);
+    lv_obj_remove_style_all(row);
+    lv_obj_clear_flag(row, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_clear_flag(row, LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_set_size(row, LV_SIZE_CONTENT, LV_SIZE_CONTENT);
+    lv_obj_set_flex_flow(row, LV_FLEX_FLOW_ROW_WRAP);
+    lv_obj_set_style_pad_column(row, 3, 0);
+    lv_obj_set_style_pad_row(row, 2, 0);
+    lv_obj_set_style_pad_top(row, 2, 0);
+    for (int k = 0; k < d.chipCount; k++) {
+        lv_obj_t *chip = lv_label_create(row);
+        lv_obj_clear_flag(chip, LV_OBJ_FLAG_CLICKABLE);
+        lv_obj_set_style_text_font(chip, font, 0);
+        lv_obj_set_style_text_color(chip, color, 0);
+        lv_obj_set_style_border_width(chip, 1, 0);
+        lv_obj_set_style_border_color(chip, color, 0);
+#if defined(DEVICE_TDECK_PRO)
+        lv_obj_set_style_border_opa(chip, LV_OPA_COVER, 0);
+#else
+        lv_obj_set_style_border_opa(chip, LV_OPA_60, 0);
+#endif
+        lv_obj_set_style_radius(chip, 6, 0);
+        lv_obj_set_style_pad_left(chip, 3, 0);
+        lv_obj_set_style_pad_right(chip, 3, 0);
+        char t[24];
+        if (d.chipN[k] > 1) snprintf(t, sizeof(t), "%s %u", d.chipEmoji[k], (unsigned)d.chipN[k]);
+        else snprintf(t, sizeof(t), "%s", d.chipEmoji[k]);
+        setLabelTextEmojiSafe(chip, t);
+    }
+}
+
+// How far a reply sits in from the messages around it. One level only: a
+// reply to a reply sits at the same depth.
+static const int kChatReplyIndent = 10;
+
 // Create one message bubble (row wrapper + colored container + optional name tag
 // + body) in the chat list. Right-aligned + accent for our own messages,
 // left-aligned + node color for others. Updates the scroll anchor pointers.
@@ -60899,6 +61127,24 @@ static void chatMakeBubble(lv_obj_t *list, uint32_t sender, bool isMe,
     lv_obj_set_flex_align(rowW, isMe ? LV_FLEX_ALIGN_END : LV_FLEX_ALIGN_START,
                           LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_START);
     stylePaperMessageRow(rowW);
+
+    // A reply from someone else sits one step in, hung off a small elbow. Ours
+    // are right-aligned already, so the quote alone marks them.
+    const ChatReplyDeco *deco = s_chatDeco;
+    if (deco && deco->replyId && !isMe) {
+        lv_obj_set_style_pad_column(rowW, 2, 0);
+        lv_obj_t *elbow = lv_obj_create(rowW);
+        lv_obj_remove_style_all(elbow);
+        lv_obj_clear_flag(elbow, LV_OBJ_FLAG_CLICKABLE);
+        lv_obj_set_size(elbow, kChatReplyIndent - 2,
+                        lv_font_get_line_height(scaledChatFont(kChannelChatFont)) / 2 + 2);
+        lv_obj_set_style_border_side(elbow, (lv_border_side_t)(LV_BORDER_SIDE_LEFT | LV_BORDER_SIDE_BOTTOM), 0);
+        lv_obj_set_style_border_width(elbow, 1, 0);
+        lv_obj_set_style_border_color(elbow, chatReplyBarColor(*deco), 0);
+        lv_obj_set_style_border_opa(elbow, LV_OPA_COVER, 0);
+        lv_obj_set_style_radius(elbow, 2, 0);
+        lv_obj_set_style_margin_left(elbow, 2, 0);
+    }
 
     // New message: the dot to the bubble's left, centred on it. Ours are never
     // new, so it is always on the left-aligned side.
@@ -61006,12 +61252,20 @@ static void chatMakeBubble(lv_obj_t *list, uint32_t sender, bool isMe,
     } else
 #endif
     if (whoTag || (metaTag && metaTag[0])) {
-        char header[56];
+        char header[96];
         if (metaTag && metaTag[0] && whoTag) {
             snprintf(header, sizeof(header), "%s  %s", metaTag, whoTag);
         } else {
             snprintf(header, sizeof(header), "%s", whoTag ? whoTag : metaTag);
         }
+#if CHAT_REPLY_TAG_STYLE
+        if (deco && deco->replyId) {
+            char tag[48];
+            chatReplyTagText(*deco, tag, sizeof(tag));
+            const size_t hl = strlen(header);
+            snprintf(header + hl, sizeof(header) - hl, "  %s", tag);
+        }
+#endif
         // With an ACK in, the header is a row: the tag, then the small marker
         // sitting on its baseline side.
         lv_obj_t *hdrParent = b;
@@ -61040,6 +61294,12 @@ static void chatMakeBubble(lv_obj_t *list, uint32_t sender, bool isMe,
         }
     }
 
+#if !CHAT_REPLY_TAG_STYLE
+    if (deco && deco->replyId) {
+        chatMakeReplyQuote(b, *deco, bubbleFont, tagColor, bubbleMaxW);
+    }
+#endif
+
     lv_obj_t *bl = lv_label_create(b);
     lv_obj_set_style_text_font(bl, bubbleFont, 0);
     lv_obj_set_style_text_color(bl, bodyColor, 0);
@@ -61049,6 +61309,8 @@ static void chatMakeBubble(lv_obj_t *list, uint32_t sender, bool isMe,
     // Measured after the text is set: emoji substitution rewrites it, so the
     // source string is not what actually gets drawn.
     chatFitBubbleLabel(bl, bubbleFont, bubbleMaxW);
+
+    if (deco) chatMakeReactionChips(b, *deco, bubbleFont, tagColor);
 
     if (isSelected) {
         const bool lightTheme = (s_cfg.uiMode == UI_MODE_LIGHT);
@@ -61183,10 +61445,14 @@ static void chatMakeIrcRow(lv_obj_t *list, const lv_font_t *font,
     lv_obj_set_flex_flow(row, LV_FLEX_FLOW_ROW);
     lv_obj_set_flex_align(row, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_START);
 #if defined(DEVICE_TDECK) || defined(DEVICE_M9)
-    const int padL = 1, padR = 0;
+    int padL = 1;
+    const int padR = 0;
 #else
-    const int padL = 2, padR = 4;
+    int padL = 2;
+    const int padR = 4;
 #endif
+    const ChatReplyDeco *deco = s_chatDeco;
+    if (deco && deco->replyId) padL += kChatReplyIndent;
     const int gap = 4;   // the lock screen's gap between time and sender
     lv_obj_set_style_pad_left(row, padL, 0);
     lv_obj_set_style_pad_right(row, padR, 0);
@@ -61251,7 +61517,15 @@ static void chatMakeIrcRow(lv_obj_t *list, const lv_font_t *font,
     if (nameText && nameText[0]) {
         char name[64];
         renderEmojiSafeText(nameText, name, sizeof(name));
-        char tagged[sizeof(name) + 2];
+        char tagged[sizeof(name) + 52];
+#if CHAT_REPLY_TAG_STYLE
+        if (deco && deco->replyId) {
+            char tag[48], tagSafe[48];
+            chatReplyTagText(*deco, tag, sizeof(tag));
+            renderEmojiSafeText(tag, tagSafe, sizeof(tagSafe));
+            snprintf(tagged, sizeof(tagged), "%s %s: ", name, tagSafe);
+        } else
+#endif
         snprintf(tagged, sizeof(tagged), "%s: ", name);
         lv_span_t *sp = lv_spangroup_add_span(sg);
         lv_style_set_text_color(lv_span_get_style(sp), nameColor);
@@ -61262,7 +61536,15 @@ static void chatMakeIrcRow(lv_obj_t *list, const lv_font_t *font,
     }
     {
         char text[400];
-        renderEmojiSafeText(body ? body : "", text, sizeof(text));
+        if (deco && deco->chipCount) {
+            char withChips[400];
+            char chips[96];
+            chatReactionText(*deco, chips, sizeof(chips));
+            snprintf(withChips, sizeof(withChips), "%s%s", body ? body : "", chips);
+            renderEmojiSafeText(withChips, text, sizeof(text));
+        } else {
+            renderEmojiSafeText(body ? body : "", text, sizeof(text));
+        }
         lv_span_t *sp = lv_spangroup_add_span(sg);
 #if defined(DEVICE_TDECK_PRO)
         lv_style_set_text_color(lv_span_get_style(sp), ink);
@@ -61280,6 +61562,22 @@ static void chatMakeIrcRow(lv_obj_t *list, const lv_font_t *font,
         lv_spangroup_set_span_text(sg, sp, markText);
     }
     lv_spangroup_refresh(sg);
+
+#if !CHAT_REPLY_TAG_STYLE
+    // The quote goes above the row, lined up with the text column.
+    if (deco && deco->replyId) {
+        lv_obj_t *q = chatMakeReplyQuote(list, *deco, font,
+#if defined(DEVICE_TDECK_PRO)
+                                         ink,
+#else
+                                         bodyColor,
+#endif
+                                         textW);
+        lv_obj_set_style_margin_left(q, padL + timeW + gap + dotD + gap, 0);
+        lv_obj_set_style_margin_top(q, 1, 0);
+        lv_obj_move_to_index(q, lv_obj_get_index(row));
+    }
+#endif
 
     if (isSelected) {
 #if defined(DEVICE_TDECK_PRO)
@@ -61416,11 +61714,14 @@ static void refreshChatViewBubbles(const DisplayLine *const *rows, int rowCount,
             if (sender != 0 && !isMe) chatSenderLabel(sender, ircName, sizeof(ircName));
             const bool freshDot = rows[i]->fresh && freshDotRoom(s_chatDots);
             lv_obj_t *dot = nullptr;
+            ChatReplyDeco deco;
+            if (chatBuildReplyDeco(rows, rowCount, rows[i], replyPacketId, deco)) s_chatDeco = &deco;
             chatMakeIrcRow(s_chatList, scaledChatFont(kChannelChatFont),
                            sender, isMe, timeBuf, ircName, body,
                            rows[i]->ack, replyPacketId, isSelected,
                            lastMsgObj, selectedMsgObj, onChatMessagePressed,
                            freshDot ? &dot : nullptr);
+            s_chatDeco = nullptr;
             freshDotTrack(s_chatDots, dot, FRESH_DOT_SLOT);
             if (anchorHere && lastMsgObj) *anchorObj = *lastMsgObj;
             continue;
@@ -61429,12 +61730,15 @@ static void refreshChatViewBubbles(const DisplayLine *const *rows, int rowCount,
         chatComposeBubbleMeta(iconBuf, timeBuf, metaBuf, sizeof(metaBuf));
         const bool freshDot = rows[i]->fresh && freshDotRoom(s_chatDots);
         lv_obj_t *dot = nullptr;
+        ChatReplyDeco deco;
+        if (chatBuildReplyDeco(rows, rowCount, rows[i], replyPacketId, deco)) s_chatDeco = &deco;
         chatMakeBubble(s_chatList, sender, isMe, metaBuf, nameTag, body,
                        rows[i]->ack,
                        replyPacketId, isSelected,
                        lastMsgObj, selectedMsgObj,
                        onChatMessagePressed,
                        freshDot ? &dot : nullptr);
+        s_chatDeco = nullptr;
         freshDotTrack(s_chatDots, dot, FRESH_DOT_OBJ);
         if (anchorHere && lastMsgObj) *anchorObj = *lastMsgObj;
     }
@@ -61576,6 +61880,7 @@ static void refreshChatView(bool force) {
     const DisplayLine *rows[MAX_MSG_LINES] = {};
     int rowCount = 0;
     collectChatRows(rows, rowCount);
+    chatCollectReactions();
 
     // A channel switch always lands on the newest message. Both measurements
     // below describe the channel being left — its scroll position says nothing
@@ -61682,6 +61987,8 @@ static void refreshChatView(bool force) {
             // text; any newline the sender typed sits inside a stored line and
             // survives untouched.
             uint32_t lastDateBucket = 0;
+            bool classicWidthReady = false;
+            (void)classicWidthReady;   // only quote-style boards measure the list
             int n = startN;
             while (n < endN) {
                 int i = displayOrder[n];
@@ -61710,6 +62017,47 @@ static void refreshChatView(bool force) {
                     if (ml < sizeof(merged) - 1)
                         ml += (size_t)snprintf(merged + ml, sizeof(merged) - ml, " %s", c);
                     n++;
+                }
+
+                // Replies: a tag after the prefix (small panels) or a quote
+                // line above; reactions trail the text.
+                ChatReplyDeco deco;
+                const bool hasDeco = chatBuildReplyDeco(rows, rowCount, rows[i],
+                                                        rows[i]->packetId, deco);
+                const bool isReply = hasDeco && deco.replyId != 0;
+#if CHAT_REPLY_TAG_STYLE
+                if (isReply) {
+                    const size_t pre = (size_t)(chatStripPrefix(merged) - merged);
+                    char tag[48];
+                    chatReplyTagText(deco, tag, sizeof(tag));
+                    char tmp[sizeof(merged)];
+                    snprintf(tmp, sizeof(tmp), "%.*s%s %s", (int)pre, merged, tag, merged + pre);
+                    memcpy(merged, tmp, sizeof(merged));
+                    ml = strlen(merged);
+                }
+#else
+                if (isReply) {
+                    if (!classicWidthReady) {
+                        chatBubbleBeginRender(s_chatList);
+                        classicWidthReady = true;
+                    }
+#if defined(DEVICE_TDECK_PRO)
+                    const lv_color_t quoteColor = lv_color_make(0, 0, 0);
+#else
+                    const lv_color_t quoteColor = (s_cfg.uiMode == UI_MODE_LIGHT)
+                                                      ? lv_color_hex(0x16233A)
+                                                      : lv_color_hex(0xE8F1FF);
+#endif
+                    lv_obj_t *q = chatMakeReplyQuote(s_chatList, deco,
+                                                     scaledChatFont(kChannelChatFont), quoteColor,
+                                                     s_chatBubbleListW - kChatReplyIndent - 8);
+                    lv_obj_set_style_margin_left(q, kChatReplyIndent + 2, 0);
+                    lv_obj_set_style_margin_top(q, 1, 0);
+                }
+#endif
+                if (hasDeco && deco.chipCount && ml < sizeof(merged) - 1) {
+                    chatReactionText(deco, merged + ml, sizeof(merged) - ml);
+                    ml = strlen(merged);
                 }
 
                 // A message whose ACK is in is a span group, for the small
@@ -61741,10 +62089,10 @@ static void refreshChatView(bool force) {
                 lv_obj_set_style_bg_opa(msg, LV_OPA_TRANSP, 0);
 #endif
 #if defined(DEVICE_TDECK) || defined(DEVICE_M9)
-                lv_obj_set_style_pad_left(msg, 1, 0);
+                lv_obj_set_style_pad_left(msg, 1 + (isReply ? kChatReplyIndent : 0), 0);
                 lv_obj_set_style_pad_right(msg, 0, 0);
 #else
-                lv_obj_set_style_pad_left(msg, 2, 0);
+                lv_obj_set_style_pad_left(msg, 2 + (isReply ? kChatReplyIndent : 0), 0);
                 lv_obj_set_style_pad_right(msg, 4, 0);
 #endif
                 lv_obj_set_style_pad_top(msg, 0, 0);

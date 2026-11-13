@@ -204,6 +204,8 @@ void ChannelMgr::_pushLine(int chanIdx, Channel &ch, const char *text, uint16_t 
     dl.senderNodeId = senderNodeId;
     dl.fresh        = _pushFresh;
     dl.viaMqtt      = _pushViaMqtt;
+    dl.replyId      = _pushReplyId;
+    dl.reaction     = _pushReaction;
     if (_pushFresh) ch.freshSeq++;
     ch.count++;
     ch.revision++;
@@ -216,7 +218,8 @@ void ChannelMgr::_pushLine(int chanIdx, Channel &ch, const char *text, uint16_t 
 
 int ChannelMgr::addMessage(int chanIdx, const char *prefix, const char *text,
                             uint16_t color, uint32_t packetId, bool trackAck,
-                            uint32_t senderNodeId, bool fresh, bool viaMqtt) {
+                            uint32_t senderNodeId, bool fresh, bool viaMqtt,
+                            uint32_t replyId, bool reaction) {
     if (chanIdx < 0 || chanIdx >= MAX_CHANNELS) return -1;
     if (!_chans[chanIdx].lines) return -1;
     int firstLine = _chans[chanIdx].count;
@@ -226,9 +229,13 @@ int ChannelMgr::addMessage(int chanIdx, const char *prefix, const char *text,
     uint32_t epoch = (nowEpoch >= 1700000000) ? (uint32_t)nowEpoch : 0;
     _pushFresh = fresh;
     _pushViaMqtt = viaMqtt;
+    _pushReplyId = replyId;
+    _pushReaction = reaction && replyId != 0;
     _wordWrap(chanIdx, prefix, text, color, packetId, trackAck, epoch, senderNodeId);
     _pushFresh = false;
     _pushViaMqtt = false;
+    _pushReplyId = 0;
+    _pushReaction = false;
     if (chanIdx != _active) _chans[chanIdx].unread = true;
     return firstLine;
 }
@@ -487,10 +494,21 @@ void ChannelMgr::_persistChannelNow(int chanIdx, const Channel &ch) {
             if (text[i] == '\n' || text[i] == '\r') text[i] = ' ';
         }
 
-        f.printf("%04X|%08lX|%u|%08lX|%08lX|%s\n",
+        // The reply link rides in the ack field as "ack,replyId,reaction": the
+        // text is the last field and may itself hold '|', so a new field
+        // cannot go after it, and a reader that predates this stops its
+        // strtoul() at the comma and still reads the ack.
+        char ackField[24];
+        if (dl.replyId) {
+            snprintf(ackField, sizeof(ackField), "%u,%08lX,%u", (unsigned)dl.ack,
+                     (unsigned long)dl.replyId, dl.reaction ? 1u : 0u);
+        } else {
+            snprintf(ackField, sizeof(ackField), "%u", (unsigned)dl.ack);
+        }
+        f.printf("%04X|%08lX|%s|%08lX|%08lX|%s\n",
                  (unsigned)dl.color,
                  (unsigned long)dl.packetId,
-                 (unsigned)dl.ack,
+                 ackField,
                  (unsigned long)dl.epoch,
                  (unsigned long)dl.senderNodeId,
                  text);
@@ -683,8 +701,16 @@ void ChannelMgr::loadPersisted() {
             *sep3 = '\0';
 
             uint32_t packetId = (uint32_t)strtoul(rest, nullptr, 16);
-            uint8_t ackRaw = (uint8_t)strtoul(sep2 + 1, nullptr, 10);
+            char *ackEnd = nullptr;
+            uint8_t ackRaw = (uint8_t)strtoul(sep2 + 1, &ackEnd, 10);
             if (ackRaw > DisplayLine::TX_FAILED) ackRaw = DisplayLine::NONE;
+            uint32_t replyId = 0;
+            bool reaction = false;
+            if (ackEnd && *ackEnd == ',') {
+                char *replyEnd = nullptr;
+                replyId = (uint32_t)strtoul(ackEnd + 1, &replyEnd, 16);
+                if (replyEnd && *replyEnd == ',') reaction = strtoul(replyEnd + 1, nullptr, 10) != 0;
+            }
 
             // Format may be any of:
             //   color|packetId|ack|text                    (legacy, no epoch)
@@ -717,8 +743,12 @@ void ChannelMgr::loadPersisted() {
             }
             if (!text[0]) continue;
 
+            _pushReplyId = replyId;
+            _pushReaction = reaction && replyId != 0;
             _pushLine(chanIdx, _chans[chanIdx], text, color,
                       packetId, (DisplayLine::AckState)ackRaw, epoch, senderNodeId);
+            _pushReplyId = 0;
+            _pushReaction = false;
         }
 
         f.close();
@@ -936,7 +966,8 @@ bool ChannelMgr::sendText(uint32_t myNodeId, const char *text, bool okToMqtt,
 
     if (!Radio.transmit(frame, frameLen)) {
         liveFeedAddLine("T TXT B ER", TFT_RED);
-        addMessage(txChan, prefix, text, TFT_RED, packetId, false, myNodeId);
+        addMessage(txChan, prefix, text, TFT_RED, packetId, false, myNodeId, false, false,
+                   replyId, emoji != 0);
         Channel &ch = _chans[txChan];
         for (int j = 0; j < min(ch.count, MAX_MSG_LINES); j++) {
             if (ch.lines[j].packetId == packetId) {
@@ -967,7 +998,8 @@ bool ChannelMgr::sendText(uint32_t myNodeId, const char *text, bool okToMqtt,
     }
 
     // Add to display first so ACK updates always have a visible line to target.
-    int firstLine = addMessage(txChan, prefix, text, TFT_WHITE, packetId, true, myNodeId);
+    int firstLine = addMessage(txChan, prefix, text, TFT_WHITE, packetId, true, myNodeId,
+                               false, false, replyId, emoji != 0);
 
     // Register ACK tracking. Records now hold their slot for seconds rather than
     // until the 1.5 s settle, so a burst of chat can fill all MAX_PENDING_ACK
