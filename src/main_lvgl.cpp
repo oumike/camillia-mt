@@ -61067,7 +61067,7 @@ static void chatReactionText(const ChatReplyDeco &d, char *out, size_t outLen) {
     }
 }
 
-// Reaction chips under a bubble's body: small outlined pills, one per emoji.
+// Reactions under a message's body: one emoji (and count) per reaction.
 static void chatMakeReactionChips(lv_obj_t *parent, const ChatReplyDeco &d,
                                   const lv_font_t *font, lv_color_t color) {
     if (d.chipCount == 0) return;
@@ -61077,7 +61077,7 @@ static void chatMakeReactionChips(lv_obj_t *parent, const ChatReplyDeco &d,
     lv_obj_clear_flag(row, LV_OBJ_FLAG_CLICKABLE);
     lv_obj_set_size(row, LV_SIZE_CONTENT, LV_SIZE_CONTENT);
     lv_obj_set_flex_flow(row, LV_FLEX_FLOW_ROW_WRAP);
-    lv_obj_set_style_pad_column(row, 3, 0);
+    lv_obj_set_style_pad_column(row, 6, 0);
     lv_obj_set_style_pad_row(row, 2, 0);
     lv_obj_set_style_pad_top(row, 2, 0);
     for (int k = 0; k < d.chipCount; k++) {
@@ -61085,16 +61085,6 @@ static void chatMakeReactionChips(lv_obj_t *parent, const ChatReplyDeco &d,
         lv_obj_clear_flag(chip, LV_OBJ_FLAG_CLICKABLE);
         lv_obj_set_style_text_font(chip, font, 0);
         lv_obj_set_style_text_color(chip, color, 0);
-        lv_obj_set_style_border_width(chip, 1, 0);
-        lv_obj_set_style_border_color(chip, color, 0);
-#if defined(DEVICE_TDECK_PRO)
-        lv_obj_set_style_border_opa(chip, LV_OPA_COVER, 0);
-#else
-        lv_obj_set_style_border_opa(chip, LV_OPA_60, 0);
-#endif
-        lv_obj_set_style_radius(chip, 6, 0);
-        lv_obj_set_style_pad_left(chip, 3, 0);
-        lv_obj_set_style_pad_right(chip, 3, 0);
         char t[24];
         if (d.chipN[k] > 1) snprintf(t, sizeof(t), "%s %u", d.chipEmoji[k], (unsigned)d.chipN[k]);
         else snprintf(t, sizeof(t), "%s", d.chipEmoji[k]);
@@ -61476,7 +61466,18 @@ static void chatMakeIrcRow(lv_obj_t *list, const lv_font_t *font,
     // grows to one long line instead.
     lv_coord_t textW = s_chatBubbleListW - padL - padR - timeW - gap - dotD - gap;
     if (textW < 24) textW = 24;
-    lv_obj_t *sg = lv_spangroup_create(row);
+    // With reactions, the text and the reactions under it share a column.
+    lv_obj_t *textCol = row;
+    if (deco && deco->chipCount) {
+        textCol = lv_obj_create(row);
+        lv_obj_remove_style_all(textCol);
+        lv_obj_clear_flag(textCol, LV_OBJ_FLAG_SCROLLABLE);
+        lv_obj_clear_flag(textCol, LV_OBJ_FLAG_CLICKABLE);
+        lv_obj_set_width(textCol, textW);
+        lv_obj_set_height(textCol, LV_SIZE_CONTENT);
+        lv_obj_set_flex_flow(textCol, LV_FLEX_FLOW_COLUMN);
+    }
+    lv_obj_t *sg = lv_spangroup_create(textCol);
     // Unlike a label, a span group is clickable by default, so it took every
     // press on the text and the row's tap and long press never fired.
     lv_obj_remove_flag(sg, LV_OBJ_FLAG_CLICKABLE);
@@ -61513,15 +61514,7 @@ static void chatMakeIrcRow(lv_obj_t *list, const lv_font_t *font,
     }
     {
         char text[400];
-        if (deco && deco->chipCount) {
-            char withChips[400];
-            char chips[96];
-            chatReactionText(*deco, chips, sizeof(chips));
-            snprintf(withChips, sizeof(withChips), "%s%s", body ? body : "", chips);
-            renderEmojiSafeText(withChips, text, sizeof(text));
-        } else {
-            renderEmojiSafeText(body ? body : "", text, sizeof(text));
-        }
+        renderEmojiSafeText(body ? body : "", text, sizeof(text));
         lv_span_t *sp = lv_spangroup_add_span(sg);
 #if defined(DEVICE_TDECK_PRO)
         lv_style_set_text_color(lv_span_get_style(sp), ink);
@@ -61539,6 +61532,14 @@ static void chatMakeIrcRow(lv_obj_t *list, const lv_font_t *font,
         lv_spangroup_set_span_text(sg, sp, markText);
     }
     lv_spangroup_refresh(sg);
+    if (textCol != row) {
+        chatMakeReactionChips(textCol, *deco, font,
+#if defined(DEVICE_TDECK_PRO)
+                              ink);
+#else
+                              bodyColor);
+#endif
+    }
 
 #if !CHAT_REPLY_TAG_STYLE
     // The quote goes above the row, lined up with the text column.
