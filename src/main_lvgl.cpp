@@ -61053,24 +61053,10 @@ static lv_obj_t *chatMakeReplyQuote(lv_obj_t *parent, const ChatReplyDeco &d,
     return q;
 }
 
-// " 👍2 ❤️" — the reaction tally as text, for the styles drawn as one text run.
-static void chatReactionText(const ChatReplyDeco &d, char *out, size_t outLen) {
-    size_t w = 0;
-    if (outLen) out[0] = '\0';
-    for (int k = 0; k < d.chipCount && w + 1 < outLen; k++) {
-        if (d.chipN[k] > 1) {
-            w += (size_t)snprintf(out + w, outLen - w, "  %s%u", d.chipEmoji[k], (unsigned)d.chipN[k]);
-        } else {
-            w += (size_t)snprintf(out + w, outLen - w, "  %s", d.chipEmoji[k]);
-        }
-        if (w >= outLen) { out[outLen - 1] = '\0'; break; }
-    }
-}
-
 // Reactions under a message's body: one emoji (and count) per reaction.
-static void chatMakeReactionChips(lv_obj_t *parent, const ChatReplyDeco &d,
+static lv_obj_t *chatMakeReactionChips(lv_obj_t *parent, const ChatReplyDeco &d,
                                   const lv_font_t *font, lv_color_t color) {
-    if (d.chipCount == 0) return;
+    if (d.chipCount == 0) return nullptr;
     lv_obj_t *row = lv_obj_create(parent);
     lv_obj_remove_style_all(row);
     lv_obj_clear_flag(row, LV_OBJ_FLAG_SCROLLABLE);
@@ -61090,6 +61076,7 @@ static void chatMakeReactionChips(lv_obj_t *parent, const ChatReplyDeco &d,
         else snprintf(t, sizeof(t), "%s", d.chipEmoji[k]);
         setLabelTextEmojiSafe(chip, t);
     }
+    return row;
 }
 
 // Create one message bubble (row wrapper + colored container + optional name tag
@@ -61998,7 +61985,7 @@ static void refreshChatView(bool force) {
                 }
 
                 // Replies: a tag after the prefix (small panels) or a quote
-                // line above; reactions trail the text.
+                // line above. Reactions go on a line under the message.
                 ChatReplyDeco deco;
                 const bool hasDeco = chatBuildReplyDeco(rows, rowCount, rows[i],
                                                         rows[i]->packetId, deco);
@@ -62037,10 +62024,6 @@ static void refreshChatView(bool force) {
                     lv_obj_set_style_margin_top(q, 1, 0);
                 }
 #endif
-                if (hasDeco && deco.chipCount && ml < sizeof(merged) - 1) {
-                    chatReactionText(deco, merged + ml, sizeof(merged) - ml);
-                    ml = strlen(merged);
-                }
 
                 // A message whose ACK is in is a span group, for the small
                 // marker; every other one stays a plain label. On the T-Deck
@@ -62174,6 +62157,25 @@ static void refreshChatView(bool force) {
                     }
                 }
 #endif
+
+                if (hasDeco && deco.chipCount) {
+#if defined(DEVICE_TDECK_PRO)
+                    const lv_color_t chipColor = lv_color_make(0, 0, 0);
+#else
+                    const lv_color_t chipColor = (s_cfg.uiMode == UI_MODE_LIGHT)
+                                                     ? lv_color_hex(0x16233A)
+                                                     : lv_color_hex(0xE8F1FF);
+#endif
+                    lv_obj_t *chips = chatMakeReactionChips(s_chatList, deco,
+                                                            scaledChatFont(kChannelChatFont),
+                                                            chipColor);
+#if defined(DEVICE_TDECK) || defined(DEVICE_M9)
+                    lv_obj_set_style_margin_left(chips, 1, 0);
+#else
+                    lv_obj_set_style_margin_left(chips, 2, 0);
+#endif
+                    lastMsgObj = chips;
+                }
 
                 // One separator between messages, none after the last.
                 if (n < endN) {
