@@ -1,12 +1,11 @@
+### New
+- Replies in channel chat now show a one-line quote above them, with a colour bar, the original sender's name and a short snippet of the message being answered. If the original has scrolled out of history, the quote reads "earlier message". This works in every chat style: Classic, IRC, Bubbles and Outline.
+- On M5Stack Cardputer, Heltec V4 (expansion), Heltec R8 and Elecrow ThinkNode M9, a reply shows a compact `↪@Name` tag after the sender instead of a quote line, to save screen space.
+- The web UI chat now shows reply quotes and reactions too. Tapping a quote scrolls to the original message and briefly highlights it.
+- Reply links are saved with chat history, so quotes and reactions are still there after a reboot. Older saved history still loads.
+
 ### Changed
-- Notification sounds are now the same on every board with a speaker: the Pager's Default, Chirpy and Bass melodies. T-Deck and Cardputer users will hear lower, longer sounds than before, and Bass may be quiet on their small speakers. Boards with a buzzer (Heltec V4/R8, M9, CrowPanel 5.0 V1.0) keep their own melodies.
-- Previewing a sound in the Notification Sound picker now only plays the sound. It no longer blinks the LED or keyboard, buzzes the motor, or restarts the light reminder.
+- In channel chat, emoji reactions no longer appear as their own chat lines. They are grouped under the message they react to, with a count when the same emoji is used more than once (e.g. `👍 2 ❤️`). This applies in every chat style.
+- An incoming reaction still counts as unread and alerts like a message.
 
-### Fixed
-- On the T-Deck, the pauses between notes were lost, so the notes ran together. This also affected the startup melody.
-- The last note of an alert was cut short on the Pager, Wio Tracker L2, T-Display P4, Tanmatsu and T-Deck.
-
-### For contributors
-- Pull requests now have a "Contribution guidelines" check. Every commit must be signed off (`git commit -s`), new source files need an SPDX license line, and `platformio.ini` dependencies must be pinned to exact versions. Missing translations are reported but never fail the check.
-
-Pull request: #151
+Pull request: #152
