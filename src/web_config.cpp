@@ -7812,9 +7812,18 @@ static void sendConfigPage(const char *msg = "", bool lite = false) {
                                 "if(added>0||chatRenderPending)chatRender();"
                             "}).catch(function(){chatPollBusy=false;});"
                         "}"
-                        "function chatBubble(pid,mine,txt){"
+                        // Message text without its "HH:MM [Name] " prefix, and the name.
+                        "function chatStrip(t){var m=/^.{0,64}?[\\]>] /.exec(t);return m?t.substring(m[0].length):t;}"
+                        "function chatWho(t){var m=/\\[([^\\]]+)\\] /.exec(t.substring(0,72));return m?m[1]:'You';}"
+                        // A reply opens with a quote of what it answers; clicking it
+                        // scrolls there. Reactions are chips under the original.
+                        "function chatBubble(pid,mine,txt,rp,chips){"
                             "if(pid!==0)chatPreview[pid]=txt;"
-                            "var s='<div class=\"chat-msg'+(mine?' mine':'')+'\"><div class=\"chat-body\">'+chatEsc(txt)+'</div>';"
+                            "var s='<div'+(pid!==0?' id=\"cm-'+pid+'\"':'')+' class=\"chat-msg'+(mine?' mine':'')+'\">';"
+                            "if(rp){var o=chatPreview[rp];"
+                                "s+='<div class=\"chat-quote\" onclick=\"chatJump('+rp+')\">\\u21AA '+(o?chatEsc(chatWho(o))+': '+chatEsc(chatStrip(o).substring(0,60)):'earlier message')+'</div>';}"
+                            "s+='<div class=\"chat-body\">'+chatEsc(txt)+'</div>';"
+                            "if(chips){s+='<div class=\"chat-chips\">';for(var e in chips)s+='<span class=\"chat-chip\">'+chatEsc(e)+(chips[e]>1?' '+chips[e]:'')+'</span>';s+='</div>';}"
                             // No reply/tapback on our own messages.
                             "if(pid!==0&&!mine){s+='<div class=\"chat-actions\">';"
                                 "s+='<button type=\"button\" class=\"chat-mini\" onclick=\"chatReply('+pid+')\">Reply</button>';"
@@ -7830,6 +7839,11 @@ static void sendConfigPage(const char *msg = "", bool lite = false) {
                             "chatRenderPending=false;"
                             "var atBottom=feed.scrollHeight-feed.scrollTop-feed.clientHeight<40;"
                             "var h='';var i=0;var L=chatLines;"
+                            // Tally reactions first: they may arrive long after the original.
+                            "var taps={};for(var r=0;r<L.length;r++){var x=L[r];"
+                                "if(!x.rx||!x.rp||/^\\s\\s/.test(x.t))continue;"
+                                "var em=chatStrip(x.t).trim();if(!em)continue;"
+                                "var tb=taps[x.rp]||(taps[x.rp]={});tb[em]=(tb[em]||0)+1;}"
                             // A wrapped message is stored one line per wrap, and
                             // ChannelMgr::_wordWrap() pushes those lines LAST SEGMENT
                             // FIRST — the device draws its feed newest-at-top, so
@@ -7842,7 +7856,8 @@ static void sendConfigPage(const char *msg = "", bool lite = false) {
                                 "if(pid!==0){while(j<L.length&&L[j].pid===pid)j++;}"
                                 "var head=L[j-1];var txt=head.t;"
                                 "for(var k=j-2;k>=i;k--){var seg=L[k].t.replace(/^\\s{1,2}/,'');if(seg)txt+=' '+seg;}"
-                                "h+=chatBubble(pid,!!head.mine,txt);i=j;}"
+                                "if(head.rx){i=j;continue;}"
+                                "h+=chatBubble(pid,!!head.mine,txt,head.rp||0,pid!==0?taps[pid]:null);i=j;}"
                             "feed.innerHTML=h;if(atBottom)feed.scrollTop=feed.scrollHeight;"
                         "}"
                         "function chatReply(pid){"
@@ -7852,6 +7867,9 @@ static void sendConfigPage(const char *msg = "", bool lite = false) {
                             "if(bar)bar.style.display='flex';"
                             "var inp=document.getElementById('chat-input');if(inp){inp.scrollIntoView({block:'nearest'});inp.focus();}"
                         "}"
+                        "function chatJump(pid){var el=document.getElementById('cm-'+pid);if(!el)return;"
+                            "el.scrollIntoView({block:'center',behavior:'smooth'});el.classList.add('flash');"
+                            "setTimeout(function(){el.classList.remove('flash');},1200);}"
                         "function chatCancelReply(){chatReplyPid=0;var bar=document.getElementById('chat-reply-bar');if(bar)bar.style.display='none';}"
                         "function chatPost(text,reply,emoji){"
                             "if(chatId==='')return;"
@@ -9423,12 +9441,15 @@ static void handleGetChatData() {
         const char *t;
         uint32_t pid;
         uint8_t ack;
+        uint32_t replyId = 0;
+        bool reaction = false;
         if (isDm) {
             const DmLine &dl = dmLines[i % cap];
             t = dl.text; pid = dl.packetId; ack = (uint8_t)dl.ack;
         } else {
             const DisplayLine &dl = chLines[i % cap];
             t = dl.text; pid = dl.packetId; ack = (uint8_t)dl.ack;
+            replyId = dl.replyId; reaction = dl.reaction;
         }
         if (!first) out += ",";
         first = false;
@@ -9440,6 +9461,12 @@ static void handleGetChatData() {
         out += (ack != 0 ? "1" : "0");
         out += ",\"ack\":";
         out += String((int)ack);
+        // Channel replies: the packet id answered, and whether it is a reaction.
+        if (replyId) {
+            out += ",\"rp\":";
+            out += String(replyId);
+            if (reaction) out += ",\"rx\":1";
+        }
         out += ",\"t\":\"";
         appendJsonEscaped(out, t);
         out += "\"}";

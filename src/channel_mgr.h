@@ -13,6 +13,12 @@ struct DisplayLine {
     uint32_t senderNodeId; // originating node; own node = me, 0 = local/system line
     bool     fresh;        // received and not yet seen: the chat view blinks it (RAM only)
     bool     viaMqtt;      // Live feed: the packet behind it reached a broker (via_mqtt set) (RAM only)
+    // Data.reply_id: the message this one answers (0 = not a reply). On a
+    // reaction it is the message reacted to.
+    uint32_t replyId;
+    // A tapback (Data.emoji set with a reply_id): the chat draws it as a chip
+    // under the message it reacts to, never as a line of its own.
+    bool     reaction;
 };
 
 struct Channel {
@@ -55,10 +61,11 @@ public:
     // Add a rendered message to a channel. Word-wraps to MSG_CHARS.
     // prefix: e.g. "14:32 [ABCD] " — prepended to first line only
     // Returns the line index of the first added line.
+    // replyId / reaction: see DisplayLine; stamped on every wrapped line.
     int addMessage(int chanIdx, const char *prefix, const char *text,
                    uint16_t color, uint32_t packetId = 0,
                    bool trackAck = false, uint32_t senderNodeId = 0, bool fresh = false,
-                   bool viaMqtt = false);
+                   bool viaMqtt = false, uint32_t replyId = 0, bool reaction = false);
 
     // Chat server replays (cs_client): whether a channel already shows a message,
     // the newest message the node received from someone else, and inserting a
@@ -237,6 +244,8 @@ private:
     bool       _persistDirReady = false;
     bool       _pushFresh = false;   // what _pushLine stamps into DisplayLine::fresh
     bool       _pushViaMqtt = false; // ... and into DisplayLine::viaMqtt
+    uint32_t   _pushReplyId = 0;     // ... DisplayLine::replyId
+    bool       _pushReaction = false; // ... DisplayLine::reaction
     // millis() when each channel first went dirty / was last touched. Zero in
     // _dirtySinceMs means clean. Sized for the persisted channels only: CHAN_LIVE
     // and anything above MESH_CHANNELS is never written to storage.
