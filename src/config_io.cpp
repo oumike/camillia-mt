@@ -8,6 +8,7 @@
 #include "utf8_utils.h"
 #include "i18n.h"           // UiLang codes for the YAML `language:` key
 #include "ignore_list.h"
+#include "user_msg_colors.h"   // custom own-message colour, as RRGGBB
 #include "storage.h"
 #include <Preferences.h>
 #include <Curve25519.h>      // validate an imported identity keypair
@@ -1761,6 +1762,10 @@ void cfgToYaml(const RhinoConfig &cfg, String &out) {
     // WiFi credentials (for web config export/import portability)
     out += "wifi_ssid: "; out += cfg.wifiSsid; out += "\n";
     out += "wifi_pass: "; out += cfg.wifiPass; out += "\n";
+    // The master switch. Missing from backups until now, so a restore left
+    // WiFi as the device had it -- and with WiFi off the load path also turns
+    // the MQTT bridge off, so a restored MQTT setup came back dead.
+    snprintf(tmp, sizeof(tmp), "wifi_enabled: %s\n", cfg.wifiEnabled ? "true" : "false"); out += tmp;
     // Every known network, with the active one flagged. wifi_ssid/wifi_pass
     // above stay for backward compatibility and always name the same network as
     // the `active: true` entry here; an older build reading this file ignores
@@ -1950,8 +1955,13 @@ void cfgToYaml(const RhinoConfig &cfg, String &out) {
     out += "\n";
     out += "    userMsgColor: ";  // own-message color: 0..15 palette index, or "default"
     if (cfg.userMsgColor <= 15) { snprintf(tmp, sizeof(tmp), "%d", cfg.userMsgColor); out += tmp; }
+    else if (cfg.userMsgColor == USER_MSG_COLOR_CUSTOM) { out += "custom"; }
     else { out += "default"; }
     out += "\n";
+    // Always written, so a custom colour survives even while a palette entry
+    // is selected -- it is what picking Custom again comes back to.
+    snprintf(tmp, sizeof(tmp), "    userMsgCustomRgb: %06lX\n",
+             (unsigned long)(cfg.userMsgCustomRgb & 0xFFFFFFUL));             out += tmp;
     // lora
     out += "  lora:\n";
     // Bandwidth goes out as the Meshtastic integer code, not the derived float:
@@ -1977,6 +1987,19 @@ void cfgToYaml(const RhinoConfig &cfg, String &out) {
     snprintf(tmp, sizeof(tmp), "    txPower: %d\n",        cfg.loraPower);    out += tmp;
     snprintf(tmp, sizeof(tmp), "    loraRxBoostedGain: %s\n",
              cfg.loraRxBoostedGain ? "true" : "false");                       out += tmp;
+    // The stored custom modem, always. bandwidth/spreadFactor/codingRate above
+    // are the settings in force, which under a preset are the preset's -- and
+    // the importer also copies those into the custom fields, so without these a
+    // round trip replaced the custom setup with the preset's numbers. Written
+    // last so they are parsed last and win.
+    snprintf(tmp, sizeof(tmp), "    customBandwidth: %u\n",
+             (unsigned)cfg.loraCustomBwKhz);                                  out += tmp;
+    snprintf(tmp, sizeof(tmp), "    customSpreadFactor: %u\n",
+             (unsigned)cfg.loraCustomSf);                                     out += tmp;
+    snprintf(tmp, sizeof(tmp), "    customCodingRate: %u\n",
+             (unsigned)cfg.loraCustomCr);                                     out += tmp;
+    snprintf(tmp, sizeof(tmp), "    customChannelNum: %u\n",
+             (unsigned)cfg.loraCustomSlot);                                   out += tmp;
     // network
     out += "  network:\n";
     out += "    ntpServer: "; out += cfg.ntpServer; out += "\n";
@@ -2389,6 +2412,7 @@ bool cfgImportFromBuf(const char *buf, size_t len, RhinoConfig &cfg) {
                     strncpy(cfg.wifiPass, val, sizeof(cfg.wifiPass) - 1);
                     cfg.wifiPass[sizeof(cfg.wifiPass) - 1] = '\0';
                 }
+                else if (!strcmp(key, "wifi_enabled")) cfg.wifiEnabled = parseBoolValue(val);
                 else if (!strcmp(key, "webcfg_user")) {
                     // Username is currently fixed to admin; accept key for compatibility.
                 }
@@ -2581,6 +2605,18 @@ bool cfgImportFromBuf(const char *buf, size_t len, RhinoConfig &cfg) {
                 else if (!strcmp(key, "hopLimit"))     cfg.loraHopLimit = (uint8_t)atoi(val);
                 else if (!strcmp(key, "txPower"))      cfg.loraPower    = (uint8_t)constrain(atoi(val), 1, 22);
                 else if (!strcmp(key, "loraRxBoostedGain")) cfg.loraRxBoostedGain = parseBoolValue(val);
+                // Range-checked by applyPresetParams() at the end of the import.
+                else if (!strcmp(key, "customBandwidth")) {
+                    if (atoi(val) > 0) cfg.loraCustomBwKhz = (uint16_t)atoi(val);
+                }
+                else if (!strcmp(key, "customSpreadFactor")) {
+                    if (atoi(val) > 0) cfg.loraCustomSf = (uint8_t)atoi(val);
+                }
+                else if (!strcmp(key, "customCodingRate")) {
+                    if (atoi(val) > 0) cfg.loraCustomCr = (uint8_t)atoi(val);
+                }
+                else if (!strcmp(key, "customChannelNum"))
+                    cfg.loraCustomSlot = (uint8_t)constrain(atoi(val), 0, 255);
                 else if (!strcmp(key, "freq_mhz"))     cfg.loraFreq     = atof(val);
                 else if (!strcmp(key, "region"))       strncpy(cfg.region, val, sizeof(cfg.region) - 1);
                 else if (!strcmp(key, "modemPreset"))  cfg.modemPreset  = presetFromName(val);
@@ -2797,9 +2833,15 @@ bool cfgImportFromBuf(const char *buf, size_t len, RhinoConfig &cfg) {
                     if (isdigit((unsigned char)val[0])) {
                         int idx = atoi(val);
                         cfg.userMsgColor = (idx >= 0 && idx <= 15) ? (uint8_t)idx : 0xFF;
+                    } else if (!strcmp(val, "custom")) {
+                        cfg.userMsgColor = USER_MSG_COLOR_CUSTOM;
                     } else {
                         cfg.userMsgColor = 0xFF;
                     }
+                }
+                else if (!strcmp(key, "userMsgCustomRgb")) {
+                    uint32_t rgb = 0;
+                    if (userMsgParseHexRgb(val, &rgb)) cfg.userMsgCustomRgb = rgb;
                 }
             } else if (!strcmp(section, "config") && !strcmp(subsection, "network")) {
                 if (!strcmp(key, "webCfgIdleTimeoutS")) cfg.webCfgIdleTimeoutS = cfgCoerceWebCfgIdle(atol(val));

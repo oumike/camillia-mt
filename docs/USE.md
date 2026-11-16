@@ -3014,6 +3014,11 @@ that a bandwidth of `31` means 31.25 kHz and `62` means 62.5 kHz. A
 `meshtastic --export-config` dump from a node on custom settings imports
 directly.
 
+Camillia's own exports also carry `customBandwidth`, `customSpreadFactor`,
+`customCodingRate` and `customChannelNum`: the stored custom settings, written
+even while a preset is in force, so a backup made on a preset still restores
+the custom setup you would switch back to.
+
 ### Choosing a Wi-Fi network
 
 The **Choose WiFi** action lists your configured network, an **AP** entry, then
@@ -3058,6 +3063,9 @@ wifi_networks:
     pass: officepass
     active: false
 ```
+
+`wifi_enabled` carries the WiFi master switch, so a restore turns WiFi (and with
+it MQTT, which needs it) back on or off as the backup had it.
 
 The top-level `wifi_ssid` / `wifi_pass` keys still name the active network too,
 so an older build reading the file comes up on the right one and simply ignores
