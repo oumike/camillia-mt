@@ -8,6 +8,7 @@
 #include "utf8_utils.h"
 #include "i18n.h"           // UiLang codes for the YAML `language:` key
 #include "ignore_list.h"
+#include "user_msg_colors.h"   // custom own-message colour, as RRGGBB
 #include "storage.h"
 #include <Preferences.h>
 #include <Curve25519.h>      // validate an imported identity keypair
@@ -472,7 +473,6 @@ void applyPresetParams(RhinoConfig &cfg) {
 
 // ── Storage paths ─────────────────────────────────────────────────────────────
 static const char *kPath = "/camillia/config.yaml";
-static const char *kTmpPath = "/camillia/config.yaml.tmp";
 static const char *kBakPath = "/camillia/config.yaml.bak";
 // Comment lines, so older builds and the Meshtastic CLI ignore them. A file
 // with the format marker was written by a build that also ends it with the end
@@ -1327,8 +1327,6 @@ void cfgInitDefaults(RhinoConfig &cfg) {
     cfg.displayUnits       = MY_DISPLAY_UNITS;
     cfg.battDisplayMode    = MY_BATT_DISPLAY;
     cfg.clockFormat        = cfgCoerceClockFormat(MY_CLOCK_FORMAT);
-    cfg.compassNorthTop    = MY_COMPASS_NORTH;
-    cfg.flipScreen         = MY_FLIP_SCREEN;
     cfg.uiOrientation      = (ORIENTATION_SEED_PORTRAIT != 0) ? 1 : 0;
     cfg.splashMelodyEnabled = MY_SPLASH_MELODY_ENABLED;
     cfg.msgAlertSound      = MY_MSG_ALERT_SOUND;
@@ -1343,9 +1341,6 @@ void cfgInitDefaults(RhinoConfig &cfg) {
     cfg.bleKbdAddr[0]      = '\0';
     cfg.bleKbdName[0]      = '\0';
     cfg.bleKbdAddrType     = 0;
-    cfg.btEnabled          = MY_BT_ENABLED;
-    cfg.btMode             = MY_BT_MODE;
-    cfg.btFixedPin         = MY_BT_PIN;
     strncpy(cfg.ntpServer,   MY_NTP_SERVER,  sizeof(cfg.ntpServer)  - 1);
     cfg.ntpServer[sizeof(cfg.ntpServer) - 1] = '\0';
     // No default: there is no public plain-HTTP elevation service to point at,
@@ -1377,10 +1372,7 @@ void cfgInitDefaults(RhinoConfig &cfg) {
     cfg.mqttEncryption     = MY_MQTT_ENCRYPT;
     cfg.mqttMapReport      = MY_MQTT_MAP_RPT;
     cfg.mqttPort           = MY_MQTT_PORT;
-    cfg.mqttTls            = MY_MQTT_TLS;
     cfg.isPowerSaving      = MY_POWER_SAVING;
-    cfg.lsSecs             = MY_LS_SECS;
-    cfg.minWakeSecs        = MY_MIN_WAKE_SECS;
     cfg.telDeviceEnabled   = MY_TEL_DEV_EN;
     cfg.telDeviceIntervalS = MY_TEL_DEV_INTV;
     cfg.telEnvEnabled      = HAS_ENV_SENSOR_TELEMETRY ? (bool)MY_TEL_ENV_EN : false;
@@ -1388,9 +1380,6 @@ void cfgInitDefaults(RhinoConfig &cfg) {
     cfg.neighborInfoEnabled = MY_NEIGHBORINFO_EN;
     cfg.neighborInfoIntervalS = MY_NEIGHBORINFO_INTV;
     cfg.neighborInfoOverLora = MY_NEIGHBORINFO_LORA;
-    cfg.cannedEnabled      = MY_CANNED_EN;
-    strncpy(cfg.cannedMessages, MY_CANNED_MSGS, sizeof(cfg.cannedMessages) - 1);
-    cfg.cannedMessages[sizeof(cfg.cannedMessages) - 1] = '\0';
     cfg.chatServerMode     = MY_CHAT_SERVER_MODE;
     cfg.chatServerNodeId   = 0;
     cfg.chatServerFlags    = CHAT_SERVER_FLAGS_MAGIC;
@@ -1409,11 +1398,9 @@ void cfgInitDefaults(RhinoConfig &cfg) {
     cfg.autoFavoriteEnabled = MY_AUTOFAV_ENABLED;
     // After cfg.displayUnits above, which decides which round value this is.
     cfg.autoFavoriteRangeM  = cfgDefaultAutoFavRangeM(cfg.displayUnits);
-    cfg.chatSpacing        = MY_CHAT_SPACING;
     cfg.fontSize           = MY_FONT_SIZE;
     cfg.battCalTrim        = 0;   // uncalibrated; the board's BATT_CAL still applies
     cfg.chatColorSalt      = 0;   // original node-color mapping
-    cfg.notifyLedEnabled   = MY_NOTIFY_LED_ENABLED;
     cfg.invertScroll       = MY_INVERT_SCROLL;
     cfg.navBarEnabled      = (bool)MY_NAV_BAR_ENABLED;
     // A config built from defaults has nothing to migrate: every migration's
@@ -1774,6 +1761,10 @@ void cfgToYaml(const RhinoConfig &cfg, String &out) {
     // WiFi credentials (for web config export/import portability)
     out += "wifi_ssid: "; out += cfg.wifiSsid; out += "\n";
     out += "wifi_pass: "; out += cfg.wifiPass; out += "\n";
+    // The master switch. Missing from backups until now, so a restore left
+    // WiFi as the device had it -- and with WiFi off the load path also turns
+    // the MQTT bridge off, so a restored MQTT setup came back dead.
+    snprintf(tmp, sizeof(tmp), "wifi_enabled: %s\n", cfg.wifiEnabled ? "true" : "false"); out += tmp;
     // Every known network, with the active one flagged. wifi_ssid/wifi_pass
     // above stay for backward compatibility and always name the same network as
     // the `active: true` entry here; an older build reading this file ignores
@@ -1849,8 +1840,6 @@ void cfgToYaml(const RhinoConfig &cfg, String &out) {
     snprintf(tmp, sizeof(tmp), "    lockScreen: %s\n", cfg.lockScreenEnabled ? "true" : "false"); out += tmp;
     snprintf(tmp, sizeof(tmp), "    lockScreenOffSecs: %lu\n", (unsigned long)cfg.lockScreenOffSecs); out += tmp;
     out += "    units: "; out += (cfg.displayUnits ? "IMPERIAL" : "METRIC"); out += "\n";
-    snprintf(tmp, sizeof(tmp), "    compassNorthTop: %s\n", cfg.compassNorthTop ? "true" : "false"); out += tmp;
-    snprintf(tmp, sizeof(tmp), "    flipScreen: %s\n",      cfg.flipScreen      ? "true" : "false"); out += tmp;
     out += "    orientation: ";
     out += (cfg.uiOrientation == 2 ? "PORTRAIT_180"
             : cfg.uiOrientation == 1 ? "PORTRAIT" : "LANDSCAPE");
@@ -1965,8 +1954,13 @@ void cfgToYaml(const RhinoConfig &cfg, String &out) {
     out += "\n";
     out += "    userMsgColor: ";  // own-message color: 0..15 palette index, or "default"
     if (cfg.userMsgColor <= 15) { snprintf(tmp, sizeof(tmp), "%d", cfg.userMsgColor); out += tmp; }
+    else if (cfg.userMsgColor == USER_MSG_COLOR_CUSTOM) { out += "custom"; }
     else { out += "default"; }
     out += "\n";
+    // Always written, so a custom colour survives even while a palette entry
+    // is selected -- it is what picking Custom again comes back to.
+    snprintf(tmp, sizeof(tmp), "    userMsgCustomRgb: %06lX\n",
+             (unsigned long)(cfg.userMsgCustomRgb & 0xFFFFFFUL));             out += tmp;
     // lora
     out += "  lora:\n";
     // Bandwidth goes out as the Meshtastic integer code, not the derived float:
@@ -1992,6 +1986,19 @@ void cfgToYaml(const RhinoConfig &cfg, String &out) {
     snprintf(tmp, sizeof(tmp), "    txPower: %d\n",        cfg.loraPower);    out += tmp;
     snprintf(tmp, sizeof(tmp), "    loraRxBoostedGain: %s\n",
              cfg.loraRxBoostedGain ? "true" : "false");                       out += tmp;
+    // The stored custom modem, always. bandwidth/spreadFactor/codingRate above
+    // are the settings in force, which under a preset are the preset's -- and
+    // the importer also copies those into the custom fields, so without these a
+    // round trip replaced the custom setup with the preset's numbers. Written
+    // last so they are parsed last and win.
+    snprintf(tmp, sizeof(tmp), "    customBandwidth: %u\n",
+             (unsigned)cfg.loraCustomBwKhz);                                  out += tmp;
+    snprintf(tmp, sizeof(tmp), "    customSpreadFactor: %u\n",
+             (unsigned)cfg.loraCustomSf);                                     out += tmp;
+    snprintf(tmp, sizeof(tmp), "    customCodingRate: %u\n",
+             (unsigned)cfg.loraCustomCr);                                     out += tmp;
+    snprintf(tmp, sizeof(tmp), "    customChannelNum: %u\n",
+             (unsigned)cfg.loraCustomSlot);                                   out += tmp;
     // network
     out += "  network:\n";
     out += "    ntpServer: "; out += cfg.ntpServer; out += "\n";
@@ -2028,8 +2035,6 @@ void cfgToYaml(const RhinoConfig &cfg, String &out) {
     // power
     out += "  power:\n";
     snprintf(tmp, sizeof(tmp), "    isPowerSaving: %s\n", cfg.isPowerSaving ? "true" : "false"); out += tmp;
-    snprintf(tmp, sizeof(tmp), "    lsSecs: %lu\n",       (unsigned long)cfg.lsSecs);            out += tmp;
-    snprintf(tmp, sizeof(tmp), "    minWakeSecs: %lu\n",  (unsigned long)cfg.minWakeSecs);        out += tmp;
     // location
     out += "location:\n";
     snprintf(tmp, sizeof(tmp), "  alt: %d\n",    (int)cfg.alt);        out += tmp;
@@ -2066,7 +2071,6 @@ void cfgToYaml(const RhinoConfig &cfg, String &out) {
     snprintf(tmp, sizeof(tmp), "    enabled: %s\n", cfg.mqttEnabled ? "true" : "false"); out += tmp;
     out += "    address: "; out += cfg.mqttServer; out += "\n";
     snprintf(tmp, sizeof(tmp), "    port: %u\n", (unsigned)cfg.mqttPort); out += tmp;
-    snprintf(tmp, sizeof(tmp), "    tlsEnabled: %s\n", cfg.mqttTls ? "true" : "false"); out += tmp;
     out += "    username: "; out += cfg.mqttUser; out += "\n";
     out += "    password: "; out += cfg.mqttPass; out += "\n";
     out += "    root: "; out += cfg.mqttRoot; out += "\n";
@@ -2074,6 +2078,14 @@ void cfgToYaml(const RhinoConfig &cfg, String &out) {
     snprintf(tmp, sizeof(tmp), "    mapReportingEnabled: %s\n", cfg.mqttMapReport ? "true" : "false"); out += tmp;
     snprintf(tmp, sizeof(tmp), "    ok_to_mqtt: %s\n", cfg.okToMqtt ? "true" : "false"); out += tmp;
     snprintf(tmp, sizeof(tmp), "    node_id_from_pubkey: %s\n", cfg.nodeIdFromPubKey ? "true" : "false"); out += tmp;
+    // "none" when off. Restoring this onto a second device gives the two the
+    // same id, which is the same caution the private key above already carries.
+    if (cfg.nodeIdOverride) {
+        snprintf(tmp, sizeof(tmp), "    node_id_override: !%08lx\n", (unsigned long)cfg.nodeIdOverride);
+    } else {
+        snprintf(tmp, sizeof(tmp), "    node_id_override: none\n");
+    }
+    out += tmp;
     snprintf(tmp, sizeof(tmp), "    packet_signature_policy: %s   # Compatible, Balanced or Strict\n",
              sigPolicyName(cfg.packetSigPolicy)); out += tmp;
     snprintf(tmp, sizeof(tmp), "    ignore_mqtt: %s\n", cfg.ignoreMqtt ? "true" : "false"); out += tmp;
@@ -2399,8 +2411,6 @@ bool cfgImportFromBuf(const char *buf, size_t len, RhinoConfig &cfg) {
                     else
                         utf8util::copyTruncate(cfg.callSign, sizeof(cfg.callSign), val);
                 }
-                else if (!strcmp(key, "canned_messages"))
-                    strncpy(cfg.cannedMessages, val, sizeof(cfg.cannedMessages) - 1);
                 else if (!strcmp(key, "wifi_ssid")) {
                     strncpy(cfg.wifiSsid, val, sizeof(cfg.wifiSsid) - 1);
                     cfg.wifiSsid[sizeof(cfg.wifiSsid) - 1] = '\0';
@@ -2409,6 +2419,7 @@ bool cfgImportFromBuf(const char *buf, size_t len, RhinoConfig &cfg) {
                     strncpy(cfg.wifiPass, val, sizeof(cfg.wifiPass) - 1);
                     cfg.wifiPass[sizeof(cfg.wifiPass) - 1] = '\0';
                 }
+                else if (!strcmp(key, "wifi_enabled")) cfg.wifiEnabled = parseBoolValue(val);
                 else if (!strcmp(key, "webcfg_user")) {
                     // Username is currently fixed to admin; accept key for compatibility.
                 }
@@ -2601,6 +2612,18 @@ bool cfgImportFromBuf(const char *buf, size_t len, RhinoConfig &cfg) {
                 else if (!strcmp(key, "hopLimit"))     cfg.loraHopLimit = (uint8_t)atoi(val);
                 else if (!strcmp(key, "txPower"))      cfg.loraPower    = (uint8_t)constrain(atoi(val), 1, 22);
                 else if (!strcmp(key, "loraRxBoostedGain")) cfg.loraRxBoostedGain = parseBoolValue(val);
+                // Range-checked by applyPresetParams() at the end of the import.
+                else if (!strcmp(key, "customBandwidth")) {
+                    if (atoi(val) > 0) cfg.loraCustomBwKhz = (uint16_t)atoi(val);
+                }
+                else if (!strcmp(key, "customSpreadFactor")) {
+                    if (atoi(val) > 0) cfg.loraCustomSf = (uint8_t)atoi(val);
+                }
+                else if (!strcmp(key, "customCodingRate")) {
+                    if (atoi(val) > 0) cfg.loraCustomCr = (uint8_t)atoi(val);
+                }
+                else if (!strcmp(key, "customChannelNum"))
+                    cfg.loraCustomSlot = (uint8_t)constrain(atoi(val), 0, 255);
                 else if (!strcmp(key, "freq_mhz"))     cfg.loraFreq     = atof(val);
                 else if (!strcmp(key, "region"))       strncpy(cfg.region, val, sizeof(cfg.region) - 1);
                 else if (!strcmp(key, "modemPreset"))  cfg.modemPreset  = presetFromName(val);
@@ -2667,9 +2690,8 @@ bool cfgImportFromBuf(const char *buf, size_t len, RhinoConfig &cfg) {
                     gotPrivKey = decodeIdentityKey(val, impPriv);
                 }
             } else if (!strcmp(section, "config") && !strcmp(subsection, "bluetooth")) {
-                if      (!strcmp(key, "enabled"))  cfg.btEnabled  = (!strcmp(val,"true"));
-                else if (!strcmp(key, "fixedPin")) cfg.btFixedPin = (uint32_t)atol(val);
-                else if (!strcmp(key, "mode"))     cfg.btMode = !strcmp(val,"FIXED_PIN") ? 1 : !strcmp(val,"NO_PIN") ? 2 : 0;
+                // Phone-pairing Bluetooth settings, retired: older exports still
+                // carry this block, which is accepted and ignored.
             } else if (!strcmp(section, "config") && !strcmp(subsection, "display")) {
                 if      (!strcmp(key, "brightness"))      cfg.brightness      = cfgCoerceBrightness(atoi(val));
                 else if (!strcmp(key, "lockScreenBrightness"))
@@ -2679,8 +2701,6 @@ bool cfgImportFromBuf(const char *buf, size_t len, RhinoConfig &cfg) {
                 else if (!strcmp(key, "lockScreenOffSecs"))
                     cfg.lockScreenOffSecs = cfgCoerceLockScreenOffSecs((uint32_t)atol(val));
                 else if (!strcmp(key, "units"))           cfg.displayUnits    = !strcmp(val,"IMPERIAL") ? 1 : 0;
-                else if (!strcmp(key, "compassNorthTop")) cfg.compassNorthTop = (!strcmp(val,"true"));
-                else if (!strcmp(key, "flipScreen"))      cfg.flipScreen      = (!strcmp(val,"true"));
                 else if (!strcmp(key, "orientation"))     cfg.uiOrientation   =
                         !strcmp(val, "PORTRAIT_180") ? 2 : (!strcmp(val, "PORTRAIT") ? 1 : 0);
                 else if (!strcmp(key, "language"))        cfg.uiLanguage = i18nLangFromCode(val);
@@ -2690,8 +2710,9 @@ bool cfgImportFromBuf(const char *buf, size_t len, RhinoConfig &cfg) {
                 else if (!strcmp(key, "batteryCalTrim"))  cfg.battCalTrim = cfgCoerceBattCalTrim(atoi(val));
                 else if (!strcmp(key, "chatColorSalt"))   cfg.chatColorSalt = (uint32_t)strtoul(val, nullptr, 10);
                 else if (!strcmp(key, "notifyLed")) {
-                    cfg.notifyLedEnabled = parseBoolValue(val);
-                    if (!cfg.notifyLedEnabled) {
+                    // Older exports' master switch, now retired: off still
+                    // means both LEDs off.
+                    if (!parseBoolValue(val)) {
                         cfg.notifyLedColorChannel = NOTIFY_LED_COLOR_OFF;
                         cfg.notifyLedColorDm = NOTIFY_LED_COLOR_OFF;
                     }
@@ -2819,9 +2840,15 @@ bool cfgImportFromBuf(const char *buf, size_t len, RhinoConfig &cfg) {
                     if (isdigit((unsigned char)val[0])) {
                         int idx = atoi(val);
                         cfg.userMsgColor = (idx >= 0 && idx <= 15) ? (uint8_t)idx : 0xFF;
+                    } else if (!strcmp(val, "custom")) {
+                        cfg.userMsgColor = USER_MSG_COLOR_CUSTOM;
                     } else {
                         cfg.userMsgColor = 0xFF;
                     }
+                }
+                else if (!strcmp(key, "userMsgCustomRgb")) {
+                    uint32_t rgb = 0;
+                    if (userMsgParseHexRgb(val, &rgb)) cfg.userMsgCustomRgb = rgb;
                 }
             } else if (!strcmp(section, "config") && !strcmp(subsection, "network")) {
                 if (!strcmp(key, "webCfgIdleTimeoutS")) cfg.webCfgIdleTimeoutS = cfgCoerceWebCfgIdle(atol(val));
@@ -2839,8 +2866,7 @@ bool cfgImportFromBuf(const char *buf, size_t len, RhinoConfig &cfg) {
                 }
             } else if (!strcmp(section, "config") && !strcmp(subsection, "power")) {
                 if      (!strcmp(key, "isPowerSaving")) cfg.isPowerSaving = (!strcmp(val,"true"));
-                else if (!strcmp(key, "lsSecs"))        cfg.lsSecs        = (uint32_t)atol(val);
-                else if (!strcmp(key, "minWakeSecs"))   cfg.minWakeSecs   = (uint32_t)atol(val);
+                // lsSecs / minWakeSecs: retired, accepted and ignored.
             } else if (!strcmp(section, "module_config") && !strcmp(subsection, "mqtt")) {
                 if      (!strcmp(key, "address"))            strncpy(cfg.mqttServer,  val, sizeof(cfg.mqttServer)  - 1);
                 else if (!strcmp(key, "enabled"))            cfg.mqttEnabled    = parseBoolValue(val);
@@ -2848,7 +2874,7 @@ bool cfgImportFromBuf(const char *buf, size_t len, RhinoConfig &cfg) {
                     long p = atol(val);
                     if (p >= 1 && p <= 65535) cfg.mqttPort = (uint16_t)p;
                 }
-                else if (!strcmp(key, "tlsEnabled") || !strcmp(key, "tls")) cfg.mqttTls = parseBoolValue(val);
+                // tlsEnabled / tls: retired (no TLS client), accepted and ignored.
                 else if (!strcmp(key, "encryptionEnabled"))  cfg.mqttEncryption = parseBoolValue(val);
                 else if (!strcmp(key, "mapReportingEnabled"))cfg.mqttMapReport  = parseBoolValue(val);
                 else if (!strcmp(key, "password"))           strncpy(cfg.mqttPass,    val, sizeof(cfg.mqttPass)    - 1);
@@ -2856,6 +2882,10 @@ bool cfgImportFromBuf(const char *buf, size_t len, RhinoConfig &cfg) {
                 else if (!strcmp(key, "username"))           strncpy(cfg.mqttUser,    val, sizeof(cfg.mqttUser)    - 1);
                 else if (!strcmp(key, "ok_to_mqtt"))         cfg.okToMqtt     = parseBoolValue(val);
                 else if (!strcmp(key, "node_id_from_pubkey")) cfg.nodeIdFromPubKey = parseBoolValue(val);
+                else if (!strcmp(key, "node_id_override")) {
+                    const uint32_t id = parseNodeIdText(val);
+                    cfg.nodeIdOverride = (id == 0xFFFFFFFFUL) ? 0 : id;   // never broadcast
+                }
                 else if (!strcmp(key, "packet_signature_policy")) cfg.packetSigPolicy = sigPolicyParse(val);
                 else if (!strcmp(key, "ignore_mqtt"))        cfg.ignoreMqtt   = parseBoolValue(val);
             } else if (!strcmp(section, "module_config") && !strcmp(subsection, "telemetry")) {
@@ -2879,7 +2909,7 @@ bool cfgImportFromBuf(const char *buf, size_t len, RhinoConfig &cfg) {
                     cfg.meshBeaconIntervalH = clampBeaconIntervalH((uint8_t)(h < 0 ? 0 : (h > 255 ? 255 : h)));
                 }
             } else if (!strcmp(section, "module_config") && !strcmp(subsection, "cannedMessage")) {
-                if (!strcmp(key, "enabled")) cfg.cannedEnabled = (!strcmp(val,"true"));
+                // Canned messages, retired: accepted and ignored, like storeForward.
             } else if (!strcmp(section, "module_config") && !strcmp(subsection, "storeForward")) {
                 // Meshtastic Store & Forward client, removed: older exports still
                 // carry this block, which is accepted and ignored.
@@ -3011,7 +3041,24 @@ bool cfgImportRestoredKeys() { return s_importRestoredKeys; }
 // The existing file is the user's only backup (identity key, PSKs), so it is
 // replaced only once the new one is fully on the card: write a temp file, check
 // it, move the old one aside, rename the temp into place, then drop the old one.
-bool cfgExport(const RhinoConfig &cfg) {
+bool cfgBackupNameValid(const char *name) {
+    if (!name || !name[0] || strchr(name, '/') || strchr(name, '\\')) return false;
+    const size_t n = strlen(name);
+    if (n >= CFG_BACKUP_NAME_MAX) return false;
+    if (!strcmp(name, "config.yaml")) return true;
+    return n > 12 && !strncmp(name, "config-", 7) && !strcmp(name + n - 5, ".yaml");
+}
+
+bool cfgExport(const RhinoConfig &cfg) { return cfgExportAs(cfg, "config.yaml"); }
+bool cfgImport(RhinoConfig &cfg) { return cfgImportFrom(cfg, "config.yaml"); }
+
+bool cfgExportAs(const RhinoConfig &cfg, const char *name) {
+    if (!cfgBackupNameValid(name)) return false;
+    // The same temp-and-rename dance for every name, each with its own pair.
+    char path[64], tmpPath[72], bakPath[72];
+    snprintf(path, sizeof(path), "/camillia/%s", name);
+    snprintf(tmpPath, sizeof(tmpPath), "%s.tmp", path);
+    snprintf(bakPath, sizeof(bakPath), "%s.bak", path);
     if (!ensureSdMounted()) return false;
     fs::FS &fsys = storageFs();
     fsys.mkdir("/camillia");
@@ -3031,10 +3078,10 @@ bool cfgExport(const RhinoConfig &cfg) {
     }
     const size_t len = yaml.length();
 
-    fsys.remove(kTmpPath);
-    File f = fsys.open(kTmpPath, FILE_WRITE);
+    fsys.remove(tmpPath);
+    File f = fsys.open(tmpPath, FILE_WRITE);
     if (!f) {
-        Serial.printf("[cfg] export FAILED: cannot create %s\n", kTmpPath);
+        Serial.printf("[cfg] export FAILED: cannot create %s\n", tmpPath);
         return false;
     }
     const size_t wrote = f.write((const uint8_t *)yaml.c_str(), len);
@@ -3042,50 +3089,54 @@ bool cfgExport(const RhinoConfig &cfg) {
     f.close();
     bool ok = (wrote == len);
     if (ok) {
-        File chk = fsys.open(kTmpPath, FILE_READ);
+        File chk = fsys.open(tmpPath, FILE_READ);
         ok = chk && (size_t)chk.size() == len;
         if (chk) chk.close();
     }
     if (!ok) {
         Serial.printf("[cfg] export FAILED: wrote %u of %u bytes\n",
                       (unsigned)wrote, (unsigned)len);
-        fsys.remove(kTmpPath);
+        fsys.remove(tmpPath);
         return false;
     }
 
-    const bool hadOld = fsys.exists(kPath);
+    const bool hadOld = fsys.exists(path);
     if (hadOld) {
-        fsys.remove(kBakPath);
-        if (!fsys.rename(kPath, kBakPath)) {
+        fsys.remove(bakPath);
+        if (!fsys.rename(path, bakPath)) {
             Serial.println("[cfg] export FAILED: cannot move old config aside");
-            fsys.remove(kTmpPath);
+            fsys.remove(tmpPath);
             return false;
         }
     }
-    if (!fsys.rename(kTmpPath, kPath)) {
+    if (!fsys.rename(tmpPath, path)) {
         Serial.println("[cfg] export FAILED: cannot rename temp file into place");
-        if (hadOld) fsys.rename(kBakPath, kPath);
-        fsys.remove(kTmpPath);
+        if (hadOld) fsys.rename(bakPath, path);
+        fsys.remove(tmpPath);
         return false;
     }
-    if (hadOld) fsys.remove(kBakPath);
+    if (hadOld) fsys.remove(bakPath);
     Serial.printf("[cfg] exported to %s on %s (%u bytes)\n",
-                  kPath, storageName(), (unsigned)len);
+                  path, storageName(), (unsigned)len);
     return true;
 }
 
 // ── Import from SD ────────────────────────────────────────────
-bool cfgImport(RhinoConfig &cfg) {
+bool cfgImportFrom(RhinoConfig &cfg, const char *name) {
+    if (!cfgBackupNameValid(name)) return false;
+    char path[64], bakPath[72];
+    snprintf(path, sizeof(path), "/camillia/%s", name);
+    snprintf(bakPath, sizeof(bakPath), "%s.bak", path);
     if (!ensureSdMounted()) return false;
     fs::FS &fsys = storageFs();
     // An export interrupted between its two renames leaves the old file at
-    // kBakPath; it is complete, so fall back to it.
-    const char *path = fsys.exists(kPath) ? kPath : kBakPath;
-    File f = fsys.open(path, FILE_READ);
+    // bakPath; it is complete, so fall back to it.
+    const char *src = fsys.exists(path) ? path : bakPath;
+    File f = fsys.open(src, FILE_READ);
     if (!f) return false;
     const size_t size = (size_t)f.size();
     if (size == 0 || size > kCfgImportMaxBytes) {
-        Serial.printf("[cfg] import refused: %s is %u bytes\n", path, (unsigned)size);
+        Serial.printf("[cfg] import refused: %s is %u bytes\n", src, (unsigned)size);
         f.close();
         return false;
     }
@@ -3105,8 +3156,46 @@ bool cfgImport(RhinoConfig &cfg) {
     content[size] = '\0';
     bool ok = cfgImportFromBuf(content, size, cfg);
     free(content);
-    if (ok) Serial.printf("[cfg] imported from %s on %s\n", path, storageName());
+    if (ok) Serial.printf("[cfg] imported from %s on %s\n", src, storageName());
     return ok;
+}
+
+int cfgListBackups(char (*names)[CFG_BACKUP_NAME_MAX], int max) {
+    if (!names || max <= 0 || !ensureSdMounted()) return 0;
+    fs::FS &fsys = storageFs();
+    int n = 0;
+    // config.yaml counts when only its .bak survives: cfgImportFrom() falls
+    // back to it, as cfgImport() always has.
+    if (fsys.exists(kPath) || fsys.exists(kBakPath)) {
+        snprintf(names[n++], CFG_BACKUP_NAME_MAX, "%s", "config.yaml");
+    }
+    File dir = fsys.open("/camillia");
+    if (!dir || !dir.isDirectory()) { if (dir) dir.close(); return n; }
+    // Collected unsorted, then the timestamped run sorted newest first. More
+    // than fit are dropped oldest first by keeping the largest names.
+    char found[CFG_BACKUP_LIST_MAX * 2][CFG_BACKUP_NAME_MAX];
+    int nf = 0;
+    for (File f = dir.openNextFile(); f; f = dir.openNextFile()) {
+        const char *nm = f.name();
+        const bool isDir = f.isDirectory();
+        char base[CFG_BACKUP_NAME_MAX] = "";
+        if (nm) {
+            const char *slash = strrchr(nm, '/');
+            snprintf(base, sizeof(base), "%s", slash ? slash + 1 : nm);
+        }
+        f.close();
+        if (isDir || !strcmp(base, "config.yaml") || !cfgBackupNameValid(base)) continue;
+        if (nf < (int)(sizeof(found) / sizeof(found[0]))) {
+            snprintf(found[nf++], CFG_BACKUP_NAME_MAX, "%s", base);
+        }
+    }
+    dir.close();
+    qsort(found, nf, CFG_BACKUP_NAME_MAX,
+          [](const void *a, const void *b) { return -strcmp((const char *)a, (const char *)b); });
+    for (int i = 0; i < nf && n < max; i++) {
+        snprintf(names[n++], CFG_BACKUP_NAME_MAX, "%s", found[i]);
+    }
+    return n;
 }
 
 bool cfgSdConfigExists() {

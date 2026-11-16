@@ -186,8 +186,11 @@ struct RhinoConfig {
     uint8_t  brightness;         // backlight percent, 10..100 in 10% steps
     uint32_t screenOnSecs;
     uint8_t  displayUnits;       // 0=METRIC, 1=IMPERIAL
-    bool     compassNorthTop;
-    bool     flipScreen;
+    // Retired: compass north-up and flip-screen were stored and exported but
+    // never read by anything. Kept as bytes so every later offset, and so the
+    // stored blob of every existing device, stays where it is.
+    uint8_t  _retiredCompassNorthTop;
+    uint8_t  _retiredFlipScreen;
     bool     splashMelodyEnabled;
     uint8_t  msgAlertSound;      // 0=DEFAULT, 1=CHIRPY, 2=BASS, 3=OFF
     uint8_t  uiTheme;            // UiThemeFamily
@@ -200,10 +203,12 @@ struct RhinoConfig {
                                  // 0xFF = adaptive default (theme yellow/amber)
                                  // -- see src/user_msg_colors.h
 
-    // Bluetooth
-    bool     btEnabled;
-    uint8_t  btMode;             // 0=RANDOM_PIN, 1=FIXED_PIN, 2=NO_PIN
-    uint32_t btFixedPin;
+    // Retired: the phone-pairing Bluetooth settings (enabled / pairing mode /
+    // fixed PIN). This firmware has no BLE peripheral role, so nothing ever
+    // read them. Same types as before, so the blob layout is unchanged.
+    uint8_t  _retiredBtEnabled;
+    uint8_t  _retiredBtMode;
+    uint32_t _retiredBtFixedPin;
 
     // Network
     char     ntpServer[48];
@@ -215,12 +220,16 @@ struct RhinoConfig {
     bool     mqttEncryption;
     bool     mqttMapReport;
     uint16_t mqttPort;           // broker TCP port (8883 TLS, 1883 plaintext)
-    bool     mqttTls;            // connect via WiFiClientSecure when set
+    // Retired: MQTT over TLS. This firmware has no TLS client, so the flag
+    // could only ever claim something untrue. Kept as a byte for the layout.
+    uint8_t  _retiredMqttTls;
 
     // Power
     bool     isPowerSaving;
-    uint32_t lsSecs;
-    uint32_t minWakeSecs;
+    // Retired: light-sleep-after and minimum-wake seconds, reserved for a
+    // deeper sleep tier that never shipped. isPowerSaving above is live.
+    uint32_t _retiredLsSecs;
+    uint32_t _retiredMinWakeSecs;
 
     // Module: Telemetry
     bool     telDeviceEnabled;
@@ -233,9 +242,10 @@ struct RhinoConfig {
     uint32_t neighborInfoIntervalS;
     bool     neighborInfoOverLora;
 
-    // Module: Canned Messages
-    bool     cannedEnabled;
-    char     cannedMessages[200];
+    // Retired: the canned-messages module was never implemented. Kept as
+    // bytes for the blob layout, like the retired fields above.
+    uint8_t  _retiredCannedEnabled;
+    char     _retiredCannedMessages[200];
 
     // Module: camillia chat server client (CHAT_SERVER_MODE_*). Was the bool
     // snfClientEnabled (Meshtastic Store & Forward client, removed): same byte,
@@ -252,7 +262,9 @@ struct RhinoConfig {
     uint32_t autoFavoriteRangeM;  // auto-favorite distance threshold, meters
 
     // Chat display
-    uint8_t  chatSpacing;   // 0=Tight(8px), 1=Normal(10px), 2=Loose(12px)
+    // Retired: chat line spacing. Row heights come from fontSize; nothing
+    // laid out from this. Kept as a byte for the layout.
+    uint8_t  _retiredChatSpacing;
     uint8_t  fontSize;      // 0=Small, 1=Medium (default), 2=Large, 3=Extra Large (chat + DM)
 
     // Serial debug categories
@@ -329,11 +341,10 @@ struct RhinoConfig {
     // assignment at once. 0 is the original mapping, so devices that never ask
     // for a reshuffle keep the colors they have always had.
     uint32_t chatColorSalt;
-    // Blink the notification LED while anything is unread. Only meaningful
-    // where HAS_NOTIFY_LED; the field is unconditional so the blob layout does
-    // not differ between boards. Defaults on, which is the behavior every unit
-    // had before the setting existed.
-    bool     notifyLedEnabled;
+    // Retired: the notification LED master switch. Each LED color has its own
+    // Off now (notifyLedColorChannel / notifyLedColorDm), which is what every
+    // reader uses. Kept as a byte for the blob layout.
+    uint8_t  _retiredNotifyLedEnabled;
     // Flip the trackball's scroll direction (HAS_SCROLL_INVERT boards). Applied
     // where the trackball is read, so it moves lists, the chat and every slider
     // together and leaves j/k alone — those are letters with a fixed meaning,
@@ -356,7 +367,7 @@ struct RhinoConfig {
     bool     shareLocation;
     // Blink the keyboard backlight while a message or DM is unread. Only
     // meaningful where HAS_KB_BLINK; the field is unconditional so the blob
-    // layout does not differ between boards, same as notifyLedEnabled.
+    // layout does not differ between boards.
     bool     kbBlinkEnabled;
     // Covers the trailing padding that followed kbBlinkEnabled. The struct
     // aligns to 4 and kbBlinkEnabled is one byte at some offset X, so the old
@@ -432,8 +443,8 @@ struct RhinoConfig {
     char     losElevServer[96];
     // ── External BLE (HID over GATT) keyboard ───────────────────────────────
     // The device as the HID *host*, connecting out to a keyboard. Nothing to do
-    // with btEnabled/btMode/btFixedPin above, which describe the opposite role
-    // -- the device as a peripheral a phone pairs to -- and remain inert.
+    // with the retired phone-pairing fields above, which described the
+    // opposite role -- the device as a peripheral a phone pairs to.
     //
     // Safe at the end for the usual reason: losElevServer is a char[96], a
     // multiple of 4, so the struct has no trailing padding for these to land in
@@ -622,7 +633,7 @@ struct RhinoConfig {
     // altogether, and does so until the next power cycle, which is why the UI
     // says as much when it is chosen.
     //
-    // Unconditional rather than #if defined(DEVICE_M9), like notifyLedEnabled and
+    // Unconditional rather than #if defined(DEVICE_M9), like the notify LED colors and
     // kbBlinkEnabled above, so the blob layout does not differ between boards.
     //
     // Safe at the end: _reservedPad14 above consumes the struct's trailing
@@ -1402,6 +1413,27 @@ bool cfgExport(const RhinoConfig &cfg);
 // Updates CHANNEL_KEYS[] and fills cfg. Returns true on success; false for a
 // missing, empty, oversized or truncated file (nothing is applied then).
 bool cfgImport(RhinoConfig &cfg);
+
+// ── Config backups ──────────────────────────────────────────────────────────
+// Besides config.yaml, an export may be written under a timestamped name,
+// config-YYYYMMDD-HHMMSS.yaml, so several backups can sit side by side in
+// /camillia and one of them be chosen to import. Names are bare file names in
+// /camillia, never paths.
+#define CFG_BACKUP_NAME_MAX 40   // bytes, terminator included
+#define CFG_BACKUP_LIST_MAX 20
+
+// config.yaml, or config-<anything>.yaml with no path separator.
+bool cfgBackupNameValid(const char *name);
+
+// cfgExport() / cfgImport() under another backup name. cfgExport() is
+// cfgExportAs("config.yaml") and cfgImport() is cfgImportFrom("config.yaml").
+bool cfgExportAs(const RhinoConfig &cfg, const char *name);
+bool cfgImportFrom(RhinoConfig &cfg, const char *name);
+
+// The backups in /camillia: config.yaml first when present, then the
+// timestamped ones newest first (their names sort by time). Returns how many
+// were written to names, at most max.
+int cfgListBackups(char (*names)[CFG_BACKUP_NAME_MAX], int max);
 
 // Returns true if /camillia/config.yaml is present on the configured storage.
 // Mounts it if needed; returns false if storage is unavailable.

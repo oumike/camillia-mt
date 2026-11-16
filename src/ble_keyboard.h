@@ -8,9 +8,9 @@
 // pumpKeyboardInput() merges with every other input source. Nothing downstream
 // of that merge knows a key came from Bluetooth.
 //
-// This is the opposite role from the btEnabled/btMode/btFixedPin fields in
-// RhinoConfig, which describe the device as a *peripheral* a phone pairs to.
-// Those are inert and unrelated; do not reuse them here.
+// This is the opposite role from the retired phone-pairing fields in
+// RhinoConfig (_retiredBt*), which described the device as a *peripheral* a
+// phone pairs to. They are unrelated; do not reuse them here.
 //
 // Every function is safe to call whether or not the stack is running, and all
 // of them are safe from the UI thread: the blocking parts (scan, connect, GATT

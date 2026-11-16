@@ -816,10 +816,10 @@ conditions only — no forecast.
   back when a reading lands
 - Every failure names what to change: no server set, no position, no Wi-Fi, the
   proxy unreachable, or the proxy answering with something that is not weather
-- Available on every board. The Cardputer has no Utilities tab in its lite web
-  config, so its server address is set through the microSD `config.yaml`
-  (`network: weatherServer:`) — and the shipped default means it works without
-  setting anything. Its 240x135 panel gets a compact layout: a smaller headline
+- Available on every board. The server address is set in Config → Mesh
+  Services → Weather Server, or in web config under Device (the lite page has
+  it too, which is how the Cardputer sets it) — and the shipped default means
+  it works without setting anything. Its 240x135 panel gets a compact layout: a smaller headline
   and three detail lines instead of four
 
 ### MQTT Monitor
@@ -962,6 +962,25 @@ reset actions. Announcing to the mesh has moved to Live → Tools → Announce.
   and press Enter, to list its rows. **‹ Back** or the close key returns to the
   grid; the close key on the grid closes Config. A section with nothing in it
   on your board is left off
+- **Every setting web config has is also on the device** (except on the
+  Cardputer, whose web config has them all), in the section it belongs to: region, TX power, hop limit, device role, the custom modem
+  (bandwidth, spreading factor, coding rate, frequency slot), RX boosted gain,
+  node ID from key and node ID override under Radio & Identity; web config login, password and
+  idle timeout, and the MQTT broker, port, credentials, root topic, encryption,
+  map report, OK to MQTT and Ignore MQTT under Connections; position broadcast
+  and GPS poll intervals, GPS standby and the fixed position under Location;
+  rebroadcast mode, NodeInfo and telemetry intervals, neighborhood info,
+  auto-favorite and the LOS and weather servers under Mesh Services; and time
+  zone, NTP server, power saving, update check, auto-install and serial debug
+  logging under Device & Firmware. A choice opens a picker and a text setting
+  opens a text box. Region, Custom Modem, RX Boosted Gain, Node ID from Key and
+  Node ID Override reboot to apply: the on/off ones ask first, and the Region
+  picker's title says it reboots
+- **Node ID Override** fixes this node's ID (e.g. `!1a2b3c4d`), overriding both
+  the default and Node ID from Key; blank turns it off. It warns first, because
+  every other node then sees a new node, existing DMs and favorites stay with
+  the old ID, and two nodes with the same ID disrupt each other. Also in web
+  config, and exported as `node_id_override`
 - Navigate action rows with Up and Down input. The list wraps: going up from
   the first row lands on the last, and down from the last returns to the first
 - Enter runs the selected action
@@ -970,8 +989,10 @@ reset actions. Announcing to the mesh has moved to Live → Tools → Announce.
   not count as a tap and never runs anything. On the other touch builds a tap
   moves the highlight and Enter still runs it
 - Keyboard builds: I opens/focuses the info panel within Config
-- Import, Clear Nodes, and Factory Reset require a second Enter
-  confirmation
+- Export, Import, Clear Nodes, and Factory Reset require a second Enter
+  confirmation. With the clock set, Export opens a picker instead (replace
+  `config.yaml` or write a dated backup), and with more than one backup on the
+  card Import opens a picker and then asks, naming the file
 - **Space filters the rows**. Press
   Space to arm the filter, then type to narrow the list; the header shows
   `[what you typed]` and how many rows match. Backspace edits the filter and
@@ -2061,78 +2082,59 @@ public channel in your region; one sent to you is only heard if the sender
 retuned onto *your* channel, preset and region — so an empty list usually just
 means nobody nearby is beaconing at you.
 
-### Store and Forward
+### Chat server catch-up
 
-Some Meshtastic nodes run as a **Store and Forward router**: they keep a buffer
-of the messages they hear and replay them on request, so a node that was off or
-out of range can catch up. This device can act as a *client* of one — it never
-stores or replays anything for anyone else.
+A **camillia chat server** is a node that keeps channel messages and replays
+the ones this device missed while it was off or out of range. This device is a
+*client* of one; it never stores or replays anything for anyone else. (It
+replaced the Meshtastic Store and Forward client, which has been removed.)
 
-- **Store&Fwd Client** on the Config screen (Modules → *Receive Replayed
-  Messages* in web config) turns the client on. Off by default.
-- **Request S&F Replay** — the row directly beneath it, and the *Request Replay
-  Now* button in web config under Utilities → Diagnostics, next to Send NODEINFO
-  Broadcast. A router **never replays history on its own**; it
-  only answers a request, so this button is what actually makes the feature do
-  something. It asks for the last four hours; the router trims that to whatever
-  window and message count it is configured to return.
-- The row names the router it will ask (`Request S&F Replay (a1b2)`), or reads
-  `no router` when none has been heard yet. Routers announce themselves with a
-  periodic heartbeat, so give it a few minutes after coming into range. The row
-  is greyed out while the client is off.
-- **Router Node ID** (web config → Modules → Store & Forward) pins the router to
-  ask. Leave it blank and the device uses whichever router it hears a heartbeat
-  from. Set it — as `!aabbccdd` — and that router is used always, with
-  heartbeats from any other ignored when choosing who to ask. Clear it to go
-  back to automatic.
-
-  This matters more than it sounds: Meshtastic defaults `store_forward.heartbeat`
-  to **off**, and a router that never beats can't be discovered. If the row reads
-  `no router` while you know a router is right there, this is the fix. The
-  setting is web config only, and travels with config export/import under
-  `module_config: storeForward: router_id`.
-- Replayed messages appear prefixed **`[SF]`** — in the channel view if they
-  were originally broadcast, in a DM thread with the original sender if they
-  were originally a DM.
-- Requests are throttled to one every 30 seconds, because a single request can
-  pull the router's whole return buffer down at once.
-
-Things worth knowing about how routers behave, which are properties of the
-router and not of this device:
-
-- **Not on the default channel.** Routers refuse history requests on the public
-  channel outright. Use a channel with your own key.
-- **Only what it heard while running.** Anything sent before the router was
-  configured, or while it was powered off, was never stored.
-- A replay carries the *original author* in the packet, so replayed messages
-  from a sender you have ignored stay hidden, and a replay does not disturb the
-  node list — the original sender's **Last Heard** and signal readings describe
-  when that node was really heard, not when the router repeated it.
-- Replays are addressed to the client that asked for them, and this device only
-  displays the ones addressed to it. Another node's catch-up burst on a shared
-  channel is not absorbed as your own history.
+- **Chat Server** on the Config screen, under Mesh Services, picks the mode:
+  **Off**, **Automatic** (checks at boot and every 15 minutes) or **Manual
+  only**. Web config has the same choice as *Catch-up* under Modules → Chat
+  Server.
+- **Chat Server Node** names the server it uses. Blank means the first one found
+  nearby. Pick a node in **Nodes → Chat Server** to use that one always; a server
+  set by hand is never replaced automatically. Activating the row clears it.
+  Web config takes a short name or `!aabbccdd` in the same field.
+- **Check for Messages Now** asks the server for anything missed on this node's
+  channels, or searches for a server if none has been found yet. At most once
+  every 5 minutes. Web config has the same button under Utilities →
+  Diagnostics.
+- Replayed messages are marked in the chat.
+- **Off while licensed:** chat server traffic is encrypted, so the client sends
+  nothing in licensed mode.
+- Backed up in `config.yaml` under `module_config: chatServer:` as `mode`
+  (`off`, `auto`, `manual`), `server` and `manual`.
 
 ### Backing up settings
 
 **Export Config** on the Config screen writes `/camillia/config.yaml` to the SD
 card — or, on the boards with no card slot, to the internal flash partition that
 stands in for one — and web config has the same export plus an upload to restore
-one. What the
-file carries:
+one. When the device knows the date and time, Export asks which file: replace
+`config.yaml`, or write a new backup beside it named after the moment, such as
+`config-20261115-143205.yaml`, so several can be kept. Without the time, Export
+writes `config.yaml` as before. What the file carries:
 
 - Every setting in this guide, and the channel list including channel keys
 - The node's **identity keypair**, so a restored device keeps the same PKI
   identity and peers holding its public key can still send it encrypted DMs
-- **Not** the node ID. That is derived from the board's MAC address, so a backup
-  restored onto *different* hardware comes up with the same name, channels and
-  keys under a **new node ID** — other nodes will treat it as a new node
+- **Not** the node ID, unless you set a Node ID Override. It is otherwise
+  derived from the board's MAC address, so a backup restored onto *different*
+  hardware comes up with the same name, channels and keys under a **new node
+  ID** — other nodes will treat it as a new node. An override is carried, so
+  restoring that backup onto a second device gives both the same ID
 
 Because it contains the private key and your channel keys, **an exported config
 is a secret, not just a settings file.** Treat it like a password.
 
 A config can be restored three ways, all equivalent: the Import row on the
 Config screen, an upload in web config, or the prompt during first-boot setup
-when a `config.yaml` is already on the card. Each one reboots afterwards.
+when a `config.yaml` is already on the card. Each one reboots afterwards. With
+more than one backup on the card, the Import row lists them, `config.yaml`
+first and then the dated ones newest first, and asks again naming the one you
+picked. First-boot setup always offers `config.yaml`.
 
 ### Backing up messages
 
@@ -2482,6 +2484,8 @@ There are two versions of the page:
   Config form (identity, Wi-Fi, LoRa, channels, MQTT, display, modules), but not
   the Utilities, Live, Chat, or Nodes tabs. Access-point mode leaves the device
   with very little memory once Wi-Fi is running, and those extras do not fit.
+  The one setting that lives under Utilities on the full page, serial debug
+  logging, is in Lite's Power section instead, so no setting is out of reach.
 - **Full Web Config** — served once the device has joined your Wi-Fi network.
   Same Config form plus Utilities, the Live feed, Chat, and the Nodes map.
 
@@ -3000,6 +3004,11 @@ that a bandwidth of `31` means 31.25 kHz and `62` means 62.5 kHz. A
 `meshtastic --export-config` dump from a node on custom settings imports
 directly.
 
+Camillia's own exports also carry `customBandwidth`, `customSpreadFactor`,
+`customCodingRate` and `customChannelNum`: the stored custom settings, written
+even while a preset is in force, so a backup made on a preset still restores
+the custom setup you would switch back to.
+
 ### Choosing a Wi-Fi network
 
 The **Choose WiFi** action lists your configured network, an **AP** entry, then
@@ -3044,6 +3053,9 @@ wifi_networks:
     pass: officepass
     active: false
 ```
+
+`wifi_enabled` carries the WiFi master switch, so a restore turns WiFi (and with
+it MQTT, which needs it) back on or off as the backup had it.
 
 The top-level `wifi_ssid` / `wifi_pass` keys still name the active network too,
 so an older build reading the file comes up on the right one and simply ignores

@@ -81,16 +81,19 @@ gaps and only fails when too many are missing.
 
 ## Point the device at it
 
-1. Open Web Config
-2. Find **Elevation Server (LOS)**
-3. Enter `http://<host>:5005` — the machine running the proxy
-4. Save
+Set it in either place:
+
+- **On the device:** Config → Mesh Services → **LOS Elevation Server** (every
+  board except the Cardputer)
+- **In web config:** Config → Device → **Elevation Server (LOS)**, on the full
+  and the lite page alike, so the Cardputer has it too
+
+Enter `http://<host>:5005`, the machine running the proxy, and save.
 
 It must be **http://**, not https://. An https:// address cannot be reached at
-all, and will fail on every attempt.
+all, and will fail on every attempt; the device refuses one.
 
-On the **Cardputer** there is no Utilities tab — its web config is lite-only —
-so set the address through the microSD `config.yaml` instead:
+It also travels in a config backup, so it can be set in `config.yaml`:
 
 ```yaml
 config:

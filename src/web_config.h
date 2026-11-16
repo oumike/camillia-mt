@@ -69,6 +69,11 @@ void webCfgEnd();
 // Must be called from loop() while the server is running.
 void webCfgLoop();
 
+// Applies a new idle timeout (seconds, 0 = never) to the session that is
+// running now, not only the next one -- so lengthening it from the device cannot
+// be cut short by the old value. Safe to call whether or not the server is up.
+void webCfgSetIdleTimeoutS(uint32_t secs);
+
 // True while the server is active.
 bool webCfgRunning();
 // True when the last webCfgBegin() failed only because the station was not up

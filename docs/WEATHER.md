@@ -21,8 +21,8 @@ not a weather station.
 
 Units follow **Config → Units**. Nothing to set separately.
 
-Available on every board. The Cardputer has no Utilities tab in its lite web
-config, so set its address through the microSD `config.yaml` instead:
+Available on every board. The address can also be set in a config backup,
+`config.yaml`:
 
 ```yaml
 config:
@@ -86,8 +86,10 @@ take the other down.
 `http://weather.camillia.sumat.org` — a public instance of this proxy. Nothing
 to set up unless you want to.
 
-To run your own instead, put its address in Web Config → **Utilities → Weather
-Server**:
+To run your own instead, put its address in Config → Mesh Services →
+**Weather Server** on the device (every board except the Cardputer), or in web
+config under Config → Device → **Weather Server** (full and lite page, so the
+Cardputer too):
 
 ```
 http://192.168.1.50:5006

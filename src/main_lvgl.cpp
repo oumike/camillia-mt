@@ -1777,7 +1777,7 @@ static char         s_cfgConfirmAltLabel[16] = {0};
 static char         s_cfgConfirmAltKey = 0;
 static int          s_cfgConfirmFnArg = 0;
 // Copied rather than pointed at: the caller's buffer is usually a local.
-static char         s_cfgConfirmText[96] = {0};
+static char         s_cfgConfirmText[256] = {0};
 static uint32_t s_cfgConfirmMs = 0;
 static uint32_t s_cfgLastActivateMs = 0;
 // The Clear Nodes confirmation's two options. Both start unticked every time
@@ -1949,6 +1949,11 @@ static uint32_t s_gpsClockSyncMs = 0;
 // A clock this far along is one somebody actually set; anything below it is the
 // 1970 epoch the ESP32 boots at.
 static constexpr time_t kClockSetEpoch = 1700000000;
+static inline bool clockIsSet();
+// Config backups: Export offers a timestamped copy while the clock is set, and
+// Import offers a choice while more than one backup is on the card.
+static bool cfgExportOffersStamp();
+static bool cfgImportHasChoice();
 
 #if HAS_SLEEP_OVERLAY
 // Record an inbound message for the sleeping panel's preview rows. Called from
@@ -3766,6 +3771,74 @@ static void setLabelTextEmojiSafe(lv_obj_t *label, const char *text) {
     lv_label_set_text(label, safeBuf);
 }
 
+// ── Table-driven Config rows ────────────────────────────────────────────────
+// Settings that are a plain value on s_cfg -- an on/off, a choice from a list,
+// or a line of text -- and need nothing bespoke to edit. Each is one entry in
+// kCfgGenRows (see cfgGenRow()), which says how to read, change and apply it;
+// the row's label, its section, the editor it opens and what happens after a
+// change are all driven from there. They sit in CfgActionId as one contiguous
+// run, CFG_ACTION_GEN_FIRST + id, so the list, the filter and the section grid
+// treat them exactly like every other row.
+//
+// Every id exists on every board, because the RhinoConfig fields behind them
+// do; whether a board lists a row is decided in initCfgActions(), the same as
+// for the hand-written rows.
+enum CfgGenId : int {
+    // Radio & Identity
+    CFG_GEN_REGION = 0,
+    CFG_GEN_TX_POWER,
+    CFG_GEN_HOP_LIMIT,
+    CFG_GEN_ROLE,
+    CFG_GEN_CUSTOM_MODEM,
+    CFG_GEN_CUSTOM_BW,
+    CFG_GEN_CUSTOM_SF,
+    CFG_GEN_CUSTOM_CR,
+    CFG_GEN_CUSTOM_SLOT,
+    CFG_GEN_RX_BOOST,
+    CFG_GEN_NODEID_PUBKEY,
+    CFG_GEN_NODEID_OVERRIDE,
+    // Connections
+    CFG_GEN_WEB_AUTH,
+    CFG_GEN_WEB_PASS,
+    CFG_GEN_WEB_IDLE,
+    CFG_GEN_MQTT_SERVER,
+    CFG_GEN_MQTT_PORT,
+    CFG_GEN_MQTT_USER,
+    CFG_GEN_MQTT_PASS,
+    CFG_GEN_MQTT_ROOT,
+    CFG_GEN_MQTT_ENCRYPT,
+    CFG_GEN_MQTT_MAP_REPORT,
+    CFG_GEN_OK_TO_MQTT,
+    CFG_GEN_IGNORE_MQTT,
+    // Location
+    CFG_GEN_POS_INTERVAL,
+    CFG_GEN_GPS_POLL,
+    CFG_GEN_GPS_DUTY,
+    CFG_GEN_FIXED_LAT,
+    CFG_GEN_FIXED_LON,
+    CFG_GEN_FIXED_ALT,
+    // Mesh Services
+    CFG_GEN_REBROADCAST,
+    CFG_GEN_NODEINFO_INTERVAL,
+    CFG_GEN_TEL_DEVICE,
+    CFG_GEN_TEL_ENV,
+    CFG_GEN_TEL_INTERVAL,
+    CFG_GEN_NEIGHBOR_INTERVAL,
+    CFG_GEN_NEIGHBOR_LORA,
+    CFG_GEN_AUTOFAV,
+    CFG_GEN_AUTOFAV_RANGE,
+    CFG_GEN_LOS_SERVER,
+    CFG_GEN_WEATHER_SERVER,
+    // Device & Firmware
+    CFG_GEN_TIMEZONE,
+    CFG_GEN_NTP_SERVER,
+    CFG_GEN_POWER_SAVING,
+    CFG_GEN_OTA_BOOT_CHECK,
+    CFG_GEN_OTA_AUTO_UPDATE,
+    CFG_GEN_DEBUG_LOG,
+    CFG_GEN__COUNT,
+};
+
 enum CfgActionId {
     CFG_ACTION_WEBCFG = 0,
     CFG_ACTION_NODE_NAME,
@@ -3880,9 +3953,23 @@ enum CfgActionId {
 #if HAS_SD_MALWARE_SCAN
     CFG_ACTION_SD_SCAN,
 #endif
+    // The table-driven rows, one per CfgGenId. Keep these last but one.
+    CFG_ACTION_GEN_FIRST,
+    CFG_ACTION_GEN_END = CFG_ACTION_GEN_FIRST + CFG_GEN__COUNT,
     // Sizes s_cfgActions. Not an action — keep it last.
-    CFG_ACTION__COUNT,
+    CFG_ACTION__COUNT = CFG_ACTION_GEN_END,
 };
+
+static constexpr bool cfgGenIsAction(int actionId) {
+    return actionId >= CFG_ACTION_GEN_FIRST && actionId < CFG_ACTION_GEN_END;
+}
+// Defined with the table, further down.
+static const char *cfgGenLabel(int genId, char *buf, size_t bufLen);
+static int  cfgGenSection(int genId);
+static bool cfgGenDisabled(int genId, const char **why);
+static bool cfgGenNeedsConfirm(int genId);
+static void cfgGenConfirmSentence(int genId, char *buf, size_t bufLen);
+static void cfgGenPerform(int genId);
 
 // Sized by the enum rather than by a hand-picked number. initCfgActions()
 // appends without a bounds check, and every previous size here was headroom
@@ -3953,6 +4040,7 @@ static lv_obj_t *s_cfgInfoBtn = nullptr;
 // Which section a row is listed under. The cases carry the same #if guards as
 // CfgActionId, since an action a build leaves out has no enumerator to name.
 static int cfgActionSection(int actionId) {
+    if (cfgGenIsAction(actionId)) return cfgGenSection(actionId - CFG_ACTION_GEN_FIRST);
     switch (actionId) {
         case CFG_ACTION_NODE_NAME:
         case CFG_ACTION_PRESET:
@@ -5769,6 +5857,7 @@ static bool wifiBeginActiveKnown() {
 
 static const char *cfgActionLabel(int actionId, char *buf, size_t bufLen) {
     if (!buf || bufLen == 0) return "";
+    if (cfgGenIsAction(actionId)) return cfgGenLabel(actionId - CFG_ACTION_GEN_FIRST, buf, bufLen);
     switch (actionId) {
         case CFG_ACTION_WIFI_TOGGLE:
             if (!s_cfg.wifiEnabled) {
@@ -6225,6 +6314,7 @@ static const char *cfgActionLabel(int actionId, char *buf, size_t bufLen) {
 // both network consumers require WiFi, and the web-config portal is locked off
 // while the MQTT bridge is on (they don't run together).
 static bool cfgActionDisabled(int actionId) {
+    if (cfgGenIsAction(actionId)) return cfgGenDisabled(actionId - CFG_ACTION_GEN_FIRST, nullptr);
     switch (actionId) {
         case CFG_ACTION_MQTT_TOGGLE: return !s_cfg.wifiEnabled;
         case CFG_ACTION_CS_MODE:     return lic::active();
@@ -6288,11 +6378,14 @@ static bool cfgActionNeedsConfirm(int actionId) {
     // destination and says it reboots -- so the confirm had become a second
     // question on top of a deliberate choice, which is the kind people learn to
     // dismiss without reading.
+    if (cfgGenIsAction(actionId)) return cfgGenNeedsConfirm(actionId - CFG_ACTION_GEN_FIRST);
     return
         // Reboots to apply.
         actionId == CFG_ACTION_MQTT_TOGGLE
-        || actionId == CFG_ACTION_EXPORT
-        || actionId == CFG_ACTION_IMPORT
+        // Unless a picker comes first: it names the file, and the import
+        // picker asks again before it reboots.
+        || (actionId == CFG_ACTION_EXPORT && !cfgExportOffersStamp())
+        || (actionId == CFG_ACTION_IMPORT && !cfgImportHasChoice())
         || actionId == CFG_ACTION_OTA_UPDATE
     || actionId == CFG_ACTION_CLEAR_MSGS
         || actionId == CFG_ACTION_CLEAR_NODES
@@ -6312,6 +6405,10 @@ static bool cfgActionNeedsConfirm(int actionId) {
 // cfgActionNeedsConfirm() later inherits exactly the same bug, and this is the
 // place a fix for it already exists.
 static bool cfgActionConfirmSentence(int actionId, char *buf, size_t bufLen) {
+    if (cfgGenIsAction(actionId)) {
+        cfgGenConfirmSentence(actionId - CFG_ACTION_GEN_FIRST, buf, bufLen);
+        return true;
+    }
     switch (actionId) {
         case CFG_ACTION_MQTT_TOGGLE:
             // Phrased from the destination, and it names the reboot -- which the
@@ -11795,7 +11892,6 @@ static void loadProvisionedConfig() {
             utf8util::copyTruncate(s_cfg.mqttPass, sizeof(s_cfg.mqttPass), p.getString("mqPass", "").c_str());
             utf8util::copyTruncate(s_cfg.mqttRoot, sizeof(s_cfg.mqttRoot), p.getString("mqRoot").c_str());
             s_cfg.mqttPort = p.getUShort("mqPort", 1883);
-            s_cfg.mqttTls = p.getBool("mqTls", false);
             s_cfg.mqttEncryption = p.getBool("mqEnc", true);
             s_cfg.mqttEnabled = true;
             if (s_cfg.wifiSsid[0]) s_cfg.wifiEnabled = true;
@@ -12364,8 +12460,6 @@ static void loadConfigFromPrefs() {
         uint8_t umc = prefs.getUChar("userMsgColor", 0xFF);
         s_cfg.userMsgColor = (umc <= 15) ? umc : 0xFF;
     }
-    if (prefs.isKey("compassNorth")) s_cfg.compassNorthTop = prefs.getBool("compassNorth");
-    if (prefs.isKey("flipScreen")) s_cfg.flipScreen = prefs.getBool("flipScreen");
     if (prefs.isKey("splashMelody")) s_cfg.splashMelodyEnabled = prefs.getBool("splashMelody");
     if (prefs.isKey("msgAlertSound")) {
         s_cfg.msgAlertSound = (uint8_t)constrain((int)prefs.getUChar("msgAlertSound"), 0, 3);
@@ -12376,12 +12470,6 @@ static void loadConfigFromPrefs() {
     if (ro != 0xFF && ro < UI_THEME_COUNT) s_cfg.uiTheme = ro;
     ro = prefs.getUChar("uiMode", 0xFF);
     if (ro != 0xFF && ro <= UI_MODE_LIGHT) s_cfg.uiMode = ro;
-
-    if (prefs.isKey("btEnabled")) s_cfg.btEnabled = prefs.getBool("btEnabled");
-    ro = prefs.getUChar("btMode", 0xFF);
-    if (ro != 0xFF) s_cfg.btMode = ro;
-    ul = prefs.getULong("btFixedPin", 0);
-    if (ul) s_cfg.btFixedPin = ul;
 
     s_cfg.wifiEnabled = prefs.getBool("wifiEnabled", s_cfg.wifiEnabled);
     if (prefs.isKey("mqttEnabled")) s_cfg.mqttEnabled = prefs.getBool("mqttEnabled");
@@ -12408,13 +12496,8 @@ static void loadConfigFromPrefs() {
     if (prefs.isKey("mqttEncrypt")) s_cfg.mqttEncryption = prefs.getBool("mqttEncrypt");
     if (prefs.isKey("mqttMapRpt")) s_cfg.mqttMapReport = prefs.getBool("mqttMapRpt");
     if (prefs.isKey("mqttPort")) s_cfg.mqttPort = prefs.getUShort("mqttPort");
-    if (prefs.isKey("mqttTls")) s_cfg.mqttTls = prefs.getBool("mqttTls");
 
     if (prefs.isKey("isPwrSaving")) s_cfg.isPowerSaving = prefs.getBool("isPwrSaving");
-    ul = prefs.getULong("lsSecs", 0);
-    if (ul) s_cfg.lsSecs = ul;
-    ul = prefs.getULong("minWakeSecs", 0);
-    if (ul) s_cfg.minWakeSecs = ul;
 
     if (prefs.isKey("telDevEn")) s_cfg.telDeviceEnabled = prefs.getBool("telDevEn");
     ul = prefs.getULong("telDevIntv", 0);
@@ -12437,7 +12520,6 @@ static void loadConfigFromPrefs() {
         s_cfg.neighborInfoIntervalS = NEIGHBORINFO_MIN_INTERVAL_S;
     }
 
-    if (prefs.isKey("cannedEn")) s_cfg.cannedEnabled = prefs.getBool("cannedEn");
     if (prefs.isKey("snfClientEn"))
         s_cfg.chatServerMode = prefs.getBool("snfClientEn") ? CHAT_SERVER_MODE_AUTO : CHAT_SERVER_MODE_OFF;
     if (prefs.isKey("otaAutoChk")) s_cfg.otaAutoCheckEnabled = prefs.getBool("otaAutoChk");
@@ -12448,18 +12530,11 @@ static void loadConfigFromPrefs() {
                                     cfgDefaultAutoFavRangeM(s_cfg.displayUnits));
         if (r > 0) s_cfg.autoFavoriteRangeM = r;
     }
-    String canned = getStringIfKey("cannedMsgs");
-    if (canned.length()) {
-        strncpy(s_cfg.cannedMessages, canned.c_str(), sizeof(s_cfg.cannedMessages) - 1);
-        s_cfg.cannedMessages[sizeof(s_cfg.cannedMessages) - 1] = '\0';
-    }
 
     ul = prefs.getULong("nodeIdOvr", 0);
     if (ul) s_cfg.nodeIdOverride = (uint32_t)ul;
     ro = prefs.getUChar("brightness", 0xFF);
     if (ro != 0xFF) s_cfg.brightness = cfgCoerceBrightness(ro);
-    ro = prefs.getUChar("chatSpace", 0xFF);
-    if (ro != 0xFF && ro <= 2) s_cfg.chatSpacing = ro;
     ro = prefs.getUChar("fontSize", 0xFF);
     if (ro != 0xFF && ro <= FONT_SIZE_MAX) s_cfg.fontSize = ro;
 
@@ -15725,6 +15800,15 @@ static void sendComposeMessage() {
 
 static void initCfgActions() {
     s_cfgActionCount = 0;
+    // A table-driven row (kCfgGenRows), listed like any other.
+    // None on builds without HAS_CFG_EXTRA_ROWS, where web config carries them.
+    auto addGen = [](int genId) {
+#if HAS_CFG_EXTRA_ROWS
+        s_cfgActions[s_cfgActionCount++] = CFG_ACTION_GEN_FIRST + genId;
+#else
+        (void)genId;
+#endif
+    };
 
     // Order here is the order on screen. Grouped by what a person is trying to
     // do rather than by which subsystem owns the setting: identity, then the
@@ -15750,6 +15834,21 @@ static void initCfgActions() {
     // Under the preset: the other half of "can this node be heard at all".
     s_cfgActions[s_cfgActionCount++] = CFG_ACTION_ANTENNA;
 #endif
+    // The rest of the radio, finest-grained last: where it may transmit, how
+    // loud and how far, what kind of node it is, then the custom modem that
+    // replaces the preset, and the identity rows nobody changes twice.
+    addGen(CFG_GEN_REGION);
+    addGen(CFG_GEN_TX_POWER);
+    addGen(CFG_GEN_HOP_LIMIT);
+    addGen(CFG_GEN_ROLE);
+    addGen(CFG_GEN_CUSTOM_MODEM);
+    addGen(CFG_GEN_CUSTOM_BW);
+    addGen(CFG_GEN_CUSTOM_SF);
+    addGen(CFG_GEN_CUSTOM_CR);
+    addGen(CFG_GEN_CUSTOM_SLOT);
+    addGen(CFG_GEN_RX_BOOST);
+    addGen(CFG_GEN_NODEID_PUBKEY);
+    addGen(CFG_GEN_NODEID_OVERRIDE);
 
     // The radios themselves, each with whatever picks what it talks to.
     s_cfgActions[s_cfgActionCount++] = CFG_ACTION_WIFI_TOGGLE;
@@ -15787,7 +15886,21 @@ static void initCfgActions() {
     // Under the web config rows it belongs to: it switches a tab of that page.
     s_cfgActions[s_cfgActionCount++] = CFG_ACTION_WEB_FILES;
 #endif
+    // How web config is reached, under the rows that turn it on.
+    addGen(CFG_GEN_WEB_AUTH);
+    addGen(CFG_GEN_WEB_PASS);
+    addGen(CFG_GEN_WEB_IDLE);
     s_cfgActions[s_cfgActionCount++] = CFG_ACTION_MQTT_TOGGLE;
+    // The broker the bridge talks to, then what crosses it.
+    addGen(CFG_GEN_MQTT_SERVER);
+    addGen(CFG_GEN_MQTT_PORT);
+    addGen(CFG_GEN_MQTT_USER);
+    addGen(CFG_GEN_MQTT_PASS);
+    addGen(CFG_GEN_MQTT_ROOT);
+    addGen(CFG_GEN_MQTT_ENCRYPT);
+    addGen(CFG_GEN_MQTT_MAP_REPORT);
+    addGen(CFG_GEN_OK_TO_MQTT);
+    addGen(CFG_GEN_IGNORE_MQTT);
 
     // In the same run as GPS above, because the two are routinely confused:
     // that row picks whether the hardware is one of the position sources, this
@@ -15796,6 +15909,13 @@ static void initCfgActions() {
     // Immediately after it: this row only means anything while sharing is on,
     // and someone turning sharing off is often really looking for this instead.
     s_cfgActions[s_cfgActionCount++] = CFG_ACTION_POSITION_PRECISION;
+    // How often, how the GPS is read, and the position used without a fix.
+    addGen(CFG_GEN_POS_INTERVAL);
+    addGen(CFG_GEN_GPS_POLL);
+    addGen(CFG_GEN_GPS_DUTY);
+    addGen(CFG_GEN_FIXED_LAT);
+    addGen(CFG_GEN_FIXED_LON);
+    addGen(CFG_GEN_FIXED_ALT);
 
     s_cfgActions[s_cfgActionCount++] = CFG_ACTION_CHANNEL_CFG;
     // After the channels: like them, it decides what this node hears.
@@ -15931,15 +16051,39 @@ static void initCfgActions() {
     // Unconditional: every supported board reads a battery voltage, so there is
     // no board this row would have nothing to show.
     s_cfgActions[s_cfgActionCount++] = CFG_ACTION_BATT_DISPLAY;
+    // Where the clock comes from, and how the device runs unattended.
+    addGen(CFG_GEN_TIMEZONE);
+    addGen(CFG_GEN_NTP_SERVER);
+    addGen(CFG_GEN_POWER_SAVING);
+    addGen(CFG_GEN_DEBUG_LOG);
 
     // ── Mesh modules ─────────────────────────────────────────────────────────
+    // What this node relays and announces, then the modules.
+    addGen(CFG_GEN_REBROADCAST);
+    addGen(CFG_GEN_NODEINFO_INTERVAL);
+    addGen(CFG_GEN_TEL_DEVICE);
+#if HAS_ENV_SENSOR_TELEMETRY
+    addGen(CFG_GEN_TEL_ENV);
+#endif
+    addGen(CFG_GEN_TEL_INTERVAL);
     s_cfgActions[s_cfgActionCount++] = CFG_ACTION_NEIGHBOR_INFO;
+    addGen(CFG_GEN_NEIGHBOR_INTERVAL);
+    addGen(CFG_GEN_NEIGHBOR_LORA);
     s_cfgActions[s_cfgActionCount++] = CFG_ACTION_MESH_BEACON;
     // camillia chat server: mode, the node it uses (activating clears it; a node
     // is set from Nodes -> Chat Server), and a manual catch-up.
     s_cfgActions[s_cfgActionCount++] = CFG_ACTION_CS_MODE;
     s_cfgActions[s_cfgActionCount++] = CFG_ACTION_CS_SERVER;
     s_cfgActions[s_cfgActionCount++] = CFG_ACTION_CS_CHECK;
+    addGen(CFG_GEN_AUTOFAV);
+    addGen(CFG_GEN_AUTOFAV_RANGE);
+    // The two HTTP services Tools reaches out to.
+#if HAS_NODE_LOS
+    addGen(CFG_GEN_LOS_SERVER);
+#endif
+#if HAS_WEATHER
+    addGen(CFG_GEN_WEATHER_SERVER);
+#endif
 
     // ── Done once, or rarely ─────────────────────────────────────────────────
     // Hardware trim: set once per unit rather than adjusted, which is why it is
@@ -15977,6 +16121,8 @@ static void initCfgActions() {
     // will find. Absent on the Cardputer for the same reason the update row is
     // — a channel setting for an update path that does not exist is inert.
     s_cfgActions[s_cfgActionCount++] = CFG_ACTION_OTA_CHANNEL;
+    addGen(CFG_GEN_OTA_BOOT_CHECK);
+    addGen(CFG_GEN_OTA_AUTO_UPDATE);
 #endif
     // Under the update entries it describes. Present on every board — the notes
     // are baked into the image, so this needs neither OTA nor WiFi, and the
@@ -20869,6 +21015,15 @@ static void refreshChanEditRows();
 static void openChanTextModal(int field);
 static void closeChanTextModal();
 static void commitChanTextModal();
+// And as the editor for every text row in the Config table (kCfgGenRows):
+// which row is open is s_cfgGenOpen, and the hooks below are defined there.
+static constexpr int kChanTextCfgGen = 0x43;
+static const char *cfgGenTextTitle();
+static uint32_t    cfgGenTextMaxLen();
+static bool        cfgGenTextMasked();
+static void        cfgGenTextInitial(char *out, size_t cap);
+static const char *cfgGenTextCommit(const char *text);   // nullptr = accepted
+static void        cfgGenTextDone();
 // The text modal doubles as the Mesh Beacons message editor: this field id
 // sits outside ChanEditRow, and its commit goes to s_cfg, not the channel.
 static constexpr int kChanTextBeaconMessage = 0x40;
@@ -21545,6 +21700,19 @@ static void commitChanTextModal() {
     const char *text = lv_textarea_get_text(s_chanTextInput);
     if (!text) text = "";
 
+    if (s_chanTextField == kChanTextCfgGen) {
+        char val[100];
+        utf8util::copyTruncate(val, sizeof(val), text);   // before close frees it
+        const char *err = cfgGenTextCommit(val);
+        if (err) {
+            if (s_chanTextStatus) lv_label_set_text(s_chanTextStatus, TR(err));
+            return;
+        }
+        closeChanTextModal();
+        cfgGenTextDone();
+        return;
+    }
+
     if (s_chanTextField == kChanTextBeaconMessage) {
         char msg[61];
         beaconCopyMessage(msg, text);   // copied before closing frees the textarea
@@ -21598,7 +21766,8 @@ static void commitChanTextModal() {
 static void openChanTextModal(int field) {
     if (!s_rootScreen || s_chanTextModal || s_chanTextBackdrop) return;
     if (field != CHAN_EDIT_NAME && field != CHAN_EDIT_KEY && field != kChanTextBeaconMessage
-        && field != kChanTextLicCall && field != kChanTextLicSuffix) return;
+        && field != kChanTextLicCall && field != kChanTextLicSuffix
+        && field != kChanTextCfgGen) return;
     s_chanTextField = field;
 
     const int w = lv_disp_get_hor_res(NULL);
@@ -21649,13 +21818,15 @@ static void openChanTextModal(int field) {
     const bool editingBeacon = (field == kChanTextBeaconMessage);
     const bool editingLicCall = (field == kChanTextLicCall);
     const bool editingLicSuffix = (field == kChanTextLicSuffix);
+    const bool editingCfgGen = (field == kChanTextCfgGen);
 
     lv_obj_t *title = lv_label_create(s_chanTextModal);
     lv_obj_set_width(title, lv_pct(100));
     lv_obj_set_style_text_font(title, &lv_font_montserrat_14, 0);
     lv_obj_set_style_text_color(title, lv_color_hex(0xD9E8FF), 0);
     lv_obj_set_style_text_align(title, LV_TEXT_ALIGN_CENTER, 0);
-    lv_label_set_text(title, editingBeacon ? TR("Beacon message")
+    lv_label_set_text(title, editingCfgGen ? cfgGenTextTitle()
+                             : editingBeacon ? TR("Beacon message")
                              : editingLicCall ? TR("Call sign")
                              : editingLicSuffix ? TR("Long name suffix")
                              : editingName ? TR("Channel Name") : TR("Channel Key"));
@@ -21676,14 +21847,20 @@ static void openChanTextModal(int field) {
     lv_obj_set_style_border_color(s_chanTextInput, lv_color_hex(0x4C76BA), 0);
     lv_textarea_set_one_line(s_chanTextInput, true);
     // Characters, not bytes: commit truncates to 60 bytes on a UTF-8 boundary.
-    lv_textarea_set_max_length(s_chanTextInput, editingBeacon ? 60u
+    lv_textarea_set_max_length(s_chanTextInput, editingCfgGen ? cfgGenTextMaxLen()
+                                                : editingBeacon ? 60u
                                                 : editingLicCall ? (uint32_t)lic::kCallSignMax
                                                 : editingLicSuffix ? (uint32_t)(MESH_LONG_NAME_MAX_BYTES - 3)
                                                 : editingName ? (uint32_t)kChanNameMax : 48);
     lv_textarea_set_placeholder_text(s_chanTextInput,
                                      editingKey ? TR("base64 key") : TR("Leave blank to clear"));
 
-    if (editingBeacon) {
+    if (editingCfgGen) {
+        char cur[100];
+        cfgGenTextInitial(cur, sizeof(cur));
+        lv_textarea_set_text(s_chanTextInput, cur);
+        if (cfgGenTextMasked()) lv_textarea_set_password_mode(s_chanTextInput, true);
+    } else if (editingBeacon) {
         lv_textarea_set_text(s_chanTextInput, s_cfg.meshBeaconMessage);
 #if FEATURE_LICENSED_MODE
     } else if (editingLicCall) {
@@ -26231,6 +26408,8 @@ static void closeCfgModal() {
     s_cfgFilter[0] = '\0';
     closeCfgWifiPickerModal();
     closeCfgNodeNameModal();
+    // A Config text row left open: nothing is staged, so closing is the cancel.
+    if (s_chanTextField == kChanTextCfgGen) closeChanTextModal();
     closeCfgPresetModal();
     closeMeshBeaconCfgModal();
 #if FEATURE_LICENSED_MODE
@@ -45293,6 +45472,11 @@ static void activateCfgSelection() {
         if ((actionId == CFG_ACTION_CS_MODE || actionId == CFG_ACTION_CS_CHECK) && lic::active()) {
             disabledMessage = TR("Chat server is off while licensed");
         }
+        if (cfgGenIsAction(actionId)) {
+            const char *why = nullptr;
+            cfgGenDisabled(actionId - CFG_ACTION_GEN_FIRST, &why);
+            if (why) disabledMessage = TR(why);
+        }
         snprintf(s_cfgStatus, sizeof(s_cfgStatus), "%s", disabledMessage);
         openCfgActionMessageModal(s_cfgStatus);
         return;
@@ -45696,10 +45880,1027 @@ static void cfgSdScanRun() {
 }
 #endif  // HAS_SD_MALWARE_SCAN
 
+#if HAS_CFG_EXTRA_ROWS
+// ── Table-driven Config rows: the table ─────────────────────────────────────
+// See CfgGenId. One entry per id, in id order (checked below). A row is one of
+// three kinds, and fills in the hooks for its kind only:
+//
+//   toggle  getBool / setBool             Enter flips it
+//   choice  opts, or count + nameAt,      opens the slider picker
+//           with getIdx / setIdx
+//   text    getText / setText             opens the one-line text modal
+//
+// After any change cfgGenFinish() applies it the way the flags say: by
+// rebooting, by re-running the whole live-apply path the web form uses
+// (onWebCfgSaved()), or by simply saving. `after` runs first, for the few rows
+// with one extra thing to poke.
+
+static int regionPickCount();
+static const RegionPlan *regionPickAt(int idx);
+
+enum CfgGenKind : uint8_t { CFG_GEN_TOGGLE, CFG_GEN_CHOICE, CFG_GEN_TEXT };
+
+enum : uint8_t {
+    // Applied by rebooting. A toggle asks first; a choice or text row says so
+    // in its editor's title instead, since its editor is already a deliberate
+    // second step.
+    CFG_GEN_F_REBOOT = 1u << 0,
+    // Applied live through onWebCfgSaved(): radio retune, hop limit, role,
+    // time zone, NTP, debug flags.
+    CFG_GEN_F_LIVE   = 1u << 1,
+    // Text shown as dots while typed, and only as set/unset on the row.
+    CFG_GEN_F_MASKED = 1u << 2,
+    // Text whose empty value means the feature is off: the row reads Off
+    // rather than (none).
+    CFG_GEN_F_EMPTY_OFF = 1u << 3,
+};
+
+// One stop of a fixed choice list: the stored value and what it is called.
+struct CfgGenOpt {
+    uint32_t    value;
+    const char *label;   // TR_NOOP
+};
+
+struct CfgGenRow {
+    int8_t      id;        // its CfgGenId, so the order can be checked
+    const char *label;     // TR_NOOP; the row reads "<label>: <value>"
+    int8_t      section;   // CfgSectionId on UI_CFG_SECTIONS builds
+    uint8_t     kind;
+    uint8_t     flags;
+    // toggle
+    bool (*getBool)();
+    void (*setBool)(bool on);
+    // choice, from a fixed list ...
+    const CfgGenOpt *opts;
+    uint8_t     optCount;
+    uint32_t (*getVal)();
+    void (*setVal)(uint32_t v);
+    // ... or computed
+    int  (*count)();
+    const char *(*nameAt)(int idx);   // translated; may use a static buffer
+    int  (*getIdx)();
+    void (*setIdx)(int idx);
+    // text
+    void (*getText)(char *out, size_t cap);
+    const char *(*setText)(const char *in);   // nullptr = applied; else TR_NOOP error
+    uint8_t     maxLen;
+    // common, optional
+    bool (*disabled)();
+    const char *disabledWhy;   // TR_NOOP
+    void (*after)();
+    // Shown, and answered Yes to, before the row's editor opens (TR_NOOP).
+    // For the settings whose consequences reach past this device.
+    const char *warn;
+};
+
+static constexpr CfgGenRow cfgGenWarn(CfgGenRow r, const char *warn) {
+    r.warn = warn;
+    return r;
+}
+
+#if UI_CFG_SECTIONS
+#define CFG_GEN_SEC(x) ((int8_t)CFG_SEC_##x)
+#else
+#define CFG_GEN_SEC(x) ((int8_t)0)
+#endif
+
+// Shorthands, so each row below reads as what it is rather than as a run of
+// nullptrs in the right places.
+static constexpr CfgGenRow cfgGenToggle(int8_t id, const char *label, int8_t sec, uint8_t flags,
+                                        bool (*g)(), void (*s)(bool),
+                                        bool (*disabled)() = nullptr,
+                                        const char *why = nullptr,
+                                        void (*after)() = nullptr) {
+    return CfgGenRow{ id, label, sec, CFG_GEN_TOGGLE, flags, g, s,
+                      nullptr, 0, nullptr, nullptr,
+                      nullptr, nullptr, nullptr, nullptr,
+                      nullptr, nullptr, 0, disabled, why, after, nullptr };
+}
+static constexpr CfgGenRow cfgGenList(int8_t id, const char *label, int8_t sec, uint8_t flags,
+                                      const CfgGenOpt *opts, uint8_t n,
+                                      uint32_t (*g)(), void (*s)(uint32_t),
+                                      bool (*disabled)() = nullptr,
+                                      const char *why = nullptr,
+                                      void (*after)() = nullptr) {
+    return CfgGenRow{ id, label, sec, CFG_GEN_CHOICE, flags, nullptr, nullptr,
+                      opts, n, g, s,
+                      nullptr, nullptr, nullptr, nullptr,
+                      nullptr, nullptr, 0, disabled, why, after, nullptr };
+}
+static constexpr CfgGenRow cfgGenPick(int8_t id, const char *label, int8_t sec, uint8_t flags,
+                                      int (*count)(), const char *(*nameAt)(int),
+                                      int (*g)(), void (*s)(int),
+                                      bool (*disabled)() = nullptr,
+                                      const char *why = nullptr,
+                                      void (*after)() = nullptr) {
+    return CfgGenRow{ id, label, sec, CFG_GEN_CHOICE, flags, nullptr, nullptr,
+                      nullptr, 0, nullptr, nullptr,
+                      count, nameAt, g, s,
+                      nullptr, nullptr, 0, disabled, why, after, nullptr };
+}
+static constexpr CfgGenRow cfgGenText(int8_t id, const char *label, int8_t sec, uint8_t flags,
+                                      uint8_t maxLen,
+                                      void (*g)(char *, size_t), const char *(*s)(const char *),
+                                      bool (*disabled)() = nullptr,
+                                      const char *why = nullptr,
+                                      void (*after)() = nullptr) {
+    return CfgGenRow{ id, label, sec, CFG_GEN_TEXT, flags, nullptr, nullptr,
+                      nullptr, 0, nullptr, nullptr,
+                      nullptr, nullptr, nullptr, nullptr,
+                      g, s, maxLen, disabled, why, after, nullptr };
+}
+
+// Copies a string setting into its field, refusing rather than clipping one
+// that does not fit: a truncated server name or password is a wrong one.
+template <size_t N>
+static const char *cfgGenStore(char (&dst)[N], const char *in) {
+    if (!in) in = "";
+    if (strlen(in) >= N) return TR_NOOP("Too long");
+    snprintf(dst, N, "%s", in);
+    return nullptr;
+}
+
+// Plain http:// or nothing: neither the LOS nor the weather fetcher has a TLS
+// client, so an https:// address could never be reached.
+template <size_t N>
+static const char *cfgGenStoreHttpUrl(char (&dst)[N], const char *in) {
+    if (in && in[0] && strncmp(in, "http://", 7) != 0) return TR_NOOP("Must start with http://");
+    return cfgGenStore(dst, in);
+}
+
+// Whole number in [lo, hi], or nullptr-on-success semantics like the stores.
+static bool cfgGenParseLong(const char *in, long lo, long hi, long &out) {
+    if (!in || !in[0]) return false;
+    char *end = nullptr;
+    const long v = strtol(in, &end, 10);
+    if (end == in || *end || v < lo || v > hi) return false;
+    out = v;
+    return true;
+}
+
+static bool cfgGenParseDegrees(const char *in, double limit, int32_t &outE7) {
+    if (!in || !in[0]) return false;
+    char *end = nullptr;
+    const double v = strtod(in, &end);
+    if (end == in || *end || v < -limit || v > limit) return false;
+    outE7 = (int32_t)lround(v * 1e7);
+    return true;
+}
+
+static void cfgGenMqttChanged() {
+    // Drop the session so the next loop reconnects with what was just set.
+    if (s_cfg.mqttEnabled) mqttBridgeConfigChanged();
+}
+
+static void cfgGenCustomModemChanged() {
+    // The four custom values only drive the radio while Custom is in force;
+    // otherwise they are what switching to Custom will start from.
+    if (!s_cfg.loraUsePreset) onWebCfgSaved();
+}
+
+static bool cfgGenLicensed() { return lic::active(); }
+
+// ── Fixed choice lists ──────────────────────────────────────────────────────
+
+static const CfgGenOpt kCfgGenRoles[] = {
+    { 0,  TR_NOOP("Client") },
+    { 1,  TR_NOOP("Client (mute)") },
+    { 5,  TR_NOOP("Tracker") },
+    { 8,  TR_NOOP("Client (hidden)") },
+#if UI_OFFER_CLIENT_BASE
+    { 12, TR_NOOP("Client base") },
+#endif
+};
+
+static const CfgGenOpt kCfgGenWebIdle[] = {
+    { 300,  TR_NOOP("5 min") },
+    { 600,  TR_NOOP("10 min") },
+    { 900,  TR_NOOP("15 min") },
+    { 1800, TR_NOOP("30 min") },
+    { 3600, TR_NOOP("1 hour") },
+    { 0,    TR_NOOP("Never") },
+};
+
+static const CfgGenOpt kCfgGenPosIntervals[] = {
+    { 300,   TR_NOOP("5 min") },
+    { 600,   TR_NOOP("10 min") },
+    { 900,   TR_NOOP("15 min") },
+    { 1800,  TR_NOOP("30 min") },
+    { 3600,  TR_NOOP("1 hour") },
+    { 7200,  TR_NOOP("2 hours") },
+    { 21600, TR_NOOP("6 hours") },
+    { 43200, TR_NOOP("12 hours") },
+    { 86400, TR_NOOP("24 hours") },
+};
+
+static const CfgGenOpt kCfgGenNodeInfoIntervals[] = {
+    { 900,   TR_NOOP("15 min") },
+    { 1800,  TR_NOOP("30 min") },
+    { 3600,  TR_NOOP("1 hour") },
+    { 10800, TR_NOOP("3 hours") },
+    { 21600, TR_NOOP("6 hours") },
+    { 43200, TR_NOOP("12 hours") },
+    { 86400, TR_NOOP("24 hours") },
+};
+
+static const CfgGenOpt kCfgGenGpsPoll[] = {
+    { 0,    TR_NOOP("Continuous") },
+    { 5,    TR_NOOP("5 sec") },
+    { 10,   TR_NOOP("10 sec") },
+    { 30,   TR_NOOP("30 sec") },
+    { 60,   TR_NOOP("1 min") },
+    { 300,  TR_NOOP("5 min") },
+    { 900,  TR_NOOP("15 min") },
+    { 1800, TR_NOOP("30 min") },
+    { 3600, TR_NOOP("1 hour") },
+};
+
+// Telemetry is held to an hour or more, as the web form and the load path do.
+static const CfgGenOpt kCfgGenTelIntervals[] = {
+    { 3600,  TR_NOOP("1 hour") },
+    { 7200,  TR_NOOP("2 hours") },
+    { 10800, TR_NOOP("3 hours") },
+    { 21600, TR_NOOP("6 hours") },
+    { 43200, TR_NOOP("12 hours") },
+    { 86400, TR_NOOP("24 hours") },
+};
+
+// NEIGHBORINFO_MIN_INTERVAL_S (4 h) is the floor.
+static const CfgGenOpt kCfgGenNeighborIntervals[] = {
+    { 14400, TR_NOOP("4 hours") },
+    { 21600, TR_NOOP("6 hours") },
+    { 43200, TR_NOOP("12 hours") },
+    { 86400, TR_NOOP("24 hours") },
+};
+
+static const CfgGenOpt kCfgGenRebroadcast[] = {
+    { 0, TR_NOOP("All") },
+    { 1, TR_NOOP("All, skip decoding") },
+    { 2, TR_NOOP("Local only") },
+    { 3, TR_NOOP("Known only") },
+    { 4, TR_NOOP("Core apps only") },
+};
+
+static const CfgGenOpt kCfgGenOtaAuto[] = {
+    { OTA_AUTO_UPDATE_OFF, TR_NOOP("Off") },
+    { OTA_AUTO_UPDATE_1H,  TR_NOOP("Every hour") },
+    { OTA_AUTO_UPDATE_6H,  TR_NOOP("Every 6 hours") },
+    { OTA_AUTO_UPDATE_12H, TR_NOOP("Every 12 hours") },
+    { OTA_AUTO_UPDATE_24H, TR_NOOP("Every 24 hours") },
+};
+
+static const CfgGenOpt kCfgGenCustomSf[] = {
+    { 7, "SF7" }, { 8, "SF8" }, { 9, "SF9" }, { 10, "SF10" }, { 11, "SF11" }, { 12, "SF12" },
+};
+static_assert(LORA_SF_MIN == 7 && LORA_SF_MAX == 12, "kCfgGenCustomSf lists SF7..SF12");
+
+static const CfgGenOpt kCfgGenCustomCr[] = {
+    { 5, "4/5" }, { 6, "4/6" }, { 7, "4/7" }, { 8, "4/8" },
+};
+static_assert(LORA_CR_MIN == 5 && LORA_CR_MAX == 8, "kCfgGenCustomCr lists 4/5..4/8");
+
+// Auto-favorite distance, in meters, offered in the units the device shows.
+static const CfgGenOpt kCfgGenAutoFavMetric[] = {
+    { 250,   "250 m" }, { 500, "500 m" }, { 1000, "1 km" },
+    { 2000,  "2 km" },  { 5000, "5 km" }, { 10000, "10 km" },
+};
+static const CfgGenOpt kCfgGenAutoFavImperial[] = {
+    { 402,   "1/4 mi" }, { 805, "1/2 mi" }, { 1609, "1 mi" },
+    { 3219,  "2 mi" },   { 8047, "5 mi" },  { 16093, "10 mi" },
+};
+
+#define CFG_GEN_N(a) ((uint8_t)(sizeof(a) / sizeof((a)[0])))
+
+// ── Computed choice lists ───────────────────────────────────────────────────
+
+static int cfgGenRegionCount() { return regionPickCount(); }
+static const char *cfgGenRegionName(int idx) { return regionPickAt(idx)->code; }
+static int cfgGenRegionIdx() {
+    const int n = regionPickCount();
+    for (int i = 0; i < n; i++) {
+        if (!strcasecmp(regionPickAt(i)->code, s_cfg.region)) return i;
+    }
+    return 0;
+}
+static void cfgGenRegionSet(int idx) {
+    utf8util::copyTruncate(s_cfg.region, sizeof(s_cfg.region), regionPickAt(idx)->code);
+    applyPresetParams(s_cfg);   // frequency and slot follow the region
+}
+
+static int cfgGenPowerCount() { return MESH_POWER; }   // 1..MESH_POWER dBm
+static const char *cfgGenPowerName(int idx) {
+    static char buf[16];
+    snprintf(buf, sizeof(buf), TR("%d dBm"), idx + 1);
+    return buf;
+}
+static int cfgGenPowerIdx() { return constrain((int)s_cfg.loraPower, 1, (int)MESH_POWER) - 1; }
+static void cfgGenPowerSet(int idx) { s_cfg.loraPower = (uint8_t)(idx + 1); }
+
+static int cfgGenHopCount() { return 7; }   // 1..7
+static const char *cfgGenHopName(int idx) {
+    static char buf[8];
+    snprintf(buf, sizeof(buf), "%d", idx + 1);
+    return buf;
+}
+static int cfgGenHopIdx() { return constrain((int)s_cfg.loraHopLimit, 1, 7) - 1; }
+static void cfgGenHopSet(int idx) { s_cfg.loraHopLimit = (uint8_t)(idx + 1); }
+
+// Only the bandwidths this board's radio can be tuned to.
+static int cfgGenBwCount() { return kBwCodeCount; }
+static const char *cfgGenBwName(int idx) {
+    static char buf[16];
+    const float khz = loraBwFromCode(kBwCodes[idx]);
+    if (khz == (float)(int)khz) snprintf(buf, sizeof(buf), TR("%d kHz"), (int)khz);
+    else                        snprintf(buf, sizeof(buf), TR("%.2f kHz"), (double)khz);
+    return buf;
+}
+static int cfgGenBwIdx() {
+    const uint16_t cur = loraCoerceBwCode(s_cfg.loraCustomBwKhz);
+    for (int i = 0; i < kBwCodeCount; i++) if (kBwCodes[i] == cur) return i;
+    return 0;
+}
+static void cfgGenBwSet(int idx) { s_cfg.loraCustomBwKhz = kBwCodes[idx]; }
+
+static int cfgGenAutoFavCount() {
+    return s_cfg.displayUnits ? CFG_GEN_N(kCfgGenAutoFavImperial) : CFG_GEN_N(kCfgGenAutoFavMetric);
+}
+static const CfgGenOpt *cfgGenAutoFavOpts() {
+    return s_cfg.displayUnits ? kCfgGenAutoFavImperial : kCfgGenAutoFavMetric;
+}
+static const char *cfgGenAutoFavName(int idx) { return cfgGenAutoFavOpts()[idx].label; }
+static int cfgGenAutoFavIdx() {
+    const CfgGenOpt *o = cfgGenAutoFavOpts();
+    const int n = cfgGenAutoFavCount();
+    int best = 0;
+    for (int i = 1; i < n; i++) {
+        if (labs((long)o[i].value - (long)s_cfg.autoFavoriteRangeM)
+            < labs((long)o[best].value - (long)s_cfg.autoFavoriteRangeM)) best = i;
+    }
+    return best;
+}
+static void cfgGenAutoFavSet(int idx) { s_cfg.autoFavoriteRangeM = cfgGenAutoFavOpts()[idx].value; }
+
+// ── The table ───────────────────────────────────────────────────────────────
+
+static constexpr CfgGenRow kCfgGenRows[CFG_GEN__COUNT] = {
+    // ── Radio & Identity ─────────────────────────────────────────────────────
+    cfgGenPick(CFG_GEN_REGION, TR_NOOP("Region"), CFG_GEN_SEC(RADIO), CFG_GEN_F_REBOOT,
+               cfgGenRegionCount, cfgGenRegionName, cfgGenRegionIdx, cfgGenRegionSet),
+    // Licensed mode owns the power level while it is on (its own popup).
+    cfgGenPick(CFG_GEN_TX_POWER, TR_NOOP("TX Power"), CFG_GEN_SEC(RADIO), CFG_GEN_F_LIVE,
+               cfgGenPowerCount, cfgGenPowerName, cfgGenPowerIdx, cfgGenPowerSet,
+               cfgGenLicensed, TR_NOOP("Set in Licensed mode")),
+    cfgGenPick(CFG_GEN_HOP_LIMIT, TR_NOOP("Hop Limit"), CFG_GEN_SEC(RADIO), CFG_GEN_F_LIVE,
+               cfgGenHopCount, cfgGenHopName, cfgGenHopIdx, cfgGenHopSet),
+    cfgGenList(CFG_GEN_ROLE, TR_NOOP("Device Role"), CFG_GEN_SEC(RADIO), CFG_GEN_F_LIVE,
+               kCfgGenRoles, CFG_GEN_N(kCfgGenRoles),
+               []() -> uint32_t { return s_cfg.deviceRole; },
+               [](uint32_t v) { s_cfg.deviceRole = cfgCoerceDeviceRole((uint8_t)v); }),
+    // Leaving or entering Custom changes what the radio and the primary
+    // channel's slot are, which the preset row reboots for too.
+    cfgGenToggle(CFG_GEN_CUSTOM_MODEM, TR_NOOP("Custom Modem"), CFG_GEN_SEC(RADIO), CFG_GEN_F_REBOOT,
+                 []() { return !s_cfg.loraUsePreset; },
+                 [](bool on) { s_cfg.loraUsePreset = !on; applyPresetParams(s_cfg); }),
+    cfgGenPick(CFG_GEN_CUSTOM_BW, TR_NOOP("Custom Bandwidth"), CFG_GEN_SEC(RADIO), 0,
+               cfgGenBwCount, cfgGenBwName, cfgGenBwIdx, cfgGenBwSet,
+               nullptr, nullptr, cfgGenCustomModemChanged),
+    cfgGenList(CFG_GEN_CUSTOM_SF, TR_NOOP("Custom Spreading Factor"), CFG_GEN_SEC(RADIO), 0,
+               kCfgGenCustomSf, CFG_GEN_N(kCfgGenCustomSf),
+               []() -> uint32_t { return s_cfg.loraCustomSf; },
+               [](uint32_t v) { s_cfg.loraCustomSf = (uint8_t)v; },
+               nullptr, nullptr, cfgGenCustomModemChanged),
+    cfgGenList(CFG_GEN_CUSTOM_CR, TR_NOOP("Custom Coding Rate"), CFG_GEN_SEC(RADIO), 0,
+               kCfgGenCustomCr, CFG_GEN_N(kCfgGenCustomCr),
+               []() -> uint32_t { return s_cfg.loraCustomCr; },
+               [](uint32_t v) { s_cfg.loraCustomCr = (uint8_t)v; },
+               nullptr, nullptr, cfgGenCustomModemChanged),
+    cfgGenText(CFG_GEN_CUSTOM_SLOT, TR_NOOP("Custom Frequency Slot"), CFG_GEN_SEC(RADIO), 0, 3,
+               [](char *o, size_t n) { snprintf(o, n, "%u", (unsigned)s_cfg.loraCustomSlot); },
+               [](const char *in) -> const char * {
+                   long v = 0;
+                   if (!cfgGenParseLong(in, 0, 255, v)) return TR_NOOP("Enter 0 (auto) to 255");
+                   s_cfg.loraCustomSlot = (uint8_t)v;
+                   return nullptr;
+               },
+               nullptr, nullptr, cfgGenCustomModemChanged),
+    // Only read when the radio is brought up.
+    cfgGenToggle(CFG_GEN_RX_BOOST, TR_NOOP("RX Boosted Gain"), CFG_GEN_SEC(RADIO), CFG_GEN_F_REBOOT,
+                 []() { return s_cfg.loraRxBoostedGain; },
+                 [](bool on) { s_cfg.loraRxBoostedGain = on; }),
+    // The node id is this node's identity: every peer sees a new node.
+    cfgGenToggle(CFG_GEN_NODEID_PUBKEY, TR_NOOP("Node ID from Key"), CFG_GEN_SEC(RADIO), CFG_GEN_F_REBOOT,
+                 []() { return s_cfg.nodeIdFromPubKey; },
+                 [](bool on) { s_cfg.nodeIdFromPubKey = on; }),
+    // A fixed node id, instead of the one derived from the MAC or the key.
+    // Blank turns it off. Asks first: this is the node's identity on the mesh.
+    cfgGenWarn(
+        cfgGenText(CFG_GEN_NODEID_OVERRIDE, TR_NOOP("Node ID Override"), CFG_GEN_SEC(RADIO),
+                   CFG_GEN_F_REBOOT | CFG_GEN_F_EMPTY_OFF, 11,
+                   [](char *o, size_t n) {
+                       if (s_cfg.nodeIdOverride) snprintf(o, n, "!%08lx", (unsigned long)s_cfg.nodeIdOverride);
+                       else if (n) o[0] = '\0';
+                   },
+                   [](const char *in) -> const char * {
+                       const uint32_t id = parseNodeIdText(in);
+                       // Blank, "none" or 0 is off; anything else must name a node.
+                       const bool blank = !in || !in[0] || !strcasecmp(in, "none") || !strcmp(in, "0");
+                       if (!blank && (id == 0 || id == 0xFFFFFFFFUL))
+                           return TR_NOOP("Enter a node ID like !1a2b3c4d, or blank for off");
+                       s_cfg.nodeIdOverride = blank ? 0 : id;
+                       return nullptr;
+                   }),
+        TR_NOOP("Warning: this replaces this node's ID. Every other node will see a new "
+                "node, and existing DMs and favorites stay with the old ID. Two nodes with "
+                "the same ID disrupt each other on the mesh. Blank turns it off. Continue?")),
+
+    // ── Connections ──────────────────────────────────────────────────────────
+    cfgGenToggle(CFG_GEN_WEB_AUTH, TR_NOOP("Web Config Login"), CFG_GEN_SEC(CONNECT), 0,
+                 []() { return s_cfg.webCfgAuthEnabled; },
+                 [](bool on) { s_cfg.webCfgAuthEnabled = on; }),
+    // Blank means the default password, as it does in web config.
+    cfgGenText(CFG_GEN_WEB_PASS, TR_NOOP("Web Config Password"), CFG_GEN_SEC(CONNECT), CFG_GEN_F_MASKED,
+               (uint8_t)(sizeof(s_cfg.webCfgPass) - 1),
+               [](char *o, size_t n) { snprintf(o, n, "%s", s_cfg.webCfgPass); },
+               [](const char *in) { return cfgGenStore(s_cfg.webCfgPass, in); }),
+    cfgGenList(CFG_GEN_WEB_IDLE, TR_NOOP("Web Config Idle Off"), CFG_GEN_SEC(CONNECT), 0,
+               kCfgGenWebIdle, CFG_GEN_N(kCfgGenWebIdle),
+               []() -> uint32_t { return cfgCoerceWebCfgIdle((long)s_cfg.webCfgIdleTimeoutS); },
+               [](uint32_t v) { s_cfg.webCfgIdleTimeoutS = cfgCoerceWebCfgIdle((long)v); },
+               nullptr, nullptr,
+               []() { webCfgSetIdleTimeoutS(s_cfg.webCfgIdleTimeoutS); }),
+    cfgGenText(CFG_GEN_MQTT_SERVER, TR_NOOP("MQTT Server"), CFG_GEN_SEC(CONNECT), 0,
+               (uint8_t)(sizeof(s_cfg.mqttServer) - 1),
+               [](char *o, size_t n) { snprintf(o, n, "%s", s_cfg.mqttServer); },
+               [](const char *in) { return cfgGenStore(s_cfg.mqttServer, in); },
+               nullptr, nullptr, cfgGenMqttChanged),
+    cfgGenText(CFG_GEN_MQTT_PORT, TR_NOOP("MQTT Port"), CFG_GEN_SEC(CONNECT), 0, 5,
+               [](char *o, size_t n) { snprintf(o, n, "%u", (unsigned)s_cfg.mqttPort); },
+               [](const char *in) -> const char * {
+                   long v = 0;
+                   if (!cfgGenParseLong(in, 1, 65535, v)) return TR_NOOP("Enter a port, 1 to 65535");
+                   s_cfg.mqttPort = (uint16_t)v;
+                   return nullptr;
+               },
+               nullptr, nullptr, cfgGenMqttChanged),
+    cfgGenText(CFG_GEN_MQTT_USER, TR_NOOP("MQTT Username"), CFG_GEN_SEC(CONNECT), 0,
+               (uint8_t)(sizeof(s_cfg.mqttUser) - 1),
+               [](char *o, size_t n) { snprintf(o, n, "%s", s_cfg.mqttUser); },
+               [](const char *in) { return cfgGenStore(s_cfg.mqttUser, in); },
+               nullptr, nullptr, cfgGenMqttChanged),
+    cfgGenText(CFG_GEN_MQTT_PASS, TR_NOOP("MQTT Password"), CFG_GEN_SEC(CONNECT), CFG_GEN_F_MASKED,
+               (uint8_t)(sizeof(s_cfg.mqttPass) - 1),
+               [](char *o, size_t n) { snprintf(o, n, "%s", s_cfg.mqttPass); },
+               [](const char *in) { return cfgGenStore(s_cfg.mqttPass, in); },
+               nullptr, nullptr, cfgGenMqttChanged),
+    // Required: the bridge builds every topic from it.
+    cfgGenText(CFG_GEN_MQTT_ROOT, TR_NOOP("MQTT Root Topic"), CFG_GEN_SEC(CONNECT), 0,
+               (uint8_t)(sizeof(s_cfg.mqttRoot) - 1),
+               [](char *o, size_t n) { snprintf(o, n, "%s", s_cfg.mqttRoot); },
+               [](const char *in) -> const char * {
+                   if (!in || !in[0]) return TR_NOOP("A root topic is required");
+                   return cfgGenStore(s_cfg.mqttRoot, in);
+               },
+               nullptr, nullptr, cfgGenMqttChanged),
+    cfgGenToggle(CFG_GEN_MQTT_ENCRYPT, TR_NOOP("MQTT Encryption"), CFG_GEN_SEC(CONNECT), 0,
+                 []() { return s_cfg.mqttEncryption; },
+                 [](bool on) { s_cfg.mqttEncryption = on; },
+                 nullptr, nullptr, cfgGenMqttChanged),
+    cfgGenToggle(CFG_GEN_MQTT_MAP_REPORT, TR_NOOP("MQTT Map Report"), CFG_GEN_SEC(CONNECT), 0,
+                 []() { return s_cfg.mqttMapReport; },
+                 [](bool on) { s_cfg.mqttMapReport = on; }),
+    cfgGenToggle(CFG_GEN_OK_TO_MQTT, TR_NOOP("OK to MQTT"), CFG_GEN_SEC(CONNECT), 0,
+                 []() { return s_cfg.okToMqtt; },
+                 [](bool on) { s_cfg.okToMqtt = on; }),
+    cfgGenToggle(CFG_GEN_IGNORE_MQTT, TR_NOOP("Ignore MQTT Packets"), CFG_GEN_SEC(CONNECT), 0,
+                 []() { return s_cfg.ignoreMqtt; },
+                 [](bool on) { s_cfg.ignoreMqtt = on; }),
+
+    // ── Location ─────────────────────────────────────────────────────────────
+    cfgGenList(CFG_GEN_POS_INTERVAL, TR_NOOP("Position Broadcast"), CFG_GEN_SEC(LOCATION), 0,
+               kCfgGenPosIntervals, CFG_GEN_N(kCfgGenPosIntervals),
+               []() -> uint32_t { return s_cfg.posIntervalS; },
+               [](uint32_t v) { s_cfg.posIntervalS = v; }),
+    cfgGenList(CFG_GEN_GPS_POLL, TR_NOOP("GPS Poll Interval"), CFG_GEN_SEC(LOCATION), 0,
+               kCfgGenGpsPoll, CFG_GEN_N(kCfgGenGpsPoll),
+               []() -> uint32_t { return s_cfg.gpsPollIntervalS; },
+               [](uint32_t v) { s_cfg.gpsPollIntervalS = v; }),
+    // Parks the receiver between polls; see gpsSetDutyCycle().
+    cfgGenToggle(CFG_GEN_GPS_DUTY, TR_NOOP("GPS Standby Between Polls"), CFG_GEN_SEC(LOCATION), 0,
+                 []() { return s_cfg.gpsDutyCycleEnabled; },
+                 [](bool on) { s_cfg.gpsDutyCycleEnabled = on; }),
+    cfgGenText(CFG_GEN_FIXED_LAT, TR_NOOP("Fixed Latitude"), CFG_GEN_SEC(LOCATION), 0, 12,
+               [](char *o, size_t n) { snprintf(o, n, "%.7f", s_cfg.latI * 1e-7); },
+               [](const char *in) -> const char * {
+                   int32_t v = 0;
+                   if (!cfgGenParseDegrees(in, 90.0, v)) return TR_NOOP("Enter -90 to 90");
+                   s_cfg.latI = v;
+                   return nullptr;
+               }),
+    cfgGenText(CFG_GEN_FIXED_LON, TR_NOOP("Fixed Longitude"), CFG_GEN_SEC(LOCATION), 0, 13,
+               [](char *o, size_t n) { snprintf(o, n, "%.7f", s_cfg.lonI * 1e-7); },
+               [](const char *in) -> const char * {
+                   int32_t v = 0;
+                   if (!cfgGenParseDegrees(in, 180.0, v)) return TR_NOOP("Enter -180 to 180");
+                   s_cfg.lonI = v;
+                   return nullptr;
+               }),
+    cfgGenText(CFG_GEN_FIXED_ALT, TR_NOOP("Fixed Altitude (m)"), CFG_GEN_SEC(LOCATION), 0, 6,
+               [](char *o, size_t n) { snprintf(o, n, "%d", (int)s_cfg.alt); },
+               [](const char *in) -> const char * {
+                   long v = 0;
+                   if (!cfgGenParseLong(in, -500, 20000, v)) return TR_NOOP("Enter -500 to 20000");
+                   s_cfg.alt = (int32_t)v;
+                   return nullptr;
+               }),
+
+    // ── Mesh Services ────────────────────────────────────────────────────────
+    // Licensed mode pins this to Local only.
+    cfgGenList(CFG_GEN_REBROADCAST, TR_NOOP("Rebroadcast"), CFG_GEN_SEC(MESH), 0,
+               kCfgGenRebroadcast, CFG_GEN_N(kCfgGenRebroadcast),
+               []() -> uint32_t { return s_cfg.rebroadcastMode; },
+               [](uint32_t v) { s_cfg.rebroadcastMode = (uint8_t)v; },
+               cfgGenLicensed, TR_NOOP("Fixed while licensed")),
+    // And this to the station-ID interval.
+    cfgGenList(CFG_GEN_NODEINFO_INTERVAL, TR_NOOP("NodeInfo Broadcast"), CFG_GEN_SEC(MESH), 0,
+               kCfgGenNodeInfoIntervals, CFG_GEN_N(kCfgGenNodeInfoIntervals),
+               []() -> uint32_t { return s_cfg.nodeInfoIntervalS; },
+               [](uint32_t v) { s_cfg.nodeInfoIntervalS = v; },
+               cfgGenLicensed, TR_NOOP("Fixed while licensed")),
+    cfgGenToggle(CFG_GEN_TEL_DEVICE, TR_NOOP("Device Telemetry"), CFG_GEN_SEC(MESH), 0,
+                 []() { return s_cfg.telDeviceEnabled; },
+                 [](bool on) { s_cfg.telDeviceEnabled = on; }),
+    cfgGenToggle(CFG_GEN_TEL_ENV, TR_NOOP("Environment Telemetry"), CFG_GEN_SEC(MESH), 0,
+                 []() { return s_cfg.telEnvEnabled; },
+                 [](bool on) { s_cfg.telEnvEnabled = HAS_ENV_SENSOR_TELEMETRY && on; }),
+    // One interval for both, as in web config.
+    cfgGenList(CFG_GEN_TEL_INTERVAL, TR_NOOP("Telemetry Interval"), CFG_GEN_SEC(MESH), 0,
+               kCfgGenTelIntervals, CFG_GEN_N(kCfgGenTelIntervals),
+               []() -> uint32_t { return s_cfg.telDeviceIntervalS; },
+               [](uint32_t v) { s_cfg.telDeviceIntervalS = v; s_cfg.telEnvIntervalS = v; }),
+    cfgGenList(CFG_GEN_NEIGHBOR_INTERVAL, TR_NOOP("Neighborhood Info Interval"), CFG_GEN_SEC(MESH), 0,
+               kCfgGenNeighborIntervals, CFG_GEN_N(kCfgGenNeighborIntervals),
+               []() -> uint32_t { return s_cfg.neighborInfoIntervalS; },
+               [](uint32_t v) { s_cfg.neighborInfoIntervalS = v; }),
+    cfgGenToggle(CFG_GEN_NEIGHBOR_LORA, TR_NOOP("Neighborhood Info over LoRa"), CFG_GEN_SEC(MESH), 0,
+                 []() { return s_cfg.neighborInfoOverLora; },
+                 [](bool on) { s_cfg.neighborInfoOverLora = on; }),
+    cfgGenToggle(CFG_GEN_AUTOFAV, TR_NOOP("Auto-Favorite Nearby"), CFG_GEN_SEC(MESH), 0,
+                 []() { return s_cfg.autoFavoriteEnabled; },
+                 [](bool on) { s_cfg.autoFavoriteEnabled = on; }),
+    cfgGenPick(CFG_GEN_AUTOFAV_RANGE, TR_NOOP("Auto-Favorite Range"), CFG_GEN_SEC(MESH), 0,
+               cfgGenAutoFavCount, cfgGenAutoFavName, cfgGenAutoFavIdx, cfgGenAutoFavSet),
+    cfgGenText(CFG_GEN_LOS_SERVER, TR_NOOP("LOS Elevation Server"), CFG_GEN_SEC(MESH), 0,
+               (uint8_t)(sizeof(s_cfg.losElevServer) - 1),
+               [](char *o, size_t n) { snprintf(o, n, "%s", s_cfg.losElevServer); },
+               [](const char *in) { return cfgGenStoreHttpUrl(s_cfg.losElevServer, in); }),
+    cfgGenText(CFG_GEN_WEATHER_SERVER, TR_NOOP("Weather Server"), CFG_GEN_SEC(MESH), 0,
+               (uint8_t)(sizeof(s_cfg.weatherServer) - 1),
+               [](char *o, size_t n) { snprintf(o, n, "%s", s_cfg.weatherServer); },
+               [](const char *in) { return cfgGenStoreHttpUrl(s_cfg.weatherServer, in); }),
+
+    // ── Device & Firmware ────────────────────────────────────────────────────
+    // A POSIX TZ string, e.g. EST5EDT,M3.2.0,M11.1.0. Blank is UTC.
+    cfgGenText(CFG_GEN_TIMEZONE, TR_NOOP("Time Zone"), CFG_GEN_SEC(DEVICE), CFG_GEN_F_LIVE,
+               (uint8_t)(sizeof(s_cfg.tzDef) - 1),
+               [](char *o, size_t n) { snprintf(o, n, "%s", s_cfg.tzDef); },
+               [](const char *in) { return cfgGenStore(s_cfg.tzDef, in); }),
+    // Blank restores the default server.
+    cfgGenText(CFG_GEN_NTP_SERVER, TR_NOOP("NTP Server"), CFG_GEN_SEC(DEVICE), CFG_GEN_F_LIVE,
+               (uint8_t)(sizeof(s_cfg.ntpServer) - 1),
+               [](char *o, size_t n) { snprintf(o, n, "%s", s_cfg.ntpServer); },
+               [](const char *in) {
+                   return cfgGenStore(s_cfg.ntpServer, (in && in[0]) ? in : MY_NTP_SERVER);
+               }),
+    cfgGenToggle(CFG_GEN_POWER_SAVING, TR_NOOP("Power Saving"), CFG_GEN_SEC(DEVICE), 0,
+                 []() { return s_cfg.isPowerSaving; },
+                 [](bool on) { s_cfg.isPowerSaving = on; }),
+    cfgGenToggle(CFG_GEN_OTA_BOOT_CHECK, TR_NOOP("Update Check at Boot"), CFG_GEN_SEC(DEVICE), 0,
+                 []() { return s_cfg.otaAutoCheckEnabled; },
+                 [](bool on) { s_cfg.otaAutoCheckEnabled = on; }),
+    cfgGenList(CFG_GEN_OTA_AUTO_UPDATE, TR_NOOP("Auto-Install Updates"), CFG_GEN_SEC(DEVICE), 0,
+               kCfgGenOtaAuto, CFG_GEN_N(kCfgGenOtaAuto),
+               []() -> uint32_t { return cfgCoerceOtaAutoUpdate(s_cfg.otaAutoUpdatePeriod); },
+               [](uint32_t v) { s_cfg.otaAutoUpdatePeriod = cfgCoerceOtaAutoUpdate((uint8_t)v); }),
+    // The three serial categories move together, as onWebCfgSaved() has them.
+    cfgGenToggle(CFG_GEN_DEBUG_LOG, TR_NOOP("Serial Debug Logging"), CFG_GEN_SEC(DEVICE), CFG_GEN_F_LIVE,
+                 []() { return s_cfg.debugAcks || s_cfg.debugMessages || s_cfg.debugGps; },
+                 [](bool on) { s_cfg.debugAcks = s_cfg.debugMessages = s_cfg.debugGps = on; }),
+};
+
+static constexpr bool cfgGenTableInOrder() {
+    for (int i = 0; i < CFG_GEN__COUNT; i++) {
+        if (kCfgGenRows[i].id != i) return false;
+    }
+    return true;
+}
+
+static_assert(cfgGenTableInOrder(), "kCfgGenRows must list every CfgGenId, in order");
+
+static const CfgGenRow *cfgGenRow(int genId) {
+    if (genId < 0 || genId >= CFG_GEN__COUNT) return nullptr;
+    return &kCfgGenRows[genId];
+}
+
+// The choice row's current stop. A fixed list matches the stored value
+// exactly, or failing that the nearest stop -- a value imported from YAML or
+// set in web config need not be one of them, and the picker should open on
+// the closest rather than at one end.
+static int cfgGenCurrentIdx(const CfgGenRow &r) {
+    if (!r.opts) return r.getIdx ? r.getIdx() : 0;
+    const uint32_t cur = r.getVal ? r.getVal() : 0;
+    int best = 0;
+    for (int i = 0; i < r.optCount; i++) {
+        if (r.opts[i].value == cur) return i;
+        const long d = labs((long)r.opts[i].value - (long)cur);
+        if (d < labs((long)r.opts[best].value - (long)cur)) best = i;
+    }
+    return best;
+}
+
+static int cfgGenChoiceCount(const CfgGenRow &r) {
+    return r.opts ? r.optCount : (r.count ? r.count() : 0);
+}
+
+static const char *cfgGenChoiceName(const CfgGenRow &r, int idx) {
+    if (r.opts) return TR(r.opts[idx].label);
+    return r.nameAt ? r.nameAt(idx) : "";
+}
+
+// The value part of the row label, into buf.
+static void cfgGenValueText(const CfgGenRow &r, char *buf, size_t bufLen) {
+    switch (r.kind) {
+        case CFG_GEN_TOGGLE:
+            snprintf(buf, bufLen, "%s", (r.getBool && r.getBool()) ? TR("On") : TR("Off"));
+            break;
+        case CFG_GEN_CHOICE: {
+            const int n = cfgGenChoiceCount(r);
+            // A value that matches no stop exactly reads as itself, not as the
+            // nearest stop: the row must say what is stored.
+            if (r.opts && r.getVal) {
+                const uint32_t cur = r.getVal();
+                bool exact = false;
+                for (int i = 0; i < r.optCount; i++) exact = exact || (r.opts[i].value == cur);
+                if (!exact) {
+                    snprintf(buf, bufLen, TR("Custom (%lu)"), (unsigned long)cur);
+                    break;
+                }
+            }
+            snprintf(buf, bufLen, "%s", n > 0 ? cfgGenChoiceName(r, cfgGenCurrentIdx(r)) : "");
+        } break;
+        case CFG_GEN_TEXT: {
+            char cur[100] = "";
+            if (r.getText) r.getText(cur, sizeof(cur));
+            if (r.flags & CFG_GEN_F_MASKED) {
+                snprintf(buf, bufLen, "%s", cur[0] ? TR("Set") : TR("(none)"));
+            } else if (!cur[0] && (r.flags & CFG_GEN_F_EMPTY_OFF)) {
+                snprintf(buf, bufLen, "%s", TR("Off"));
+            } else {
+                snprintf(buf, bufLen, "%s", cur[0] ? cur : TR("(none)"));
+            }
+        } break;
+    }
+}
+
+static const char *cfgGenLabel(int genId, char *buf, size_t bufLen) {
+    const CfgGenRow *r = cfgGenRow(genId);
+    if (!r) { snprintf(buf, bufLen, "%s", TR("(unknown)")); return buf; }
+    char val[64];
+    cfgGenValueText(*r, val, sizeof(val));
+    snprintf(buf, bufLen, TR("%s: %s"), TR(r->label), val);
+    return buf;
+}
+
+static int cfgGenSection(int genId) {
+    const CfgGenRow *r = cfgGenRow(genId);
+    return r ? r->section : 0;
+}
+
+static bool cfgGenDisabled(int genId, const char **why) {
+    const CfgGenRow *r = cfgGenRow(genId);
+    const bool off = r && r->disabled && r->disabled();
+    if (why) *why = off ? r->disabledWhy : nullptr;
+    return off;
+}
+
+// A row with a warning asks before its editor opens. Otherwise only toggles
+// ask: their Enter is the whole change, and a reboot should never be the
+// surprise at the end of one keypress.
+static bool cfgGenNeedsConfirm(int genId) {
+    const CfgGenRow *r = cfgGenRow(genId);
+    if (!r) return false;
+    if (r->warn) return true;
+    return r->kind == CFG_GEN_TOGGLE && (r->flags & CFG_GEN_F_REBOOT);
+}
+
+// Phrased from the destination, for the reason cfgActionConfirmSentence()
+// gives: a toggle's label names the state being left.
+static void cfgGenConfirmSentence(int genId, char *buf, size_t bufLen) {
+    const CfgGenRow *r = cfgGenRow(genId);
+    if (!r) { buf[0] = '\0'; return; }
+    if (r->warn) { snprintf(buf, bufLen, "%s", TR(r->warn)); return; }
+    const bool on = r->getBool && r->getBool();
+    snprintf(buf, bufLen, TR("Turn %s %s and reboot?"), TR(r->label), on ? TR("off") : TR("on"));
+}
+
+// Applies a change already written into s_cfg.
+static void cfgGenFinish(int genId) {
+    const CfgGenRow *r = cfgGenRow(genId);
+    if (!r) return;
+    if (r->after) r->after();
+    char label[96];
+    cfgGenLabel(genId, label, sizeof(label));
+    if (r->flags & CFG_GEN_F_REBOOT) {
+        persistConfigToPrefs();
+        snprintf(s_cfgStatus, sizeof(s_cfgStatus), TR("%s - rebooting..."), label);
+        refreshCfgModal();
+        // Paint the status before going, as the preset row does: a device that
+        // reboots with no explanation reads as a crash.
+        lv_timer_handler();
+        delay(1000);
+        flushPersistentState();
+        ESP.restart();
+        return;
+    }
+    if (r->flags & CFG_GEN_F_LIVE) onWebCfgSaved();   // saves, then applies
+    else                           persistConfigToPrefs();
+    snprintf(s_cfgStatus, sizeof(s_cfgStatus), "%s", label);
+    refreshCfgModal();
+}
+
+// ── Editors ─────────────────────────────────────────────────────────────────
+
+// The row whose slider picker or text modal is open. Both editors take plain
+// function pointers with no context, so the trampolines below read it.
+static int s_cfgGenOpen = -1;
+static CfgSliderPicker s_cfgGenSlider = {};
+static char s_cfgGenTitle[64];
+
+static const char *cfgGenSliderLabel(int idx) {
+    const CfgGenRow *r = cfgGenRow(s_cfgGenOpen);
+    return r ? cfgGenChoiceName(*r, idx) : "";
+}
+
+static void cfgGenSliderApply(int idx) {
+    const CfgGenRow *r = cfgGenRow(s_cfgGenOpen);
+    if (!r) return;
+    // Saved where it already was: nothing to apply, and above all nothing to
+    // reboot for. An off-list value (see cfgGenValueText) is not "where it
+    // already was" -- saving it onto the nearest stop is a real change.
+    char before[64];
+    cfgGenValueText(*r, before, sizeof(before));
+    if (idx == cfgGenCurrentIdx(*r) && !strcmp(before, cfgGenChoiceName(*r, idx))) {
+        cfgGenLabel(s_cfgGenOpen, s_cfgStatus, sizeof(s_cfgStatus));
+        return;
+    }
+    if (r->opts) {
+        if (r->setVal && idx >= 0 && idx < r->optCount) r->setVal(r->opts[idx].value);
+    } else if (r->setIdx) {
+        r->setIdx(idx);
+    }
+    cfgGenFinish(s_cfgGenOpen);
+}
+
+// The editor's title: the row name, plus a warning when saving reboots.
+static const char *cfgGenEditorTitle(const CfgGenRow &r) {
+    if (r.flags & CFG_GEN_F_REBOOT) {
+        snprintf(s_cfgGenTitle, sizeof(s_cfgGenTitle), TR("%s (reboots)"), TR(r.label));
+    } else {
+        snprintf(s_cfgGenTitle, sizeof(s_cfgGenTitle), "%s", TR(r.label));
+    }
+    return s_cfgGenTitle;
+}
+
+static const char *cfgGenTextTitle() {
+    const CfgGenRow *r = cfgGenRow(s_cfgGenOpen);
+    return r ? cfgGenEditorTitle(*r) : "";
+}
+
+static uint32_t cfgGenTextMaxLen() {
+    const CfgGenRow *r = cfgGenRow(s_cfgGenOpen);
+    return r ? r->maxLen : 0;
+}
+
+static bool cfgGenTextMasked() {
+    const CfgGenRow *r = cfgGenRow(s_cfgGenOpen);
+    return r && (r->flags & CFG_GEN_F_MASKED);
+}
+
+static void cfgGenTextInitial(char *out, size_t cap) {
+    const CfgGenRow *r = cfgGenRow(s_cfgGenOpen);
+    if (cap) out[0] = '\0';
+    if (r && r->getText) r->getText(out, cap);
+}
+
+// Set by the commit when the text came back as it went in, so Done does not
+// save, apply or -- above all -- reboot for nothing.
+static bool s_cfgGenTextUnchanged = false;
+
+static const char *cfgGenTextCommit(const char *text) {
+    const CfgGenRow *r = cfgGenRow(s_cfgGenOpen);
+    s_cfgGenTextUnchanged = false;
+    if (!r || !r->setText) return nullptr;
+    char before[100] = "", after[100] = "";
+    if (r->getText) r->getText(before, sizeof(before));
+    const char *err = r->setText(text);
+    if (err) return err;
+    if (r->getText) r->getText(after, sizeof(after));
+    s_cfgGenTextUnchanged = !strcmp(before, after);
+    return nullptr;
+}
+
+static void cfgGenTextDone() {
+    const int id = s_cfgGenOpen;
+    s_cfgGenOpen = -1;
+    if (s_cfgGenTextUnchanged) {
+        cfgGenLabel(id, s_cfgStatus, sizeof(s_cfgStatus));
+        refreshCfgModal();
+        return;
+    }
+    cfgGenFinish(id);
+}
+
+static void cfgGenPerform(int genId) {
+    const CfgGenRow *r = cfgGenRow(genId);
+    if (!r) return;
+    switch (r->kind) {
+        case CFG_GEN_TOGGLE:
+            if (r->setBool && r->getBool) r->setBool(!r->getBool());
+            cfgGenFinish(genId);
+            break;
+        case CFG_GEN_CHOICE: {
+            const int n = cfgGenChoiceCount(*r);
+            if (n <= 0) return;
+            s_cfgGenOpen = genId;
+            // The slider reads its spec for as long as it is open, so it lives
+            // here rather than on the stack. TR() is applied by the picker, and
+            // the title is already translated, which TR() passes through.
+            s_cfgGenSlider = {};
+            s_cfgGenSlider.title    = cfgGenEditorTitle(*r);
+            s_cfgGenSlider.count    = n;
+            s_cfgGenSlider.labelFor = cfgGenSliderLabel;
+            s_cfgGenSlider.apply    = cfgGenSliderApply;
+            s_cfgGenSlider.leftEnd  = nullptr;
+            s_cfgGenSlider.rightEnd = nullptr;
+            openCfgSliderModal(&s_cfgGenSlider, cfgGenCurrentIdx(*r));
+        } break;
+        case CFG_GEN_TEXT:
+            s_cfgGenOpen = genId;
+            openChanTextModal(kChanTextCfgGen);
+            break;
+    }
+}
+
+#else  // !HAS_CFG_EXTRA_ROWS
+// No table on this build: initCfgActions() lists none of these rows, so nothing
+// below is ever reached. Stubs keep the shared dispatch compiling.
+static const char *cfgGenLabel(int, char *buf, size_t bufLen) {
+    if (bufLen) buf[0] = '\0';
+    return buf;
+}
+static int  cfgGenSection(int) { return 0; }
+static bool cfgGenDisabled(int, const char **why) { if (why) *why = nullptr; return false; }
+static bool cfgGenNeedsConfirm(int) { return false; }
+static void cfgGenConfirmSentence(int, char *buf, size_t bufLen) { if (bufLen) buf[0] = '\0'; }
+static void cfgGenPerform(int) {}
+static const char *cfgGenTextTitle() { return ""; }
+static uint32_t    cfgGenTextMaxLen() { return 0; }
+static bool        cfgGenTextMasked() { return false; }
+static void        cfgGenTextInitial(char *out, size_t cap) { if (cap) out[0] = '\0'; }
+static const char *cfgGenTextCommit(const char *) { return nullptr; }
+static void        cfgGenTextDone() {}
+#endif  // HAS_CFG_EXTRA_ROWS
+
+// ── Config backups: export / import pickers ─────────────────────────────────
+
+// Imports one backup and reboots into it; on failure leaves the reason in
+// s_cfgStatus. The body the Import row always ran, now for any backup name.
+static void cfgImportNamed(const char *name) {
+    bool ok = cfgImportFrom(s_cfg, name);
+    if (ok) {
+#if FEATURE_LICENSED_MODE
+        // Licensed now, or by the imported config: its channels come in
+        // keyless. Stripped before onWebCfgSaved() persists them.
+        const bool licKeysStripped =
+            (lic::active() || s_cfg.licensedMode) && licStripChannels(0);
+#else
+        const bool licKeysStripped = false;
+#endif
+        onWebCfgSaved();
+        persistUiTheme();
+        persistMessageAlertSetting();
+        persistSplashMelodySetting();
+        s_lastRenderedChannel = -1;
+        s_lastRenderedCount = -1;
+        refreshHeaderTime(true);
+        refreshHeaderStatus(true);
+        refreshChannelGlow(true);
+        refreshChatView(true);
+        if (licKeysStripped) {
+            snprintf(s_cfgStatus, sizeof(s_cfgStatus), "%s",
+                     TR("Licensed mode: channel imported without its key"));
+            refreshCfgModal();
+            lv_timer_handler();
+            delay(3000);
+        }
+        const char *importWarn = cfgImportWarning();
+        const bool hasImportWarn = importWarn && importWarn[0];
+        snprintf(s_cfgStatus, sizeof(s_cfgStatus), "%s",
+                 hasImportWarn ? importWarn : TR("Imported OK - rebooting..."));
+        refreshCfgModal();
+        lv_timer_handler();
+        delay(hasImportWarn ? 4000 : 1000);
+        flushPersistentState();   // settings and transcripts must land before we go
+        ESP.restart();
+    } else {
+        snprintf(s_cfgStatus, sizeof(s_cfgStatus), TR("Import FAILED (no %s?)"), name);
+    }
+}
+
+// The timestamped name an export would get now, from the local clock.
+static void cfgBackupStampName(char *out, size_t cap) {
+    const time_t now = time(nullptr);
+    struct tm lt;
+    localtime_r(&now, &lt);
+    strftime(out, cap, "config-%Y%m%d-%H%M%S.yaml", &lt);
+}
+
+static bool cfgExportOffersStamp() { return clockIsSet(); }
+
+static char s_cfgBackupNames[CFG_BACKUP_LIST_MAX][CFG_BACKUP_NAME_MAX];
+static int  s_cfgBackupCount = 0;
+static char s_cfgExportStamp[CFG_BACKUP_NAME_MAX];
+
+// Re-read each time: a card can be swapped, and an export just added one.
+static bool cfgImportHasChoice() {
+    s_cfgBackupCount = cfgListBackups(s_cfgBackupNames, CFG_BACKUP_LIST_MAX);
+    return s_cfgBackupCount > 1;
+}
+
+static const char *cfgExportPickLabel(int idx) {
+    return idx == 0 ? "config.yaml" : s_cfgExportStamp;
+}
+
+static void cfgExportPickApply(int idx) {
+    const char *name = cfgExportPickLabel(idx);
+    sdForceRescan();
+    const bool ok = cfgExportAs(s_cfg, name);
+    if (ok) snprintf(s_cfgStatus, sizeof(s_cfgStatus), TR("Exported to /camillia/%s"), name);
+    else    snprintf(s_cfgStatus, sizeof(s_cfgStatus), "%s", TR("Export FAILED (no SD?)"));
+    openCfgActionMessageModal(s_cfgStatus);
+}
+
+// config.yaml, overwritten as Export always has, or a new timestamped file
+// beside it. Only offered with the clock set: a stamp from a clock that does
+// not know the date would sort as the oldest backup on the card.
+static void openCfgExportPicker() {
+    cfgBackupStampName(s_cfgExportStamp, sizeof(s_cfgExportStamp));
+    static const CfgSliderPicker kSpec = {
+        TR_NOOP("Export Config As"), 2, cfgExportPickLabel, cfgExportPickApply,
+        TR_NOOP("replace"), TR_NOOP("new backup"),
+    };
+    openCfgSliderModal(&kSpec, 0);
+}
+
+static void cfgImportPickedCommit(int idx) {
+    if (idx < 0 || idx >= s_cfgBackupCount) return;
+    cfgImportNamed(s_cfgBackupNames[idx]);   // reboots on success
+    openCfgActionMessageModal(s_cfgStatus);
+}
+
+static const char *cfgImportPickLabel(int idx) {
+    return (idx >= 0 && idx < s_cfgBackupCount) ? s_cfgBackupNames[idx] : "";
+}
+
+// The pick, then the same question the single-file Import asks, naming it.
+static void cfgImportPickApply(int idx) {
+    if (idx < 0 || idx >= s_cfgBackupCount) return;
+    snprintf(s_cfgConfirmText, sizeof(s_cfgConfirmText),
+             TR("Import %s and reboot?"), s_cfgBackupNames[idx]);
+    openCfgConfirmModal(-1, s_cfgConfirmText, cfgImportPickedCommit, idx);
+}
+
+static void openCfgImportPicker() {
+    static CfgSliderPicker spec = {};
+    spec.title    = TR_NOOP("Import Which Backup?");
+    spec.count    = s_cfgBackupCount;
+    spec.labelFor = cfgImportPickLabel;
+    spec.apply    = cfgImportPickApply;
+    spec.leftEnd  = TR_NOOP("newest");
+    spec.rightEnd = TR_NOOP("oldest");
+    openCfgSliderModal(&spec, 0);
+}
+
 static void performCfgAction(int actionId) {
     s_cfgConfirmAction = -1;
     s_cfgConfirmMs = 0;
     bool showActionPopup = true;
+
+    // The row reads back its own value, so there is no popup to show.
+    if (cfgGenIsAction(actionId)) {
+        cfgGenPerform(actionId - CFG_ACTION_GEN_FIRST);
+        refreshCfgModal();
+        return;
+    }
 
     switch (actionId) {
         case CFG_ACTION_WEBCFG: {
@@ -45916,6 +47117,11 @@ static void performCfgAction(int actionId) {
             // The user picked this from a menu; if they just inserted a card,
             // the failed-probe cooldown must not be what tells them there isn't one.
             sdForceRescan();
+            if (cfgExportOffersStamp()) {
+                showActionPopup = false;   // the picker is the next step
+                openCfgExportPicker();
+                break;
+            }
             bool ok = cfgExport(s_cfg);
             snprintf(s_cfgStatus, sizeof(s_cfgStatus),
                      ok ? TR("Exported to /camillia/config.yaml") : TR("Export FAILED (no SD?)"));
@@ -45924,45 +47130,14 @@ static void performCfgAction(int actionId) {
         case CFG_ACTION_IMPORT: {
             if (s_cfgDebugLog) Serial.println("[lvgl-cfg] exec IMPORT");
             sdForceRescan();   // same reason as Export above
-            bool ok = cfgImport(s_cfg);
-            if (ok) {
-#if FEATURE_LICENSED_MODE
-                // Licensed now, or by the imported config: its channels come in
-                // keyless. Stripped before onWebCfgSaved() persists them.
-                const bool licKeysStripped =
-                    (lic::active() || s_cfg.licensedMode) && licStripChannels(0);
-#else
-                const bool licKeysStripped = false;
-#endif
-                onWebCfgSaved();
-                persistUiTheme();
-                persistMessageAlertSetting();
-                persistSplashMelodySetting();
-                s_lastRenderedChannel = -1;
-                s_lastRenderedCount = -1;
-                refreshHeaderTime(true);
-                refreshHeaderStatus(true);
-                refreshChannelGlow(true);
-                refreshChatView(true);
-                if (licKeysStripped) {
-                    snprintf(s_cfgStatus, sizeof(s_cfgStatus), "%s",
-                             TR("Licensed mode: channel imported without its key"));
-                    refreshCfgModal();
-                    lv_timer_handler();
-                    delay(3000);
-                }
-                const char *importWarn = cfgImportWarning();
-                const bool hasImportWarn = importWarn && importWarn[0];
-                snprintf(s_cfgStatus, sizeof(s_cfgStatus), "%s",
-                         hasImportWarn ? importWarn : TR("Imported OK - rebooting..."));
-                refreshCfgModal();
-                lv_timer_handler();
-                delay(hasImportWarn ? 4000 : 1000);
-                flushPersistentState();   // settings and transcripts must land before we go
-                ESP.restart();
-            } else {
-                snprintf(s_cfgStatus, sizeof(s_cfgStatus), "%s", TR("Import FAILED (no file?)"));
+            if (cfgImportHasChoice()) {
+                showActionPopup = false;   // the picker, then its own confirm
+                openCfgImportPicker();
+                break;
             }
+            // One backup, or none: that one, which is config.yaml unless the
+            // card only holds a timestamped copy.
+            cfgImportNamed(s_cfgBackupCount == 1 ? s_cfgBackupNames[0] : "config.yaml");
         } break;
 
         case CFG_ACTION_THEME:
@@ -61721,7 +62896,6 @@ static uint32_t chatRenderContextSignature() {
     mix((uint32_t)s_cfg.chatNameStyle);
     // Both change every row's geometry, so a cached pass must not survive them.
     mix((uint32_t)s_cfg.fontSize);
-    mix((uint32_t)s_cfg.chatSpacing);
     mix((uint32_t)s_cfg.chatColorsEnabled);
     // Reshuffling node colors from the web form has to repaint the chat too,
     // and this signature is the only thing that notices a config change made
@@ -64220,7 +65394,6 @@ static void cfgApplyStagedMqtt(const char *wifiSsid) {
         utf8util::copyTruncate(s_cfg.mqttPass, sizeof(s_cfg.mqttPass), s_cfgMqtt.pass);
         utf8util::copyTruncate(s_cfg.mqttRoot, sizeof(s_cfg.mqttRoot), s_cfgMqtt.root);
         s_cfg.mqttPort = s_cfgMqtt.port;
-        s_cfg.mqttTls = s_cfgMqtt.tls;
         s_cfg.mqttEncryption = s_cfgMqtt.encryption;
         s_cfg.mqttEnabled = true;
         if (wifiSsid && wifiSsid[0]) s_cfg.wifiEnabled = true;
@@ -66172,8 +67345,7 @@ void setup() {
 // of busy-waiting. Every input that is allowed to wake the display is registered
 // as a GPIO wake source, so the timer wake only has to be fast enough for
 // scheduled TX (nodeinfo is 15 min) rather than doubling as the input-latency
-// ceiling. lsSecs/minWakeSecs are reserved for a future deeper-sleep tier and
-// intentionally unused here.
+// ceiling.
 static bool powerSaveShouldNap() {
     return s_cfg.isPowerSaving
         && s_screenAsleep                 // only after screen-off inactivity

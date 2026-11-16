@@ -28,6 +28,7 @@
 #include "map_tiles.h"
 #include "env_sensor.h"
 #include "i18n.h"         // the Language select: kUiLangNames / kUiLangCodes
+#include "user_msg_colors.h"   // the My Message Color select
 #include <esp_heap_caps.h>
 #include <math.h>
 #include <ctype.h>
@@ -367,6 +368,12 @@ static void runQueuedReleaseCheck() {
     }
 
     gReleaseCheckFinishedAtMs = millis();
+}
+
+void webCfgSetIdleTimeoutS(uint32_t secs) {
+    // Only while a session is up: webCfgBegin() seeds it from the config, and
+    // webCfgEnd() leaves it zero.
+    if (running) gIdleTimeoutMs = secs * 1000UL;
 }
 
 // ── Helpers ───────────────────────────────────────────────────
@@ -3868,15 +3875,14 @@ static void sendConfigPage(const char *msg = "", bool lite = false) {
     html += "<label>Short Name (max 4 chars)"
             "<input name='short' type='text' maxlength='4' value='";
     appendAttr(html, gCfg->nodeShort); html += "'></label>";
-    // Node ID override (developer option — hidden for end users)
-    // snprintf(tmp, sizeof(tmp), "%08lx", (unsigned long)gCfg->nodeIdOverride);
-    // html += "<label>Node ID Override ...";
+    // The two ways to change this node's id: derive it from the public key
+    // (Meshtastic 2.8's way), or fix it outright. Both are a change of identity,
+    // so each says so rather than leaving the consequence to be discovered.
     //
-    // The pubkey derivation below is offered where the override is not, because
-    // it is the one Meshtastic 2.8 uses and there is a reason to want it. It is
-    // still a change of identity, so the label says so rather than leaving the
-    // consequence to be discovered.
-    if (!lite) {
+    // On lite too: it is the only page the Cardputer serves, and these two are
+    // settings it has no other way to reach. Both are small; the save handler
+    // already applies each only when its control was on the page.
+    {
         // Marker so the POST handler can apply this checkbox (an unchecked box
         // submits nothing) only when the control was actually on the page.
         html += "<input type='hidden' name='nodeid_present' value='1'>";
@@ -3889,6 +3895,21 @@ static void sendConfigPage(const char *msg = "", bool lite = false) {
                 "out, and direct messages people already have with you stay "
                 "attached to the old address. Your own chat history is carried "
                 "across. Reboot to apply.</p>";
+
+        // Blank is off: the id is derived as above. Wins over the key option.
+        html += "<label>Node ID Override<input name='node_id_ovr' type='text' maxlength='11' "
+                "placeholder='blank = off' value='";
+        if (gCfg->nodeIdOverride) {
+            snprintf(tmp, sizeof(tmp), "!%08lx", (unsigned long)gCfg->nodeIdOverride);
+            html += tmp;
+        }
+        html += "'></label>";
+        html += "<p class='hint' style='color:var(--warn,#a15c00)'><b>Warning:</b> this replaces "
+                "this node's ID (e.g. <code>!1a2b3c4d</code>), overriding both the "
+                "default and the public-key option above. Every other node will see a "
+                "new node, and existing DMs and favorites stay with the old ID. Two "
+                "nodes with the same ID disrupt each other on the mesh. Leave blank to "
+                "turn it off. Reboot to apply.</p>";
 
         // Values are Meshtastic 2.8.1's PacketSignaturePolicy, in its order.
         html += "<label>Signed packets<select name='sig_policy'>";
@@ -4213,6 +4234,13 @@ static void sendConfigPage(const char *msg = "", bool lite = false) {
     html += "<p class='hint'>Poll is how often this device reads its own GPS "
             "(0 = every loop). Broadcast is how often that position is sent to "
             "the mesh.</p>";
+    html += "<label>GPS Standby Between Polls<select name='gps_duty'>"
+            "<option value='0'"; if (!gCfg->gpsDutyCycleEnabled) html += " selected"; html += ">Off (always on)</option>"
+            "<option value='1'"; if ( gCfg->gpsDutyCycleEnabled) html += " selected"; html += ">On</option>"
+            "</select></label>";
+    html += "<p class='hint'>Parks the GPS receiver between polls to save power. "
+            "Needs a poll interval long enough for it to reacquire; test it on your "
+            "unit before relying on it.</p>";
     html += "<div class='row2'>";
     snprintf(tmp, sizeof(tmp), "%.7f", gCfg->latI * 1e-7);
     html += "<label>Latitude&deg; (fallback)<input name='lat' type='number' step='0.0000001' value='";
@@ -4299,6 +4327,13 @@ static void sendConfigPage(const char *msg = "", bool lite = false) {
     snprintf(tmp, sizeof(tmp), "%d", gCfg->loraHopLimit);
     html += "<label>Hop Limit (1&ndash;7)<input name='hop' type='number' min='1' max='7' value='";
     html += tmp; html += "'></label></div>";
+    html += "<label>RX Boosted Gain<select name='rx_boost'>"
+            "<option value='1'"; if ( gCfg->loraRxBoostedGain) html += " selected"; html += ">On</option>"
+            "<option value='0'"; if (!gCfg->loraRxBoostedGain) html += " selected"; html += ">Off</option>"
+            "</select></label>";
+    html += "<p class='hint'>About 2 dB more receive sensitivity for roughly 2 mA "
+            "more current, all the time the radio listens. Applies after the reboot "
+            "that saving does.</p>";
     html += "<label>"
             "<input type='checkbox' name='ok_to_mqtt' value='1'";
     if (gCfg->okToMqtt) html += " checked";
@@ -4656,6 +4691,13 @@ static void sendConfigPage(const char *msg = "", bool lite = false) {
     if (gCfg->battDisplayMode == BATT_DISPLAY_VOLTAGE) html += " selected";
     html += ">Voltage (3.94V)</option>"
             "</select></label></div>";
+    html += "<label>Battery Calibration (0.1% steps)<input name='batt_cal' type='number' ";
+    snprintf(tmp, sizeof(tmp), "min='%d' max='%d' step='1' value='%d'></label>",
+             BATT_CAL_TRIM_MIN, BATT_CAL_TRIM_MAX, (int)cfgCoerceBattCalTrim(gCfg->battCalTrim));
+    html += tmp;
+    html += "<p class='hint'>Corrects the battery voltage reading: +25 reads 2.5% "
+            "higher. 0 is uncalibrated. Easier on the device (Config, Battery "
+            "Calibration), which previews against a meter as you adjust.</p>";
 #if HAS_SCROLL_INVERT
     // Trackball direction. Sits in Display rather than getting a section of its
     // own: it is a comfort preference like brightness, and one heading is heap
@@ -4689,6 +4731,31 @@ static void sendConfigPage(const char *msg = "", bool lite = false) {
             "<option value='0'"; if (gCfg->chatNameStyle == CHAT_NAME_SHORT) html += " selected"; html += ">Short (ABCD)</option>"
             "<option value='1'"; if (gCfg->chatNameStyle == CHAT_NAME_LONG)  html += " selected"; html += ">Long (full name)</option>"
             "</select></label></div>";
+#if HAS_UI_COLOR_OPTIONS
+    html += "<div class='row2'>";
+    html += "<label>Chat Colors<select name='chat_colors'>"
+            "<option value='1'"; if ( gCfg->chatColorsEnabled) html += " selected"; html += ">On</option>"
+            "<option value='0'"; if (!gCfg->chatColorsEnabled) html += " selected"; html += ">Off</option>"
+            "</select></label>";
+    html += "<label>My Message Color<select name='user_msg_color'>";
+    snprintf(tmp, sizeof(tmp), "<option value='%u'%s>Default</option>",
+             (unsigned)USER_MSG_COLOR_DEFAULT,
+             gCfg->userMsgColor == USER_MSG_COLOR_DEFAULT ? " selected" : "");
+    html += tmp;
+    for (int i = 0; i < kUserMsgPaletteCount; i++) {
+        snprintf(tmp, sizeof(tmp), "<option value='%d'%s>%s</option>", i,
+                 gCfg->userMsgColor == i ? " selected" : "", kUserMsgPalette[i].name);
+        html += tmp;
+    }
+    // Only offered while it is the setting: the custom colour itself is picked
+    // on the device, and this keeps a save from quietly discarding it.
+    if (gCfg->userMsgColor == USER_MSG_COLOR_CUSTOM) {
+        snprintf(tmp, sizeof(tmp), "<option value='%u' selected>Custom (#%06lX)</option>",
+                 (unsigned)USER_MSG_COLOR_CUSTOM, (unsigned long)gCfg->userMsgCustomRgb);
+        html += tmp;
+    }
+    html += "</select></label></div>";
+#endif
     // Font size chooser — a modal (rather than a plain select) so the sizes read
     // as a deliberate pick. The button shows the current value; the hidden input
     // is what actually submits with the form.
@@ -4928,6 +4995,14 @@ static void sendConfigPage(const char *msg = "", bool lite = false) {
             "clock restarts on each new message, and reading the message stops it "
             "immediately either way. Never means it keeps reminding until read.</p>";
 #endif
+#if defined(DEVICE_TDECK_PRO) || defined(DEVICE_TDISPLAY_P4)
+    // The on/off that Alt+B (T-Deck Pro) or F7 (P4) flips; the level below is
+    // how bright "on" is.
+    html += "<label>Keyboard Light On<select name='kb_light_on'>"
+            "<option value='1'"; if ( gCfg->kbBacklightEnabled) html += " selected"; html += ">On</option>"
+            "<option value='0'"; if (!gCfg->kbBacklightEnabled) html += " selected"; html += ">Off</option>"
+            "</select></label>";
+#endif
 #if HAS_KB_BACKLIGHT_LEVEL
     html += "<label>Keyboard Light<select name='keypad_light'>";
     for (int i = 0; i < kKbBacklightLevelCount; i++) {
@@ -5056,13 +5131,16 @@ static void sendConfigPage(const char *msg = "", bool lite = false) {
             "<option value='1'"; if ( gCfg->isPowerSaving) html += " selected"; html += ">Enabled</option>"
             "<option value='0'"; if (!gCfg->isPowerSaving) html += " selected"; html += ">Disabled</option>"
             "</select></label>";
-    html += "<div class='row2'>";
-    snprintf(tmp, sizeof(tmp), "%lu", (unsigned long)gCfg->lsSecs);
-    html += "<label>Light Sleep After (s)<input name='ls_secs' type='number' min='0' value='";
-    html += tmp; html += "'></label>";
-    snprintf(tmp, sizeof(tmp), "%lu", (unsigned long)gCfg->minWakeSecs);
-    html += "<label>Min Wake (s)<input name='min_wake' type='number' min='0' value='";
-    html += tmp; html += "'></label></div>";
+    html += "<p class='hint'>Naps the CPU in light sleep while the screen is off, "
+            "waking on any input or scheduled transmission. Never while web config is running.</p>";
+    // The full page has this on the Utilities tab, which lite does not carry --
+    // and lite is all the Cardputer ever serves -- so it rides in the main form.
+    if (lite) {
+        html += "<label>Serial Debug Logging<select name='dbg_lite'>"
+                "<option value='0'"; if (!monitorDebugEnabled()) html += " selected"; html += ">Off</option>"
+                "<option value='1'"; if ( monitorDebugEnabled()) html += " selected"; html += ">On</option>"
+                "</select></label>";
+    }
     sectionEnd(html, lite);
     sendChunk(html);
 
@@ -8346,14 +8424,13 @@ static void handlePostSave() {
     String shrt = server.arg("short");
     utf8util::copyTruncate(gCfg->nodeLong, MESH_LONG_NAME_MAX_BYTES + 1, lng.c_str());
     utf8util::copyTruncate(gCfg->nodeShort, sizeof(gCfg->nodeShort), shrt.c_str());
-    // Lite never renders this control, and an unchecked checkbox sends nothing —
-    // so applying it unconditionally would switch the setting off for anyone who
-    // saved from the lite page. Gated on the marker the full page emits.
+    // An unchecked checkbox sends nothing, so applying this unconditionally
+    // would switch the setting off for any form that did not carry it (an
+    // older page, a partial send). Gated on the marker the page emits beside it.
     if (server.hasArg("nodeid_present")) {
         gCfg->nodeIdFromPubKey = (server.arg("nodeid_pubkey") == "1");
     }
-    // Also only on the full page; a select always submits, so its own name is
-    // the marker.
+    // A select always submits, so its own name is the marker.
     if (server.hasArg("sig_policy")) {
         gCfg->packetSigPolicy = sigPolicyCoerce(server.arg("sig_policy").toInt());
     }
@@ -8371,9 +8448,18 @@ static void handlePostSave() {
         gCfg->webCfgPass[sizeof(gCfg->webCfgPass) - 1] = '\0';
     }
 
-    // Node ID override hidden for end users; preserve existing value
-    // String ovr = server.arg("node_id_ovr");
-    // gCfg->nodeIdOverride = (ovr.length() > 0) ? (uint32_t)strtoul(ovr.c_str(), nullptr, 16) : 0;
+    // Node ID override. Blank (or "none"/"0") is off; anything that does not
+    // name a node keeps the current value rather than silently clearing it.
+    if (server.hasArg("node_id_ovr")) {
+        String ovr = server.arg("node_id_ovr");
+        ovr.trim();
+        if (ovr.length() == 0 || ovr.equalsIgnoreCase("none") || ovr == "0") {
+            gCfg->nodeIdOverride = 0;
+        } else {
+            const uint32_t id = parseNodeIdText(ovr.c_str());
+            if (id != 0 && id != 0xFFFFFFFFUL) gCfg->nodeIdOverride = id;
+        }
+    }
 
     // Device
     gCfg->deviceRole        = cfgCoerceDeviceRole((uint8_t)server.arg("role").toInt());
@@ -8385,6 +8471,10 @@ static void handlePostSave() {
                                                   (long)60, (long)CFG_BROADCAST_INTERVAL_MAX_S);
     gCfg->posIntervalS      = (uint32_t)constrain(server.arg("pos_intv").toInt(),
                                                   (long)60, (long)CFG_BROADCAST_INTERVAL_MAX_S);
+    // hasArg-guarded: the lite page does not render it.
+    if (server.hasArg("gps_duty")) {
+        gCfg->gpsDutyCycleEnabled = server.arg("gps_duty") == "1";
+    }
     if (server.hasArg("gps_poll_s")) {
         gCfg->gpsPollIntervalS = (uint32_t)constrain(server.arg("gps_poll_s").toInt(), 0, 3600);
     } else if (server.hasArg("gps_poll_ms")) {
@@ -8545,6 +8635,9 @@ static void handlePostSave() {
     applyPresetParams(*gCfg);
     gCfg->loraPower    = (uint8_t)constrain(server.arg("pwr").toInt(), 1, 22);
     gCfg->loraHopLimit = (uint8_t)constrain(server.arg("hop").toInt(), 1,  7);
+    if (server.hasArg("rx_boost")) {
+        gCfg->loraRxBoostedGain = server.arg("rx_boost") == "1";
+    }
 
     // Network / MQTT. Text fields apply whenever present; checkbox state is only
     // meaningful when the MQTT section was rendered (mqtt_present marker), since
@@ -8571,9 +8664,6 @@ static void handlePostSave() {
     }
     if (server.hasArg("mqtt_present")) {
         gCfg->mqttEnabled    = (server.arg("mqtt_en")         == "1");
-        // No TLS client in this firmware; clear any stale flag from an older
-        // config so nothing implies MQTT is running over TLS.
-        gCfg->mqttTls        = false;
         gCfg->mqttEncryption = (server.arg("mqtt_encrypt")    == "1");
         gCfg->mqttMapReport  = (server.arg("mqtt_map_report") == "1");
     }
@@ -8661,6 +8751,21 @@ static void handlePostSave() {
 #elif !HAS_CHAT_STYLE_OPTIONS
     gCfg->chatStyle = CHAT_STYLE_OUTLINE;
 #endif
+    if (server.hasArg("batt_cal")) {
+        gCfg->battCalTrim = cfgCoerceBattCalTrim(server.arg("batt_cal").toInt());
+    }
+#if HAS_UI_COLOR_OPTIONS
+    if (server.hasArg("chat_colors")) {
+        gCfg->chatColorsEnabled = server.arg("chat_colors") == "1";
+    }
+    if (server.hasArg("user_msg_color")) {
+        const long c = server.arg("user_msg_color").toInt();
+        if (c == USER_MSG_COLOR_DEFAULT || c == USER_MSG_COLOR_CUSTOM
+            || (c >= 0 && c < kUserMsgPaletteCount)) {
+            gCfg->userMsgColor = (uint8_t)c;
+        }
+    }
+#endif
     if (server.hasArg("chat_names")) {
         long cn = server.arg("chat_names").toInt();
         if (cn < 0 || cn > CHAT_NAME_MAX) cn = CHAT_NAME_SHORT;
@@ -8728,6 +8833,11 @@ static void handlePostSave() {
             gCfg->navAlign = want;
         }
     }
+#if defined(DEVICE_TDECK_PRO) || defined(DEVICE_TDISPLAY_P4)
+    if (server.hasArg("kb_light_on")) {
+        gCfg->kbBacklightEnabled = server.arg("kb_light_on") == "1";
+    }
+#endif
 #if HAS_KB_BACKLIGHT_LEVEL
     // hasArg-guarded like the two above: the control only exists on the one
     // board that has this, and an absent field would otherwise read back as 0 --
@@ -8796,10 +8906,6 @@ static void handlePostSave() {
         gCfg->invertScroll = server.arg("invert_scroll").toInt() != 0;
     }
 #endif
-    // Legacy compatibility: only apply chat spacing if an older web form sends it.
-    if (server.hasArg("chat_space")) {
-        gCfg->chatSpacing = (uint8_t)constrain(server.arg("chat_space").toInt(), 0, 2);
-    }
 #if HAS_UI_THEMES
     if (server.hasArg("ui_theme_preset")) {
         // kThemePresetTotal, not kThemePresetCount: the custom slots live past
@@ -8822,8 +8928,7 @@ static void handlePostSave() {
 
     // Power
     gCfg->isPowerSaving = server.arg("pwr_saving").toInt() != 0;
-    gCfg->lsSecs        = (uint32_t)server.arg("ls_secs").toInt();
-    gCfg->minWakeSecs   = (uint32_t)server.arg("min_wake").toInt();
+    if (server.hasArg("dbg_lite")) setMonitorDebugEnabled(server.arg("dbg_lite") == "1");
 
     // Modules
     uint32_t telemetryIntervalS = 3600UL;

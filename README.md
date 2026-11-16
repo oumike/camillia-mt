@@ -70,10 +70,10 @@ Notes:
 - **Maps and line of sight** — OpenStreetMap view of a node's last position with offline tiles ([docs/MAPS.md](docs/MAPS.md)), and terrain line-of-sight checks ([docs/LOS.md](docs/LOS.md))
 - **Remote administration** — read and change another node's config from a terminal ([docs/ADMIN_TERMINAL.md](docs/ADMIN_TERMINAL.md))
 - **Browser VNC** — mirror and drive the device UI from a browser (all boards except the Cardputer)
-- **Signed packets and Store and Forward client** — Meshtastic 2.8 packet signatures, and catch-up replay from an S&F router
+- **Signed packets and chat server catch-up** — Meshtastic 2.8 packet signatures, and replay of missed channel messages from a camillia chat server
 - **13 UI themes and 22 languages** (the Cardputer is English-only)
 - **Web configuration** — browser-based settings UI, on by default, served over the device's own Wi-Fi AP or your network
-- **YAML config** — import/export all settings and channel keys via microSD at `/camillia/config.yaml`
+- **YAML config** — import/export all settings and channel keys via microSD at `/camillia/config.yaml`, plus dated backups beside it to choose from
 
 ## First-Time Setup
 
