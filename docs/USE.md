@@ -964,8 +964,8 @@ reset actions. Announcing to the mesh has moved to Live → Tools → Announce.
   on your board is left off
 - **Every setting web config has is also on the device** (except on the
   Cardputer, whose web config has them all), in the section it belongs to: region, TX power, hop limit, device role, the custom modem
-  (bandwidth, spreading factor, coding rate, frequency slot), RX boosted gain
-  and node ID from key under Radio & Identity; web config login, password and
+  (bandwidth, spreading factor, coding rate, frequency slot), RX boosted gain,
+  node ID from key and node ID override under Radio & Identity; web config login, password and
   idle timeout, and the MQTT broker, port, credentials, root topic, encryption,
   map report, OK to MQTT and Ignore MQTT under Connections; position broadcast
   and GPS poll intervals, GPS standby and the fixed position under Location;
@@ -973,9 +973,14 @@ reset actions. Announcing to the mesh has moved to Live → Tools → Announce.
   auto-favorite and the LOS and weather servers under Mesh Services; and time
   zone, NTP server, power saving, update check, auto-install and serial debug
   logging under Device & Firmware. A choice opens a picker and a text setting
-  opens a text box. Region, Custom Modem, RX Boosted Gain and Node ID from Key
-  reboot to apply: the two on/off ones ask first, and the Region picker's title
-  says it reboots
+  opens a text box. Region, Custom Modem, RX Boosted Gain, Node ID from Key and
+  Node ID Override reboot to apply: the on/off ones ask first, and the Region
+  picker's title says it reboots
+- **Node ID Override** fixes this node's ID (e.g. `!1a2b3c4d`), overriding both
+  the default and Node ID from Key; blank turns it off. It warns first, because
+  every other node then sees a new node, existing DMs and favorites stay with
+  the old ID, and two nodes with the same ID disrupt each other. Also in web
+  config, and exported as `node_id_override`
 - Navigate action rows with Up and Down input. The list wraps: going up from
   the first row lands on the last, and down from the last returns to the first
 - Enter runs the selected action

@@ -1777,7 +1777,7 @@ static char         s_cfgConfirmAltLabel[16] = {0};
 static char         s_cfgConfirmAltKey = 0;
 static int          s_cfgConfirmFnArg = 0;
 // Copied rather than pointed at: the caller's buffer is usually a local.
-static char         s_cfgConfirmText[96] = {0};
+static char         s_cfgConfirmText[256] = {0};
 static uint32_t s_cfgConfirmMs = 0;
 static uint32_t s_cfgLastActivateMs = 0;
 // The Clear Nodes confirmation's two options. Both start unticked every time
@@ -3791,6 +3791,7 @@ enum CfgGenId : int {
     CFG_GEN_CUSTOM_SLOT,
     CFG_GEN_RX_BOOST,
     CFG_GEN_NODEID_PUBKEY,
+    CFG_GEN_NODEID_OVERRIDE,
     // Connections
     CFG_GEN_WEB_AUTH,
     CFG_GEN_WEB_PASS,
@@ -15840,6 +15841,7 @@ static void initCfgActions() {
     addGen(CFG_GEN_CUSTOM_SLOT);
     addGen(CFG_GEN_RX_BOOST);
     addGen(CFG_GEN_NODEID_PUBKEY);
+    addGen(CFG_GEN_NODEID_OVERRIDE);
 
     // The radios themselves, each with whatever picks what it talks to.
     s_cfgActions[s_cfgActionCount++] = CFG_ACTION_WIFI_TOGGLE;
@@ -45901,6 +45903,9 @@ enum : uint8_t {
     CFG_GEN_F_LIVE   = 1u << 1,
     // Text shown as dots while typed, and only as set/unset on the row.
     CFG_GEN_F_MASKED = 1u << 2,
+    // Text whose empty value means the feature is off: the row reads Off
+    // rather than (none).
+    CFG_GEN_F_EMPTY_OFF = 1u << 3,
 };
 
 // One stop of a fixed choice list: the stored value and what it is called.
@@ -45936,7 +45941,15 @@ struct CfgGenRow {
     bool (*disabled)();
     const char *disabledWhy;   // TR_NOOP
     void (*after)();
+    // Shown, and answered Yes to, before the row's editor opens (TR_NOOP).
+    // For the settings whose consequences reach past this device.
+    const char *warn;
 };
+
+static constexpr CfgGenRow cfgGenWarn(CfgGenRow r, const char *warn) {
+    r.warn = warn;
+    return r;
+}
 
 #if UI_CFG_SECTIONS
 #define CFG_GEN_SEC(x) ((int8_t)CFG_SEC_##x)
@@ -45954,7 +45967,7 @@ static constexpr CfgGenRow cfgGenToggle(int8_t id, const char *label, int8_t sec
     return CfgGenRow{ id, label, sec, CFG_GEN_TOGGLE, flags, g, s,
                       nullptr, 0, nullptr, nullptr,
                       nullptr, nullptr, nullptr, nullptr,
-                      nullptr, nullptr, 0, disabled, why, after };
+                      nullptr, nullptr, 0, disabled, why, after, nullptr };
 }
 static constexpr CfgGenRow cfgGenList(int8_t id, const char *label, int8_t sec, uint8_t flags,
                                       const CfgGenOpt *opts, uint8_t n,
@@ -45965,7 +45978,7 @@ static constexpr CfgGenRow cfgGenList(int8_t id, const char *label, int8_t sec, 
     return CfgGenRow{ id, label, sec, CFG_GEN_CHOICE, flags, nullptr, nullptr,
                       opts, n, g, s,
                       nullptr, nullptr, nullptr, nullptr,
-                      nullptr, nullptr, 0, disabled, why, after };
+                      nullptr, nullptr, 0, disabled, why, after, nullptr };
 }
 static constexpr CfgGenRow cfgGenPick(int8_t id, const char *label, int8_t sec, uint8_t flags,
                                       int (*count)(), const char *(*nameAt)(int),
@@ -45976,7 +45989,7 @@ static constexpr CfgGenRow cfgGenPick(int8_t id, const char *label, int8_t sec, 
     return CfgGenRow{ id, label, sec, CFG_GEN_CHOICE, flags, nullptr, nullptr,
                       nullptr, 0, nullptr, nullptr,
                       count, nameAt, g, s,
-                      nullptr, nullptr, 0, disabled, why, after };
+                      nullptr, nullptr, 0, disabled, why, after, nullptr };
 }
 static constexpr CfgGenRow cfgGenText(int8_t id, const char *label, int8_t sec, uint8_t flags,
                                       uint8_t maxLen,
@@ -45987,7 +46000,7 @@ static constexpr CfgGenRow cfgGenText(int8_t id, const char *label, int8_t sec, 
     return CfgGenRow{ id, label, sec, CFG_GEN_TEXT, flags, nullptr, nullptr,
                       nullptr, 0, nullptr, nullptr,
                       nullptr, nullptr, nullptr, nullptr,
-                      g, s, maxLen, disabled, why, after };
+                      g, s, maxLen, disabled, why, after, nullptr };
 }
 
 // Copies a string setting into its field, refusing rather than clipping one
@@ -46271,6 +46284,27 @@ static constexpr CfgGenRow kCfgGenRows[CFG_GEN__COUNT] = {
     cfgGenToggle(CFG_GEN_NODEID_PUBKEY, TR_NOOP("Node ID from Key"), CFG_GEN_SEC(RADIO), CFG_GEN_F_REBOOT,
                  []() { return s_cfg.nodeIdFromPubKey; },
                  [](bool on) { s_cfg.nodeIdFromPubKey = on; }),
+    // A fixed node id, instead of the one derived from the MAC or the key.
+    // Blank turns it off. Asks first: this is the node's identity on the mesh.
+    cfgGenWarn(
+        cfgGenText(CFG_GEN_NODEID_OVERRIDE, TR_NOOP("Node ID Override"), CFG_GEN_SEC(RADIO),
+                   CFG_GEN_F_REBOOT | CFG_GEN_F_EMPTY_OFF, 11,
+                   [](char *o, size_t n) {
+                       if (s_cfg.nodeIdOverride) snprintf(o, n, "!%08lx", (unsigned long)s_cfg.nodeIdOverride);
+                       else if (n) o[0] = '\0';
+                   },
+                   [](const char *in) -> const char * {
+                       const uint32_t id = parseNodeIdText(in);
+                       // Blank, "none" or 0 is off; anything else must name a node.
+                       const bool blank = !in || !in[0] || !strcasecmp(in, "none") || !strcmp(in, "0");
+                       if (!blank && (id == 0 || id == 0xFFFFFFFFUL))
+                           return TR_NOOP("Enter a node ID like !1a2b3c4d, or blank for off");
+                       s_cfg.nodeIdOverride = blank ? 0 : id;
+                       return nullptr;
+                   }),
+        TR_NOOP("Warning: this replaces this node's ID. Every other node will see a new "
+                "node, and existing DMs and favorites stay with the old ID. Two nodes with "
+                "the same ID disrupt each other on the mesh. Blank turns it off. Continue?")),
 
     // ── Connections ──────────────────────────────────────────────────────────
     cfgGenToggle(CFG_GEN_WEB_AUTH, TR_NOOP("Web Config Login"), CFG_GEN_SEC(CONNECT), 0,
@@ -46511,6 +46545,8 @@ static void cfgGenValueText(const CfgGenRow &r, char *buf, size_t bufLen) {
             if (r.getText) r.getText(cur, sizeof(cur));
             if (r.flags & CFG_GEN_F_MASKED) {
                 snprintf(buf, bufLen, "%s", cur[0] ? TR("Set") : TR("(none)"));
+            } else if (!cur[0] && (r.flags & CFG_GEN_F_EMPTY_OFF)) {
+                snprintf(buf, bufLen, "%s", TR("Off"));
             } else {
                 snprintf(buf, bufLen, "%s", cur[0] ? cur : TR("(none)"));
             }
@@ -46539,11 +46575,14 @@ static bool cfgGenDisabled(int genId, const char **why) {
     return off;
 }
 
-// Only toggles ask: their Enter is otherwise the whole change, and a reboot
-// should never be the surprise at the end of one keypress.
+// A row with a warning asks before its editor opens. Otherwise only toggles
+// ask: their Enter is the whole change, and a reboot should never be the
+// surprise at the end of one keypress.
 static bool cfgGenNeedsConfirm(int genId) {
     const CfgGenRow *r = cfgGenRow(genId);
-    return r && r->kind == CFG_GEN_TOGGLE && (r->flags & CFG_GEN_F_REBOOT);
+    if (!r) return false;
+    if (r->warn) return true;
+    return r->kind == CFG_GEN_TOGGLE && (r->flags & CFG_GEN_F_REBOOT);
 }
 
 // Phrased from the destination, for the reason cfgActionConfirmSentence()
@@ -46551,6 +46590,7 @@ static bool cfgGenNeedsConfirm(int genId) {
 static void cfgGenConfirmSentence(int genId, char *buf, size_t bufLen) {
     const CfgGenRow *r = cfgGenRow(genId);
     if (!r) { buf[0] = '\0'; return; }
+    if (r->warn) { snprintf(buf, bufLen, "%s", TR(r->warn)); return; }
     const bool on = r->getBool && r->getBool();
     snprintf(buf, bufLen, TR("Turn %s %s and reboot?"), TR(r->label), on ? TR("off") : TR("on"));
 }
@@ -46644,15 +46684,31 @@ static void cfgGenTextInitial(char *out, size_t cap) {
     if (r && r->getText) r->getText(out, cap);
 }
 
+// Set by the commit when the text came back as it went in, so Done does not
+// save, apply or -- above all -- reboot for nothing.
+static bool s_cfgGenTextUnchanged = false;
+
 static const char *cfgGenTextCommit(const char *text) {
     const CfgGenRow *r = cfgGenRow(s_cfgGenOpen);
+    s_cfgGenTextUnchanged = false;
     if (!r || !r->setText) return nullptr;
-    return r->setText(text);
+    char before[100] = "", after[100] = "";
+    if (r->getText) r->getText(before, sizeof(before));
+    const char *err = r->setText(text);
+    if (err) return err;
+    if (r->getText) r->getText(after, sizeof(after));
+    s_cfgGenTextUnchanged = !strcmp(before, after);
+    return nullptr;
 }
 
 static void cfgGenTextDone() {
     const int id = s_cfgGenOpen;
     s_cfgGenOpen = -1;
+    if (s_cfgGenTextUnchanged) {
+        cfgGenLabel(id, s_cfgStatus, sizeof(s_cfgStatus));
+        refreshCfgModal();
+        return;
+    }
     cfgGenFinish(id);
 }
 

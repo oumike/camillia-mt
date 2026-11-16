@@ -3875,14 +3875,9 @@ static void sendConfigPage(const char *msg = "", bool lite = false) {
     html += "<label>Short Name (max 4 chars)"
             "<input name='short' type='text' maxlength='4' value='";
     appendAttr(html, gCfg->nodeShort); html += "'></label>";
-    // Node ID override (developer option — hidden for end users)
-    // snprintf(tmp, sizeof(tmp), "%08lx", (unsigned long)gCfg->nodeIdOverride);
-    // html += "<label>Node ID Override ...";
-    //
-    // The pubkey derivation below is offered where the override is not, because
-    // it is the one Meshtastic 2.8 uses and there is a reason to want it. It is
-    // still a change of identity, so the label says so rather than leaving the
-    // consequence to be discovered.
+    // The two ways to change this node's id: derive it from the public key
+    // (Meshtastic 2.8's way), or fix it outright. Both are a change of identity,
+    // so each says so rather than leaving the consequence to be discovered.
     //
     // On lite too: it is the only page the Cardputer serves, and these two are
     // settings it has no other way to reach. Both are small; the save handler
@@ -3900,6 +3895,21 @@ static void sendConfigPage(const char *msg = "", bool lite = false) {
                 "out, and direct messages people already have with you stay "
                 "attached to the old address. Your own chat history is carried "
                 "across. Reboot to apply.</p>";
+
+        // Blank is off: the id is derived as above. Wins over the key option.
+        html += "<label>Node ID Override<input name='node_id_ovr' type='text' maxlength='11' "
+                "placeholder='blank = off' value='";
+        if (gCfg->nodeIdOverride) {
+            snprintf(tmp, sizeof(tmp), "!%08lx", (unsigned long)gCfg->nodeIdOverride);
+            html += tmp;
+        }
+        html += "'></label>";
+        html += "<p class='hint' style='color:var(--warn,#a15c00)'><b>Warning:</b> this replaces "
+                "this node's ID (e.g. <code>!1a2b3c4d</code>), overriding both the "
+                "default and the public-key option above. Every other node will see a "
+                "new node, and existing DMs and favorites stay with the old ID. Two "
+                "nodes with the same ID disrupt each other on the mesh. Leave blank to "
+                "turn it off. Reboot to apply.</p>";
 
         // Values are Meshtastic 2.8.1's PacketSignaturePolicy, in its order.
         html += "<label>Signed packets<select name='sig_policy'>";
@@ -8438,9 +8448,18 @@ static void handlePostSave() {
         gCfg->webCfgPass[sizeof(gCfg->webCfgPass) - 1] = '\0';
     }
 
-    // Node ID override hidden for end users; preserve existing value
-    // String ovr = server.arg("node_id_ovr");
-    // gCfg->nodeIdOverride = (ovr.length() > 0) ? (uint32_t)strtoul(ovr.c_str(), nullptr, 16) : 0;
+    // Node ID override. Blank (or "none"/"0") is off; anything that does not
+    // name a node keeps the current value rather than silently clearing it.
+    if (server.hasArg("node_id_ovr")) {
+        String ovr = server.arg("node_id_ovr");
+        ovr.trim();
+        if (ovr.length() == 0 || ovr.equalsIgnoreCase("none") || ovr == "0") {
+            gCfg->nodeIdOverride = 0;
+        } else {
+            const uint32_t id = parseNodeIdText(ovr.c_str());
+            if (id != 0 && id != 0xFFFFFFFFUL) gCfg->nodeIdOverride = id;
+        }
+    }
 
     // Device
     gCfg->deviceRole        = cfgCoerceDeviceRole((uint8_t)server.arg("role").toInt());

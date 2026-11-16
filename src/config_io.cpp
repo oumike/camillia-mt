@@ -2079,6 +2079,14 @@ void cfgToYaml(const RhinoConfig &cfg, String &out) {
     snprintf(tmp, sizeof(tmp), "    mapReportingEnabled: %s\n", cfg.mqttMapReport ? "true" : "false"); out += tmp;
     snprintf(tmp, sizeof(tmp), "    ok_to_mqtt: %s\n", cfg.okToMqtt ? "true" : "false"); out += tmp;
     snprintf(tmp, sizeof(tmp), "    node_id_from_pubkey: %s\n", cfg.nodeIdFromPubKey ? "true" : "false"); out += tmp;
+    // "none" when off. Restoring this onto a second device gives the two the
+    // same id, which is the same caution the private key above already carries.
+    if (cfg.nodeIdOverride) {
+        snprintf(tmp, sizeof(tmp), "    node_id_override: !%08lx\n", (unsigned long)cfg.nodeIdOverride);
+    } else {
+        snprintf(tmp, sizeof(tmp), "    node_id_override: none\n");
+    }
+    out += tmp;
     snprintf(tmp, sizeof(tmp), "    packet_signature_policy: %s   # Compatible, Balanced or Strict\n",
              sigPolicyName(cfg.packetSigPolicy)); out += tmp;
     snprintf(tmp, sizeof(tmp), "    ignore_mqtt: %s\n", cfg.ignoreMqtt ? "true" : "false"); out += tmp;
@@ -2875,6 +2883,10 @@ bool cfgImportFromBuf(const char *buf, size_t len, RhinoConfig &cfg) {
                 else if (!strcmp(key, "username"))           strncpy(cfg.mqttUser,    val, sizeof(cfg.mqttUser)    - 1);
                 else if (!strcmp(key, "ok_to_mqtt"))         cfg.okToMqtt     = parseBoolValue(val);
                 else if (!strcmp(key, "node_id_from_pubkey")) cfg.nodeIdFromPubKey = parseBoolValue(val);
+                else if (!strcmp(key, "node_id_override")) {
+                    const uint32_t id = parseNodeIdText(val);
+                    cfg.nodeIdOverride = (id == 0xFFFFFFFFUL) ? 0 : id;   // never broadcast
+                }
                 else if (!strcmp(key, "packet_signature_policy")) cfg.packetSigPolicy = sigPolicyParse(val);
                 else if (!strcmp(key, "ignore_mqtt"))        cfg.ignoreMqtt   = parseBoolValue(val);
             } else if (!strcmp(section, "module_config") && !strcmp(subsection, "telemetry")) {
