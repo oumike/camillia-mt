@@ -1327,8 +1327,6 @@ void cfgInitDefaults(RhinoConfig &cfg) {
     cfg.displayUnits       = MY_DISPLAY_UNITS;
     cfg.battDisplayMode    = MY_BATT_DISPLAY;
     cfg.clockFormat        = cfgCoerceClockFormat(MY_CLOCK_FORMAT);
-    cfg.compassNorthTop    = MY_COMPASS_NORTH;
-    cfg.flipScreen         = MY_FLIP_SCREEN;
     cfg.uiOrientation      = (ORIENTATION_SEED_PORTRAIT != 0) ? 1 : 0;
     cfg.splashMelodyEnabled = MY_SPLASH_MELODY_ENABLED;
     cfg.msgAlertSound      = MY_MSG_ALERT_SOUND;
@@ -1343,9 +1341,6 @@ void cfgInitDefaults(RhinoConfig &cfg) {
     cfg.bleKbdAddr[0]      = '\0';
     cfg.bleKbdName[0]      = '\0';
     cfg.bleKbdAddrType     = 0;
-    cfg.btEnabled          = MY_BT_ENABLED;
-    cfg.btMode             = MY_BT_MODE;
-    cfg.btFixedPin         = MY_BT_PIN;
     strncpy(cfg.ntpServer,   MY_NTP_SERVER,  sizeof(cfg.ntpServer)  - 1);
     cfg.ntpServer[sizeof(cfg.ntpServer) - 1] = '\0';
     // No default: there is no public plain-HTTP elevation service to point at,
@@ -1377,10 +1372,7 @@ void cfgInitDefaults(RhinoConfig &cfg) {
     cfg.mqttEncryption     = MY_MQTT_ENCRYPT;
     cfg.mqttMapReport      = MY_MQTT_MAP_RPT;
     cfg.mqttPort           = MY_MQTT_PORT;
-    cfg.mqttTls            = MY_MQTT_TLS;
     cfg.isPowerSaving      = MY_POWER_SAVING;
-    cfg.lsSecs             = MY_LS_SECS;
-    cfg.minWakeSecs        = MY_MIN_WAKE_SECS;
     cfg.telDeviceEnabled   = MY_TEL_DEV_EN;
     cfg.telDeviceIntervalS = MY_TEL_DEV_INTV;
     cfg.telEnvEnabled      = HAS_ENV_SENSOR_TELEMETRY ? (bool)MY_TEL_ENV_EN : false;
@@ -1388,9 +1380,6 @@ void cfgInitDefaults(RhinoConfig &cfg) {
     cfg.neighborInfoEnabled = MY_NEIGHBORINFO_EN;
     cfg.neighborInfoIntervalS = MY_NEIGHBORINFO_INTV;
     cfg.neighborInfoOverLora = MY_NEIGHBORINFO_LORA;
-    cfg.cannedEnabled      = MY_CANNED_EN;
-    strncpy(cfg.cannedMessages, MY_CANNED_MSGS, sizeof(cfg.cannedMessages) - 1);
-    cfg.cannedMessages[sizeof(cfg.cannedMessages) - 1] = '\0';
     cfg.chatServerMode     = MY_CHAT_SERVER_MODE;
     cfg.chatServerNodeId   = 0;
     cfg.chatServerFlags    = CHAT_SERVER_FLAGS_MAGIC;
@@ -1409,11 +1398,9 @@ void cfgInitDefaults(RhinoConfig &cfg) {
     cfg.autoFavoriteEnabled = MY_AUTOFAV_ENABLED;
     // After cfg.displayUnits above, which decides which round value this is.
     cfg.autoFavoriteRangeM  = cfgDefaultAutoFavRangeM(cfg.displayUnits);
-    cfg.chatSpacing        = MY_CHAT_SPACING;
     cfg.fontSize           = MY_FONT_SIZE;
     cfg.battCalTrim        = 0;   // uncalibrated; the board's BATT_CAL still applies
     cfg.chatColorSalt      = 0;   // original node-color mapping
-    cfg.notifyLedEnabled   = MY_NOTIFY_LED_ENABLED;
     cfg.invertScroll       = MY_INVERT_SCROLL;
     cfg.navBarEnabled      = (bool)MY_NAV_BAR_ENABLED;
     // A config built from defaults has nothing to migrate: every migration's
@@ -1849,8 +1836,6 @@ void cfgToYaml(const RhinoConfig &cfg, String &out) {
     snprintf(tmp, sizeof(tmp), "    lockScreen: %s\n", cfg.lockScreenEnabled ? "true" : "false"); out += tmp;
     snprintf(tmp, sizeof(tmp), "    lockScreenOffSecs: %lu\n", (unsigned long)cfg.lockScreenOffSecs); out += tmp;
     out += "    units: "; out += (cfg.displayUnits ? "IMPERIAL" : "METRIC"); out += "\n";
-    snprintf(tmp, sizeof(tmp), "    compassNorthTop: %s\n", cfg.compassNorthTop ? "true" : "false"); out += tmp;
-    snprintf(tmp, sizeof(tmp), "    flipScreen: %s\n",      cfg.flipScreen      ? "true" : "false"); out += tmp;
     out += "    orientation: ";
     out += (cfg.uiOrientation == 2 ? "PORTRAIT_180"
             : cfg.uiOrientation == 1 ? "PORTRAIT" : "LANDSCAPE");
@@ -2028,8 +2013,6 @@ void cfgToYaml(const RhinoConfig &cfg, String &out) {
     // power
     out += "  power:\n";
     snprintf(tmp, sizeof(tmp), "    isPowerSaving: %s\n", cfg.isPowerSaving ? "true" : "false"); out += tmp;
-    snprintf(tmp, sizeof(tmp), "    lsSecs: %lu\n",       (unsigned long)cfg.lsSecs);            out += tmp;
-    snprintf(tmp, sizeof(tmp), "    minWakeSecs: %lu\n",  (unsigned long)cfg.minWakeSecs);        out += tmp;
     // location
     out += "location:\n";
     snprintf(tmp, sizeof(tmp), "  alt: %d\n",    (int)cfg.alt);        out += tmp;
@@ -2066,7 +2049,6 @@ void cfgToYaml(const RhinoConfig &cfg, String &out) {
     snprintf(tmp, sizeof(tmp), "    enabled: %s\n", cfg.mqttEnabled ? "true" : "false"); out += tmp;
     out += "    address: "; out += cfg.mqttServer; out += "\n";
     snprintf(tmp, sizeof(tmp), "    port: %u\n", (unsigned)cfg.mqttPort); out += tmp;
-    snprintf(tmp, sizeof(tmp), "    tlsEnabled: %s\n", cfg.mqttTls ? "true" : "false"); out += tmp;
     out += "    username: "; out += cfg.mqttUser; out += "\n";
     out += "    password: "; out += cfg.mqttPass; out += "\n";
     out += "    root: "; out += cfg.mqttRoot; out += "\n";
@@ -2399,8 +2381,6 @@ bool cfgImportFromBuf(const char *buf, size_t len, RhinoConfig &cfg) {
                     else
                         utf8util::copyTruncate(cfg.callSign, sizeof(cfg.callSign), val);
                 }
-                else if (!strcmp(key, "canned_messages"))
-                    strncpy(cfg.cannedMessages, val, sizeof(cfg.cannedMessages) - 1);
                 else if (!strcmp(key, "wifi_ssid")) {
                     strncpy(cfg.wifiSsid, val, sizeof(cfg.wifiSsid) - 1);
                     cfg.wifiSsid[sizeof(cfg.wifiSsid) - 1] = '\0';
@@ -2667,9 +2647,8 @@ bool cfgImportFromBuf(const char *buf, size_t len, RhinoConfig &cfg) {
                     gotPrivKey = decodeIdentityKey(val, impPriv);
                 }
             } else if (!strcmp(section, "config") && !strcmp(subsection, "bluetooth")) {
-                if      (!strcmp(key, "enabled"))  cfg.btEnabled  = (!strcmp(val,"true"));
-                else if (!strcmp(key, "fixedPin")) cfg.btFixedPin = (uint32_t)atol(val);
-                else if (!strcmp(key, "mode"))     cfg.btMode = !strcmp(val,"FIXED_PIN") ? 1 : !strcmp(val,"NO_PIN") ? 2 : 0;
+                // Phone-pairing Bluetooth settings, retired: older exports still
+                // carry this block, which is accepted and ignored.
             } else if (!strcmp(section, "config") && !strcmp(subsection, "display")) {
                 if      (!strcmp(key, "brightness"))      cfg.brightness      = cfgCoerceBrightness(atoi(val));
                 else if (!strcmp(key, "lockScreenBrightness"))
@@ -2679,8 +2658,6 @@ bool cfgImportFromBuf(const char *buf, size_t len, RhinoConfig &cfg) {
                 else if (!strcmp(key, "lockScreenOffSecs"))
                     cfg.lockScreenOffSecs = cfgCoerceLockScreenOffSecs((uint32_t)atol(val));
                 else if (!strcmp(key, "units"))           cfg.displayUnits    = !strcmp(val,"IMPERIAL") ? 1 : 0;
-                else if (!strcmp(key, "compassNorthTop")) cfg.compassNorthTop = (!strcmp(val,"true"));
-                else if (!strcmp(key, "flipScreen"))      cfg.flipScreen      = (!strcmp(val,"true"));
                 else if (!strcmp(key, "orientation"))     cfg.uiOrientation   =
                         !strcmp(val, "PORTRAIT_180") ? 2 : (!strcmp(val, "PORTRAIT") ? 1 : 0);
                 else if (!strcmp(key, "language"))        cfg.uiLanguage = i18nLangFromCode(val);
@@ -2690,8 +2667,9 @@ bool cfgImportFromBuf(const char *buf, size_t len, RhinoConfig &cfg) {
                 else if (!strcmp(key, "batteryCalTrim"))  cfg.battCalTrim = cfgCoerceBattCalTrim(atoi(val));
                 else if (!strcmp(key, "chatColorSalt"))   cfg.chatColorSalt = (uint32_t)strtoul(val, nullptr, 10);
                 else if (!strcmp(key, "notifyLed")) {
-                    cfg.notifyLedEnabled = parseBoolValue(val);
-                    if (!cfg.notifyLedEnabled) {
+                    // Older exports' master switch, now retired: off still
+                    // means both LEDs off.
+                    if (!parseBoolValue(val)) {
                         cfg.notifyLedColorChannel = NOTIFY_LED_COLOR_OFF;
                         cfg.notifyLedColorDm = NOTIFY_LED_COLOR_OFF;
                     }
@@ -2839,8 +2817,7 @@ bool cfgImportFromBuf(const char *buf, size_t len, RhinoConfig &cfg) {
                 }
             } else if (!strcmp(section, "config") && !strcmp(subsection, "power")) {
                 if      (!strcmp(key, "isPowerSaving")) cfg.isPowerSaving = (!strcmp(val,"true"));
-                else if (!strcmp(key, "lsSecs"))        cfg.lsSecs        = (uint32_t)atol(val);
-                else if (!strcmp(key, "minWakeSecs"))   cfg.minWakeSecs   = (uint32_t)atol(val);
+                // lsSecs / minWakeSecs: retired, accepted and ignored.
             } else if (!strcmp(section, "module_config") && !strcmp(subsection, "mqtt")) {
                 if      (!strcmp(key, "address"))            strncpy(cfg.mqttServer,  val, sizeof(cfg.mqttServer)  - 1);
                 else if (!strcmp(key, "enabled"))            cfg.mqttEnabled    = parseBoolValue(val);
@@ -2848,7 +2825,7 @@ bool cfgImportFromBuf(const char *buf, size_t len, RhinoConfig &cfg) {
                     long p = atol(val);
                     if (p >= 1 && p <= 65535) cfg.mqttPort = (uint16_t)p;
                 }
-                else if (!strcmp(key, "tlsEnabled") || !strcmp(key, "tls")) cfg.mqttTls = parseBoolValue(val);
+                // tlsEnabled / tls: retired (no TLS client), accepted and ignored.
                 else if (!strcmp(key, "encryptionEnabled"))  cfg.mqttEncryption = parseBoolValue(val);
                 else if (!strcmp(key, "mapReportingEnabled"))cfg.mqttMapReport  = parseBoolValue(val);
                 else if (!strcmp(key, "password"))           strncpy(cfg.mqttPass,    val, sizeof(cfg.mqttPass)    - 1);
@@ -2879,7 +2856,7 @@ bool cfgImportFromBuf(const char *buf, size_t len, RhinoConfig &cfg) {
                     cfg.meshBeaconIntervalH = clampBeaconIntervalH((uint8_t)(h < 0 ? 0 : (h > 255 ? 255 : h)));
                 }
             } else if (!strcmp(section, "module_config") && !strcmp(subsection, "cannedMessage")) {
-                if (!strcmp(key, "enabled")) cfg.cannedEnabled = (!strcmp(val,"true"));
+                // Canned messages, retired: accepted and ignored, like storeForward.
             } else if (!strcmp(section, "module_config") && !strcmp(subsection, "storeForward")) {
                 // Meshtastic Store & Forward client, removed: older exports still
                 // carry this block, which is accepted and ignored.

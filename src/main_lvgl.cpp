@@ -11795,7 +11795,6 @@ static void loadProvisionedConfig() {
             utf8util::copyTruncate(s_cfg.mqttPass, sizeof(s_cfg.mqttPass), p.getString("mqPass", "").c_str());
             utf8util::copyTruncate(s_cfg.mqttRoot, sizeof(s_cfg.mqttRoot), p.getString("mqRoot").c_str());
             s_cfg.mqttPort = p.getUShort("mqPort", 1883);
-            s_cfg.mqttTls = p.getBool("mqTls", false);
             s_cfg.mqttEncryption = p.getBool("mqEnc", true);
             s_cfg.mqttEnabled = true;
             if (s_cfg.wifiSsid[0]) s_cfg.wifiEnabled = true;
@@ -12364,8 +12363,6 @@ static void loadConfigFromPrefs() {
         uint8_t umc = prefs.getUChar("userMsgColor", 0xFF);
         s_cfg.userMsgColor = (umc <= 15) ? umc : 0xFF;
     }
-    if (prefs.isKey("compassNorth")) s_cfg.compassNorthTop = prefs.getBool("compassNorth");
-    if (prefs.isKey("flipScreen")) s_cfg.flipScreen = prefs.getBool("flipScreen");
     if (prefs.isKey("splashMelody")) s_cfg.splashMelodyEnabled = prefs.getBool("splashMelody");
     if (prefs.isKey("msgAlertSound")) {
         s_cfg.msgAlertSound = (uint8_t)constrain((int)prefs.getUChar("msgAlertSound"), 0, 3);
@@ -12376,12 +12373,6 @@ static void loadConfigFromPrefs() {
     if (ro != 0xFF && ro < UI_THEME_COUNT) s_cfg.uiTheme = ro;
     ro = prefs.getUChar("uiMode", 0xFF);
     if (ro != 0xFF && ro <= UI_MODE_LIGHT) s_cfg.uiMode = ro;
-
-    if (prefs.isKey("btEnabled")) s_cfg.btEnabled = prefs.getBool("btEnabled");
-    ro = prefs.getUChar("btMode", 0xFF);
-    if (ro != 0xFF) s_cfg.btMode = ro;
-    ul = prefs.getULong("btFixedPin", 0);
-    if (ul) s_cfg.btFixedPin = ul;
 
     s_cfg.wifiEnabled = prefs.getBool("wifiEnabled", s_cfg.wifiEnabled);
     if (prefs.isKey("mqttEnabled")) s_cfg.mqttEnabled = prefs.getBool("mqttEnabled");
@@ -12408,13 +12399,8 @@ static void loadConfigFromPrefs() {
     if (prefs.isKey("mqttEncrypt")) s_cfg.mqttEncryption = prefs.getBool("mqttEncrypt");
     if (prefs.isKey("mqttMapRpt")) s_cfg.mqttMapReport = prefs.getBool("mqttMapRpt");
     if (prefs.isKey("mqttPort")) s_cfg.mqttPort = prefs.getUShort("mqttPort");
-    if (prefs.isKey("mqttTls")) s_cfg.mqttTls = prefs.getBool("mqttTls");
 
     if (prefs.isKey("isPwrSaving")) s_cfg.isPowerSaving = prefs.getBool("isPwrSaving");
-    ul = prefs.getULong("lsSecs", 0);
-    if (ul) s_cfg.lsSecs = ul;
-    ul = prefs.getULong("minWakeSecs", 0);
-    if (ul) s_cfg.minWakeSecs = ul;
 
     if (prefs.isKey("telDevEn")) s_cfg.telDeviceEnabled = prefs.getBool("telDevEn");
     ul = prefs.getULong("telDevIntv", 0);
@@ -12437,7 +12423,6 @@ static void loadConfigFromPrefs() {
         s_cfg.neighborInfoIntervalS = NEIGHBORINFO_MIN_INTERVAL_S;
     }
 
-    if (prefs.isKey("cannedEn")) s_cfg.cannedEnabled = prefs.getBool("cannedEn");
     if (prefs.isKey("snfClientEn"))
         s_cfg.chatServerMode = prefs.getBool("snfClientEn") ? CHAT_SERVER_MODE_AUTO : CHAT_SERVER_MODE_OFF;
     if (prefs.isKey("otaAutoChk")) s_cfg.otaAutoCheckEnabled = prefs.getBool("otaAutoChk");
@@ -12448,18 +12433,11 @@ static void loadConfigFromPrefs() {
                                     cfgDefaultAutoFavRangeM(s_cfg.displayUnits));
         if (r > 0) s_cfg.autoFavoriteRangeM = r;
     }
-    String canned = getStringIfKey("cannedMsgs");
-    if (canned.length()) {
-        strncpy(s_cfg.cannedMessages, canned.c_str(), sizeof(s_cfg.cannedMessages) - 1);
-        s_cfg.cannedMessages[sizeof(s_cfg.cannedMessages) - 1] = '\0';
-    }
 
     ul = prefs.getULong("nodeIdOvr", 0);
     if (ul) s_cfg.nodeIdOverride = (uint32_t)ul;
     ro = prefs.getUChar("brightness", 0xFF);
     if (ro != 0xFF) s_cfg.brightness = cfgCoerceBrightness(ro);
-    ro = prefs.getUChar("chatSpace", 0xFF);
-    if (ro != 0xFF && ro <= 2) s_cfg.chatSpacing = ro;
     ro = prefs.getUChar("fontSize", 0xFF);
     if (ro != 0xFF && ro <= FONT_SIZE_MAX) s_cfg.fontSize = ro;
 
@@ -61721,7 +61699,6 @@ static uint32_t chatRenderContextSignature() {
     mix((uint32_t)s_cfg.chatNameStyle);
     // Both change every row's geometry, so a cached pass must not survive them.
     mix((uint32_t)s_cfg.fontSize);
-    mix((uint32_t)s_cfg.chatSpacing);
     mix((uint32_t)s_cfg.chatColorsEnabled);
     // Reshuffling node colors from the web form has to repaint the chat too,
     // and this signature is the only thing that notices a config change made
@@ -64220,7 +64197,6 @@ static void cfgApplyStagedMqtt(const char *wifiSsid) {
         utf8util::copyTruncate(s_cfg.mqttPass, sizeof(s_cfg.mqttPass), s_cfgMqtt.pass);
         utf8util::copyTruncate(s_cfg.mqttRoot, sizeof(s_cfg.mqttRoot), s_cfgMqtt.root);
         s_cfg.mqttPort = s_cfgMqtt.port;
-        s_cfg.mqttTls = s_cfgMqtt.tls;
         s_cfg.mqttEncryption = s_cfgMqtt.encryption;
         s_cfg.mqttEnabled = true;
         if (wifiSsid && wifiSsid[0]) s_cfg.wifiEnabled = true;
@@ -66172,8 +66148,7 @@ void setup() {
 // of busy-waiting. Every input that is allowed to wake the display is registered
 // as a GPIO wake source, so the timer wake only has to be fast enough for
 // scheduled TX (nodeinfo is 15 min) rather than doubling as the input-latency
-// ceiling. lsSecs/minWakeSecs are reserved for a future deeper-sleep tier and
-// intentionally unused here.
+// ceiling.
 static bool powerSaveShouldNap() {
     return s_cfg.isPowerSaving
         && s_screenAsleep                 // only after screen-off inactivity

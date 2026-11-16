@@ -5056,13 +5056,8 @@ static void sendConfigPage(const char *msg = "", bool lite = false) {
             "<option value='1'"; if ( gCfg->isPowerSaving) html += " selected"; html += ">Enabled</option>"
             "<option value='0'"; if (!gCfg->isPowerSaving) html += " selected"; html += ">Disabled</option>"
             "</select></label>";
-    html += "<div class='row2'>";
-    snprintf(tmp, sizeof(tmp), "%lu", (unsigned long)gCfg->lsSecs);
-    html += "<label>Light Sleep After (s)<input name='ls_secs' type='number' min='0' value='";
-    html += tmp; html += "'></label>";
-    snprintf(tmp, sizeof(tmp), "%lu", (unsigned long)gCfg->minWakeSecs);
-    html += "<label>Min Wake (s)<input name='min_wake' type='number' min='0' value='";
-    html += tmp; html += "'></label></div>";
+    html += "<p class='hint'>Naps the CPU in light sleep while the screen is off, "
+            "waking on any input or scheduled transmission. Never while web config is running.</p>";
     sectionEnd(html, lite);
     sendChunk(html);
 
@@ -8571,9 +8566,6 @@ static void handlePostSave() {
     }
     if (server.hasArg("mqtt_present")) {
         gCfg->mqttEnabled    = (server.arg("mqtt_en")         == "1");
-        // No TLS client in this firmware; clear any stale flag from an older
-        // config so nothing implies MQTT is running over TLS.
-        gCfg->mqttTls        = false;
         gCfg->mqttEncryption = (server.arg("mqtt_encrypt")    == "1");
         gCfg->mqttMapReport  = (server.arg("mqtt_map_report") == "1");
     }
@@ -8796,10 +8788,6 @@ static void handlePostSave() {
         gCfg->invertScroll = server.arg("invert_scroll").toInt() != 0;
     }
 #endif
-    // Legacy compatibility: only apply chat spacing if an older web form sends it.
-    if (server.hasArg("chat_space")) {
-        gCfg->chatSpacing = (uint8_t)constrain(server.arg("chat_space").toInt(), 0, 2);
-    }
 #if HAS_UI_THEMES
     if (server.hasArg("ui_theme_preset")) {
         // kThemePresetTotal, not kThemePresetCount: the custom slots live past
@@ -8822,8 +8810,6 @@ static void handlePostSave() {
 
     // Power
     gCfg->isPowerSaving = server.arg("pwr_saving").toInt() != 0;
-    gCfg->lsSecs        = (uint32_t)server.arg("ls_secs").toInt();
-    gCfg->minWakeSecs   = (uint32_t)server.arg("min_wake").toInt();
 
     // Modules
     uint32_t telemetryIntervalS = 3600UL;

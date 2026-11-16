@@ -288,8 +288,6 @@
 // How a time reads wherever a person sees one.
 // 0 = 24-hour (the behavior before the setting existed), 1 = 12-hour with AM/PM.
 #define MY_CLOCK_FORMAT     0
-#define MY_COMPASS_NORTH    0
-#define MY_FLIP_SCREEN      0
 #define MY_UI_THEME         0      // 0=CAMELLIA, 1=EVERGREEN, 2=EARTHEN, 3=SOLARIZED, 4=CRIMSON, 5=SCARLET_POP, 6=INK_WASH, 7=LAVENDAR_FIELDS, 8=WILD_FLOWERS, 9=QUIET_LUXURY, 10=MORNING_DEW, 11=WINTER_CHILL, 12=CAMELLIA_BLACK
 #if defined(DEVICE_TDECK_PRO)
 #define MY_UI_MODE          1      // E-paper default: white background, dark text
@@ -345,11 +343,6 @@
 // be able to decline the feature rather than pay for it at boot.
 #define MY_BLE_KBD_ENABLED  0
 
-// ── Bluetooth defaults ─────────────────────────────────────────
-#define MY_BT_ENABLED       1
-#define MY_BT_MODE          0      // RANDOM_PIN
-#define MY_BT_PIN           123456
-
 // ── Network defaults ───────────────────────────────────────────
 #define MY_WIFI_ENABLED     1      // master WiFi switch (gates web config + MQTT)
 // Auto-stop the web config server after this long with no HTTP request. Web
@@ -382,14 +375,11 @@
 // and mqtt.michmesh.net serve plaintext on 1883 with the same credentials.
 // Channel payloads stay end-to-end encrypted with the channel key either way, so
 // what TLS would add here is only transport-level metadata privacy on a public
-// broker. Set 8883/1 to opt back into TLS (also togglable in web config).
+// broker. There is no TLS client in this firmware.
 #define MY_MQTT_PORT        1883   // 1883 = plaintext (default), 8883 = TLS
-#define MY_MQTT_TLS         0      // connect via WiFiClientSecure when set
 
 // ── Power defaults ─────────────────────────────────────────────
 #define MY_POWER_SAVING     0
-#define MY_LS_SECS          300
-#define MY_MIN_WAKE_SECS    10
 
 // ── Module defaults ────────────────────────────────────────────
 #define MY_TEL_DEV_EN       1
@@ -532,8 +522,6 @@
 #else
 #define FEATURE_MQTT_MONITOR 0
 #endif
-#define MY_CANNED_EN        1
-#define MY_CANNED_MSGS      "Hi|Bye|Yes|No|Ok"
 // camillia chat server client: 0 off, 1 automatic (boot + every 15 min), 2 manual only.
 // Off on fresh installs; a device upgrading from the S&F client keeps its old setting.
 #define MY_CHAT_SERVER_MODE 0
@@ -561,7 +549,6 @@
 // until someone changes it. See cfgDefaultAutoFavRangeM().
 #define MY_AUTOFAV_RANGE_KM_M  1000   // 1 km, metric default
 #define MY_AUTOFAV_RANGE_MI_M  1609   // 1 mile, imperial default
-#define MY_CHAT_SPACING     1   // 0=Tight(8px), 1=Normal(10px), 2=Loose(12px)
 
 // Chat/DM message font size. Medium matches the built-in size; Small/Large step
 // one Montserrat size down/up from it, Extra Large two up. Applies to the chat
@@ -780,7 +767,6 @@
 #endif
 // Percent; see kPowerLedLevels. Dim by default: it sits beside the screen.
 #define MY_POWER_LED_PCT 10
-#define MY_NOTIFY_LED_ENABLED 1
 // Mesh Deck RGB notification LED defaults.
 // 0=Red, 1=Green, 2=Blue, 3=Yellow, 4=Cyan, 5=Magenta, 6=White
 #define MY_NOTIFY_LED_COLOR_CHANNEL 2
@@ -1053,7 +1039,7 @@
 #define DM_LINE_H         11
 #endif
 // CHAR_H is the actual font cell height used for cursor/input positioning.
-// LINE_H and VISIBLE_LINES are runtime globals set at startup from chatSpacing config.
+// LINE_H and VISIBLE_LINES are runtime globals set at startup.
 // Declared in the active UI entrypoint (main_lvgl.cpp), extern here so all modules can reference them.
 extern int LINE_H;          // row stride in channel/node/settings panels
 extern int VISIBLE_LINES;   // visible rows at LINE_H spacing
