@@ -835,6 +835,18 @@
 #define HAS_TOOL_STACK_LAYOUT 0
 #endif
 
+// The Config rows for settings that were once web-config-only (kCfgGenRows in
+// main_lvgl.cpp): region, TX power, MQTT broker, intervals and the rest. Not on
+// the Cardputer: its 3 MB app slot is the one with no room to spare, and its web
+// config (always the lite page) carries every one of these settings.
+#ifndef HAS_CFG_EXTRA_ROWS
+#if defined(DEVICE_CARDPUTER_LORA_HAT)
+#define HAS_CFG_EXTRA_ROWS 0
+#else
+#define HAS_CFG_EXTRA_ROWS 1
+#endif
+#endif
+
 // Spell suggestions in the compose box (English; see src/spell.h). Turned on
 // with -DHAS_SPELLCHECK=1 in platformio.ini, on the boards whose app partition
 // has room for the ~115 KB word list -- every 6 MB-slot board. Not the
