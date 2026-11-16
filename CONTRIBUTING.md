@@ -66,7 +66,11 @@ Match the code around you. In general:
   stack arrays to tasks without checking their stack size.
 - **Settings.** Saved config must survive an update. Add new fields to the end
   of `RhinoConfig`, give them a safe default, and keep the device UI, web
-  config and import/export in step.
+  config and import/export in step. A plain on/off, choice or text setting
+  needs no hand-written Config row: add a `CfgGenId` and its entry in
+  `kCfgGenRows` (`main_lvgl.cpp`), then list it in `initCfgActions()`. A
+  setting that nothing reads any more is retired, not deleted: rename it
+  `_retired*` and keep its type, so the stored layout does not move.
 - **Identity and keys.** Never log or export private keys, and don't change
   how node identity or key material is derived without saying so plainly in
   the PR.

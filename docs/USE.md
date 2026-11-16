@@ -816,10 +816,10 @@ conditions only — no forecast.
   back when a reading lands
 - Every failure names what to change: no server set, no position, no Wi-Fi, the
   proxy unreachable, or the proxy answering with something that is not weather
-- Available on every board. The Cardputer has no Utilities tab in its lite web
-  config, so its server address is set through the microSD `config.yaml`
-  (`network: weatherServer:`) — and the shipped default means it works without
-  setting anything. Its 240x135 panel gets a compact layout: a smaller headline
+- Available on every board. The server address is set in Config → Mesh
+  Services → Weather Server, or in web config under Device (the lite page has
+  it too, which is how the Cardputer sets it) — and the shipped default means
+  it works without setting anything. Its 240x135 panel gets a compact layout: a smaller headline
   and three detail lines instead of four
 
 ### MQTT Monitor
@@ -989,8 +989,10 @@ reset actions. Announcing to the mesh has moved to Live → Tools → Announce.
   not count as a tap and never runs anything. On the other touch builds a tap
   moves the highlight and Enter still runs it
 - Keyboard builds: I opens/focuses the info panel within Config
-- Import, Clear Nodes, and Factory Reset require a second Enter
-  confirmation
+- Export, Import, Clear Nodes, and Factory Reset require a second Enter
+  confirmation. With the clock set, Export opens a picker instead (replace
+  `config.yaml` or write a dated backup), and with more than one backup on the
+  card Import opens a picker and then asks, naming the file
 - **Space filters the rows**. Press
   Space to arm the filter, then type to narrow the list; the header shows
   `[what you typed]` and how many rows match. Backspace edits the filter and
@@ -2080,56 +2082,30 @@ public channel in your region; one sent to you is only heard if the sender
 retuned onto *your* channel, preset and region — so an empty list usually just
 means nobody nearby is beaconing at you.
 
-### Store and Forward
+### Chat server catch-up
 
-Some Meshtastic nodes run as a **Store and Forward router**: they keep a buffer
-of the messages they hear and replay them on request, so a node that was off or
-out of range can catch up. This device can act as a *client* of one — it never
-stores or replays anything for anyone else.
+A **camillia chat server** is a node that keeps channel messages and replays
+the ones this device missed while it was off or out of range. This device is a
+*client* of one; it never stores or replays anything for anyone else. (It
+replaced the Meshtastic Store and Forward client, which has been removed.)
 
-- **Store&Fwd Client** on the Config screen (Modules → *Receive Replayed
-  Messages* in web config) turns the client on. Off by default.
-- **Request S&F Replay** — the row directly beneath it, and the *Request Replay
-  Now* button in web config under Utilities → Diagnostics, next to Send NODEINFO
-  Broadcast. A router **never replays history on its own**; it
-  only answers a request, so this button is what actually makes the feature do
-  something. It asks for the last four hours; the router trims that to whatever
-  window and message count it is configured to return.
-- The row names the router it will ask (`Request S&F Replay (a1b2)`), or reads
-  `no router` when none has been heard yet. Routers announce themselves with a
-  periodic heartbeat, so give it a few minutes after coming into range. The row
-  is greyed out while the client is off.
-- **Router Node ID** (web config → Modules → Store & Forward) pins the router to
-  ask. Leave it blank and the device uses whichever router it hears a heartbeat
-  from. Set it — as `!aabbccdd` — and that router is used always, with
-  heartbeats from any other ignored when choosing who to ask. Clear it to go
-  back to automatic.
-
-  This matters more than it sounds: Meshtastic defaults `store_forward.heartbeat`
-  to **off**, and a router that never beats can't be discovered. If the row reads
-  `no router` while you know a router is right there, this is the fix. The
-  setting is web config only, and travels with config export/import under
-  `module_config: storeForward: router_id`.
-- Replayed messages appear prefixed **`[SF]`** — in the channel view if they
-  were originally broadcast, in a DM thread with the original sender if they
-  were originally a DM.
-- Requests are throttled to one every 30 seconds, because a single request can
-  pull the router's whole return buffer down at once.
-
-Things worth knowing about how routers behave, which are properties of the
-router and not of this device:
-
-- **Not on the default channel.** Routers refuse history requests on the public
-  channel outright. Use a channel with your own key.
-- **Only what it heard while running.** Anything sent before the router was
-  configured, or while it was powered off, was never stored.
-- A replay carries the *original author* in the packet, so replayed messages
-  from a sender you have ignored stay hidden, and a replay does not disturb the
-  node list — the original sender's **Last Heard** and signal readings describe
-  when that node was really heard, not when the router repeated it.
-- Replays are addressed to the client that asked for them, and this device only
-  displays the ones addressed to it. Another node's catch-up burst on a shared
-  channel is not absorbed as your own history.
+- **Chat Server** on the Config screen, under Mesh Services, picks the mode:
+  **Off**, **Automatic** (checks at boot and every 15 minutes) or **Manual
+  only**. Web config has the same choice as *Catch-up* under Modules → Chat
+  Server.
+- **Chat Server Node** names the server it uses. Blank means the first one found
+  nearby. Pick a node in **Nodes → Chat Server** to use that one always; a server
+  set by hand is never replaced automatically. Activating the row clears it.
+  Web config takes a short name or `!aabbccdd` in the same field.
+- **Check for Messages Now** asks the server for anything missed on this node's
+  channels, or searches for a server if none has been found yet. At most once
+  every 5 minutes. Web config has the same button under Utilities →
+  Diagnostics.
+- Replayed messages are marked in the chat.
+- **Off while licensed:** chat server traffic is encrypted, so the client sends
+  nothing in licensed mode.
+- Backed up in `config.yaml` under `module_config: chatServer:` as `mode`
+  (`off`, `auto`, `manual`), `server` and `manual`.
 
 ### Backing up settings
 
@@ -2508,6 +2484,8 @@ There are two versions of the page:
   Config form (identity, Wi-Fi, LoRa, channels, MQTT, display, modules), but not
   the Utilities, Live, Chat, or Nodes tabs. Access-point mode leaves the device
   with very little memory once Wi-Fi is running, and those extras do not fit.
+  The one setting that lives under Utilities on the full page, serial debug
+  logging, is in Lite's Power section instead, so no setting is out of reach.
 - **Full Web Config** — served once the device has joined your Wi-Fi network.
   Same Config form plus Utilities, the Live feed, Chat, and the Nodes map.
 
