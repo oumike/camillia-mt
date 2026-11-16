@@ -1414,6 +1414,27 @@ bool cfgExport(const RhinoConfig &cfg);
 // missing, empty, oversized or truncated file (nothing is applied then).
 bool cfgImport(RhinoConfig &cfg);
 
+// ── Config backups ──────────────────────────────────────────────────────────
+// Besides config.yaml, an export may be written under a timestamped name,
+// config-YYYYMMDD-HHMMSS.yaml, so several backups can sit side by side in
+// /camillia and one of them be chosen to import. Names are bare file names in
+// /camillia, never paths.
+#define CFG_BACKUP_NAME_MAX 40   // bytes, terminator included
+#define CFG_BACKUP_LIST_MAX 20
+
+// config.yaml, or config-<anything>.yaml with no path separator.
+bool cfgBackupNameValid(const char *name);
+
+// cfgExport() / cfgImport() under another backup name. cfgExport() is
+// cfgExportAs("config.yaml") and cfgImport() is cfgImportFrom("config.yaml").
+bool cfgExportAs(const RhinoConfig &cfg, const char *name);
+bool cfgImportFrom(RhinoConfig &cfg, const char *name);
+
+// The backups in /camillia: config.yaml first when present, then the
+// timestamped ones newest first (their names sort by time). Returns how many
+// were written to names, at most max.
+int cfgListBackups(char (*names)[CFG_BACKUP_NAME_MAX], int max);
+
 // Returns true if /camillia/config.yaml is present on the configured storage.
 // Mounts it if needed; returns false if storage is unavailable.
 bool cfgSdConfigExists();

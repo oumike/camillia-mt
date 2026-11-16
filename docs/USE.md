@@ -2136,22 +2136,29 @@ router and not of this device:
 **Export Config** on the Config screen writes `/camillia/config.yaml` to the SD
 card — or, on the boards with no card slot, to the internal flash partition that
 stands in for one — and web config has the same export plus an upload to restore
-one. What the
-file carries:
+one. When the device knows the date and time, Export asks which file: replace
+`config.yaml`, or write a new backup beside it named after the moment, such as
+`config-20261115-143205.yaml`, so several can be kept. Without the time, Export
+writes `config.yaml` as before. What the file carries:
 
 - Every setting in this guide, and the channel list including channel keys
 - The node's **identity keypair**, so a restored device keeps the same PKI
   identity and peers holding its public key can still send it encrypted DMs
-- **Not** the node ID. That is derived from the board's MAC address, so a backup
-  restored onto *different* hardware comes up with the same name, channels and
-  keys under a **new node ID** — other nodes will treat it as a new node
+- **Not** the node ID, unless you set a Node ID Override. It is otherwise
+  derived from the board's MAC address, so a backup restored onto *different*
+  hardware comes up with the same name, channels and keys under a **new node
+  ID** — other nodes will treat it as a new node. An override is carried, so
+  restoring that backup onto a second device gives both the same ID
 
 Because it contains the private key and your channel keys, **an exported config
 is a secret, not just a settings file.** Treat it like a password.
 
 A config can be restored three ways, all equivalent: the Import row on the
 Config screen, an upload in web config, or the prompt during first-boot setup
-when a `config.yaml` is already on the card. Each one reboots afterwards.
+when a `config.yaml` is already on the card. Each one reboots afterwards. With
+more than one backup on the card, the Import row lists them, `config.yaml`
+first and then the dated ones newest first, and asks again naming the one you
+picked. First-boot setup always offers `config.yaml`.
 
 ### Backing up messages
 

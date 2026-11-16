@@ -473,7 +473,6 @@ void applyPresetParams(RhinoConfig &cfg) {
 
 // ── Storage paths ─────────────────────────────────────────────────────────────
 static const char *kPath = "/camillia/config.yaml";
-static const char *kTmpPath = "/camillia/config.yaml.tmp";
 static const char *kBakPath = "/camillia/config.yaml.bak";
 // Comment lines, so older builds and the Meshtastic CLI ignore them. A file
 // with the format marker was written by a build that also ends it with the end
@@ -3042,7 +3041,24 @@ bool cfgImportRestoredKeys() { return s_importRestoredKeys; }
 // The existing file is the user's only backup (identity key, PSKs), so it is
 // replaced only once the new one is fully on the card: write a temp file, check
 // it, move the old one aside, rename the temp into place, then drop the old one.
-bool cfgExport(const RhinoConfig &cfg) {
+bool cfgBackupNameValid(const char *name) {
+    if (!name || !name[0] || strchr(name, '/') || strchr(name, '\\')) return false;
+    const size_t n = strlen(name);
+    if (n >= CFG_BACKUP_NAME_MAX) return false;
+    if (!strcmp(name, "config.yaml")) return true;
+    return n > 12 && !strncmp(name, "config-", 7) && !strcmp(name + n - 5, ".yaml");
+}
+
+bool cfgExport(const RhinoConfig &cfg) { return cfgExportAs(cfg, "config.yaml"); }
+bool cfgImport(RhinoConfig &cfg) { return cfgImportFrom(cfg, "config.yaml"); }
+
+bool cfgExportAs(const RhinoConfig &cfg, const char *name) {
+    if (!cfgBackupNameValid(name)) return false;
+    // The same temp-and-rename dance for every name, each with its own pair.
+    char path[64], tmpPath[72], bakPath[72];
+    snprintf(path, sizeof(path), "/camillia/%s", name);
+    snprintf(tmpPath, sizeof(tmpPath), "%s.tmp", path);
+    snprintf(bakPath, sizeof(bakPath), "%s.bak", path);
     if (!ensureSdMounted()) return false;
     fs::FS &fsys = storageFs();
     fsys.mkdir("/camillia");
@@ -3062,10 +3078,10 @@ bool cfgExport(const RhinoConfig &cfg) {
     }
     const size_t len = yaml.length();
 
-    fsys.remove(kTmpPath);
-    File f = fsys.open(kTmpPath, FILE_WRITE);
+    fsys.remove(tmpPath);
+    File f = fsys.open(tmpPath, FILE_WRITE);
     if (!f) {
-        Serial.printf("[cfg] export FAILED: cannot create %s\n", kTmpPath);
+        Serial.printf("[cfg] export FAILED: cannot create %s\n", tmpPath);
         return false;
     }
     const size_t wrote = f.write((const uint8_t *)yaml.c_str(), len);
@@ -3073,50 +3089,54 @@ bool cfgExport(const RhinoConfig &cfg) {
     f.close();
     bool ok = (wrote == len);
     if (ok) {
-        File chk = fsys.open(kTmpPath, FILE_READ);
+        File chk = fsys.open(tmpPath, FILE_READ);
         ok = chk && (size_t)chk.size() == len;
         if (chk) chk.close();
     }
     if (!ok) {
         Serial.printf("[cfg] export FAILED: wrote %u of %u bytes\n",
                       (unsigned)wrote, (unsigned)len);
-        fsys.remove(kTmpPath);
+        fsys.remove(tmpPath);
         return false;
     }
 
-    const bool hadOld = fsys.exists(kPath);
+    const bool hadOld = fsys.exists(path);
     if (hadOld) {
-        fsys.remove(kBakPath);
-        if (!fsys.rename(kPath, kBakPath)) {
+        fsys.remove(bakPath);
+        if (!fsys.rename(path, bakPath)) {
             Serial.println("[cfg] export FAILED: cannot move old config aside");
-            fsys.remove(kTmpPath);
+            fsys.remove(tmpPath);
             return false;
         }
     }
-    if (!fsys.rename(kTmpPath, kPath)) {
+    if (!fsys.rename(tmpPath, path)) {
         Serial.println("[cfg] export FAILED: cannot rename temp file into place");
-        if (hadOld) fsys.rename(kBakPath, kPath);
-        fsys.remove(kTmpPath);
+        if (hadOld) fsys.rename(bakPath, path);
+        fsys.remove(tmpPath);
         return false;
     }
-    if (hadOld) fsys.remove(kBakPath);
+    if (hadOld) fsys.remove(bakPath);
     Serial.printf("[cfg] exported to %s on %s (%u bytes)\n",
-                  kPath, storageName(), (unsigned)len);
+                  path, storageName(), (unsigned)len);
     return true;
 }
 
 // ── Import from SD ────────────────────────────────────────────
-bool cfgImport(RhinoConfig &cfg) {
+bool cfgImportFrom(RhinoConfig &cfg, const char *name) {
+    if (!cfgBackupNameValid(name)) return false;
+    char path[64], bakPath[72];
+    snprintf(path, sizeof(path), "/camillia/%s", name);
+    snprintf(bakPath, sizeof(bakPath), "%s.bak", path);
     if (!ensureSdMounted()) return false;
     fs::FS &fsys = storageFs();
     // An export interrupted between its two renames leaves the old file at
-    // kBakPath; it is complete, so fall back to it.
-    const char *path = fsys.exists(kPath) ? kPath : kBakPath;
-    File f = fsys.open(path, FILE_READ);
+    // bakPath; it is complete, so fall back to it.
+    const char *src = fsys.exists(path) ? path : bakPath;
+    File f = fsys.open(src, FILE_READ);
     if (!f) return false;
     const size_t size = (size_t)f.size();
     if (size == 0 || size > kCfgImportMaxBytes) {
-        Serial.printf("[cfg] import refused: %s is %u bytes\n", path, (unsigned)size);
+        Serial.printf("[cfg] import refused: %s is %u bytes\n", src, (unsigned)size);
         f.close();
         return false;
     }
@@ -3136,8 +3156,46 @@ bool cfgImport(RhinoConfig &cfg) {
     content[size] = '\0';
     bool ok = cfgImportFromBuf(content, size, cfg);
     free(content);
-    if (ok) Serial.printf("[cfg] imported from %s on %s\n", path, storageName());
+    if (ok) Serial.printf("[cfg] imported from %s on %s\n", src, storageName());
     return ok;
+}
+
+int cfgListBackups(char (*names)[CFG_BACKUP_NAME_MAX], int max) {
+    if (!names || max <= 0 || !ensureSdMounted()) return 0;
+    fs::FS &fsys = storageFs();
+    int n = 0;
+    // config.yaml counts when only its .bak survives: cfgImportFrom() falls
+    // back to it, as cfgImport() always has.
+    if (fsys.exists(kPath) || fsys.exists(kBakPath)) {
+        snprintf(names[n++], CFG_BACKUP_NAME_MAX, "%s", "config.yaml");
+    }
+    File dir = fsys.open("/camillia");
+    if (!dir || !dir.isDirectory()) { if (dir) dir.close(); return n; }
+    // Collected unsorted, then the timestamped run sorted newest first. More
+    // than fit are dropped oldest first by keeping the largest names.
+    char found[CFG_BACKUP_LIST_MAX * 2][CFG_BACKUP_NAME_MAX];
+    int nf = 0;
+    for (File f = dir.openNextFile(); f; f = dir.openNextFile()) {
+        const char *nm = f.name();
+        const bool isDir = f.isDirectory();
+        char base[CFG_BACKUP_NAME_MAX] = "";
+        if (nm) {
+            const char *slash = strrchr(nm, '/');
+            snprintf(base, sizeof(base), "%s", slash ? slash + 1 : nm);
+        }
+        f.close();
+        if (isDir || !strcmp(base, "config.yaml") || !cfgBackupNameValid(base)) continue;
+        if (nf < (int)(sizeof(found) / sizeof(found[0]))) {
+            snprintf(found[nf++], CFG_BACKUP_NAME_MAX, "%s", base);
+        }
+    }
+    dir.close();
+    qsort(found, nf, CFG_BACKUP_NAME_MAX,
+          [](const void *a, const void *b) { return -strcmp((const char *)a, (const char *)b); });
+    for (int i = 0; i < nf && n < max; i++) {
+        snprintf(names[n++], CFG_BACKUP_NAME_MAX, "%s", found[i]);
+    }
+    return n;
 }
 
 bool cfgSdConfigExists() {

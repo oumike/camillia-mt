@@ -1949,6 +1949,11 @@ static uint32_t s_gpsClockSyncMs = 0;
 // A clock this far along is one somebody actually set; anything below it is the
 // 1970 epoch the ESP32 boots at.
 static constexpr time_t kClockSetEpoch = 1700000000;
+static inline bool clockIsSet();
+// Config backups: Export offers a timestamped copy while the clock is set, and
+// Import offers a choice while more than one backup is on the card.
+static bool cfgExportOffersStamp();
+static bool cfgImportHasChoice();
 
 #if HAS_SLEEP_OVERLAY
 // Record an inbound message for the sleeping panel's preview rows. Called from
@@ -6377,8 +6382,10 @@ static bool cfgActionNeedsConfirm(int actionId) {
     return
         // Reboots to apply.
         actionId == CFG_ACTION_MQTT_TOGGLE
-        || actionId == CFG_ACTION_EXPORT
-        || actionId == CFG_ACTION_IMPORT
+        // Unless a picker comes first: it names the file, and the import
+        // picker asks again before it reboots.
+        || (actionId == CFG_ACTION_EXPORT && !cfgExportOffersStamp())
+        || (actionId == CFG_ACTION_IMPORT && !cfgImportHasChoice())
         || actionId == CFG_ACTION_OTA_UPDATE
     || actionId == CFG_ACTION_CLEAR_MSGS
         || actionId == CFG_ACTION_CLEAR_NODES
@@ -46763,6 +46770,126 @@ static const char *cfgGenTextCommit(const char *) { return nullptr; }
 static void        cfgGenTextDone() {}
 #endif  // HAS_CFG_EXTRA_ROWS
 
+// ── Config backups: export / import pickers ─────────────────────────────────
+
+// Imports one backup and reboots into it; on failure leaves the reason in
+// s_cfgStatus. The body the Import row always ran, now for any backup name.
+static void cfgImportNamed(const char *name) {
+    bool ok = cfgImportFrom(s_cfg, name);
+    if (ok) {
+#if FEATURE_LICENSED_MODE
+        // Licensed now, or by the imported config: its channels come in
+        // keyless. Stripped before onWebCfgSaved() persists them.
+        const bool licKeysStripped =
+            (lic::active() || s_cfg.licensedMode) && licStripChannels(0);
+#else
+        const bool licKeysStripped = false;
+#endif
+        onWebCfgSaved();
+        persistUiTheme();
+        persistMessageAlertSetting();
+        persistSplashMelodySetting();
+        s_lastRenderedChannel = -1;
+        s_lastRenderedCount = -1;
+        refreshHeaderTime(true);
+        refreshHeaderStatus(true);
+        refreshChannelGlow(true);
+        refreshChatView(true);
+        if (licKeysStripped) {
+            snprintf(s_cfgStatus, sizeof(s_cfgStatus), "%s",
+                     TR("Licensed mode: channel imported without its key"));
+            refreshCfgModal();
+            lv_timer_handler();
+            delay(3000);
+        }
+        const char *importWarn = cfgImportWarning();
+        const bool hasImportWarn = importWarn && importWarn[0];
+        snprintf(s_cfgStatus, sizeof(s_cfgStatus), "%s",
+                 hasImportWarn ? importWarn : TR("Imported OK - rebooting..."));
+        refreshCfgModal();
+        lv_timer_handler();
+        delay(hasImportWarn ? 4000 : 1000);
+        flushPersistentState();   // settings and transcripts must land before we go
+        ESP.restart();
+    } else {
+        snprintf(s_cfgStatus, sizeof(s_cfgStatus), TR("Import FAILED (no %s?)"), name);
+    }
+}
+
+// The timestamped name an export would get now, from the local clock.
+static void cfgBackupStampName(char *out, size_t cap) {
+    const time_t now = time(nullptr);
+    struct tm lt;
+    localtime_r(&now, &lt);
+    strftime(out, cap, "config-%Y%m%d-%H%M%S.yaml", &lt);
+}
+
+static bool cfgExportOffersStamp() { return clockIsSet(); }
+
+static char s_cfgBackupNames[CFG_BACKUP_LIST_MAX][CFG_BACKUP_NAME_MAX];
+static int  s_cfgBackupCount = 0;
+static char s_cfgExportStamp[CFG_BACKUP_NAME_MAX];
+
+// Re-read each time: a card can be swapped, and an export just added one.
+static bool cfgImportHasChoice() {
+    s_cfgBackupCount = cfgListBackups(s_cfgBackupNames, CFG_BACKUP_LIST_MAX);
+    return s_cfgBackupCount > 1;
+}
+
+static const char *cfgExportPickLabel(int idx) {
+    return idx == 0 ? "config.yaml" : s_cfgExportStamp;
+}
+
+static void cfgExportPickApply(int idx) {
+    const char *name = cfgExportPickLabel(idx);
+    sdForceRescan();
+    const bool ok = cfgExportAs(s_cfg, name);
+    if (ok) snprintf(s_cfgStatus, sizeof(s_cfgStatus), TR("Exported to /camillia/%s"), name);
+    else    snprintf(s_cfgStatus, sizeof(s_cfgStatus), "%s", TR("Export FAILED (no SD?)"));
+    openCfgActionMessageModal(s_cfgStatus);
+}
+
+// config.yaml, overwritten as Export always has, or a new timestamped file
+// beside it. Only offered with the clock set: a stamp from a clock that does
+// not know the date would sort as the oldest backup on the card.
+static void openCfgExportPicker() {
+    cfgBackupStampName(s_cfgExportStamp, sizeof(s_cfgExportStamp));
+    static const CfgSliderPicker kSpec = {
+        TR_NOOP("Export Config As"), 2, cfgExportPickLabel, cfgExportPickApply,
+        TR_NOOP("replace"), TR_NOOP("new backup"),
+    };
+    openCfgSliderModal(&kSpec, 0);
+}
+
+static void cfgImportPickedCommit(int idx) {
+    if (idx < 0 || idx >= s_cfgBackupCount) return;
+    cfgImportNamed(s_cfgBackupNames[idx]);   // reboots on success
+    openCfgActionMessageModal(s_cfgStatus);
+}
+
+static const char *cfgImportPickLabel(int idx) {
+    return (idx >= 0 && idx < s_cfgBackupCount) ? s_cfgBackupNames[idx] : "";
+}
+
+// The pick, then the same question the single-file Import asks, naming it.
+static void cfgImportPickApply(int idx) {
+    if (idx < 0 || idx >= s_cfgBackupCount) return;
+    snprintf(s_cfgConfirmText, sizeof(s_cfgConfirmText),
+             TR("Import %s and reboot?"), s_cfgBackupNames[idx]);
+    openCfgConfirmModal(-1, s_cfgConfirmText, cfgImportPickedCommit, idx);
+}
+
+static void openCfgImportPicker() {
+    static CfgSliderPicker spec = {};
+    spec.title    = TR_NOOP("Import Which Backup?");
+    spec.count    = s_cfgBackupCount;
+    spec.labelFor = cfgImportPickLabel;
+    spec.apply    = cfgImportPickApply;
+    spec.leftEnd  = TR_NOOP("newest");
+    spec.rightEnd = TR_NOOP("oldest");
+    openCfgSliderModal(&spec, 0);
+}
+
 static void performCfgAction(int actionId) {
     s_cfgConfirmAction = -1;
     s_cfgConfirmMs = 0;
@@ -46990,6 +47117,11 @@ static void performCfgAction(int actionId) {
             // The user picked this from a menu; if they just inserted a card,
             // the failed-probe cooldown must not be what tells them there isn't one.
             sdForceRescan();
+            if (cfgExportOffersStamp()) {
+                showActionPopup = false;   // the picker is the next step
+                openCfgExportPicker();
+                break;
+            }
             bool ok = cfgExport(s_cfg);
             snprintf(s_cfgStatus, sizeof(s_cfgStatus),
                      ok ? TR("Exported to /camillia/config.yaml") : TR("Export FAILED (no SD?)"));
@@ -46998,45 +47130,14 @@ static void performCfgAction(int actionId) {
         case CFG_ACTION_IMPORT: {
             if (s_cfgDebugLog) Serial.println("[lvgl-cfg] exec IMPORT");
             sdForceRescan();   // same reason as Export above
-            bool ok = cfgImport(s_cfg);
-            if (ok) {
-#if FEATURE_LICENSED_MODE
-                // Licensed now, or by the imported config: its channels come in
-                // keyless. Stripped before onWebCfgSaved() persists them.
-                const bool licKeysStripped =
-                    (lic::active() || s_cfg.licensedMode) && licStripChannels(0);
-#else
-                const bool licKeysStripped = false;
-#endif
-                onWebCfgSaved();
-                persistUiTheme();
-                persistMessageAlertSetting();
-                persistSplashMelodySetting();
-                s_lastRenderedChannel = -1;
-                s_lastRenderedCount = -1;
-                refreshHeaderTime(true);
-                refreshHeaderStatus(true);
-                refreshChannelGlow(true);
-                refreshChatView(true);
-                if (licKeysStripped) {
-                    snprintf(s_cfgStatus, sizeof(s_cfgStatus), "%s",
-                             TR("Licensed mode: channel imported without its key"));
-                    refreshCfgModal();
-                    lv_timer_handler();
-                    delay(3000);
-                }
-                const char *importWarn = cfgImportWarning();
-                const bool hasImportWarn = importWarn && importWarn[0];
-                snprintf(s_cfgStatus, sizeof(s_cfgStatus), "%s",
-                         hasImportWarn ? importWarn : TR("Imported OK - rebooting..."));
-                refreshCfgModal();
-                lv_timer_handler();
-                delay(hasImportWarn ? 4000 : 1000);
-                flushPersistentState();   // settings and transcripts must land before we go
-                ESP.restart();
-            } else {
-                snprintf(s_cfgStatus, sizeof(s_cfgStatus), "%s", TR("Import FAILED (no file?)"));
+            if (cfgImportHasChoice()) {
+                showActionPopup = false;   // the picker, then its own confirm
+                openCfgImportPicker();
+                break;
             }
+            // One backup, or none: that one, which is config.yaml unless the
+            // card only holds a timestamped copy.
+            cfgImportNamed(s_cfgBackupCount == 1 ? s_cfgBackupNames[0] : "config.yaml");
         } break;
 
         case CFG_ACTION_THEME:
