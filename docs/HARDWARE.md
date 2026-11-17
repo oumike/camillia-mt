@@ -94,7 +94,7 @@ and issue #155.
 | **Interface** | Daemon as a systemd service (`camillia-czero`), screen app from the launcher, joined by a Unix socket at `/run/camillia/camillia.sock`; settings in `~/.config/camillia/config` |
 | **Identity** | Curve25519 key in `~/.config/camillia/identity` (0600); node ID is `crc32(public key)` as in Meshtastic 2.8; known nodes in `~/.config/camillia/nodes` |
 | **Not used** | Battery gauge, Wi-Fi/MQTT |
-| **Status** | Hardware-verified on one unit with the first headless program: receive and decode (channel and NodeInfo, via the DIO1 interrupt), NodeInfo and text broadcast transmit. Daemon, relaying, GPS, service and screen app not yet run on the device; PKI DMs and ACKs not yet confirmed on air |
+| **Status** | Hardware-verified on one unit: the daemon receives, relays, broadcasts NodeInfo and GPS position (heard and relayed by a neighbour), and sends and receives PKI DMs with ACKs; the screen app runs from the launcher. Secondary channels and NAKs not yet tested |
 
 ### Elecrow CrowPanel Advance 3.5 (WIP)
 

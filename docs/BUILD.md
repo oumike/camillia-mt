@@ -734,11 +734,11 @@ top). Home long-press also quits.
 [--power DBM] [--rx-only] [--debug]` overriding the settings. A line typed at
 the console broadcasts on the primary channel; `/help` lists commands.
 
-> **Partly hardware-verified** (issue #155). Receive, decode, and NodeInfo and
-> text transmit are confirmed on a unit with the first headless program. The
-> daemon, settings, relaying, GPS, history, service and screen app are built
-> and unit-tested on the host but not yet run on the device. PKI DMs and ACKs
-> are not yet confirmed on air.
+> **Hardware-verified on one unit** (issue #155): the service starts at boot
+> and receives, relays other nodes' packets, broadcasts NodeInfo and GPS
+> position (both relayed onward by a neighbour), and sends and receives PKI
+> DMs with the ACK coming back. The screen app runs from the launcher. Not yet
+> tested: secondary channels from the settings file, and NAK handling.
 
 ### Seeed Wio Tracker L2 (wio-tracker-l2)
 
