@@ -40,6 +40,9 @@ uint32_t crc32(uint32_t crc, const uint8_t *p, size_t n) {
 
 const esp_partition_t kAppPartition = {ESP_PARTITION_TYPE_APP, ESP_PARTITION_SUBTYPE_APP_FACTORY, 0, 0,
                                        "factory", false};
+// Stands for the file-backed NVS (nvs_linux.cpp); only its label is meaningful.
+const esp_partition_t kNvsPartition = {ESP_PARTITION_TYPE_DATA, ESP_PARTITION_SUBTYPE_DATA_NVS, 0, 0,
+                                       "nvs", false};
 
 }  // namespace
 
@@ -130,8 +133,13 @@ esp_err_t esp_light_sleep_start(void) { return ESP_ERR_NOT_SUPPORTED; }
 void esp_deep_sleep_start(void) { czeroExit(0); }
 esp_err_t esp_deep_sleep_enable_gpio_wakeup(uint64_t, int) { return ESP_OK; }
 
-// No partitions or OTA slots: the app is updated by its installer.
-const esp_partition_t *esp_partition_find_first(esp_partition_type_t, esp_partition_subtype_t, const char *) {
+// No flash partitions or OTA slots: the app is updated by its installer. NVS
+// alone answers, since its store exists (as files).
+const esp_partition_t *esp_partition_find_first(esp_partition_type_t type, esp_partition_subtype_t subtype,
+                                                const char *label) {
+    if (type == ESP_PARTITION_TYPE_DATA && subtype == ESP_PARTITION_SUBTYPE_DATA_NVS &&
+        (!label || !strcmp(label, "nvs")))
+        return &kNvsPartition;
     return nullptr;
 }
 const esp_partition_t *esp_ota_get_running_partition(void) { return &kAppPartition; }

@@ -312,7 +312,7 @@
 // How a channel reply names the message it answers: a quoted snippet over the
 // reply, or on the smallest panels, where a quote would cost a whole line, a
 // compact "↪@Name" in the reply's own header.
-#if defined(DEVICE_CARDPUTER_LORA_HAT) || defined(DEVICE_HELTEC_V4_EXPANSION) \
+#if UI_CARDPUTER_COMPACT || defined(DEVICE_HELTEC_V4_EXPANSION) \
     || defined(DEVICE_HELTEC_R8) || defined(DEVICE_M9)
 #define CHAT_REPLY_TAG_STYLE 1
 #else

@@ -228,6 +228,18 @@ DEVICE_CARDPUTER_ZERO"
 #  define TFT_ROTATION_PORTRAIT_180  (((TFT_ROTATION_PORTRAIT) + 2) & 3)
 #endif
 
+// ── Compact Cardputer UI profile ────────────────────────────────────────────
+// Short, keyboard-only landscape panels with a Cardputer keyboard: the
+// Cardputer ADV (240x135) and the CardputerZero (320x170). The generic layouts
+// assume a 240px-tall panel and run off the bottom of these, so they take the
+// compact layouts and key-driven navigation instead. Layout only: M5Cardputer
+// hardware stays on DEVICE_CARDPUTER_LORA_HAT.
+#if defined(DEVICE_CARDPUTER_LORA_HAT) || defined(DEVICE_CARDPUTER_ZERO)
+#  define UI_CARDPUTER_COMPACT 1
+#else
+#  define UI_CARDPUTER_COMPACT 0
+#endif
+
 // ── Channel list presentation ────────────────────────────────────────────────
 // Two layouts exist for the main screen. Boards with this set render channels
 // as an overlay dropdown that appears on demand, leaving the full width to the
@@ -237,7 +249,7 @@ DEVICE_CARDPUTER_ZERO"
 // This used to be spelled out longhand as the same three-device condition at a
 // dozen call sites, which made adding a board a dozen chances to miss one.
 #if defined(DEVICE_TDECK) || defined(DEVICE_TDECK_PRO) || defined(DEVICE_HELTEC_V4_EXPANSION) \
-    || defined(DEVICE_CARDPUTER_LORA_HAT) || defined(DEVICE_MESH_DECK) \
+    || UI_CARDPUTER_COMPACT || defined(DEVICE_MESH_DECK) \
     || defined(DEVICE_M9) || defined(DEVICE_WIO_TRACKER_L2) \
     || defined(DEVICE_TDISPLAY_P4) || defined(DEVICE_CROWPANEL) \
     || defined(DEVICE_TANMATSU)

@@ -1261,7 +1261,7 @@ static lv_obj_t *s_nodesDetail = nullptr;
 // leave the values a readable column, nor the height for four sections of
 // fields. Both layouts share the list, the filter, the selection model and the
 // focus model below; only the geometry and the detail rendering differ.
-#if defined(DEVICE_CARDPUTER_LORA_HAT)
+#if UI_CARDPUTER_COMPACT
 #define NODES_LAYOUT_WIDE 0
 #else
 #define NODES_LAYOUT_WIDE 1
@@ -2181,7 +2181,7 @@ static constexpr bool kUseScrollKeysForMainNav = true;
 static constexpr bool kModalCloseUsesEscape = false;
 static const lv_font_t *kMainScreenFont = &lv_font_montserrat_12;
 static constexpr int kMainScreenChannelBtnHeight = 24;
-#elif defined(DEVICE_CARDPUTER_LORA_HAT)
+#elif UI_CARDPUTER_COMPACT
 static constexpr bool kPagerWheelChatNav = false;
 static constexpr bool kUseScrollKeysForMainNav = true;
 static constexpr bool kModalCloseUsesEscape = true;
@@ -2253,7 +2253,7 @@ static const lv_font_t *kChannelChatFont = kMainScreenFont;
 
 // Relative chat/DM sizes keep Medium at the caller's base and step Small down
 // one face, including 10 -> 8 px. Boards below use fixed, display-specific sizes.
-#if defined(DEVICE_CARDPUTER_LORA_HAT) || defined(DEVICE_TLORA_PAGER_TFT) \
+#if UI_CARDPUTER_COMPACT || defined(DEVICE_TLORA_PAGER_TFT) \
     || defined(DEVICE_TDECK_PRO) || defined(DEVICE_TDISPLAY_P4) \
     || defined(DEVICE_CROWPANEL)
 static const lv_font_t *explicitChatFont() {
@@ -2304,7 +2304,7 @@ static const lv_font_t *explicitChatFont() {
 #endif
 
 static const lv_font_t *scaledChatFontBase(const lv_font_t *base) {
-#if defined(DEVICE_CARDPUTER_LORA_HAT) || defined(DEVICE_TLORA_PAGER_TFT) \
+#if UI_CARDPUTER_COMPACT || defined(DEVICE_TLORA_PAGER_TFT) \
     || defined(DEVICE_TDECK_PRO) || defined(DEVICE_TDISPLAY_P4) \
     || defined(DEVICE_CROWPANEL)
     (void)base;
@@ -2396,7 +2396,7 @@ static bool s_pagerChatCursorMode = false;
 static int s_pagerChatCursorDisplayIndex = -1;
 // One-shot: after leaving chat cursor mode, reopen plain chat at latest.
 static bool s_chatScrollToLatestOnce = false;
-#if defined(DEVICE_CARDPUTER_LORA_HAT)
+#if UI_CARDPUTER_COMPACT
 static bool s_cardputerMainChatPanelFocused = false;
 #endif
 static int s_cardputerDropdownSelection = -1;
@@ -2561,7 +2561,7 @@ static void scrollListClamped(lv_obj_t *obj, lv_coord_t dy) {
     if (dy != 0) lv_obj_scroll_by(obj, 0, dy, LV_ANIM_OFF);
 }
 
-#if defined(DEVICE_CARDPUTER_LORA_HAT)
+#if UI_CARDPUTER_COMPACT
 static inline char remapCardputerUiKey(char k, bool allowScrollRemap) {
     if (k == '`' || k == '~') return KEY_ESCAPE;
     if (allowScrollRemap) {
@@ -2968,7 +2968,7 @@ static void chatMakeIrcRow(lv_obj_t *list, const lv_font_t *font,
 // Cardputer's 240x135 panel can't spare the ~13px per row it costs — three
 // styles' worth pushed the last option off the modal entirely — so there it
 // renders names only.
-#if defined(DEVICE_CARDPUTER_LORA_HAT)
+#if UI_CARDPUTER_COMPACT
 static constexpr bool kModalRowDescriptions = false;
 #else
 static constexpr bool kModalRowDescriptions = true;
@@ -15154,7 +15154,7 @@ static void openComposePrompt(uint32_t replyPacketId,
     const lv_coord_t composeInputPadTop = 1;
     const lv_coord_t composeModalBottomPad = 4;
     const lv_coord_t composeModalRowPad = 2;
-#elif defined(DEVICE_CARDPUTER_LORA_HAT)
+#elif UI_CARDPUTER_COMPACT
     const lv_font_t *composeBodyFont = emojiFont(&lv_font_montserrat_12);
     // Compose is full screen here, so the input gets four lines instead of the
     // single one the old boxed modal had room for. 200 characters never fit on
@@ -15410,7 +15410,7 @@ static void openComposePrompt(uint32_t replyPacketId,
     // which was written for much smaller screens and left most of this one
     // unused.
     modalH = lv_disp_get_ver_res(NULL) - 36;
-#elif defined(DEVICE_CARDPUTER_LORA_HAT)
+#elif UI_CARDPUTER_COMPACT
     // Full screen. On a 240x135 panel a boxed modal spent most of its height on
     // margin and border; composing is a modal activity anyway, so it takes the
     // whole display and the room goes to the message.
@@ -15426,7 +15426,7 @@ static void openComposePrompt(uint32_t replyPacketId,
     lv_obj_set_size(s_composeModal, modalW, modalH);
 #if defined(DEVICE_TLORA_PAGER_TFT)
     lv_obj_align(s_composeModal, LV_ALIGN_CENTER, 0, -12);
-#elif defined(DEVICE_CARDPUTER_LORA_HAT) || defined(DEVICE_MESH_DECK) || defined(DEVICE_TDECK_PRO)
+#elif UI_CARDPUTER_COMPACT || defined(DEVICE_MESH_DECK) || defined(DEVICE_TDECK_PRO)
     lv_obj_align(s_composeModal, LV_ALIGN_CENTER, 0, 0);   // centred, grows both ways
 #else
     lv_obj_align(s_composeModal, LV_ALIGN_CENTER, 0, 10);
@@ -15483,7 +15483,7 @@ static void openComposePrompt(uint32_t replyPacketId,
 // No band on the Pro: its box is sized from the message (below), so there is
 // never slack for a band to centre it in — the band would just be somewhere for
 // empty space to live.
-#if defined(DEVICE_TDECK) || defined(DEVICE_CARDPUTER_LORA_HAT) || defined(DEVICE_MESH_DECK) \
+#if defined(DEVICE_TDECK) || UI_CARDPUTER_COMPACT || defined(DEVICE_MESH_DECK) \
     || defined(DEVICE_M9)
     lv_obj_t *composeCenterBand = lv_obj_create(s_composeModal);
     lv_obj_set_width(composeCenterBand, lv_pct(100));
@@ -15547,7 +15547,7 @@ static void openComposePrompt(uint32_t replyPacketId,
     lv_obj_set_height(s_composeInput, lv_pct(100));
     lv_obj_set_flex_grow(s_composeInput, 1);
 #endif
-#if (defined(DEVICE_TDECK) || defined(DEVICE_CARDPUTER_LORA_HAT) || defined(DEVICE_MESH_DECK) \
+#if (defined(DEVICE_TDECK) || UI_CARDPUTER_COMPACT || defined(DEVICE_MESH_DECK) \
      || defined(DEVICE_M9)) && !HAS_COMPOSE_EMOJI_BTN
     // composeInputH is the FLOOR now, not the exact height. It used to be both:
     // min and max were pinned to it, so the centre band grew to take the slack
@@ -15565,7 +15565,7 @@ static void openComposePrompt(uint32_t replyPacketId,
     lv_obj_set_style_pad_bottom(s_composeInput, 1, 0);
     lv_obj_set_style_pad_left(s_composeInput, 3, 0);
     lv_obj_set_style_pad_right(s_composeInput, 3, 0);
-#if defined(DEVICE_TLORA_PAGER_TFT) || defined(DEVICE_TDECK) || defined(DEVICE_TDECK_PRO) || defined(DEVICE_CARDPUTER_LORA_HAT) \
+#if defined(DEVICE_TLORA_PAGER_TFT) || defined(DEVICE_TDECK) || defined(DEVICE_TDECK_PRO) || UI_CARDPUTER_COMPACT \
     || defined(DEVICE_MESH_DECK) || defined(DEVICE_M9) || defined(DEVICE_TANMATSU)
     // Wrap instead of scrolling sideways. The min/max height above pins the box
     // to its fixed number of lines, so a longer message scrolls inside it
@@ -15620,7 +15620,7 @@ static void openComposePrompt(uint32_t replyPacketId,
 
     lv_obj_t *hint = lv_label_create(s_composeModal);
     lv_obj_set_width(hint, lv_pct(100));
-#if defined(DEVICE_CARDPUTER_LORA_HAT)
+#if UI_CARDPUTER_COMPACT
     // The legend is reference text, not content: at 10 it stops competing with
     // the message for the narrow bottom line, and leaves the character count
     // beside it room to sit without colliding.
@@ -15632,12 +15632,12 @@ static void openComposePrompt(uint32_t replyPacketId,
     lv_obj_set_style_pad_top(hint, 0, 0);
 #if defined(DEVICE_TLORA_PAGER_TFT)
     lv_obj_set_style_pad_bottom(hint, 0, 0);
-#elif defined(DEVICE_TDECK) || defined(DEVICE_CARDPUTER_LORA_HAT) || defined(DEVICE_M9)
+#elif defined(DEVICE_TDECK) || UI_CARDPUTER_COMPACT || defined(DEVICE_M9)
     lv_obj_set_style_pad_bottom(hint, 0, 0);
 #else
     lv_obj_set_style_pad_bottom(hint, 1, 0);
 #endif
-#if defined(DEVICE_CARDPUTER_LORA_HAT)
+#if UI_CARDPUTER_COMPACT
     // Emoji isn't a compose action anymore — it's the 'E' quick-send tray on the
     // chat/DM screen (see openEmojiPicker), so it's off the compose legend.
     lv_label_set_text(hint, TR("Enter=Send  Esc=Cancel  Bksp=Del"));
@@ -15661,14 +15661,14 @@ static void openComposePrompt(uint32_t replyPacketId,
     // reserves the line above it so the two labels cannot overlap.
     s_composeCharCount = lv_label_create(s_composeModal);
     lv_obj_add_flag(s_composeCharCount, LV_OBJ_FLAG_IGNORE_LAYOUT);
-#if defined(DEVICE_CARDPUTER_LORA_HAT)
+#if UI_CARDPUTER_COMPACT
     // Matches the shrunk legend it shares the bottom line with.
     lv_obj_set_style_text_font(s_composeCharCount, &lv_font_montserrat_10, 0);
 #else
     lv_obj_set_style_text_font(s_composeCharCount, composeBodyFont, 0);
 #endif
     composeStyleMeta(s_composeCharCount);
-#if defined(DEVICE_CARDPUTER_LORA_HAT)
+#if UI_CARDPUTER_COMPACT
     // Flush with the legend's line rather than lifted off it: the legend is the
     // last item in the column, so its box already ends at the content bottom.
     lv_obj_align(s_composeCharCount, LV_ALIGN_BOTTOM_RIGHT, -4, 0);
@@ -15732,7 +15732,7 @@ static void updateComposeCharCount() {
         countColor = s_ui.battWarn;
     }
     lv_obj_set_style_text_color(s_composeCharCount, lvColorFrom565(countColor), 0);
-#if defined(DEVICE_CARDPUTER_LORA_HAT)
+#if UI_CARDPUTER_COMPACT
     // "200/200" rather than "200 of 200": the count shares its line with the
     // key legend, and on a 240 px panel the long form runs into it once the
     // message passes 100 characters.
@@ -16619,7 +16619,7 @@ static void buildCfgGrid() {
     const lv_font_t *font = &lv_font_montserrat_16;
     const int btnH = 72;
     const int btnPad = 4;
-#elif defined(DEVICE_CARDPUTER_LORA_HAT) || defined(DEVICE_TLORA_PAGER_TFT)
+#elif UI_CARDPUTER_COMPACT || defined(DEVICE_TLORA_PAGER_TFT)
     // 135 px of height on the Cardputer, and the Pager's list is the left 58%
     // of a 222 px-tall screen: a smaller font, so a wrapped name still fits.
     const lv_font_t *font = &lv_font_montserrat_12;
@@ -17446,7 +17446,7 @@ static constexpr int kUserMsgColorNavCount = kUserMsgColorCount + 1;  // +1 rese
 // to ~134 px inside a modal capped at 119 — the overflow is what clipped the
 // dialog at the top and bottom. Eight 20 px cells put the whole palette on two
 // rows that fit without scrolling.
-#if defined(DEVICE_CARDPUTER_LORA_HAT)
+#if UI_CARDPUTER_COMPACT
 static constexpr int kMsgColorSwatchW   = 20;
 static constexpr int kMsgColorSwatchH   = 20;
 static constexpr int kMsgColorSwatchGap = 4;
@@ -20251,12 +20251,17 @@ enum ChanEncType : uint8_t {
 // selection by one still walks straight down a column — the Pager's wheel is the
 // only way to move on that board, and a row-major fill would have left it
 // zig-zagging across the grid.
-#if defined(DEVICE_CARDPUTER_LORA_HAT)
+#if UI_CARDPUTER_COMPACT
 // 240x135: eight 19px rows in two columns, plus title and hint, come to 125 of
 // the 129px the modal is allowed — the tightest fit of any board, so these
-// numbers have very little slack in them.
+// numbers have very little slack in them. The 320x170 Zero shares the rows and
+// only widens the modal.
 static constexpr int  kChanModalCols  = 2;
+#if defined(DEVICE_CARDPUTER_LORA_HAT)
 static constexpr int  kChanModalMaxW  = 236;
+#else
+static constexpr int  kChanModalMaxW  = 300;
+#endif
 static constexpr int  kChanModalPad   = 3;
 static constexpr int  kChanModalGap   = 3;
 static constexpr int  kChanModalRowH  = 19;
@@ -22770,7 +22775,7 @@ static void openCfgColorPickerModal() {
 
     // Cardputer has no hint row: the line and its 6 px of padding are the space
     // the swatch grid needs to fit between the title and the bottom edge.
-#if !defined(DEVICE_CARDPUTER_LORA_HAT)
+#if !UI_CARDPUTER_COMPACT
     lv_obj_t *hint = lv_label_create(s_cfgColorModal);
     lv_obj_set_width(hint, lv_pct(100));
     lv_obj_set_style_text_font(hint, &lv_font_montserrat_10, 0);
@@ -22789,7 +22794,7 @@ static void openCfgColorPickerModal() {
     // kMsgColorCols swatches per row. The height is capped so a grid taller than
     // the modal scrolls, with the highlighted swatch scrolled into view.
     lv_obj_set_width(s_cfgColorGrid, kMsgColorGridW);
-#if defined(DEVICE_CARDPUTER_LORA_HAT)
+#if UI_CARDPUTER_COMPACT
     // Derived, not guessed: the modal is capped at h-16, and border, padding,
     // the title line and one row gap are all that sit above the grid. The old
     // hardcoded h-60 assumed a hint row that is no longer built here, which
@@ -32528,7 +32533,7 @@ static void openNodeLosModal(uint32_t nodeId) {
     // Shrunk rather than dropped: the silhouette is what makes this feature
     // read at a glance, and 40 px of it over 200 px of width still shows where
     // the terrain rises. The numbers below say the rest.
-#if defined(DEVICE_CARDPUTER_LORA_HAT)
+#if UI_CARDPUTER_COMPACT
     lv_obj_set_height(plot, 40);
 #else
     lv_obj_set_height(plot, 74);
@@ -33745,7 +33750,7 @@ static void openTracerouteProgressModal(uint32_t nodeId, uint32_t packetId) {
     appendHeltecCloseX(s_tracerouteModal,
                        [](lv_event_t *ev) { LV_UNUSED(ev); closeTracerouteProgressModal(); },
                        /*size=*/22);
-#elif defined(DEVICE_CARDPUTER_LORA_HAT)
+#elif UI_CARDPUTER_COMPACT
     lv_label_set_text(hint, TR("Bksp=Close"));
 #else
     char hintText[24];
@@ -34254,7 +34259,7 @@ static void onNodesActionRowPressed(lv_event_t *e) {
 // name has arrived, which is the normal case for a node we have only ever
 // heard relayed.
 static void nodesActionTitleLabel(uint32_t nodeId, char *out, size_t outLen) {
-#if !defined(DEVICE_CARDPUTER_LORA_HAT)
+#if !UI_CARDPUTER_COMPACT
     const NodeEntry *e = Nodes.find(nodeId);
     if (e && e->hasName && e->longName[0]) {
         utf8util::copyTruncate(out, outLen, e->longName);
@@ -35194,7 +35199,7 @@ static void openLiveModal() {
     lv_obj_set_width(hint, lv_pct(100));
     lv_obj_set_style_text_font(hint, &lv_font_montserrat_10, 0);
     lv_obj_set_style_text_color(hint, lv_color_hex(0xA7C7FF), 0);
-#if defined(DEVICE_CARDPUTER_LORA_HAT)
+#if UI_CARDPUTER_COMPACT
     // No Back tooltip here. Esc leaves every modal on this build, and carrying
     // it made the legend 239 px wide against 230 px of content — it wrapped to
     // a second line and took 11 px off the feed. The rest fits on one line.
@@ -38642,7 +38647,7 @@ static WeatherInk weatherInk() {
 // fit on it: title, a 32 px hero, four detail lines, a status line and a legend
 // come to about 170 px. It gets its own set, and a three-line body below, which
 // together land inside 135 with the legend still on screen.
-#if defined(DEVICE_CARDPUTER_LORA_HAT)
+#if UI_CARDPUTER_COMPACT
 static const lv_font_t *const kWeatherHeroFont = &lv_font_montserrat_18;
 static const lv_font_t *const kWeatherDescFont = &lv_font_montserrat_12;
 static const lv_font_t *const kWeatherBodyFont = &lv_font_montserrat_10;
@@ -42779,7 +42784,7 @@ static void dmRefreshHeaderTitle(const DmConv *selected) {
 static const char *dmHintText() {
     static char buf[128];
     const bool drawer = dmListIsDrawer();
-#if defined(DEVICE_CARDPUTER_LORA_HAT)
+#if UI_CARDPUTER_COMPACT
     LV_UNUSED(drawer);
     buf[0] = '\0';   // no static legend here (openDmModal())
 #elif defined(DEVICE_TDECK)
@@ -43140,7 +43145,7 @@ static void refreshDmNodePicker(bool force) {
         // Nothing here changes with the filter — there is no keyboard to open
         // one — so the line says the one thing that is always true.
         lv_label_set_text(s_dmNodePickerHint, TR("Tap a node to start a DM"));
-#elif defined(DEVICE_CARDPUTER_LORA_HAT)
+#elif UI_CARDPUTER_COMPACT
         lv_label_set_text(s_dmNodePickerHint,
                           s_dmNodeFilterOpen
                               ? TR("Type = Filter   Bksp = Edit Filter   Enter = Open DM   Esc = Back")
@@ -43334,7 +43339,7 @@ static void openDmNodePicker() {
         hint,
         (s_cfg.uiMode == UI_MODE_LIGHT) ? lv_color_hex(0x334E75) : lv_color_hex(0xA7C7FF),
         0);
-#if defined(DEVICE_CARDPUTER_LORA_HAT)
+#if UI_CARDPUTER_COMPACT
     lv_label_set_text(hint, TR("Type = Filter   Enter = Open DM   Esc = Back"));
 #elif UI_TOUCH_ONLY_PROFILE
     lv_label_set_text(hint, TR("Tap a node to start a DM"));
@@ -43878,7 +43883,7 @@ static void refreshDmModal(bool force) {
         } else {
             lv_label_set_text(s_dmHintLabel, dmHintText());
         }
-#if defined(DEVICE_CARDPUTER_LORA_HAT)
+#if UI_CARDPUTER_COMPACT
         // The line exists only while the delete flow is talking. Hiding rather
         // than blanking it hands the height back to the conversation list,
         // which is the flex-grow child above.
@@ -44190,7 +44195,7 @@ static void openDmModal() {
         (s_cfg.uiMode == UI_MODE_LIGHT) ? lv_color_hex(0x334E75) : lv_color_hex(0xA7C7FF),
         0);
     lv_label_set_text(hint, dmHintText());
-#if defined(DEVICE_CARDPUTER_LORA_HAT)
+#if UI_CARDPUTER_COMPACT
     // No static key legend on this build: a 240x135 panel cannot spare a
     // permanent line for it. The label itself stays, because the delete flow
     // has nowhere else to prompt — refreshDmModal() unhides it for "Confirm
@@ -45026,7 +45031,7 @@ static void openLegendModal() {
     // the face no longer has to shrink until the whole list squeezes onto the
     // panel. The Cardputer's 240x135 stays at 10 -- one line of 14 there is a
     // tenth of the screen.
-#if defined(DEVICE_CARDPUTER_LORA_HAT)
+#if UI_CARDPUTER_COMPACT
     const lv_font_t *legendBodyFont = &lv_font_montserrat_10;
 #elif defined(DEVICE_TDECK)
     // Two columns in 320 px: 12 is as large as the key list goes and still
@@ -49011,14 +49016,15 @@ static void onboardingComputeModalSizeForStage(uint8_t stage, int screenW, int s
     if (modalH > 860) modalH = 860;
 #endif
 
-#if defined(DEVICE_CARDPUTER_LORA_HAT)
+#if UI_CARDPUTER_COMPACT
+    // Derived from the panel, not capped: at 240x135 this is 228/226 x 91,
+    // the ADV's long-standing size, and on the 320x170 Zero it takes the
+    // extra room instead of leaving a 240-px box in the middle.
     modalW = screenW - (stage == ONBOARD_STAGE_ASK_IMPORT ? 12 : 14);
     if (modalW < 180) modalW = screenW - 4;
-    if (modalW > 228) modalW = 228;
 
     modalH = screenH - 44;
     if (modalH < 84) modalH = screenH - 6;
-    if (modalH > 92) modalH = 92;
 #endif
 
     if (!textEntry) modalH = LV_SIZE_CONTENT;
@@ -49093,7 +49099,7 @@ static void renderOnboardingStage() {
 #endif
                           LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
 
-#if defined(DEVICE_CARDPUTER_LORA_HAT)
+#if UI_CARDPUTER_COMPACT
     const bool compactOnboarding = true;
     const bool compactImportStage = (s_onboardingStage == ONBOARD_STAGE_ASK_IMPORT);
 #else
@@ -49144,7 +49150,7 @@ static void renderOnboardingStage() {
                     : (compactOnboarding ? &lv_font_montserrat_12 : &lv_font_montserrat_14);
         const lv_font_t *onboardingStatusFont =
                 largeOnboarding ? &lv_font_montserrat_18 : &lv_font_montserrat_10;
-#if !defined(DEVICE_CARDPUTER_LORA_HAT)
+#if !UI_CARDPUTER_COMPACT
     const lv_font_t *onboardingButtonFont =
                 largeOnboarding ? &lv_font_montserrat_18
                     : (compactOnboarding ? &lv_font_montserrat_10 : &lv_font_montserrat_12);
@@ -49155,7 +49161,7 @@ static void renderOnboardingStage() {
 #endif
         const int onboardingInputH = largeOnboarding ? 60 : (compactOnboarding ? 30 : 34);
 
-#if !defined(DEVICE_CARDPUTER_LORA_HAT)
+#if !UI_CARDPUTER_COMPACT
     const lv_font_t *onboardingTitleFont =
                 largeOnboarding ? &lv_font_montserrat_28
                     : (compactOnboarding ? &lv_font_montserrat_12 : &lv_font_montserrat_16);
@@ -49179,7 +49185,7 @@ static void renderOnboardingStage() {
                           "A saved config was found on SD.\n"
                           "Import it now?");
 
-#if defined(DEVICE_CARDPUTER_LORA_HAT)
+#if UI_CARDPUTER_COMPACT
         s_onboardingStatus = lv_label_create(s_onboardingModal);
         lv_obj_set_width(s_onboardingStatus, lv_pct(100));
         lv_obj_set_style_text_font(s_onboardingStatus, onboardingStatusFont, 0);
@@ -49276,7 +49282,7 @@ static void renderOnboardingStage() {
         lv_obj_set_flex_align(pickRow, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER,
                               LV_FLEX_ALIGN_CENTER);
 
-#if !defined(DEVICE_CARDPUTER_LORA_HAT)
+#if !UI_CARDPUTER_COMPACT
         auto makeStepBtn = [=](lv_obj_t *parent, const char *text, lv_event_cb_t cb) {
             lv_obj_t *btn = lv_btn_create(parent);
             lv_obj_set_size(btn, onboardingStepBtnW, onboardingStepBtnH);
@@ -49297,7 +49303,7 @@ static void renderOnboardingStage() {
 
         s_onboardingPickLabel = lv_label_create(pickRow);
             lv_obj_set_width(s_onboardingPickLabel, lv_pct(100));
-        #if !defined(DEVICE_CARDPUTER_LORA_HAT)
+        #if !UI_CARDPUTER_COMPACT
             lv_obj_set_flex_grow(s_onboardingPickLabel, 1);
         #endif
         lv_obj_set_style_text_font(s_onboardingPickLabel, onboardingPickerFont, 0);
@@ -49305,7 +49311,7 @@ static void renderOnboardingStage() {
         lv_obj_set_style_text_align(s_onboardingPickLabel, LV_TEXT_ALIGN_CENTER, 0);
         lv_label_set_text(s_onboardingPickLabel, onboardingPickerCurrentText());
 
-        #if !defined(DEVICE_CARDPUTER_LORA_HAT)
+        #if !UI_CARDPUTER_COMPACT
         makeStepBtn(pickRow, LV_SYMBOL_RIGHT,
                     [](lv_event_t *) { onboardingPickerStep(1); });
         #endif
@@ -49315,7 +49321,7 @@ static void renderOnboardingStage() {
         lv_obj_set_style_text_font(s_onboardingStatus, onboardingStatusFont, 0);
         lv_obj_set_style_text_color(s_onboardingStatus, lv_color_hex(0xA7C7FF), 0);
         lv_obj_set_style_text_align(s_onboardingStatus, LV_TEXT_ALIGN_CENTER, 0);
-        #if defined(DEVICE_CARDPUTER_LORA_HAT)
+        #if UI_CARDPUTER_COMPACT
             lv_label_set_text(s_onboardingStatus, TR("j/k=Change   Enter=Next   Bksp=Back"));
         #elif UI_TOUCH_ONLY_PROFILE
         lv_label_set_text(s_onboardingStatus, TR("Use arrows to choose, then tap Next"));
@@ -49329,7 +49335,7 @@ static void renderOnboardingStage() {
                  lv_label_get_text(s_onboardingStatus));
         onboardingRegionWarnUpdate();
 
-        #if !defined(DEVICE_CARDPUTER_LORA_HAT)
+        #if !UI_CARDPUTER_COMPACT
         lv_obj_t *btnRow = lv_obj_create(s_onboardingModal);
         lv_obj_set_width(btnRow, lv_pct(100));
         lv_obj_set_height(btnRow, LV_SIZE_CONTENT);
@@ -49386,7 +49392,7 @@ static void renderOnboardingStage() {
         lv_obj_set_style_text_font(s_onboardingStatus, onboardingStatusFont, 0);
         lv_obj_set_style_text_color(s_onboardingStatus, lv_color_hex(0xA7C7FF), 0);
         lv_obj_set_style_text_align(s_onboardingStatus, LV_TEXT_ALIGN_CENTER, 0);
-#if defined(DEVICE_CARDPUTER_LORA_HAT)
+#if UI_CARDPUTER_COMPACT
         lv_label_set_text(s_onboardingStatus, TR("N=Choose WiFi   Enter=Finish   Bksp=Back"));
 #elif ONBOARD_BUTTON_FOCUS
         lv_label_set_text(s_onboardingStatus,
@@ -49395,7 +49401,7 @@ static void renderOnboardingStage() {
         lv_label_set_text(s_onboardingStatus, TR("Choose WiFi or Finish"));
 #endif
 
-#if !defined(DEVICE_CARDPUTER_LORA_HAT)
+#if !UI_CARDPUTER_COMPACT
         lv_obj_t *btnRow = lv_obj_create(s_onboardingModal);
         lv_obj_set_width(btnRow, lv_pct(100));
         lv_obj_set_height(btnRow, LV_SIZE_CONTENT);
@@ -49503,7 +49509,7 @@ static void renderOnboardingStage() {
         lv_obj_set_style_text_font(s_onboardingStatus, onboardingStatusFont, 0);
         lv_obj_set_style_text_color(s_onboardingStatus, lv_color_hex(0xA7C7FF), 0);
         lv_obj_set_style_text_align(s_onboardingStatus, LV_TEXT_ALIGN_CENTER, 0);
-    #if defined(DEVICE_CARDPUTER_LORA_HAT)
+    #if UI_CARDPUTER_COMPACT
         const char *statusHint = "Enter=Next";
         if (isShortStage)      statusHint = TR("Enter=Next   Bksp(empty)=Back");
     #elif UI_TOUCH_ONLY_PROFILE
@@ -49520,7 +49526,7 @@ static void renderOnboardingStage() {
     #endif
         lv_label_set_text(s_onboardingStatus, statusHint);
 
-    #if !defined(DEVICE_CARDPUTER_LORA_HAT)
+    #if !UI_CARDPUTER_COMPACT
         lv_obj_t *btnRow = lv_obj_create(s_onboardingModal);
         lv_obj_set_width(btnRow, lv_pct(100));
         lv_obj_set_height(btnRow, LV_SIZE_CONTENT);
@@ -49863,7 +49869,7 @@ static void onboardingFinalize() {
 #define HAS_GLOBAL_NAV_SHORTCUTS \
     (defined(DEVICE_M9) || defined(DEVICE_TDECK) || defined(DEVICE_TDECK_PRO) \
      || defined(DEVICE_MESH_DECK) || defined(DEVICE_TLORA_PAGER_TFT) \
-     || defined(DEVICE_CARDPUTER_LORA_HAT) || defined(DEVICE_TDISPLAY_P4) \
+     || UI_CARDPUTER_COMPACT || defined(DEVICE_TDISPLAY_P4) \
      || defined(DEVICE_TANMATSU))
 
 #if HAS_GLOBAL_NAV_SHORTCUTS
@@ -50161,7 +50167,7 @@ static bool handleGlobalNavigationKey(char key) {
 #endif  // HAS_GLOBAL_NAV_SHORTCUTS
 
 #if defined(DEVICE_TDECK) || defined(DEVICE_TDECK_PRO) || defined(DEVICE_MESH_DECK) \
-    || defined(DEVICE_TLORA_PAGER_TFT) || defined(DEVICE_CARDPUTER_LORA_HAT) \
+    || defined(DEVICE_TLORA_PAGER_TFT) || UI_CARDPUTER_COMPACT \
     || defined(DEVICE_TANMATSU)
 // Alt+H is "close everything and get back to chat", and it deliberately does
 // NOT open the channel list the way the M9's dedicated Home button does.
@@ -50275,7 +50281,7 @@ static void handleComposeKey(char k) {
         case KEY_BACKSPACE_HOLD:
             if (s_composeInput) {
                 const char *cur = lv_textarea_get_text(s_composeInput);
-#if defined(DEVICE_CARDPUTER_LORA_HAT)
+#if UI_CARDPUTER_COMPACT
                 if (cur && cur[0] && k == KEY_BACKSPACE) {
                     lv_textarea_delete_char(s_composeInput);
                 }
@@ -50484,7 +50490,7 @@ static void pumpKeyboardInput() {
 #endif
 
 #if defined(DEVICE_TDECK) || defined(DEVICE_TDECK_PRO) || defined(DEVICE_MESH_DECK) \
-    || defined(DEVICE_TLORA_PAGER_TFT) || defined(DEVICE_CARDPUTER_LORA_HAT) \
+    || defined(DEVICE_TLORA_PAGER_TFT) || UI_CARDPUTER_COMPACT \
     || defined(DEVICE_TANMATSU)
         // The Cardputer belongs on this list and was missing from it, which made
         // Alt+H a dead key on that board alone: altNavShortcut() raised
@@ -50711,7 +50717,7 @@ static void pumpKeyboardInput() {
 
         char rawKey = k;
 
-#if defined(DEVICE_CARDPUTER_LORA_HAT)
+#if UI_CARDPUTER_COMPACT
         // Match v1 Cardputer shortcuts: ';' / '.' navigate lists, and
         // the key physically labeled '`' acts as Escape to close modals.
         k = remapCardputerUiKey(k, !typingContext);
@@ -50724,7 +50730,7 @@ static void pumpKeyboardInput() {
         k = remapJkUiKey(k, !typingContext);
 #endif
 
-#if defined(DEVICE_CARDPUTER_LORA_HAT) || defined(DEVICE_MESH_DECK) || defined(DEVICE_M9)
+#if UI_CARDPUTER_COMPACT || defined(DEVICE_MESH_DECK) || defined(DEVICE_M9)
     // Cardputer parity rule: physical Up/Down arrows must behave exactly
     // like j/k anywhere j/k are used for navigation, so all downstream
     // navFromJk direction branches apply the same way.
@@ -50923,7 +50929,7 @@ static void pumpKeyboardInput() {
         }
 
         if (s_tracerouteModal) {
-#if defined(DEVICE_CARDPUTER_LORA_HAT)
+#if UI_CARDPUTER_COMPACT
             if (k == KEY_ESCAPE || isBackspaceKey(k)) {
 #else
             if (isModalCloseKey(k)) {
@@ -52557,7 +52563,7 @@ static void pumpKeyboardInput() {
                         dmNodePickerApplyFilter();
                         refreshDmNodePicker(true);
                     } else {
-#if defined(DEVICE_CARDPUTER_LORA_HAT)
+#if UI_CARDPUTER_COMPACT
                         // On Cardputer, Escape is the dedicated close action.
 #else
                         closeDmNodePicker();
@@ -53440,7 +53446,7 @@ static void pumpKeyboardInput() {
             }
 #endif
             if (isChannelDropdownVisible()) {
-#if defined(DEVICE_CARDPUTER_LORA_HAT)
+#if UI_CARDPUTER_COMPACT
                 // Cardputer directional labels: '/' is right, ',' is left.
                 if (k == '/') k = KEY_NEXT_CHAN;
                 else if (k == ',') k = KEY_PREV_CHAN;
@@ -53456,7 +53462,7 @@ static void pumpKeyboardInput() {
                     } else if (k == KEY_PREV_CHAN) {
                         next -= 1;
                     } else {
-#if defined(DEVICE_CARDPUTER_LORA_HAT)
+#if UI_CARDPUTER_COMPACT
                         // j and the up arrow move up the list, k and the down
                         // arrow move down it, the same as every other list on
                         // this board. This used to reverse itself whenever the
@@ -53488,7 +53494,7 @@ static void pumpKeyboardInput() {
                     continue;
                 }
 
-#if defined(DEVICE_CARDPUTER_LORA_HAT)
+#if UI_CARDPUTER_COMPACT
                 if ((k == KEY_ENTER || k == KEY_FN_ENTER)
                     && s_activeChannel >= 0 && s_activeChannel < MESH_CHANNELS) {
 #else
@@ -53499,7 +53505,7 @@ static void pumpKeyboardInput() {
                     if (chosen < 0 || chosen >= MESH_CHANNELS) chosen = s_activeChannel;
                     setActiveChannel(chosen);
                     setChannelDropdownVisible(false);
-#if defined(DEVICE_CARDPUTER_LORA_HAT)
+#if UI_CARDPUTER_COMPACT
                     s_cardputerMainChatPanelFocused = true;
                     // Return to plain chat focus after channel selection.
                     s_pagerChatCursorMode = false;
@@ -53551,7 +53557,7 @@ static void pumpKeyboardInput() {
 #endif
 
             if (kUseScrollKeysForMainNav) {
-#if defined(DEVICE_CARDPUTER_LORA_HAT)
+#if UI_CARDPUTER_COMPACT
                 // Cardputer directional labels: '/' is right, ',' is left.
                 if (k == '/') k = KEY_NEXT_CHAN;
                 else if (k == ',') k = KEY_PREV_CHAN;
@@ -53596,7 +53602,7 @@ static void pumpKeyboardInput() {
                         refreshChannelGlow(true);
                     }
 #endif
-#if defined(DEVICE_CARDPUTER_LORA_HAT)
+#if UI_CARDPUTER_COMPACT
                     if (!s_cardputerMainChatPanelFocused) {
                         int nextChannel = s_activeChannel + ((k == KEY_NEXT_CHAN) ? 1 : -1);
                         if (nextChannel < 0) nextChannel = MESH_CHANNELS - 1;
@@ -53607,7 +53613,7 @@ static void pumpKeyboardInput() {
                     continue;
                 }
 
-#if defined(DEVICE_CARDPUTER_LORA_HAT)
+#if UI_CARDPUTER_COMPACT
                 if (k == KEY_ESCAPE) {
                     if (s_pagerChatCursorMode) {
                         pagerExitChatCursorMode(true);
@@ -53661,7 +53667,7 @@ static void pumpKeyboardInput() {
                         clearSelectedMsgContext();
                         s_lastRenderedChannel = -1;
                         refreshChatView(true);
-#if defined(DEVICE_CARDPUTER_LORA_HAT)
+#if UI_CARDPUTER_COMPACT
                     } else if (s_cardputerMainChatPanelFocused) {
                         s_cardputerMainChatPanelFocused = false;
 #endif
@@ -53670,7 +53676,7 @@ static void pumpKeyboardInput() {
                 }
 
                 if (k == KEY_SCROLL_UP || k == KEY_SCROLL_DN) {
-#if defined(DEVICE_CARDPUTER_LORA_HAT)
+#if UI_CARDPUTER_COMPACT
                     if (!s_cardputerMainChatPanelFocused) {
                         if (isChannelDropdownVisible()) {
                             int next = s_cardputerDropdownSelection;
@@ -53925,13 +53931,18 @@ static void pumpKeyboardInput() {
                 }
 #else
             // Space is the new-message key on keyboard builds; it replaced Enter.
-#if defined(DEVICE_CARDPUTER_LORA_HAT)
+#if UI_CARDPUTER_COMPACT
             } else if ((k == ' ' || k == KEY_FN_ENTER)
                        && s_activeChannel >= 0 && s_activeChannel < MESH_CHANNELS) {
+#if HAS_HOME_DASHBOARD
+                // The Zero has the dashboard the ADV lacks; compose belongs to
+                // the chat screen (see the Space branch below).
+                if (homeDashboardIsForeground()) {
+                    // deliberately nothing
+                } else
+#endif
                 if (!s_cardputerMainChatPanelFocused) {
                     // In nav focus, the channel selector flow owns activation.
-                    // No dashboard guard here: this branch is the Cardputer's
-                    // alone, and that is the one board with no home dashboard.
                 } else if (s_pagerChatCursorMode && s_selectedMsgReplyPacketId != 0 && s_selectedMsgText[0]) {
                     openComposePrompt(s_selectedMsgReplyPacketId, s_selectedMsgText);
                 } else {
@@ -56221,7 +56232,7 @@ static void refreshChannelGlow(bool force) {
             // the pulse, and lv_label_set_text() reflows the label.
             if (!textSame) {
                 lv_label_set_text(lbl, text);
-#if defined(DEVICE_CARDPUTER_LORA_HAT) || UI_TOUCH_ONLY_PROFILE
+#if UI_CARDPUTER_COMPACT || UI_TOUCH_ONLY_PROFILE
                 sizeChannelButtonToLabel(i);
 #endif
             }
@@ -56296,7 +56307,7 @@ static void refreshChannelGlow(bool force) {
         lv_obj_set_style_shadow_opa(s_channelSelectorBtn, LV_OPA_TRANSP, 0);
         lv_obj_set_style_shadow_width(s_channelSelectorBtn, 0, 0);
     #else
-        #if defined(DEVICE_CARDPUTER_LORA_HAT)
+        #if UI_CARDPUTER_COMPACT
         const bool selectorNavCursor = (!s_cardputerMainChatPanelFocused
                         && !s_pagerChatCursorMode
                         && !isChannelDropdownVisible()
@@ -56338,7 +56349,7 @@ static void refreshChannelGlow(bool force) {
             sp.shadowW = shadowW;
         }
 
-    #if defined(DEVICE_CARDPUTER_LORA_HAT)
+    #if UI_CARDPUTER_COMPACT
         if (selectorNavCursor) {
             lv_obj_set_style_border_width(s_channelSelectorBtn, 2, 0);
             lv_obj_set_style_border_color(s_channelSelectorBtn, lv_color_hex(0xF4D35E), 0);
@@ -56442,10 +56453,10 @@ static void setActiveChannel(int channelIdx) {
     s_activeChannel = channelIdx;
     s_pagerChatCursorMode = false;
     s_pagerChatCursorDisplayIndex = -1;
-#if defined(DEVICE_CARDPUTER_LORA_HAT)
+#if UI_CARDPUTER_COMPACT
     s_cardputerMainChatPanelFocused = false;
 #endif
-#if defined(DEVICE_TDECK) || defined(DEVICE_TDECK_PRO) || defined(DEVICE_CARDPUTER_LORA_HAT) || defined(DEVICE_M9) \
+#if defined(DEVICE_TDECK) || defined(DEVICE_TDECK_PRO) || UI_CARDPUTER_COMPACT || defined(DEVICE_M9) \
     || defined(DEVICE_TANMATSU)
     s_cardputerDropdownSelection = channelIdx;
 #endif
@@ -56497,7 +56508,7 @@ static void refreshChannelSelectorLabel() {
     if (!s_channelSelectorLabel) return;
 
     const char *name = channelName(s_activeChannel);
-#if defined(DEVICE_TDECK) || defined(DEVICE_TDECK_PRO) || defined(DEVICE_CARDPUTER_LORA_HAT) || defined(DEVICE_MESH_DECK) \
+#if defined(DEVICE_TDECK) || defined(DEVICE_TDECK_PRO) || UI_CARDPUTER_COMPACT || defined(DEVICE_MESH_DECK) \
     || defined(DEVICE_M9) || defined(DEVICE_TANMATSU)
     if (isChannelDropdownVisible()
         && s_cardputerDropdownSelection >= 0
@@ -56523,7 +56534,7 @@ static void refreshChannelSelectorLabel() {
     // The caret said "this opens"; the selector no longer does (it is only the
     // chat's name now, and the list is the drawer).
     const bool showSelectorCaret = false;
-#elif defined(DEVICE_CARDPUTER_LORA_HAT)
+#elif UI_CARDPUTER_COMPACT
     const bool showSelectorCaret = false;
 #else
     const bool showSelectorCaret = true;
@@ -56575,7 +56586,7 @@ static void refreshChannelSelectorLabel() {
             lv_coord_t desiredW = textW + (showSelectorCaret ? 26 : (selectorEdgePad * 2 + selectorAntiClip));
 #if defined(DEVICE_TDECK) || defined(DEVICE_M9) || defined(DEVICE_TANMATSU)
             if (desiredW < 56) desiredW = 56;
-#elif defined(DEVICE_CARDPUTER_LORA_HAT)
+#elif UI_CARDPUTER_COMPACT
             if (desiredW < 60) desiredW = 60;
 #elif defined(DEVICE_TDISPLAY_P4)
             // Wider in portrait, where the header grew: a short name like "Main"
@@ -56803,7 +56814,7 @@ static void setChannelDropdownVisible(bool visible) {
 
     if (visible) {
         channelDrawerSlide(true);
-#if defined(DEVICE_TDECK) || defined(DEVICE_TDECK_PRO) || defined(DEVICE_CARDPUTER_LORA_HAT) || defined(DEVICE_MESH_DECK) \
+#if defined(DEVICE_TDECK) || defined(DEVICE_TDECK_PRO) || UI_CARDPUTER_COMPACT || defined(DEVICE_MESH_DECK) \
     || defined(DEVICE_M9) || defined(DEVICE_TANMATSU)
         if (s_cardputerDropdownSelection < 0 || s_cardputerDropdownSelection >= MESH_CHANNELS) {
             s_cardputerDropdownSelection = s_activeChannel;
@@ -56815,7 +56826,7 @@ static void setChannelDropdownVisible(bool visible) {
 #endif
     } else {
         channelDrawerSlide(false);
-#if defined(DEVICE_TDECK) || defined(DEVICE_TDECK_PRO) || defined(DEVICE_CARDPUTER_LORA_HAT) || defined(DEVICE_MESH_DECK) \
+#if defined(DEVICE_TDECK) || defined(DEVICE_TDECK_PRO) || UI_CARDPUTER_COMPACT || defined(DEVICE_MESH_DECK) \
     || defined(DEVICE_M9) || defined(DEVICE_TANMATSU)
         s_cardputerDropdownSelection = -1;
 #endif
@@ -56856,7 +56867,7 @@ static const char *channelName(int idx) {
 }
 
 static void sizeChannelButtonToLabel(int idx) {
-#if defined(DEVICE_CARDPUTER_LORA_HAT) || UI_TOUCH_ONLY_PROFILE
+#if UI_CARDPUTER_COMPACT || UI_TOUCH_ONLY_PROFILE
     if (s_channelList && !s_channelStrip) return;
     if (idx < 0 || idx >= MESH_CHANNELS) return;
     lv_obj_t *btn = s_channelBtns[idx];
@@ -57668,7 +57679,7 @@ static void refreshHeaderStatus(bool force) {
         // "%.2fV" reaches the screen as a literal "fV". Every other float in
         // this file is formatted this way for the same reason.
         char battBuf[12];
-#if defined(DEVICE_CARDPUTER_LORA_HAT)
+#if UI_CARDPUTER_COMPACT
         // Same width treatment the percent branch gets on this panel: "4.02" is
         // four glyphs, exactly like "100".
         snprintf(battBuf, sizeof(battBuf), "%.2f", (double)battV);
@@ -57677,7 +57688,7 @@ static void refreshHeaderStatus(bool force) {
 #endif
         lv_label_set_text(s_chatHeaderBattText, battBuf);
     } else {
-#if defined(DEVICE_CARDPUTER_LORA_HAT)
+#if UI_CARDPUTER_COMPACT
         lv_label_set_text_fmt(s_chatHeaderBattText, "%u", (unsigned)battPct);
 #else
         lv_label_set_text_fmt(s_chatHeaderBattText, "%u%%", (unsigned)battPct);
@@ -58170,7 +58181,7 @@ static void appendRxText(int chanIdx, uint32_t fromNode, const char *text, uint3
     char prefix[80];
 
     liveBuildPrefix(timePrefix, sizeof(timePrefix));
-#if defined(DEVICE_CARDPUTER_LORA_HAT)
+#if UI_CARDPUTER_COMPACT
     LV_UNUSED(viaMqtt);
     chatSenderLabel(fromNode, sender, sizeof(sender));
     snprintf(prefix, sizeof(prefix), "%s[%s] ", timePrefix, sender);
@@ -59901,7 +59912,7 @@ static int csPostItems(int chanIdx, const csp::BatchHeader &h, const csp::Item *
         }
         char sender[48], prefix[96];
         chatSenderLabel(it.from, sender, sizeof(sender));
-#if defined(DEVICE_CARDPUTER_LORA_HAT)
+#if UI_CARDPUTER_COMPACT
         snprintf(prefix, sizeof(prefix), "CS %s [%s] ", clock, sender);
 #else
         // The refresh mark where LoRa/MQTT messages show their transport icon:
@@ -63702,7 +63713,7 @@ static void buildUi() {
 #else
     const int chatH = screenH - panelMargin - chatY - chatLegendH - 3;
 #endif
-#elif defined(DEVICE_CARDPUTER_LORA_HAT)
+#elif UI_CARDPUTER_COMPACT
     const int panelMargin = 2;
     const int headerTop = panelMargin;
     const int chatGap = 0;
@@ -63855,7 +63866,7 @@ static void buildUi() {
     const lv_font_t *headerTextFont = (chatHeaderH >= 25) ? &lv_font_montserrat_12 : &lv_font_montserrat_10;
     // Clock gets a larger font than the other header items so the time reads at a glance.
     // Cardputer keeps the original clock size to fit its narrow header.
-#if defined(DEVICE_CARDPUTER_LORA_HAT)
+#if UI_CARDPUTER_COMPACT
     const lv_font_t *clockTextFont = headerTextFont;
 #elif defined(DEVICE_TDECK_PRO) || defined(DEVICE_TANMATSU)
     const lv_font_t *clockTextFont = &lv_font_montserrat_12;
@@ -63890,7 +63901,7 @@ static void buildUi() {
         ? max((int)lv_font_get_line_height(headerTextFont) + 4, 14)
         : min(max(chatW / 3, 96), 220);
     const int selectorBtnOffsetX = compactHeltecSelector ? 1 : headerPadX;
-#elif defined(DEVICE_CARDPUTER_LORA_HAT)
+#elif UI_CARDPUTER_COMPACT
     const int selectorBtnW = min(max(chatW / 3, 84), 108);
     const int selectorBtnOffsetX = headerPadX;
 #else
@@ -63907,13 +63918,13 @@ static void buildUi() {
     const bool showSelectorCaret = false;
 #elif UI_TOUCH_ONLY_PROFILE
     const bool showSelectorCaret = false;   // see refreshChannelSelectorLabel()
-#elif defined(DEVICE_CARDPUTER_LORA_HAT)
+#elif UI_CARDPUTER_COMPACT
     const bool showSelectorCaret = false;
 #else
     const bool showSelectorCaret = true;
 #endif
 
-#if defined(DEVICE_CARDPUTER_LORA_HAT) || defined(DEVICE_TANMATSU)
+#if UI_CARDPUTER_COMPACT || defined(DEVICE_TANMATSU)
     const lv_coord_t selectorTextYOffset = 0;
 #else
     const lv_coord_t selectorTextYOffset = 1;
@@ -64029,7 +64040,7 @@ static void buildUi() {
     s_chatHeaderBattBar = lv_obj_create(s_chatHeaderBar);
     lv_obj_remove_style_all(s_chatHeaderBattBar);
     {
-#if defined(DEVICE_CARDPUTER_LORA_HAT)
+#if UI_CARDPUTER_COMPACT
         const int battW = 6;
 #elif defined(DEVICE_CROWPANEL_50)
         const int battW = 16;
@@ -64611,7 +64622,7 @@ static void buildUi() {
         }
         lv_obj_center(lbl);
 #else
-    #if defined(DEVICE_CARDPUTER_LORA_HAT)
+    #if UI_CARDPUTER_COMPACT
         lv_obj_t *btn = lv_obj_create(s_channelList ? s_channelList : screen);
         lv_obj_clear_flag(btn, LV_OBJ_FLAG_SCROLLABLE);
         lv_obj_add_flag(btn, LV_OBJ_FLAG_CLICKABLE);
@@ -64628,7 +64639,7 @@ static void buildUi() {
         lv_obj_t *btn = lv_btn_create(panel);
     #endif
         s_channelBtns[i] = btn;
-    #if defined(DEVICE_CARDPUTER_LORA_HAT)
+    #if UI_CARDPUTER_COMPACT
         lv_obj_set_size(btn, 40, kMainScreenChannelBtnHeight);
     #elif UI_TOUCH_ONLY_PROFILE
         lv_obj_set_width(btn, LV_SIZE_CONTENT);
@@ -64654,14 +64665,14 @@ static void buildUi() {
         lv_obj_t *lbl = lv_label_create(btn);
         s_channelLabels[i] = lbl;
         lv_obj_set_style_text_font(lbl, kMainScreenFont, 0);
-    #if defined(DEVICE_CARDPUTER_LORA_HAT) || UI_TOUCH_ONLY_PROFILE
+    #if UI_CARDPUTER_COMPACT || UI_TOUCH_ONLY_PROFILE
         lv_obj_set_width(lbl, LV_SIZE_CONTENT);
     #else
         lv_obj_set_width(lbl, lv_pct(100));
     #endif
         lv_obj_set_height(lbl, lv_font_get_line_height(kMainScreenFont));
         lv_obj_set_style_text_align(lbl, LV_TEXT_ALIGN_CENTER, 0);
-    #if defined(DEVICE_CARDPUTER_LORA_HAT) || UI_TOUCH_ONLY_PROFILE
+    #if UI_CARDPUTER_COMPACT || UI_TOUCH_ONLY_PROFILE
         lv_label_set_long_mode(lbl, LV_LABEL_LONG_CLIP);
     #else
         lv_label_set_long_mode(lbl, LV_LABEL_LONG_DOT);
@@ -64672,7 +64683,7 @@ static void buildUi() {
         } else {
             lv_label_set_text(lbl, TR("Channel"));
         }
-    #if defined(DEVICE_CARDPUTER_LORA_HAT) || UI_TOUCH_ONLY_PROFILE
+    #if UI_CARDPUTER_COMPACT || UI_TOUCH_ONLY_PROFILE
         sizeChannelButtonToLabel(i);
     #endif
         lv_obj_center(lbl);
