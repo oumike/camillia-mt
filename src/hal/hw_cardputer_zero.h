@@ -107,7 +107,8 @@
 #define GPS_TX                    14
 #define GPS_BAUD              115200
 
-// ── Battery — BQ27220 fuel gauge (kernel power_supply); not yet read ─────────
+// ── Battery — BQ27220 fuel gauge, read from kernel sysfs (battery_util.cpp) ──
+// HAS_BATTERY_SENSE stays 0: low-battery shutdown is the OS's job here.
 #define BATT_ADC_PIN              -1
 #define BATT_DIV                1.0f
 #define BATT_SENSE_ENABLE_PIN     -1

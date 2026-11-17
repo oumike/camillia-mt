@@ -5428,7 +5428,7 @@ static void sendConfigPage(const char *msg = "", bool lite = false) {
     // Firmware Updates. Compiled out on the Cardputer, where OTA is disabled
     // altogether — offering the toggle there would promise a check that never
     // leads anywhere. The update source itself is not configurable by design.
-#if !defined(DEVICE_CARDPUTER_LORA_HAT)
+#if !defined(DEVICE_CARDPUTER_LORA_HAT) && !defined(DEVICE_CARDPUTER_ZERO)
     section(html, lite, "Firmware Updates", "firmware", "Update checks and over-the-air updates.");
     if (!otaLayoutSupportsUpdate()) {
         // Installed by a third-party flasher into its own partition layout: the

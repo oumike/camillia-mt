@@ -16141,7 +16141,8 @@ static void initCfgActions() {
 #endif
 
     // ── Firmware ─────────────────────────────────────────────────────────────
-#if !defined(DEVICE_CARDPUTER_LORA_HAT)
+    // The CardputerZero app is updated through M5Stack's app store instead.
+#if !defined(DEVICE_CARDPUTER_LORA_HAT) && !defined(DEVICE_CARDPUTER_ZERO)
     s_cfgActions[s_cfgActionCount++] = CFG_ACTION_OTA_UPDATE;
     // Directly under the update action it governs: it decides what that check
     // will find. Absent on the Cardputer for the same reason the update row is
@@ -47705,6 +47706,10 @@ static void performCfgAction(int actionId) {
                      sizeof(s_cfgStatus),
                      "%s", TR("OTA disabled on Cardputer build"));
             break;
+#elif defined(DEVICE_CARDPUTER_ZERO)
+            snprintf(s_cfgStatus, sizeof(s_cfgStatus),
+                     "%s", TR("Update Camillia from the M5Stack app store"));
+            break;
 #endif
 
             // A third-party installer's layout keeps another firmware in the
@@ -50134,6 +50139,28 @@ static constexpr bool kNavChatKeyIsDeliberate = false;
 #endif
 #endif
 
+#if defined(DEVICE_CARDPUTER_ZERO)
+static constexpr uint32_t kZeroEscDoubleTapMs = 400;
+
+// The number row's F-key meaning outside text entry (see pumpKeyboardInput).
+static char zeroNumberRowKey(char k) {
+    switch (k) {
+        case '1': return KEY_OPEN_HOME;
+#if HAS_HOME_DASHBOARD
+        case '2': return KEY_OPEN_CHAT_BTN;
+#else
+        case '2': return KEY_OPEN_HOME;   // no dashboard: Home is chat
+#endif
+        case '3': return KEY_OPEN_DMS;
+        case '4': return KEY_OPEN_NODES;
+        case '5': return KEY_OPEN_TOOLS;
+        case '6': return KEY_OPEN_CONFIG;
+        case '0': return KEY_OPEN_HELP;
+        default:  return KEY_NONE;
+    }
+}
+#endif
+
 // Returns true when the key was a navigation shortcut and has been acted on.
 static bool handleGlobalNavigationKey(char key) {
 #if defined(DEVICE_M9)
@@ -50508,6 +50535,23 @@ static void pumpKeyboardInput() {
         }
         s_lastActivityMs = millis();
 
+#if defined(DEVICE_CARDPUTER_ZERO)
+        // Esc twice in quick succession goes Home. The first press still does
+        // its ordinary back/close; only the second is turned into Home, so a
+        // single Esc behaves exactly as before. (Held for 4 s instead, Esc
+        // quits to the launcher -- linux/app/keys_linux.cpp.)
+        if (k == KEY_ESCAPE) {
+            static uint32_t s_lastEscMs = 0;
+            const uint32_t nowMs = millis();
+            if (s_lastEscMs && (uint32_t)(nowMs - s_lastEscMs) <= kZeroEscDoubleTapMs) {
+                s_lastEscMs = 0;
+                k = KEY_OPEN_HOME;
+            } else {
+                s_lastEscMs = nowMs;
+            }
+        }
+#endif
+
 #if HAS_RUNTIME_ORIENTATION && defined(DEVICE_TDISPLAY_P4)
         // Ahead of everything, the F-keys included: a countdown to a reboot
         // is not the moment for a key to open something behind it.
@@ -50606,6 +50650,17 @@ static void pumpKeyboardInput() {
         // The spell row likewise; it is only ever up in English, when the
         // accent box never is.
         if (typingContext && (accentHandleKey(k) || spellHandleKey(k))) continue;
+#if defined(DEVICE_CARDPUTER_ZERO)
+        // Outside text entry the number row is the P4's F-row: 1-6 follow the
+        // nav bar (Home, Chat, DMs, Nodes, Tools, Config) and 0 is Help, as
+        // F10 is there. 7-9 are unbound, as F7-F9 are on a board without a
+        // keyboard light.
+        if (!typingContext && k >= '0' && k <= '9') {
+            const char fkey = zeroNumberRowKey(k);
+            if (fkey == KEY_OPEN_HOME) { openKeyboardHomeShortcut(); continue; }
+            if (fkey != KEY_NONE && handleGlobalNavigationKey(fkey)) continue;
+        }
+#endif
 #if HAS_HOME_DASHBOARD
         // The glance carousel, on every board at once. KEY_PREV_CHAN and
         // KEY_NEXT_CHAN are what the T-Deck trackball's horizontal, the M9 and
@@ -55894,7 +55949,8 @@ static void drawBootSplash() {
         return drawn;
     };
 
-#if !defined(DEVICE_TLORA_PAGER_TFT) && !defined(DEVICE_CARDPUTER_LORA_HAT)
+#if !defined(DEVICE_TLORA_PAGER_TFT) && !defined(DEVICE_CARDPUTER_LORA_HAT) \
+    && !defined(DEVICE_CARDPUTER_ZERO)
     // Native-size Roboto GFX fonts (crisp at this size, no bitmap upscaling).
     int splashContentBottom = cardY + 40;
     splashDev().setTextColor(titleCol, cardBg);
@@ -55936,8 +55992,9 @@ static void drawBootSplash() {
 #endif
 
 
-#if defined(DEVICE_CARDPUTER_LORA_HAT)
-    // Cardputer splash: centered flower with version directly underneath.
+#if defined(DEVICE_CARDPUTER_LORA_HAT) || defined(DEVICE_CARDPUTER_ZERO)
+    // Cardputer splash, ADV and Zero alike: centered flower with version
+    // directly underneath.
     const int flowerCx = cardX + (cardW / 2);
     const int flowerCy = cardY + (cardH / 2) - 10;
     const float cardputerFlowerScale = 0.90f;
