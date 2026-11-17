@@ -20,7 +20,7 @@
 // still gets DEVICE_TDECK forced on underneath it, and because board.h tests
 // DEVICE_TDECK first, the build then silently compiles against the T-Deck pin
 // map — the real target's header is never included at all.
-#if !defined(DEVICE_TDECK) && !defined(DEVICE_TDECK_PRO) && !defined(DEVICE_TLORA_PAGER_TFT) && !defined(DEVICE_CARDPUTER_LORA_HAT) && !defined(DEVICE_HELTEC_V4_EXPANSION) && !defined(DEVICE_MESH_DECK) && !defined(DEVICE_M9) && !defined(DEVICE_WIO_TRACKER_L2) && !defined(DEVICE_TDISPLAY_P4) && !defined(DEVICE_CROWPANEL_35) && !defined(DEVICE_CROWPANEL_50) && !defined(DEVICE_TANMATSU)
+#if !defined(DEVICE_TDECK) && !defined(DEVICE_TDECK_PRO) && !defined(DEVICE_TLORA_PAGER_TFT) && !defined(DEVICE_CARDPUTER_LORA_HAT) && !defined(DEVICE_HELTEC_V4_EXPANSION) && !defined(DEVICE_MESH_DECK) && !defined(DEVICE_M9) && !defined(DEVICE_WIO_TRACKER_L2) && !defined(DEVICE_TDISPLAY_P4) && !defined(DEVICE_CROWPANEL_35) && !defined(DEVICE_CROWPANEL_50) && !defined(DEVICE_TANMATSU) && !defined(DEVICE_CARDPUTER_ZERO)
 #  define DEVICE_TDECK 1
 #endif
 
@@ -190,6 +190,9 @@
 // the M9 is a MeshCore device. Advertising one of those, or the T-Deck the
 // #else below would hand out, would put a hardware name on the mesh that does
 // not match what is transmitting.
+#define MY_HW_MODEL MESH_HW_MODEL_PRIVATE_HW
+#elif defined(DEVICE_CARDPUTER_ZERO)
+// No HardwareModel for the CardputerZero either.
 #define MY_HW_MODEL MESH_HW_MODEL_PRIVATE_HW
 #else
 #define MY_HW_MODEL MESH_HW_MODEL_T_DECK

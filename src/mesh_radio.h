@@ -13,6 +13,8 @@
 #include "hal/tdisplay_p4_radio_hal.h"
 #elif defined(DEVICE_TANMATSU)
 #include "hal/tanmatsu_lora.h"
+#elif defined(DEVICE_CARDPUTER_ZERO)
+#include "hal/linux_hal.h"
 #endif
 
 #ifndef PAGER_LORA_USE_LR1121
@@ -194,6 +196,11 @@ private:
 #elif defined(DEVICE_TANMATSU)
     // SX1262 on the ESP32-C6, reached over ESP-Hosted; see tanmatsu_lora.h.
     TanmatsuLoraRpc _radio;
+#elif defined(DEVICE_CARDPUTER_ZERO)
+    // Linux: spidev + GPIO chardev. CS belongs to the spidev driver.
+    LinuxHal _hal{LINUX_LORA_SPI_DEV, LINUX_GPIO_CHIP};
+    Module _module{&_hal, RADIOLIB_NC, LORA_DIO1, LORA_RST, LORA_BUSY};
+    SX1262 _radio{&_module};
 #elif defined(MESH_LORA_LR1110)
     MeshLR1110 _radio{new Module(LORA_CS, LORA_DIO1, LORA_RST, LORA_BUSY)};
 #elif defined(DEVICE_TLORA_PAGER_TFT) && (PAGER_LORA_USE_LR1121)

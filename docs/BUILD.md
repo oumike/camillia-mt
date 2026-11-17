@@ -684,6 +684,30 @@ once more` on a fresh checkout, the library had not been fetched yet; build agai
 > **Hardware verification pending.** Display init, rotation, keyboard map, LoRa
 > RPC, Wi-Fi, SD and battery readings have not been checked on a unit.
 
+### M5Stack CardputerZero (Linux)
+
+The CardputerZero runs Debian on a Raspberry Pi CM0, so it gets a Linux program
+rather than a firmware image. `linux/` builds it from the firmware's shared
+radio and protocol sources; nothing is flashed.
+
+- **Build** (Docker, any host that can run `linux/arm64` containers; native on
+  Apple Silicon): `linux/build.sh`. It builds a Debian 13 image with
+  `libmbedtls-dev`, fetches RadioLib 7.8.1 and the meshtastic/Crypto commit
+  `platformio.ini` pins, and writes `linux/build/camillia-czero`.
+  `linux/build.sh --deploy user@host` also copies it to `~/camillia/` there.
+- **Run** on the Zero as a user in the `spi`, `gpio` and `i2c` groups:
+  `~/camillia/camillia-czero [--long NAME] [--short ABCD] [--hops N] [--power DBM] [--rx-only] [--debug]`.
+  It powers the cap and arms its RF switch itself, generates an identity on
+  first run in `~/.config/camillia/`, broadcasts a NodeInfo, then prints what
+  it hears. Type a line to broadcast on LongFast; `/help` lists commands.
+  `--rx-only` never transmits.
+- US LongFast only for now: region, channels and modem preset are the
+  compile-time defaults in `src/config.h`.
+
+> **Partly hardware-verified** (issue #155). Receive, decode, and NodeInfo and
+> text transmit are confirmed on a unit. PKI DMs and ACKs are implemented but
+> not yet confirmed on air.
+
 ### Seeed Wio Tracker L2 (wio-tracker-l2)
 
 - **Its own partition table**, `partitions_16mb_wio.csv`: 6 MB app slots rather

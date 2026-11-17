@@ -37,3 +37,4 @@ tests/__pycache__/
 
 # Python bytecode (tools/pr_guidelines.py imports tools/i18n_audit.py)
 __pycache__/
+linux/build/

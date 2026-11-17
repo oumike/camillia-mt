@@ -41,6 +41,8 @@
 //   DEVICE_CROWPANEL_50         Elecrow CrowPanel Advance 5.0" (800x480 RGB, SX1262)
 //   DEVICE_TANMATSU             Nicolai Electronics Tanmatsu (ESP32-P4, ST7701
 //                               MIPI-DSI, LoRa via the ESP32-C6)
+//   DEVICE_CARDPUTER_ZERO       M5Stack CardputerZero + LoRa-1262 Cap (Linux,
+//                               headless; built by linux/, not PlatformIO)
 //
 // DEVICE_CROWPANEL is defined for both CrowPanels: what they share -- the
 // touch-first UI and its sizing -- keys on it, and what differs (pins, panel,
@@ -80,11 +82,14 @@
 #  include "hw_crowpanel_50.h"
 #elif defined(DEVICE_TANMATSU)
 #  include "hw_tanmatsu.h"
+#elif defined(DEVICE_CARDPUTER_ZERO)
+#  include "hw_cardputer_zero.h"
 #else
 #  error "No DEVICE_* build flag set. Define one of: DEVICE_TDECK, DEVICE_TDECK_PRO, \
 DEVICE_TLORA_PAGER_TFT, DEVICE_CARDPUTER_LORA_HAT, DEVICE_HELTEC_V4_EXPANSION, \
 DEVICE_HELTEC_R8, DEVICE_MESH_DECK, DEVICE_M9, DEVICE_WIO_TRACKER_L2, \
-DEVICE_TDISPLAY_P4, DEVICE_CROWPANEL_35, DEVICE_CROWPANEL_50, DEVICE_TANMATSU"
+DEVICE_TDISPLAY_P4, DEVICE_CROWPANEL_35, DEVICE_CROWPANEL_50, DEVICE_TANMATSU, \
+DEVICE_CARDPUTER_ZERO"
 #endif
 
 // ESP32-P4 boards share the Arduino 3.x / ESP-IDF 5.5 platform, ESP-Hosted
@@ -92,6 +97,10 @@ DEVICE_TDISPLAY_P4, DEVICE_CROWPANEL_35, DEVICE_CROWPANEL_50, DEVICE_TANMATSU"
 // on their own DEVICE_* macro.
 #if defined(DEVICE_TDISPLAY_P4) || defined(DEVICE_TANMATSU)
 #  define PLATFORM_ESP32P4 1
+#endif
+
+#if defined(DEVICE_CARDPUTER_ZERO)
+#  define PLATFORM_LINUX 1
 #endif
 
 #if defined(DEVICE_CROWPANEL_35) || defined(DEVICE_CROWPANEL_50)
