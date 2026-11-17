@@ -11500,6 +11500,8 @@ bool webCfgBegin(RhinoConfig *cfg, WebCfgSaveCb onSave,
     bool reclaimUiBuffers = false;
 #if defined(DEVICE_CARDPUTER_LORA_HAT)
     reclaimUiBuffers = true;
+#elif defined(PLATFORM_LINUX)
+    reclaimUiBuffers = false;   // ordinary Linux RAM; chat keeps running
 #elif defined(BOARD_HAS_PSRAM)
     reclaimUiBuffers = (ESP.getPsramSize() == 0);
 #else

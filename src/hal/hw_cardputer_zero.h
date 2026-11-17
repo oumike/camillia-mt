@@ -100,8 +100,11 @@
 
 // ── GPS — on the cap, Linux UART ─────────────────────────────────────────────
 #define HAS_GPS                    1
-#define GPS_RX                    -1
-#define GPS_TX                    -1
+// The UART is LINUX_GPS_TTY (linux/app/serial_tty.cpp ignores pins). These
+// are the Pi's RXD0/TXD0 for the record, and must stay non-negative: gps.cpp
+// reads -1/-1 as "no GPS wired" and never opens the port.
+#define GPS_RX                    15
+#define GPS_TX                    14
 #define GPS_BAUD              115200
 
 // ── Battery — BQ27220 fuel gauge (kernel power_supply); not yet read ─────────

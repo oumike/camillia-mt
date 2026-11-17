@@ -6556,6 +6556,10 @@ static void persistWebCfgEnabled() {
 // Both helpers return true when they actually stopped something, so the caller
 // knows whether to raise the notice.
 static bool bleKbdStopWebConfigForBt() {
+#if defined(PLATFORM_LINUX)
+    // The OS runs Wi-Fi and Bluetooth on separate stacks; nothing to share.
+    return false;
+#endif
     const bool wasOn = s_webCfgEnabled || webCfgRunning();
     if (!wasOn) return false;
     Serial.println("[blekbd] stopping web config: cannot share the radio with Bluetooth");
@@ -6567,6 +6571,9 @@ static bool bleKbdStopWebConfigForBt() {
 }
 
 static bool webCfgStopBleKeyboardForWeb() {
+#if defined(PLATFORM_LINUX)
+    return false;
+#endif
     if (!s_cfg.bleKbdEnabled && !bleKeyboardEnabled()) return false;
     Serial.println("[web] stopping BLE keyboard: cannot share the radio with web config");
     bleKeyboardSetEnabled(false);
@@ -67346,11 +67353,13 @@ void setup() {
     // than a wrong setting, so it is checked rather than assumed. Web config is
     // the one that wins because it is the recovery path: it is how a device
     // with no keyboard gets reconfigured.
+#if !defined(PLATFORM_LINUX)
     if (s_cfg.bleKbdEnabled && (s_webCfgEnabled || webCfgRunning())) {
         Serial.println("[blekbd] not starting: web config owns the radio this boot");
         s_cfg.bleKbdEnabled = false;
         markConfigDirty();
     }
+#endif
     bleKeyboardBegin(s_cfg.bleKbdEnabled, s_cfg.bleKbdAddr, s_cfg.bleKbdAddrType,
                      s_cfg.bleKbdName);
 #endif
