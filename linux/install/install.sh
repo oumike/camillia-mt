@@ -46,8 +46,8 @@ sed "s|@USER@|$RUN_AS|g" "$HERE/camillia-czero.service" > "$UNIT"
 systemctl daemon-reload
 systemctl enable camillia-czero >/dev/null
 systemctl restart camillia-czero
-# The launcher reads its app list at start.
-systemctl try-restart APPLaunch 2>/dev/null || true
+# The launcher reads its app list at start; it is a user service of RUN_AS.
+systemctl --user -M "$RUN_AS@" try-restart APPLaunch.service 2>/dev/null || true
 sleep 2
 systemctl --no-pager --lines=12 status camillia-czero || true
 echo "installed; settings: ~$RUN_AS/.config/camillia/config"
