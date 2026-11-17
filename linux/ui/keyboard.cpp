@@ -104,6 +104,7 @@ KeyEvent Keyboard::read() {
             }
             continue;
         }
+        if (c == KEY_ESC && ev.value != 2) _escDown = ev.value == 1;
         if (ev.value == 0) continue;            // releases
         if (c == KEY_CAPSLOCK) { _caps = !_caps; continue; }
 

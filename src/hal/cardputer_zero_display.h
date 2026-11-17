@@ -52,8 +52,43 @@ private:
     int _max = 0;
 };
 
+// Panel_fb as shipped (LovyanGFX 1.2.34) gets RGB565 wrong both ways: blits copy
+// LovyanGFX's byte-swapped pixels straight into the little-endian framebuffer,
+// and fills reassemble green with its two halves exchanged. Running the panel
+// in rgb565_nonswapped makes every converted pixel native RGB565, which is the
+// framebuffer's own format, so blits are right as they stand; the two fill
+// paths are replaced to store that value as it is.
+class Panel_CzeroFb : public lgfx::Panel_fb {
+public:
+    lgfx::color_depth_t setColorDepth(lgfx::color_depth_t depth) override {
+        (void)depth;
+        _write_depth = _read_depth = lgfx::color_depth_t::rgb565_nonswapped;
+        _write_bits = _read_bits = 16;
+        return _write_depth;
+    }
+    void drawPixelPreclipped(uint_fast16_t x, uint_fast16_t y, uint32_t rawcolor) override {
+        writeFillRectPreclipped(x, y, 1, 1, rawcolor);
+    }
+    void writeFillRectPreclipped(uint_fast16_t x, uint_fast16_t y, uint_fast16_t w,
+                                 uint_fast16_t h, uint32_t rawcolor) override {
+        if (!_fbp) return;
+        uint_fast8_t r = _internal_rotation;
+        if (r) {
+            if ((1u << r) & 0b10010110) y = _height - (y + h);
+            if (r & 2) x = _width - (x + w);
+            if (r & 1) { std::swap(x, y); std::swap(w, h); }
+        }
+        const uint16_t c = (uint16_t)rawcolor;
+        const size_t stride = _fix_info.line_length;
+        for (uint_fast16_t row = 0; row < h; ++row) {
+            uint16_t *p = (uint16_t *)(_fbp + (y + row) * stride) + x;
+            for (uint_fast16_t col = 0; col < w; ++col) p[col] = c;
+        }
+    }
+};
+
 class LGFX_TDeck : public lgfx::LGFX_Device {
-    lgfx::Panel_fb _fb;
+    Panel_CzeroFb _fb;
     Light_LinuxBacklight _light;
 
 public:

@@ -24,10 +24,13 @@ public:
     int fd() const { return _fd; }
     // Next decoded key, or Key::None when nothing more is waiting.
     KeyEvent read();
+    // Esc is physically down (press seen, release not yet).
+    bool escDown() const { return _escDown; }
 
 private:
     void loadKeymap();
     int _fd = -1;
+    bool _escDown = false;
     bool _shift = false, _shiftUsed = false, _oneShot = false, _caps = false;
     std::string _sym[256];
 };
