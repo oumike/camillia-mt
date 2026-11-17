@@ -60,7 +60,8 @@ std::string gSocketPath, gReadPath;
 int gSock = -1;
 std::string gIn;
 bool gSynced = false;
-uint32_t gNextConnectMs = 0;
+uint32_t gNextConnectMs = 0;    // next connect attempt; main() starts it at now
+bool gSocketFixed = false;      // --socket or $CAMILLIA_SOCKET given
 
 uint32_t gMe = 0;
 std::string gMyShort, gRegion, gPreset;
@@ -217,6 +218,9 @@ void disconnect() {
 void tryConnect() {
     if (gSock >= 0 || nowMs() - gNextConnectMs > 0x80000000u) return;
     gNextConnectMs = nowMs() + 2000;
+    // systemd creates /run/camillia only while the service runs, so the
+    // default path can change between attempts.
+    if (!gSocketFixed) gSocketPath = ipc::defaultSocketPath();
     int fd = socket(AF_UNIX, SOCK_STREAM | SOCK_CLOEXEC, 0);
     sockaddr_un a = {};
     a.sun_family = AF_UNIX;
@@ -592,10 +596,12 @@ uint32_t tickCb() { return nowMs(); }
 }  // namespace
 
 int main(int argc, char **argv) {
+    gNextConnectMs = nowMs();
     gSocketPath = ipc::defaultSocketPath();
+    gSocketFixed = getenv("CAMILLIA_SOCKET") != nullptr;
     std::string fb = access("/dev/fb_lcd", F_OK) == 0 ? "/dev/fb_lcd" : "/dev/fb0";
     for (int i = 1; i < argc; i++) {
-        if (!strcmp(argv[i], "--socket") && i + 1 < argc) gSocketPath = argv[++i];
+        if (!strcmp(argv[i], "--socket") && i + 1 < argc) gSocketPath = argv[++i], gSocketFixed = true;
         else if (!strcmp(argv[i], "--fb") && i + 1 < argc) fb = argv[++i];
         else {
             fprintf(stderr, "usage: %s [--socket PATH] [--fb /dev/fbN]\n", argv[0]);

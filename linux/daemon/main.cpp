@@ -670,6 +670,7 @@ void handlePacket(MeshPacket &pkt) {
     peer.hops = hopsAway(h.flags);
     peer.lastHeard = nowEpoch();
 
+    if (pkt.decrypted && pkt.chanIdx >= 0 && CHANNEL_KEYS[pkt.chanIdx].role == 2) pkt.decrypted = false;
     if (!pkt.decrypted && h.channel == 0 && h.to == gMe && pkt.rawLen > 12 && peer.hasPubKey
         && !lic::active()) {
         uint8_t plain[256];

@@ -107,6 +107,7 @@ static void testSettings() {
     applyChannels(s);
     CHECK(!strcmp(CHANNEL_KEYS[0].name, "Friends") && CHANNEL_KEYS[0].role == 0);
     CHECK(CHANNEL_KEYS[1].role == 1 && CHANNEL_KEYS[2].role == 2);
+    CHECK(CHANNEL_KEYS[2].keyLen == 0);          // unconfigured slots cannot decrypt
     CHECK(CHANNEL_KEYS[0].hash == channelKeyHash(CHANNEL_KEYS[0]));
 
     // No channels: the preset's own public channel, as a stock node has.

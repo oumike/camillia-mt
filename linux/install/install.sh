@@ -7,7 +7,11 @@
 set -euo pipefail
 HERE="$(cd "$(dirname "$0")" && pwd)"
 [[ $EUID -eq 0 ]] || { echo "run with sudo" >&2; exit 1; }
-RUN_AS="${SUDO_USER:-mike}"
+RUN_AS="${CAMILLIA_USER:-${SUDO_USER:-}}"
+if [[ -z "$RUN_AS" || "$RUN_AS" == root ]]; then
+  echo "run with sudo from the user the service should run as, or set CAMILLIA_USER" >&2; exit 1
+fi
+id -u "$RUN_AS" >/dev/null 2>&1 || { echo "no such user: $RUN_AS" >&2; exit 1; }
 LAUNCH=/usr/share/APPLaunch
 UNIT=/etc/systemd/system/camillia-czero.service
 

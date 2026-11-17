@@ -195,6 +195,12 @@ void applyChannels(const Settings &s) {
     for (int i = 0; i < MAX_CHANNELS; i++) {
         ChannelKey &ck = CHANNEL_KEYS[i];
         if (i >= (int)list.size()) {
+            // Keyless as well as disabled, so the table's default keys
+            // cannot decrypt traffic on channels that were not configured.
+            memset(ck.name_buf, 0, sizeof ck.name_buf);
+            ck.name = ck.name_buf;
+            memset(ck.key, 0, sizeof ck.key);
+            ck.keyLen = 0;
             ck.role = 2;
             ck.shareLocation = false;
             continue;

@@ -131,7 +131,7 @@ KeyEvent Keyboard::read() {
             } else if (c >= KEY_1 && c <= KEY_0) {
                 k.key = Key::Char;
                 k.text = std::string(1, "1234567890"[c - KEY_1]);
-            } else if (!_sym[c].empty()) {
+            } else if (c < 256 && !_sym[c].empty()) {
                 k.key = Key::Char;
                 k.text = _sym[c];
             }
