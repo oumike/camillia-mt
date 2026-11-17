@@ -74,11 +74,11 @@ and its [`src/hal/hw_*.h`](../src/hal/) pin map.
 Flashing Camillia replaces the badge.team launcher. To go back, flash the
 launcher again from <https://tanmatsu.cloud>.
 
-### M5Stack CardputerZero + Cap LoRa-1262 (Linux, headless, WIP)
+### M5Stack CardputerZero + Cap LoRa-1262 (Linux, WIP)
 
 The CardputerZero is a Linux handheld, not an ESP32, so it does not run the
-firmware image. `linux/` builds a headless program from the firmware's own radio
-and protocol sources (`mesh_radio`, `mesh_proto`, XEdDSA, ACK proofs) with a
+firmware image. `linux/` builds a radio daemon and an LVGL screen app from the
+firmware's own radio and protocol sources (`mesh_radio`, `mesh_proto`, XEdDSA, ACK proofs) with a
 small Linux HAL underneath. See [BUILD.md](BUILD.md#m5stack-cardputerzero-linux)
 and issue #155.
 
@@ -88,11 +88,13 @@ and issue #155.
 | **Host** | Raspberry Pi CM0 (RP3A0, 4x Cortex-A53, 512 MB), Debian 13, kernel 6.18 |
 | **LoRa** | SX1262 on the Cap LoRa-1262: `/dev/spidev0.1` (CE1), DIO1 GPIO23, RST GPIO26, BUSY GPIO22 on `gpiochip0`; DIO1 is a GPIO edge event, not polled |
 | **Cap** | 5 V from the Zero's M5IOE1 `ext_5v_out` (`/sys/class/leds/ext_5v_out`); PI4IOE5V6408 at `0x43` on `/dev/i2c-1` arms the RF switch. The program does both at start |
-| **GPS** | L76K on `/dev/serial0` at 115200 (verified sending NMEA); not read by the program yet |
-| **Interface** | Console on stdin/stdout: a line broadcasts on LongFast; `/dm !id text` sends a PKI DM; `/nodes`, `/nodeinfo`, `/debug`, `/quit` |
+| **GPS** | L76K on `/dev/serial0` at 115200 (verified sending NMEA); the daemon reads GGA/RMC and broadcasts position on the primary channel |
+| **Display** | ST7789 320x170 at `/dev/fb_lcd` (fbdev), drawn by `camillia-czero-ui` with LVGL |
+| **Keyboard** | TCA8418 matrix as a Linux evdev device (`/dev/input/by-path/platform-3f804000.i2c-event`), read without grabbing so the launcher keeps Home; symbols from `/usr/share/keymaps/tca8418_keypad_m5stack_keymap.map` |
+| **Interface** | Daemon as a systemd service (`camillia-czero`), screen app from the launcher, joined by a Unix socket at `/run/camillia/camillia.sock`; settings in `~/.config/camillia/config` |
 | **Identity** | Curve25519 key in `~/.config/camillia/identity` (0600); node ID is `crc32(public key)` as in Meshtastic 2.8; known nodes in `~/.config/camillia/nodes` |
-| **Not used** | Display, keyboard, battery gauge, GPS, Wi-Fi/MQTT, relaying, settings beyond the command line |
-| **Status** | Hardware-verified on one unit: receive and decode (channel and NodeInfo, via the DIO1 interrupt), NodeInfo and text broadcast transmit. Reception of our packets by other nodes, PKI DMs and ACKs not yet confirmed on air |
+| **Not used** | Battery gauge, Wi-Fi/MQTT |
+| **Status** | Hardware-verified on one unit with the first headless program: receive and decode (channel and NodeInfo, via the DIO1 interrupt), NodeInfo and text broadcast transmit. Daemon, relaying, GPS, service and screen app not yet run on the device; PKI DMs and ACKs not yet confirmed on air |
 
 ### Elecrow CrowPanel Advance 3.5 (WIP)
 

@@ -686,27 +686,59 @@ once more` on a fresh checkout, the library had not been fetched yet; build agai
 
 ### M5Stack CardputerZero (Linux)
 
-The CardputerZero runs Debian on a Raspberry Pi CM0, so it gets a Linux program
-rather than a firmware image. `linux/` builds it from the firmware's shared
-radio and protocol sources; nothing is flashed.
+The CardputerZero runs Debian on a Raspberry Pi CM0, so it gets Linux programs
+rather than a firmware image. `linux/` builds them from the firmware's shared
+radio and protocol sources; nothing is flashed. There are two:
 
-- **Build** (Docker, any host that can run `linux/arm64` containers; native on
-  Apple Silicon): `linux/build.sh`. It builds a Debian 13 image with
-  `libmbedtls-dev`, fetches RadioLib 7.8.1 and the meshtastic/Crypto commit
-  `platformio.ini` pins, and writes `linux/build/camillia-czero`.
-  `linux/build.sh --deploy user@host` also copies it to `~/camillia/` there.
-- **Run** on the Zero as a user in the `spi`, `gpio` and `i2c` groups:
-  `~/camillia/camillia-czero [--long NAME] [--short ABCD] [--hops N] [--power DBM] [--rx-only] [--debug]`.
-  It powers the cap and arms its RF switch itself, generates an identity on
-  first run in `~/.config/camillia/`, broadcasts a NodeInfo, then prints what
-  it hears. Type a line to broadcast on LongFast; `/help` lists commands.
-  `--rx-only` never transmits.
-- US LongFast only for now: region, channels and modem preset are the
-  compile-time defaults in `src/config.h`.
+- `camillia-czero`, the radio daemon. A systemd service runs it from boot: it
+  receives, relays (role CLIENT), sends NodeInfo and GPS position, retries DMs
+  until ACKed, and keeps the message history.
+- `camillia-czero-ui`, the screen app, started from the Zero's launcher. It is
+  an LVGL client of the daemon over a Unix socket, so closing it leaves the
+  radio running.
+
+**Build** (Docker, any host that can run `linux/arm64` containers; native on
+Apple Silicon): `linux/build.sh`. It builds a Debian 13 image with
+`libmbedtls-dev`, fetches RadioLib 7.8.1, LVGL 9.5.0 and the meshtastic/Crypto
+commit `platformio.ini` pins, writes both programs to `linux/build/`, and runs
+`camillia-czero-tests` (NMEA, settings, message store and socket format).
+
+**Install:** `linux/build.sh --deploy user@host --install` copies the programs
+and `linux/install/` to `~/camillia/` on the Zero and runs
+`sudo ~/camillia/install.sh`, which:
+
+- installs the daemon to `/usr/local/bin` and the `camillia-czero` service,
+  running as the deploying user (who must be in the `spi`, `gpio` and `i2c`
+  groups), and starts it;
+- installs the screen app, its icon and `camillia.desktop` into
+  `/usr/share/APPLaunch`, and restarts the launcher.
+
+`sudo ~/camillia/install.sh --remove` undoes it and keeps `~/.config/camillia`.
+Stop the stock Cap LoRa-1262 and meshterm apps first: two programs cannot share
+the radio.
+
+**Settings** are in `~/.config/camillia/config`, written with comments on first
+run; restart the service after editing. Keys: `region`, `preset`, `hop_limit`,
+`tx_power`, `role` (`CLIENT` or `CLIENT_MUTE`), `rx_only`, `gps`,
+`gps_device`, `gps_baud`, `position_interval`, `position_precision`,
+`nodeinfo_interval`, and one `channel = NAME BASE64KEY` line per channel,
+primary first (none: the preset's public channel). The same folder holds
+`identity`, `nodes` and `messages`.
+
+**Screen app keys:** Up/Down select, Enter opens a conversation or sends,
+Tab switches between conversations and nodes, Esc goes back (and quits from the
+top). Home long-press also quits.
+
+**Without the service:** `camillia-czero` runs in a terminal too, with
+`[--config FILE] [--socket PATH] [--long NAME] [--short ABCD] [--hops N]
+[--power DBM] [--rx-only] [--debug]` overriding the settings. A line typed at
+the console broadcasts on the primary channel; `/help` lists commands.
 
 > **Partly hardware-verified** (issue #155). Receive, decode, and NodeInfo and
-> text transmit are confirmed on a unit. PKI DMs and ACKs are implemented but
-> not yet confirmed on air.
+> text transmit are confirmed on a unit with the first headless program. The
+> daemon, settings, relaying, GPS, history, service and screen app are built
+> and unit-tested on the host but not yet run on the device. PKI DMs and ACKs
+> are not yet confirmed on air.
 
 ### Seeed Wio Tracker L2 (wio-tracker-l2)
 
