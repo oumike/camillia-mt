@@ -5785,6 +5785,16 @@ bool cfgSavedWifiActivate(const char *ssid) {
 
 
 static void wifiGetActiveCreds(const char **ssidOut, const char **passOut) {
+#if defined(PLATFORM_LINUX)
+    // The OS owns the network here; whatever it is connected to is the active
+    // network, and there are no credentials of our own to hand anyone.
+    static char sysSsid[33];
+    String cur = WiFi.SSID();
+    snprintf(sysSsid, sizeof(sysSsid), "%s", cur.length() ? cur.c_str() : "system network");
+    if (ssidOut) *ssidOut = sysSsid;
+    if (passOut) *passOut = "";
+    return;
+#endif
     const char *ssid = s_cfg.wifiSsid;
     const char *pass = s_cfg.wifiPass;
     if (s_wifiUsingKnownOverride && s_wifiSelectedSsid[0]) {
@@ -15858,7 +15868,10 @@ static void initCfgActions() {
 
     // The radios themselves, each with whatever picks what it talks to.
     s_cfgActions[s_cfgActionCount++] = CFG_ACTION_WIFI_TOGGLE;
+#if !defined(PLATFORM_LINUX)
+    // On Linux the OS picks the network.
     s_cfgActions[s_cfgActionCount++] = CFG_ACTION_CHOOSE_WIFI;
+#endif
 #if HAS_BLE_KEYBOARD
     // Web Config sits with the WiFi pair on these boards instead of down in the
     // services group below. It is what most people turn WiFi on *for*, and
@@ -45476,7 +45489,7 @@ static void activateCfgSelection() {
         }
 #endif
 #if HAS_BLE_KEYBOARD
-        else if (actionId == CFG_ACTION_BLE_KBD_PAIR) {
+        if (actionId == CFG_ACTION_BLE_KBD_PAIR) {
             disabledMessage = TR("Turn BT Keyboard on first");
         }
 #endif
@@ -49797,6 +49810,11 @@ static void onboardingPickerAdvance() {
         renderOnboardingStage();
     } else if (s_onboardingStage == ONBOARD_STAGE_SELECT_ROLE) {
         s_onboardingRoleScratch = kOnboardRoles[s_onboardingPickIndex].value;
+#if defined(PLATFORM_LINUX)
+        // No Wi-Fi step: the OS owns the network.
+        onboardingFinalize();
+        return;
+#endif
         s_onboardingStage = ONBOARD_STAGE_CHOOSE_WIFI;
         renderOnboardingStage();
     }

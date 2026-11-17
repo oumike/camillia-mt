@@ -473,8 +473,11 @@ DEVICE_CARDPUTER_ZERO"
 // board-specific — this macro plus a build_src_filter entry is the entire gate
 // — but the NimBLE stack costs 30-40 KB of internal DRAM while it is running,
 // so BLE remains an explicit per-board opt-in.
+//
+// The CardputerZero pairs through BlueZ instead (linux/app/ble_keyboard_linux.cpp),
+// behind the same API; the scan list there can include Classic keyboards too.
 #if defined(DEVICE_HELTEC_V4_EXPANSION) || defined(DEVICE_WIO_TRACKER_L2) \
-    || defined(DEVICE_CROWPANEL)
+    || defined(DEVICE_CROWPANEL) || defined(DEVICE_CARDPUTER_ZERO)
 #  define HAS_BLE_KEYBOARD 1
 #else
 #  define HAS_BLE_KEYBOARD 0

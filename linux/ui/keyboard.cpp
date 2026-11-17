@@ -2,11 +2,13 @@
 #include "keyboard.h"
 
 #include <dirent.h>
+#include <errno.h>
 #include <fcntl.h>
 #include <linux/input.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <strings.h>
 #include <sys/ioctl.h>
 #include <unistd.h>
 
@@ -43,6 +45,30 @@ char letterFor(uint16_t code) {
     return 0;
 }
 
+// US-layout punctuation for standard keyboards: {code, plain, shifted}.
+const struct { uint16_t code; char plain, shifted; } kUsPunct[] = {
+    {KEY_MINUS, '-', '_'}, {KEY_EQUAL, '=', '+'}, {KEY_LEFTBRACE, '[', '{'},
+    {KEY_RIGHTBRACE, ']', '}'}, {KEY_BACKSLASH, '\\', '|'}, {KEY_SEMICOLON, ';', ':'},
+    {KEY_APOSTROPHE, '\'', '"'}, {KEY_GRAVE, '`', '~'}, {KEY_COMMA, ',', '<'},
+    {KEY_DOT, '.', '>'}, {KEY_SLASH, '/', '?'},
+    // Keypad, at face value: Num Lock state is the keyboard's own.
+    {KEY_KPSLASH, '/', '/'}, {KEY_KPASTERISK, '*', '*'}, {KEY_KPMINUS, '-', '-'},
+    {KEY_KPPLUS, '+', '+'}, {KEY_KPDOT, '.', '.'}, {KEY_KP0, '0', '0'},
+    {KEY_KP1, '1', '1'}, {KEY_KP2, '2', '2'}, {KEY_KP3, '3', '3'}, {KEY_KP4, '4', '4'},
+    {KEY_KP5, '5', '5'}, {KEY_KP6, '6', '6'}, {KEY_KP7, '7', '7'}, {KEY_KP8, '8', '8'},
+    {KEY_KP9, '9', '9'},
+};
+
+uint8_t chordBit(uint16_t code) {
+    switch (code) {
+    case KEY_LEFTCTRL: return 1;
+    case KEY_RIGHTCTRL: return 2;
+    case KEY_LEFTMETA: return 4;
+    case KEY_RIGHTMETA: return 8;
+    default: return 0;
+    }
+}
+
 bool isKeypad(int fd) {
     char name[128] = {};
     ioctl(fd, EVIOCGNAME(sizeof name - 1), name);
@@ -66,11 +92,51 @@ bool Keyboard::open() {
             int fd = ::open(path.c_str(), O_RDONLY | O_NONBLOCK | O_CLOEXEC);
             if (fd < 0) continue;
             if (isKeypad(fd)) { _fd = fd; break; }
-            close(fd);
+            ::close(fd);
         }
         closedir(d);
     }
     return _fd >= 0;
+}
+
+void Keyboard::adoptStandard(int fd) {
+    close();
+    _fd = fd;
+    _standard = true;
+    _escDown = _shift = _shiftUsed = _oneShot = _caps = false;
+    _chordMods = 0;
+}
+
+void Keyboard::close() {
+    if (_fd >= 0) ::close(_fd);
+    _fd = -1;
+}
+
+int openKeyboardByUniq(const char *uniq) {
+    if (!uniq || !*uniq) return -1;
+    int found = -1;
+    if (DIR *d = opendir("/dev/input")) {
+        while (dirent *e = readdir(d)) {
+            if (strncmp(e->d_name, "event", 5)) continue;
+            std::string path = std::string("/dev/input/") + e->d_name;
+            int fd = ::open(path.c_str(), O_RDONLY | O_NONBLOCK | O_CLOEXEC);
+            if (fd < 0) continue;
+            char id[64] = {};
+            unsigned long keys[KEY_MAX / (8 * sizeof(long)) + 1] = {};
+            bool match = ioctl(fd, EVIOCGUNIQ(sizeof id - 1), id) > 0 && !strcasecmp(id, uniq)
+                && ioctl(fd, EVIOCGBIT(EV_KEY, sizeof keys), keys) >= 0
+                && (keys[KEY_A / (8 * sizeof(long))] >> (KEY_A % (8 * sizeof(long)))) & 1;
+            if (match) {
+                // Ours alone while we run, so keystrokes do not also reach a console.
+                ioctl(fd, EVIOCGRAB, 1);
+                found = fd;
+                break;
+            }
+            ::close(fd);
+        }
+        closedir(d);
+    }
+    return found;
 }
 
 void Keyboard::loadKeymap() {
@@ -92,7 +158,14 @@ void Keyboard::loadKeymap() {
 
 KeyEvent Keyboard::read() {
     input_event ev;
-    while (_fd >= 0 && ::read(_fd, &ev, sizeof ev) == (ssize_t)sizeof ev) {
+    for (;;) {
+        if (_fd < 0) break;
+        ssize_t n = ::read(_fd, &ev, sizeof ev);
+        if (n != (ssize_t)sizeof ev) {
+            // Unplugged / Bluetooth link gone: report it as no fd.
+            if (n < 0 && errno == ENODEV) close();
+            break;
+        }
         if (ev.type != EV_KEY) continue;
         const uint16_t c = ev.code;
         if (c == KEY_LEFTSHIFT || c == KEY_RIGHTSHIFT) {
@@ -100,9 +173,21 @@ KeyEvent Keyboard::read() {
             else if (ev.value == 0) {
                 _shift = false;
                 // Tapped on its own: applies to the next key, as on the Cardputer.
-                if (!_shiftUsed) _oneShot = !_oneShot;
+                if (!_shiftUsed && !_standard) _oneShot = !_oneShot;
             }
             continue;
+        }
+        if (_standard) {
+            if (uint8_t bit = chordBit(c)) {
+                if (ev.value == 1) _chordMods |= bit;
+                else if (ev.value == 0) _chordMods &= ~bit;
+                continue;
+            }
+            // Nothing is bound to chords, and the bare letter would type.
+            if (_chordMods) continue;
+            // A held Enter would resend, a held Esc walk up the modal stack.
+            if (ev.value == 2 && (c == KEY_ENTER || c == KEY_KPENTER || c == KEY_ESC || c == KEY_TAB))
+                continue;
         }
         if (c == KEY_ESC && ev.value != 2) _escDown = ev.value == 1;
         if (ev.value == 0) continue;            // releases
@@ -131,7 +216,10 @@ KeyEvent Keyboard::read() {
                 k.text = std::string(1, upper ? (char)(l - 32) : l);
             } else if (c >= KEY_1 && c <= KEY_0) {
                 k.key = Key::Char;
-                k.text = std::string(1, "1234567890"[c - KEY_1]);
+                k.text = std::string(1, (_standard && _shift ? "!@#$%^&*()" : "1234567890")[c - KEY_1]);
+            } else if (_standard) {
+                for (auto &p : kUsPunct)
+                    if (p.code == c) { k.key = Key::Char; k.text = std::string(1, _shift ? p.shifted : p.plain); }
             } else if (c < 256 && !_sym[c].empty()) {
                 k.key = Key::Char;
                 k.text = _sym[c];

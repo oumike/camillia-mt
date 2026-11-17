@@ -21,6 +21,11 @@ class Keyboard {
 public:
     // Opens the keypad (or the device named by CAMILLIA_KBD); false if none.
     bool open();
+    // Takes over an already-open evdev fd from an ordinary (PC-layout)
+    // keyboard: Shift is held rather than one-shot, punctuation follows the US
+    // layout, and Ctrl/Alt/Meta chords are dropped.
+    void adoptStandard(int fd);
+    void close();
     int fd() const { return _fd; }
     // Next decoded key, or Key::None when nothing more is waiting.
     KeyEvent read();
@@ -31,6 +36,12 @@ private:
     void loadKeymap();
     int _fd = -1;
     bool _escDown = false;
+    bool _standard = false;
     bool _shift = false, _shiftUsed = false, _oneShot = false, _caps = false;
+    uint8_t _chordMods = 0;
     std::string _sym[256];
 };
+
+// Opens and grabs the keyboard evdev device whose uniq (the Bluetooth address,
+// for BlueZ HID devices) matches `uniq`, case-insensitively. -1 if none.
+int openKeyboardByUniq(const char *uniq);

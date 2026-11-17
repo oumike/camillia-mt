@@ -62,7 +62,15 @@ static const char    *kDefaultWebPass  = "admin";
 #define APP_VERSION "unknown"
 #endif
 
-static WebServer      server(80);
+// The CardputerZero shares its host with other services, so the web config
+// sits on an unprivileged port of its own; ipBuf then carries "ip:port" so
+// every place that shows the address shows a URL that works.
+#if defined(PLATFORM_LINUX)
+static constexpr uint16_t kWebCfgPort = 18765;
+#else
+static constexpr uint16_t kWebCfgPort = 80;
+#endif
+static WebServer      server(kWebCfgPort);
 // No captive portal: the AP runs no DNS server and never redirects the OS's
 // portal-detection probes, so phones don't pop a captive sheet on join. Browse
 // to the AP IP directly.
@@ -133,13 +141,18 @@ static bool apHasRoomForFullPage() {
 static inline bool webCfgUseLite() {
     return kLiteOnlyBoard || (gApMode && !apHasRoomForFullPage());
 }
-static char           ipBuf[16]        = "";
+static char           ipBuf[24]        = "";
 static char           sessionToken[17] = "";   // hex token; empty = no session
 static RhinoConfig   *gCfg             = nullptr;
 
 // The credentials webCfgBegin() should actually associate with: the picker's
 // override when one was pushed, otherwise what is stored in the config.
 static const char *staConnectSsid() {
+#if defined(PLATFORM_LINUX)
+    // The OS owns the network: never fall into onboarding AP mode for want of
+    // credentials of our own.
+    return "system network";
+#endif
     return gStaSsidOverride[0] ? gStaSsidOverride : gCfg->wifiSsid;
 }
 static const char *staConnectPass() {
@@ -11700,6 +11713,12 @@ bool webCfgBegin(RhinoConfig *cfg, WebCfgSaveCb onSave,
     }
 
     WiFi.localIP().toString().toCharArray(ipBuf, sizeof(ipBuf));
+#if defined(PLATFORM_LINUX)
+    {
+        const size_t n = strlen(ipBuf);
+        snprintf(ipBuf + n, sizeof(ipBuf) - n, ":%u", (unsigned)kWebCfgPort);
+    }
+#endif
 
     // Disable STA modem power-save for the web session. The default
     // WIFI_PS_MIN_MODEM buffers our inbound packets until the AP's next DTIM
