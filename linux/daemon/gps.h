@@ -26,6 +26,8 @@ public:
     const GpsFix &fix() const { return _fix; }
     // A fix older than this is treated as lost.
     bool current() const;
+    // Sentences with a good checksum since open.
+    uint32_t sentences() const { return _sentences; }
 
 private:
     void sentence(char *s);
@@ -34,6 +36,7 @@ private:
     size_t _len = 0;
     GpsFix _fix;
     bool _changed = false;
+    uint32_t _sentences = 0;
 };
 
 // Checks a "$...*hh" sentence's checksum; exposed for tests.

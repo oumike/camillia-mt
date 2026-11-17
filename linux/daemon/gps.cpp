@@ -102,6 +102,7 @@ bool Gps::service() {
 
 void Gps::sentence(char *s) {
     if (!nmeaChecksumOk(s)) return;
+    _sentences++;
     *strchr(s, '*') = 0;
     // Split in place; empty fields stay empty strings.
     const char *f[24];

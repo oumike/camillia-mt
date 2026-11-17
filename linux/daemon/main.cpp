@@ -603,7 +603,7 @@ bool serviceRelays(uint32_t now) {
         p.active = false;
         if (Radio.transmit(p.frame, p.len)) {
             gRelayed++;
-            if (debugMessagesEnabled()) Serial.printf("[fwd] relayed %08x/%08x\n", p.from, p.id);
+            Serial.printf("[fwd] relayed %08x/%08x\n", p.from, p.id);
         }
         return true;
     }
@@ -764,7 +764,8 @@ void handlePacket(MeshPacket &pkt) {
     publish(nodeRecord(h.from, peer));
 
     if (toMe && (h.flags & 0x08) && !gCfg.rxOnly) {
-        if (!sendAck(h.from, h.id)) Serial.printf("[tx] ack to %s FAILED\n", from.c_str());
+        bool ok = sendAck(h.from, h.id);
+        Serial.printf("[tx] ack %08x to %s %s\n", h.id, from.c_str(), ok ? "ok" : "FAILED");
     }
 }
 
@@ -969,6 +970,18 @@ int main(int argc, char **argv) {
         }
         if (gGpsOpen) {
             if (gGps.service()) publish(gpsRecord());
+            static bool heard = false, hadFix = false;
+            if (!heard && gGps.sentences()) {
+                heard = true;
+                Serial.printf("[gps] receiving NMEA\n");
+            }
+            if (gGps.current() != hadFix) {
+                hadFix = !hadFix;
+                if (hadFix)
+                    Serial.printf("[gps] fix, %d sats\n", gGps.fix().sats);
+                else
+                    Serial.printf("[gps] fix lost\n");
+            }
             if (gGps.current() && gCfg.positionIntervalS
                 && (!gPositionSent || now - gLastPositionMs >= gCfg.positionIntervalS * 1000u))
                 sendPosition();
