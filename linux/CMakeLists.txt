@@ -113,10 +113,56 @@ FetchContent_Declare(lovyangfx
 # TinyGPSPlus 1.1.0 (library.json "1.1.0"; upstream has no tag for it).
 FetchContent_Declare(tinygps
   URL https://github.com/mikalhart/TinyGPSPlus/archive/c093432911f5e1a2f54844976d3a14ec212f2403.tar.gz)
-foreach(dep lovyangfx tinygps)
+# PubSubClient 2.8 (platformio.ini knolleary/PubSubClient@2.8.0).
+FetchContent_Declare(pubsubclient
+  URL https://github.com/knolleary/pubsubclient/archive/refs/tags/v2.8.tar.gz)
+foreach(dep lovyangfx tinygps pubsubclient)
   FetchContent_GetProperties(${dep})
   if(NOT ${dep}_POPULATED)
     FetchContent_Populate(${dep})
+  endif()
+endforeach()
+
+# The ESP32 builds' PubSubClient topic-length fix, applied from the same
+# OLD_*/NEW_* strings in tools/patch_pubsubclient_topiclen.py.
+file(READ ${FW}/../tools/patch_pubsubclient_topiclen.py PUBSUB_PATCH)
+file(READ ${pubsubclient_SOURCE_DIR}/src/PubSubClient.cpp PUBSUB_CPP)
+function(pubsub_patch_string name out)
+  string(FIND "${PUBSUB_PATCH}" "${name} = \"\"\"" at)
+  if(at LESS 0)
+    message(FATAL_ERROR "PubSubClient patch: ${name} missing")
+  endif()
+  string(LENGTH "${name} = \"\"\"" skip)
+  math(EXPR at "${at} + ${skip}")
+  string(SUBSTRING "${PUBSUB_PATCH}" ${at} -1 rest)
+  string(FIND "${rest}" "\"\"\"" end)
+  string(SUBSTRING "${rest}" 0 ${end} value)
+  set(${out} "${value}" PARENT_SCOPE)
+endfunction()
+foreach(hunk READ LOOP)
+  pubsub_patch_string(OLD_${hunk} old)
+  pubsub_patch_string(NEW_${hunk} new)
+  string(FIND "${PUBSUB_CPP}" "${old}" first)
+  string(FIND "${PUBSUB_CPP}" "${old}" last REVERSE)
+  if(first LESS 0 OR NOT first EQUAL last)
+    message(FATAL_ERROR "PubSubClient patch: ${hunk} hunk does not match exactly once")
+  endif()
+  string(REPLACE "${old}" "${new}" PUBSUB_CPP "${PUBSUB_CPP}")
+endforeach()
+set(PUBSUB_SRC ${CMAKE_BINARY_DIR}/pubsubclient/PubSubClient.cpp)
+file(CONFIGURE OUTPUT ${PUBSUB_SRC} CONTENT "${PUBSUB_CPP}" @ONLY)
+set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS
+  ${FW}/../tools/patch_pubsubclient_topiclen.py)
+
+# TLS for WiFiClientSecure, static like mbedcrypto so the device needs no
+# extra packages.
+foreach(lib mbedtls mbedx509)
+  string(TOUPPER ${lib} var)
+  find_library(${var}_STATIC NAMES lib${lib}.a)
+  if(${var}_STATIC)
+    set(${var} ${${var}_STATIC})
+  else()
+    find_library(${var} NAMES ${lib} REQUIRED)
   endif()
 endforeach()
 
@@ -170,6 +216,7 @@ add_executable(camillia ${APP_FW_SRC} ${APP_SHIM_SRC}
   ${ACORE_DIR}/WString.cpp ${ACORE_DIR}/Print.cpp ${ACORE_DIR}/Stream.cpp
   ${ACORE_DIR}/StreamString.cpp ${ACORE_DIR}/stdlib_noniso.c
   ${tinygps_SOURCE_DIR}/src/TinyGPS++.cpp
+  ${PUBSUB_SRC}
   ui/keyboard.cpp hal/linux_hal.cpp hal/linux_board.cpp)
 # TinyGPS++ brings its own millis() unless ARDUINO is set; the shim has one.
 set_source_files_properties(${tinygps_SOURCE_DIR}/src/TinyGPS++.cpp
@@ -179,7 +226,8 @@ target_compile_definitions(camillia PRIVATE APP_VERSION="${APP_VERSION}"
 # app/shim first so its Arduino.h and ESP-IDF stand-ins win; ACORE_DIR for the
 # String/Print/Stream headers they include.
 target_include_directories(camillia PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/app/shim
-  ${ACORE_DIR} ${CMAKE_CURRENT_SOURCE_DIR} ${FW} ${FW}/hal ${tinygps_SOURCE_DIR}/src)
+  ${ACORE_DIR} ${CMAKE_CURRENT_SOURCE_DIR} ${FW} ${FW}/hal ${tinygps_SOURCE_DIR}/src
+  ${pubsubclient_SOURCE_DIR}/src)
 target_compile_options(camillia PRIVATE $<$<COMPILE_LANGUAGE:CXX>:-std=gnu++17>)
 target_link_libraries(camillia PRIVATE lvgl_fw lgfx_fb radiolib mtcrypto
-  ${MBEDCRYPTO} Threads::Threads m)
+  ${MBEDTLS} ${MBEDX509} ${MBEDCRYPTO} Threads::Threads m)
