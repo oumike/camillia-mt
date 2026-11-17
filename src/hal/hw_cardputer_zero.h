@@ -64,9 +64,16 @@
 #define LORA_FEM_TX_MODE_PIN      -1
 
 #define HAS_SD_CARD                0
+#define SD_CS                     -1
+// Files an SD card would hold live in a directory on the Zero's own disk
+// (~/.config/camillia/fs), reached through storageFs() like the Mesh Deck's
+// LittleFS partition. See linux/app/fs_linux.cpp.
+#define HAS_INTERNAL_FS            1
+#define INTERNAL_FS_PARTITION  "camillia"
 
-// ── Keyboard — TCA8418 @0x34, owned by the kernel (evdev); headless for now ──
-#define HAS_KEYBOARD               0
+// ── Keyboard — TCA8418 @0x34, owned by the kernel (evdev). keyboard.cpp reads
+// it through linux/app/keys_linux.cpp, so the KB_* pins below are unused. ──
+#define HAS_KEYBOARD               1
 #define KB_SDA                    -1
 #define KB_SCL                    -1
 #define KB_ADDR                0x00

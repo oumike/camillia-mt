@@ -143,6 +143,10 @@ DEVICE_CARDPUTER_ZERO"
 // On hardware 3 (wadamesh's 270 degrees) came out upside down, so this is the
 // opposite turn.
 #  define TFT_ROTATION_DEFAULT 1
+#elif defined(DEVICE_CARDPUTER_ZERO)
+// The kernel framebuffer is already landscape (320x170); LovyanGFX's Panel_fb
+// is configured that size, so no turn is applied on top.
+#  define TFT_ROTATION_DEFAULT 0
 #elif DEVICE_UI_VERTICAL
 #  define TFT_ROTATION_DEFAULT 0
 #else

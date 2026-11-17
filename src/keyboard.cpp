@@ -6,6 +6,9 @@
 #include "hal/tanmatsu_coproc.h"
 #endif
 #include "battery_util.h"
+#if defined(DEVICE_CARDPUTER_ZERO)
+#include "app/czero_keys.h"
+#endif
 #if HAS_BLE_KEYBOARD
 #include "ble_keyboard.h"
 #endif
@@ -1767,6 +1770,8 @@ void TDeckKeyboard::begin() {
     tloraResetKeyboardController();
 #elif defined(DEVICE_TANMATSU)
     if (!tanmatsuCoprocBegin()) Serial.println("[kb] Tanmatsu coprocessor not responding");
+#elif defined(DEVICE_CARDPUTER_ZERO)
+    czeroKeysBegin();
 #elif HAS_KEYBOARD
 #if defined(M9_KB_NEEDS_USB_PAD_RELEASE)
     // Before Wire.begin(): the USB PHY is holding SDA until this runs.
@@ -2022,6 +2027,8 @@ char TDeckKeyboard::readKey() {
     return tloraReadMappedKey();
 #elif defined(DEVICE_TANMATSU)
     return tmReadKey();
+#elif defined(DEVICE_CARDPUTER_ZERO)
+    return czeroReadKey();
 #elif !HAS_KEYBOARD
     return KEY_NONE;
 #else
@@ -2557,6 +2564,8 @@ uint32_t keyboardLastKeyMs() {
     return sTloraLastKeyMs;
 #elif defined(DEVICE_TANMATSU)
     return sTmLastKeyMs;
+#elif defined(DEVICE_CARDPUTER_ZERO)
+    return czeroLastKeyMs();
 #else
     return 0;
 #endif
@@ -2571,6 +2580,8 @@ char keyboardHeldKey() {
     return sTloraHeldKey;
 #elif defined(DEVICE_TANMATSU)
     return sTmHeldKey;
+#elif defined(DEVICE_CARDPUTER_ZERO)
+    return KEY_NONE;   // presses only; no release events reach the UI yet
 #elif !HAS_KEYBOARD
 #  if HAS_BLE_KEYBOARD
     // This board has no keyboard of its own, so a held key can only come from a
@@ -2596,6 +2607,8 @@ uint32_t keyboardHeldMs() {
 #elif defined(DEVICE_TANMATSU)
     if (sTmHeldKey == KEY_NONE || sTmHeldSinceMs == 0) return 0;
     return millis() - sTmHeldSinceMs;
+#elif defined(DEVICE_CARDPUTER_ZERO)
+    return 0;
 #elif !HAS_KEYBOARD
 #  if HAS_BLE_KEYBOARD
     return bleKeyboardHeldMs();

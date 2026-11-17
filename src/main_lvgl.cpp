@@ -12029,6 +12029,12 @@ static void flushPersistentState() {
     DMs.flushPersistence();
 }
 
+#if defined(PLATFORM_LINUX)
+// The CardputerZero app leaves on SIGINT/SIGTERM (the launcher's Home
+// long-press) rather than losing power; linux/app/main_linux.cpp calls this.
+void linuxAppFlushBeforeExit() { flushPersistentState(); }
+#endif
+
 static void serviceConfigFlush(uint32_t nowMs) {
     if (!s_configDirty) return;
     if ((uint32_t)(nowMs - s_configDirtyAtMs) < kConfigFlushDelayMs) return;

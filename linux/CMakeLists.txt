@@ -103,3 +103,83 @@ target_compile_definitions(lvgl_czero PUBLIC LV_CONF_INCLUDE_SIMPLE=1)
 add_executable(camillia-czero-ui ui/main.cpp ui/keyboard.cpp daemon/store.cpp)
 target_include_directories(camillia-czero-ui PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
 target_link_libraries(camillia-czero-ui PRIVATE lvgl_czero m)
+
+# ── camillia: the firmware itself (src/main_lvgl.cpp) as a launcher app ──────
+# The same sources the T-Deck environment builds, compiled for Linux against
+# app/shim (Arduino/ESP-IDF stand-ins) and drawn through LovyanGFX's Linux
+# framebuffer panel. Board specifics stay behind DEVICE_CARDPUTER_ZERO.
+FetchContent_Declare(lovyangfx
+  URL https://github.com/lovyan03/LovyanGFX/archive/refs/tags/1.2.34.tar.gz)
+# TinyGPSPlus 1.1.0 (library.json "1.1.0"; upstream has no tag for it).
+FetchContent_Declare(tinygps
+  URL https://github.com/mikalhart/TinyGPSPlus/archive/c093432911f5e1a2f54844976d3a14ec212f2403.tar.gz)
+foreach(dep lovyangfx tinygps)
+  FetchContent_GetProperties(${dep})
+  if(NOT ${dep}_POPULATED)
+    FetchContent_Populate(${dep})
+  endif()
+endforeach()
+
+# String/Print/Stream from the arduino-esp32 core the ESP32 builds use
+# (espressif32@7.0.1 = arduino-esp32 2.0.17), so they behave identically.
+set(ACORE_DIR ${CMAKE_BINARY_DIR}/arduino-core)
+set(ACORE_URL https://raw.githubusercontent.com/espressif/arduino-esp32/2.0.17/cores/esp32)
+foreach(f WString.h WString.cpp Print.h Print.cpp Printable.h Stream.h Stream.cpp
+          StreamString.h StreamString.cpp stdlib_noniso.h stdlib_noniso.c WCharacter.h)
+  if(NOT EXISTS ${ACORE_DIR}/${f})
+    file(DOWNLOAD ${ACORE_URL}/${f} ${ACORE_DIR}/${f} STATUS st)
+    list(GET st 0 rc)
+    if(NOT rc EQUAL 0)
+      file(REMOVE ${ACORE_DIR}/${f})
+      message(FATAL_ERROR "download ${f}: ${st}")
+    endif()
+  endif()
+endforeach()
+
+set(APP_FW_SRC
+  main_lvgl.cpp i18n.cpp spell.cpp spell_en.cpp mqtt_bridge.cpp keyboard.cpp
+  battery_util.cpp power_mgr.cpp emoji_font.cpp env_sensor.cpp gps.cpp los.cpp
+  weather.cpp config_io.cpp mesh_channel_plan.cpp admin_proto.cpp admin_client.cpp
+  admin_peers.cpp storage.cpp base64_util.cpp web_config.cpp web_theme.cpp
+  community_presets.cpp ota_update.cpp mesh_radio.cpp mesh_proto.cpp mesh_beacon.cpp
+  licensed_mode.cpp cs_proto.cpp cs_client.cpp sha256_portable.cpp xeddsa_sig.cpp
+  ack_proof.cpp channel_mgr.cpp dm_mgr.cpp node_db.cpp key_pin.cpp node_name_cache.cpp
+  wardrive_log.cpp live_util.cpp live_feed.cpp debug_flags.cpp ignore_list.cpp
+  fonts/lv_font_montserrat_bold_12.c)
+list(TRANSFORM APP_FW_SRC PREPEND ${FW}/)
+file(GLOB APP_FONT_SRC ${FW}/fonts/latin/*.c)
+file(GLOB APP_SHIM_SRC app/*.cpp)
+file(GLOB_RECURSE LGFX_SRC
+  ${lovyangfx_SOURCE_DIR}/src/lgfx/v1/*.cpp ${lovyangfx_SOURCE_DIR}/src/lgfx/v1/*.c
+  ${lovyangfx_SOURCE_DIR}/src/lgfx/utility/*.c ${lovyangfx_SOURCE_DIR}/src/lgfx/Fonts/efont/*.c
+  ${lovyangfx_SOURCE_DIR}/src/lgfx/Fonts/IPA/*.c)
+list(FILTER LGFX_SRC EXCLUDE REGEX "/platforms/(esp|rp2040|samd|stm32|spresense|arduino|sdl|opencv)")
+
+add_library(lgfx_fb STATIC ${LGFX_SRC})
+target_include_directories(lgfx_fb PUBLIC ${lovyangfx_SOURCE_DIR}/src)
+target_compile_definitions(lgfx_fb PUBLIC LGFX_LINUX_FB=1)
+
+# LVGL again, this time with the firmware's own lv_conf.h.
+add_library(lvgl_fw STATIC ${LVGL_SRC} ${APP_FONT_SRC})
+target_include_directories(lvgl_fw PUBLIC ${FW} ${lvgl_SOURCE_DIR}
+  ${CMAKE_CURRENT_SOURCE_DIR}/app/shim)
+target_compile_definitions(lvgl_fw PUBLIC LV_CONF_INCLUDE_SIMPLE=1 DEVICE_CARDPUTER_ZERO=1
+  UI_LVGL_POC=1 I18N_ENABLED=1)
+
+add_executable(camillia ${APP_FW_SRC} ${APP_SHIM_SRC}
+  ${ACORE_DIR}/WString.cpp ${ACORE_DIR}/Print.cpp ${ACORE_DIR}/Stream.cpp
+  ${ACORE_DIR}/StreamString.cpp ${ACORE_DIR}/stdlib_noniso.c
+  ${tinygps_SOURCE_DIR}/src/TinyGPS++.cpp
+  ui/keyboard.cpp hal/linux_hal.cpp hal/linux_board.cpp)
+# TinyGPS++ brings its own millis() unless ARDUINO is set; the shim has one.
+set_source_files_properties(${tinygps_SOURCE_DIR}/src/TinyGPS++.cpp
+  TARGET_DIRECTORY camillia PROPERTIES COMPILE_DEFINITIONS ARDUINO=10819)
+target_compile_definitions(camillia PRIVATE APP_VERSION="${APP_VERSION}"
+  RADIOLIB_EXCLUDE_APRS=1)
+# app/shim first so its Arduino.h and ESP-IDF stand-ins win; ACORE_DIR for the
+# String/Print/Stream headers they include.
+target_include_directories(camillia PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/app/shim
+  ${ACORE_DIR} ${CMAKE_CURRENT_SOURCE_DIR} ${FW} ${FW}/hal ${tinygps_SOURCE_DIR}/src)
+target_compile_options(camillia PRIVATE $<$<COMPILE_LANGUAGE:CXX>:-std=gnu++17>)
+target_link_libraries(camillia PRIVATE lvgl_fw lgfx_fb radiolib mtcrypto
+  ${MBEDCRYPTO} Threads::Threads m)
