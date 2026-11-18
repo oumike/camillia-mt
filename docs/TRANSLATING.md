@@ -10,7 +10,7 @@ Languages today: **English** (the keys), **Spanish** (`es`), **French** (`fr`),
 (`nb`), **Danish** (`da`), **Finnish** (`fi`), **Hungarian** (`hu`), **Slovak** (`sk`),
 **Croatian** (`hr`), **Slovenian** (`sl`), **Turkish** (`tr`), **Lithuanian** (`lt`),
 **Latvian** (`lv`) and **Estonian** (`et`). All are first drafts and want review by native
-speakers. The Cardputer build is English-only (`-DI18N_ENABLED=0`).
+speakers. The ESP32 Cardputer build (`cardputer-cap`) is English-only (`-DI18N_ENABLED=0`); the CardputerZero app has every language.
 
 ## The file format
 

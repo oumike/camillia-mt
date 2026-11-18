@@ -337,6 +337,8 @@ Pick the environment for your board:
 | LilyGo T-Display P4 AMOLED + LR2021 | `p4-amoled-lr2021` |
 | Nicolai Electronics Tanmatsu | `tanmatsu` |
 
+The M5Stack CardputerZero is not a PlatformIO env; it builds with
+`linux/build.sh` (see [M5Stack CardputerZero](#m5stack-cardputerzero-linux)).
 The command is identical on Windows, macOS and Linux:
 
 ```
@@ -671,7 +673,7 @@ once more` on a fresh checkout, the library had not been fetched yet; build agai
 
 - Built with the same isolated P4 toolchain as the T-Display P4:
   `PLATFORMIO_CORE_DIR="$HOME/.platformio-p4" pio run -e tanmatsu`.
-  It is not in the release set yet; build it from source.
+  Releases include it (since v6.3.5), with OTA.
 - Camillia replaces the badge.team launcher. To restore it, flash the launcher
   again from <https://tanmatsu.cloud>.
 - The ESP32-C6 keeps its shipped firmware. Wi-Fi and LoRa both go through it
@@ -681,8 +683,9 @@ once more` on a fresh checkout, the library had not been fetched yet; build agai
 - BLE keyboards are not supported here yet: NimBLE-Arduino 1.x needs an on-chip
   Bluetooth controller.
 
-> **Hardware verification pending.** Display init, rotation, keyboard map, LoRa
-> RPC, Wi-Fi, SD and battery readings have not been checked on a unit.
+> **Hardware status:** run on one unit. Display, keyboard, Wi-Fi and LoRa RPC
+> were tuned against it (TX is capped at 20 dBm because it stopped receiving at
+> 22). SD and battery readings have no recorded measurements.
 
 ### M5Stack CardputerZero (Linux)
 
@@ -702,7 +705,8 @@ stripped copy for the device).
 `linux/install/` to `~/camillia/` on the Zero and runs
 `sudo ~/camillia/install.sh`, which installs the app, its launcher wrapper,
 icon and `camillia.desktop` into `/usr/share/APPLaunch` and restarts the
-launcher. It also removes the radio daemon service earlier builds installed.
+launcher. If a development build from before v6.7.0 installed the old
+`camillia-czero` radio service, it removes that too.
 The user who starts the app needs the `spi`, `gpio`, `i2c`, `dialout`, `video`
 and `input` groups; the installer warns about any that are missing.
 `sudo ~/camillia/install.sh --remove` undoes it and keeps the data. Close the
@@ -754,11 +758,11 @@ flash, and `app.log` the last run's log.
   **1** Home, **2** Chat, **3** DMs, **4** Nodes, **5** Tools, **6** Config,
   **0** Help.
 
-> **Hardware status** (one unit, issue #155): the app runs from the launcher
-> and from the .deb, receives and transmits on the Cap, serves web config on
-> :18765 over the system Wi-Fi, gets a GPS fix and reads the battery. Not yet
-> confirmed on the unit: Bluetooth keyboards, and the Esc-twice and number-row
-> keys.
+> **Hardware status** (one unit, issue #155; released in v6.7.0): the app runs
+> from the launcher and from the .deb, receives and transmits on the Cap, serves
+> web config on :18765 over the system Wi-Fi, gets a GPS fix and reads the
+> battery; the number-row keys were driven on the unit. Not yet confirmed on the
+> unit: Bluetooth keyboards, and Esc twice for Home.
 
 ### Seeed Wio Tracker L2 (wio-tracker-l2)
 

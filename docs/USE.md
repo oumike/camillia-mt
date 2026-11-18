@@ -146,7 +146,8 @@ Remote forwards its clicks to the panel as a real pointer.
 ### Shared shortcuts (keyboard builds)
 
 These apply to all keyboard builds, including `tdeck`, `tdeck-pro`,
-`tlora-pager-tft`, `cardputer-cap`, `mesh-deck`, and `m9`.
+`tlora-pager-tft`, `cardputer-cap`, `mesh-deck`, `m9`, `tanmatsu` and the
+CardputerZero app.
 
 - D opens Direct Messages
 - C opens Config
@@ -274,6 +275,48 @@ These apply to all keyboard builds, including `tdeck`, `tdeck-pro`,
 - Compose close behavior: Esc closes compose (Backspace only deletes characters)
 - Picker modals (Chat Style, Chat Names) show option names without the
   explanatory line underneath, and scroll when they outgrow the 240x135 panel
+- In the Config grid and grid popups, Up, Down, Left and Right move the way the
+  grid is drawn
+
+### M5Stack CardputerZero (Linux app)
+
+The CardputerZero runs Camillia as an app from its launcher rather than as
+flashed firmware. Install it from the M5Stack App Store (share code `CMLA`), or
+install the `.deb` attached to each release with
+`sudo apt install ./camillia-cardputer-zero-<version>_arm64.deb`. Updates come
+from the store, so the over-the-air update settings are hidden. Close the stock
+Cap LoRa-1262 and meshterm apps first: only one app can use the radio, and
+Camillia's radio runs only while it is open.
+
+Keys are the Cardputer's above, plus:
+
+- **Esc** goes back; **Esc twice** quickly goes to the
+  [home dashboard](#home-dashboard), which this board has; **Esc held for 4
+  seconds** quits to the launcher
+- Outside text entry the number row works like the T-Display P4's F-keys:
+  **1** Home, **2** Chat, **3** DMs, **4** Nodes, **5** Tools, **6** Config,
+  **0** Help
+- Up, Down, Left and Right move the Config grid and grid popups the way they are
+  drawn
+
+Wi-Fi is the system's own connection, so there is no Choose WiFi row and no
+Wi-Fi step in first-time setup; see [Web Config](#web-config) for the port.
+Bluetooth keyboards pair through the system's Bluetooth from the usual Config
+rows.
+
+### Nicolai Electronics Tanmatsu (tanmatsu)
+
+- **F1** Home, **F2** channels, **F3** DMs, **F4** Nodes, **F5** Tools, **F6**
+  Config
+- Arrow keys scroll and switch channel; **Fn+Up/Down** pages; **Fn+Backspace**
+  is Back. In the compose box the arrow keys move the caret
+- **Channel Panel** (Config → Display) docks the channel list beside the chat
+  (Locked, the default) or makes it a drawer (Unlocked). Docked, Left or C moves
+  into the list, Up/Down and Enter switch channel, Right returns to the chat and
+  Right again undocks it. Undocked, Left opens the drawer and Left again docks it
+- **Keyboard Light** (Config, and in web config) picks Low, Medium (the
+  default), High or Off; the keyboard goes dark while the screen sleeps
+- No Bluetooth keyboard support yet, and no GPS or touch panel
 
 ### Elecrow ThinkNode M9 (m9)
 
@@ -375,7 +418,8 @@ These apply to all keyboard builds, including `tdeck`, `tdeck-pro`,
 
 ## Home dashboard
 
-Every build with a display except the Cardputer opens a **home dashboard**: the
+Every build with a display except the ESP32 Cardputer (`cardputer-cap`) opens a
+**home dashboard** — the CardputerZero app has one too: the
 lock screen's glance header — node name, clock, conditions, date, battery — over
 two charts of the radio's own health, channel utilisation and SNR/RSSI.
 
@@ -513,7 +557,7 @@ How you reach it depends on the board:
 - **T-Deck Pro exception**: Config has no Alt chord there. Alt+F is already
   next-channel on that keyboard, and the pair of channel chords straddle Alt+D
   on the physical home row. Plain F still opens Config, as does the nav bar
-- **Cardputer** has no dashboard. Its 240x135 panel does not build the glance
+- **Cardputer** (`cardputer-cap`) has no dashboard. Its 240x135 panel does not build the glance
   header this is made of — so its footer is never the ticker, and the nav bar
   simply replaces the key hints there full-time
 
@@ -1210,7 +1254,8 @@ a backup can never select the socket on a unit without an antenna fitted.
 (the default), Español, Français, Română, Italiano, Deutsch, Português (Brasil),
 Polski, Nederlands, Čeština, Svenska, Norsk bokmål, Dansk, Suomi, Magyar,
 Slovenčina, Hrvatski, Slovenščina, Türkçe, Lietuvių, Latviešu or Eesti. The
-Cardputer is English-only. Activating it opens a
+ESP32 Cardputer (`cardputer-cap`) is English-only; the CardputerZero has every
+language. Activating it opens a
 dropdown of the languages, each written in its own language, with Cancel and
 Save. On a keyboard build, Up/Down (or the wheel/trackball) changes the choice,
 Enter saves and Backspace/Esc cancels.
@@ -2113,8 +2158,10 @@ replaced the Meshtastic Store and Forward client, which has been removed.)
 card — or, on the boards with no card slot, to the internal flash partition that
 stands in for one — and web config has the same export plus an upload to restore
 one. When the device knows the date and time, Export asks which file: replace
-`config.yaml`, or write a new backup beside it named after the moment, such as
-`config-20261115-143205.yaml`, so several can be kept. Without the time, Export
+`config.yaml`, or tick the **Append date** checkbox to write a new backup beside
+it named after the moment, such as `config-20261115-143205.yaml`, so several can
+be kept. The dialog shows the file name it will write, and remembers the
+checkbox until the next reboot. Without the time, Export
 writes `config.yaml` as before. What the file carries:
 
 - Every setting in this guide, and the channel list including channel keys
@@ -2489,8 +2536,13 @@ There are two versions of the page:
 - **Full Web Config** — served once the device has joined your Wi-Fi network.
   Same Config form plus Utilities, the Live feed, Chat, and the Nodes map.
 
-The Cardputer always serves Lite, on its own network or yours, because it has no
-PSRAM to spare.
+The Cardputer (`cardputer-cap`) always serves Lite, on its own network or yours,
+because it has no PSRAM to spare.
+
+**On the CardputerZero**, Web Config uses the system's Wi-Fi connection and is
+served on port **18765** rather than 80 — browse to `http://<address>:18765`;
+the row shows the full address. It never starts its own access point, and it
+serves the full page. Chat and Bluetooth keep running while it is on.
 
 Web Config and the **MQTT Bridge** can be on together; both use your Wi-Fi
 network. While the bridge is on, Web Config never falls back to its own access
@@ -2544,7 +2596,7 @@ One caveat if **Auto-favorite nearby nodes** is on: it re-favorites any node
 reporting a position inside the radius, so unfavoriting one that is still in
 range only lasts until its next position packet.
 
-**On the Cardputer, chat is paused while Web Config runs.** That board needs its
+**On the Cardputer (`cardputer-cap`), chat is paused while Web Config runs.** That board needs its
 message memory to run Wi-Fi, so messages sent to it during a Web Config session
 are not received or stored — they are lost, not queued. The device warns you
 when Web Config starts, the Config row reads *chat PAUSED*, and the web page
@@ -2552,7 +2604,7 @@ shows a red banner. Turn Web Config off to resume messaging.
 
 ### Browser VNC
 
-Every board except the Cardputer has an experimental **VNC Host** action on the
+Every board except the Cardputer and the CardputerZero has an experimental **VNC Host** action on the
 Config screen. It mirrors the live device UI into a browser — 480x222 on the
 Pager, 240x320 on the T-Deck Pro or a vertical Heltec build, 320x240 elsewhere —
 and sends browser taps and keyboard input back through the same UI paths as the
@@ -3013,6 +3065,8 @@ the custom setup you would switch back to.
 
 The **Choose WiFi** action lists your configured network, an **AP** entry, then
 up to **five remembered networks**, plus anything found by a scan — names only.
+The CardputerZero has no Choose WiFi: it uses whatever network the system is
+connected to, and the WiFi switch only decides whether Camillia uses it.
 
 **Networks are remembered across reboots.** Joining a new one does not forget
 the last: whichever network you were on moves into the remembered list, so you
@@ -3402,6 +3456,19 @@ Primary usage is keyboard.
 - Space (or Fn+Enter) opens compose; Enter confirms selected actions and moves the cursor into the channel's messages,
   and Enter again opens Message Actions for the highlighted message
 - D is the DM delete trigger
+
+### M5Stack CardputerZero (Linux app)
+
+Primary usage is keyboard, as on the Cardputer above, plus Esc twice for Home,
+Esc held 4 s to quit to the launcher, and the number row as shortcut keys
+outside text entry. See
+[its shortcuts](#m5stack-cardputerzero-linux-app).
+
+### Nicolai Electronics Tanmatsu (tanmatsu)
+
+Primary usage is keyboard: F1–F6 open the navigation bar's screens, and the
+arrow keys drive the channel panel. See
+[its shortcuts](#nicolai-electronics-tanmatsu-tanmatsu).
 
 ### Heltec WiFi LoRa 32 V4 + TFT expansion (heltec-v4)
 

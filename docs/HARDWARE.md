@@ -1,17 +1,21 @@
 # Hardware Targets
 
-Camillia has **eleven distinct boards** across fourteen build envs (the two Heltec
-families each also have a portrait-seeded environment, and the P4 AMOLED has
-separate SX1262 and LR2021 environments). The comparison table
-below covers seven S3 boards. Ten boards use **ESP32-S3** with
-`espressif32@7.0.1` / Arduino 2.0.17. The T-Display P4 is the exception: ESP32-P4
-with a pinned pioarduino / Arduino 3.3.12 toolchain. All use dual-slot OTA;
+Camillia has **fourteen boards**: thirteen ESP32 boards across fourteen release
+envs (the T-Display P4 has separate SX1262 and LR2021 environments; Heltec
+orientation is a runtime setting, not a separate env), plus the M5Stack
+CardputerZero, a Linux handheld that runs Camillia as an app. The comparison
+table below covers seven S3 boards; the others have their own sections. Eleven
+boards use **ESP32-S3** with `espressif32@7.0.1` / Arduino 2.0.17. The T-Display
+P4 and the Tanmatsu are the exceptions: ESP32-P4 with a pinned pioarduino /
+Arduino 3.3.12 toolchain. All use dual-slot OTA;
 Wio Tracker L2 and T-Display P4 use the 6 MB-slot
 [`partitions_16mb_wio.csv`](../partitions_16mb_wio.csv), while the other layouts
 are described below.
 
-The Attaky Mesh Deck (`mesh-deck`) ships but is not yet in the comparison table; its
-pin map is in [`src/hal/hw_mesh_deck.h`](../src/hal/hw_mesh_deck.h).
+The Attaky Mesh Deck (`mesh-deck`) and the Heltec V4-R8 (`heltec-r8`) ship but
+are not in the comparison table; their pin maps are in
+[`src/hal/hw_mesh_deck.h`](../src/hal/hw_mesh_deck.h) and
+[`src/hal/hw_heltec_r8.h`](../src/hal/hw_heltec_r8.h).
 
 Specs are cross-checked against the manufacturers' sites (see [Sources](#sources))
 and reconciled with each board's build config in [platformio.ini](../platformio.ini)
@@ -52,7 +56,7 @@ and its [`src/hal/hw_*.h`](../src/hal/) pin map.
 | **microSD** | Four-bit SD_MMC on CLK43/CMD44/D0-D3 39-42; active-low power control through XL9535 |
 | **Status** | Implementation present; no subsystem is hardware-verified without serial logs or measurements |
 
-### Nicolai Electronics Tanmatsu (WIP)
+### Nicolai Electronics Tanmatsu
 
 | Spec | Tanmatsu |
 | --- | --- |
@@ -69,12 +73,12 @@ and its [`src/hal/hw_*.h`](../src/hal/) pin map.
 | **LEDs** | Coprocessor LEDs in manual mode: power (charge-state colors) and radio (Wi-Fi: green connected, blue AP, amber joining) share the Status Lights level in Settings, messages LED blinks for unread messages |
 | **microSD** | Four-bit SD_MMC on CLK43/CMD44/D0-D3 39-42, powered by the P4's LDO channel 4 |
 | **Not used** | Touch (none fitted), GNSS (none fitted), microphone, IR, camera, expansion port |
-| **Status** | Compiles. No subsystem is hardware-verified yet |
+| **Status** | Released since v6.3.5. Run on one unit: display, keyboard, Wi-Fi and LoRa through the C6 were tuned against it (TX is capped at 20 dBm because the radio stopped receiving at 22; the C6's RSSI field is decoded as reported). SD and the battery curve have no recorded measurements |
 
 Flashing Camillia replaces the badge.team launcher. To go back, flash the
 launcher again from <https://tanmatsu.cloud>.
 
-### M5Stack CardputerZero + Cap LoRa-1262 (Linux, WIP)
+### M5Stack CardputerZero + Cap LoRa-1262 (Linux)
 
 The CardputerZero is a Linux handheld, not an ESP32, so it does not run the
 firmware image. `linux/` compiles the shared firmware for Linux as one app,
@@ -84,7 +88,7 @@ and issue #155.
 
 | Spec | CardputerZero |
 | --- | --- |
-| **Build** | `linux/build.sh` (Docker, Debian 13 arm64); not a PlatformIO env |
+| **Build** | `linux/build.sh` (Docker, Debian 13 arm64); `--deb` packages it. Not a PlatformIO env; each release attaches the `.deb`, which is published to the M5Stack App Store (share code `CMLA`) |
 | **Host** | Raspberry Pi CM0 (RP3A0, 4x Cortex-A53, 512 MB), Debian 13, kernel 6.18 |
 | **LoRa** | SX1262 on the Cap LoRa-1262: `/dev/spidev0.1` (CE1), DIO1 GPIO23, RST GPIO26, BUSY GPIO22 on `gpiochip0`; DIO1 is a GPIO edge event, not polled |
 | **Cap** | 5 V from the Zero's M5IOE1 `ext_5v_out` (`/sys/class/leds/ext_5v_out`); PI4IOE5V6408 at `0x43` on `/dev/i2c-1` arms the RF switch. The program does both at start |
@@ -94,7 +98,7 @@ and issue #155.
 | **Interface** | App from the launcher (`/usr/share/APPLaunch/bin/camillia`); data in `~/.config/camillia-app`; web config on port 18765 |
 | **Battery** | bq27220 gauge via `/sys/class/power_supply`; the OS handles low-battery shutdown |
 | **Wi-Fi** | The system connection (NetworkManager); updates come from M5Stack's app store, not OTA |
-| **Status** | On one unit the app runs from the launcher, receives and transmits on the Cap, and serves web config over the system Wi-Fi. GPS, battery and Bluetooth keyboards not yet confirmed in the app |
+| **Status** | Released in v6.7.0. On one unit the app runs from the launcher and from the `.deb`, receives and transmits on the Cap, serves web config over the system Wi-Fi, gets a GPS fix and reads the battery; the number-row keys were driven on the unit. Bluetooth keyboards and Esc twice for Home not yet confirmed on the unit |
 
 ### Elecrow CrowPanel Advance 3.5 (WIP)
 
