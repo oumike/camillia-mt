@@ -710,6 +710,28 @@ stock Cap LoRa-1262 and meshterm apps first: two programs cannot share the
 radio. Releases reach users through M5Stack's app store, so the firmware's OTA
 update settings are hidden on this board.
 
+**Package:** `linux/build.sh --deb` also writes
+`dist/camillia-cardputer-zero-<VERSION>_arm64.deb` (CPack, from
+`linux/CMakeLists.txt`). It installs the same files under
+`/usr/share/APPLaunch`; install it on the Zero with
+`sudo apt install ./camillia-cardputer-zero-<VERSION>_arm64.deb`, after
+`sudo ~/camillia/install.sh --remove` if a development install is there. The
+package version is `VERSION` without its `v`. `release.yml` builds it on an
+arm64 runner and attaches it to each release; `build.yml` builds it on every PR.
+
+**App Store:** the listing is `linux/packaging/app-builder.json` (package
+`camillia`, "Camillia for Meshtastic", share code `CMLA`), with its icon and
+320x170 screenshots under `linux/packaging/store/`. A store screenshot is a
+copy of `/dev/fb0` (RGB565, 640-byte stride) converted to PNG at 1:1.
+Publishing uses M5Stack's `czdev` from
+[AppBuilder](https://github.com/CardputerZero/AppBuilder): after a release, from
+`linux/packaging/`, run `czdev login` once, then
+`czdev publish --deb <path to the release .deb>`. It checks the package and the
+listing against the store's policy, uploads the .deb and opens a pull request
+on `CardputerZero/packages`. The first release of a package also needs a video
+of the app running on the device posted on that pull request.
+`czdev publish --meta-only` updates the listing alone.
+
 **Data** lives in `~/.config/camillia-app` (or `$CAMILLIA_HOME`): `nvs/` holds
 what Preferences keeps in NVS on other boards, `fs/` what they keep on SD or
 flash, and `app.log` the last run's log.
@@ -732,10 +754,11 @@ flash, and `app.log` the last run's log.
   **1** Home, **2** Chat, **3** DMs, **4** Nodes, **5** Tools, **6** Config,
   **0** Help.
 
-> **Hardware status** (one unit, issue #155): the app runs from the launcher,
-> receives and transmits on the Cap, and serves web config on :18765 over the
-> system Wi-Fi. Not yet confirmed on the unit: GPS position, battery readings,
-> Bluetooth keyboards, and the Esc-twice and number-row keys.
+> **Hardware status** (one unit, issue #155): the app runs from the launcher
+> and from the .deb, receives and transmits on the Cap, serves web config on
+> :18765 over the system Wi-Fi, gets a GPS fix and reads the battery. Not yet
+> confirmed on the unit: Bluetooth keyboards, and the Esc-twice and number-row
+> keys.
 
 ### Seeed Wio Tracker L2 (wio-tracker-l2)
 
