@@ -698,11 +698,13 @@
 
 // Boards whose keyboard or pad has all four arrows reaching Config as distinct
 // keys: there the grid moves like a grid, Up/Down a row and Left/Right a button.
+// The Cardputer ADV's ; . , / arrive as the four arrows outside typing
+// (remapCardputerUiKey).
 // The M9's pad folds Left/Right onto Up/Down elsewhere but not on the grid
 // (m9FourWaySelection), since walking it in reading order sent Down sideways.
 // Boards with only a wheel walk the grid in reading order (cfgMoveSelection()).
 #if defined(DEVICE_TDISPLAY_P4) || defined(DEVICE_TANMATSU) || defined(DEVICE_M9) \
-    || defined(DEVICE_CARDPUTER_ZERO)
+    || defined(DEVICE_CARDPUTER_ZERO) || defined(DEVICE_CARDPUTER_LORA_HAT)
 #define CFG_GRID_FOUR_WAY 1
 #else
 #define CFG_GRID_FOUR_WAY 0
@@ -710,10 +712,11 @@
 
 // Popups drawn as grids (font size, alert sound, message colour, Node/Message
 // Actions) and the slider with a checkbox under it are walked as drawn: Up/Down
-// a row, Left/Right a column. The M9 pad and the Tanmatsu's and CardputerZero's
-// arrows deliver all four directions; elsewhere these step through the flat
-// index.
-#if defined(DEVICE_M9) || defined(DEVICE_TANMATSU) || defined(DEVICE_CARDPUTER_ZERO)
+// a row, Left/Right a column. The M9 pad and the Tanmatsu's, Cardputer ADV's
+// and CardputerZero's arrows deliver all four directions; elsewhere these step
+// through the flat index.
+#if defined(DEVICE_M9) || defined(DEVICE_TANMATSU) || defined(DEVICE_CARDPUTER_ZERO) \
+    || defined(DEVICE_CARDPUTER_LORA_HAT)
 #define UI_ARROW_GRID_NAV 1
 #else
 #define UI_ARROW_GRID_NAV 0
