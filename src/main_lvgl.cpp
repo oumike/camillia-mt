@@ -16819,6 +16819,12 @@ static void refreshCfgModal() {
     const lv_font_t *cfgRowFont = &lv_font_montserrat_16;
     const int cfgPadTop = 14;
     const int cfgPadBottom = 14;
+#elif defined(DEVICE_CARDPUTER_ZERO)
+    // 320x170 behind small glass: the ADV's 10 px rows are hard to read on it,
+    // and the extra 35 px of height pays for bigger text and more space.
+    const lv_font_t *cfgRowFont = &lv_font_montserrat_14;
+    const int cfgPadTop = 4;
+    const int cfgPadBottom = 4;
 #elif UI_TOUCH_ONLY_PROFILE
     // Touch-only build: tall rows give a comfortable tap target. The action list
     // scrolls, so the extra height just means a bit more scrolling.
@@ -20291,19 +20297,25 @@ enum ChanEncType : uint8_t {
 #if UI_CARDPUTER_COMPACT
 // 240x135: eight 19px rows in two columns, plus title and hint, come to 125 of
 // the 129px the modal is allowed — the tightest fit of any board, so these
-// numbers have very little slack in them. The 320x170 Zero shares the rows and
-// only widens the modal.
+// numbers have very little slack in them.
 static constexpr int  kChanModalCols  = 2;
-#if defined(DEVICE_CARDPUTER_LORA_HAT)
-static constexpr int  kChanModalMaxW  = 236;
-#else
+#if defined(DEVICE_CARDPUTER_ZERO)
+// 320x170, 164px allowed: four 25px rows a column at montserrat_12 under a
+// montserrat_14 title come to ~160, the extra room going to legibility.
 static constexpr int  kChanModalMaxW  = 300;
-#endif
+static constexpr int  kChanModalPad   = 5;
+static constexpr int  kChanModalGap   = 4;
+static constexpr int  kChanModalRowH  = 25;
+static const lv_font_t *kChanModalTitleFont = &lv_font_montserrat_14;
+static const lv_font_t *kChanModalRowFont   = &lv_font_montserrat_12;
+#else
+static constexpr int  kChanModalMaxW  = 236;
 static constexpr int  kChanModalPad   = 3;
 static constexpr int  kChanModalGap   = 3;
 static constexpr int  kChanModalRowH  = 19;
 static const lv_font_t *kChanModalTitleFont = &lv_font_montserrat_12;
 static const lv_font_t *kChanModalRowFont   = &lv_font_montserrat_10;
+#endif
 // A half-width cell here is ~112px. "Encryption" plus its value does not fit,
 // and an ellipsised field name is worse than a short one.
 #define CHAN_EDIT_LABELS { TR_NOOP("Name"), TR_NOOP("Enc"), TR_NOOP("AEAD"), TR_NOOP("Save"), TR_NOOP("Loc"), TR_NOOP("Key"), TR_NOOP("Hops") }
