@@ -187,3 +187,18 @@ jobs:
       # addresses can drift — symbolicating a real crash against them is
       # misleading. Use the debug-symbols-<tag> artifact from the release.yml
       # run that published the firmware; those match the shipped image exactly.
+
+  cardputer-zero:
+    # The CardputerZero builds the shared firmware sources as a Linux app
+    # (linux/), so a change under src/ can break it without touching any
+    # PlatformIO env. Same command the release uses, natively on arm64.
+    name: CardputerZero .deb
+    needs: host-tests
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 45
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Build the .deb
+        run: linux/build.sh --deb

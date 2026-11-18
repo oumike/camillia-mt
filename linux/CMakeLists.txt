@@ -196,3 +196,32 @@ target_include_directories(camillia PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/app/shim
 target_compile_options(camillia PRIVATE $<$<COMPILE_LANGUAGE:CXX>:-std=gnu++17>)
 target_link_libraries(camillia PRIVATE lvgl_fw lgfx_fb radiolib mtcrypto
   ${MBEDTLS} ${MBEDX509} ${MBEDCRYPTO} Threads::Threads m)
+
+# The .deb (linux/build.sh --deb, `cpack -G DEB` in build/): what install/install.sh
+# puts on the device, under /usr/share/APPLaunch, for the CardputerZero App Store
+# (linux/packaging/app-builder.json) and the GitHub release.
+string(REGEX REPLACE "^v" "" APP_DEB_VERSION "${APP_VERSION}")
+set(ICON share/images/camillia.png)   # relative to /usr/share/APPLaunch, as the stock entries
+configure_file(install/camillia.desktop ${CMAKE_CURRENT_BINARY_DIR}/camillia.desktop @ONLY)
+install(TARGETS camillia RUNTIME DESTINATION share/APPLaunch/bin)
+install(PROGRAMS install/camillia-launch DESTINATION share/APPLaunch/bin)
+install(FILES ${CMAKE_CURRENT_BINARY_DIR}/camillia.desktop DESTINATION share/APPLaunch/applications)
+install(FILES install/camillia.png DESTINATION share/APPLaunch/share/images)
+install(FILES ${CMAKE_CURRENT_SOURCE_DIR}/../LICENSE DESTINATION share/doc/camillia RENAME copyright)
+set(CPACK_GENERATOR DEB)
+set(CPACK_PACKAGE_NAME camillia)
+set(CPACK_PACKAGE_VERSION "${APP_DEB_VERSION}")
+set(CPACK_PACKAGE_FILE_NAME "camillia-cardputer-zero-${APP_VERSION}_arm64")
+set(CPACK_PACKAGING_INSTALL_PREFIX /usr)
+set(CPACK_PACKAGE_CONTACT "oumike <michael.cojocari@gmail.com>")
+set(CPACK_PACKAGE_DESCRIPTION_SUMMARY "Camillia for Meshtastic: LoRa mesh messaging on the Cap LoRa-1262")
+set(CPACK_DEBIAN_PACKAGE_DESCRIPTION
+  "Meshtastic-compatible chat, direct messages, nodes, channels and GPS for the M5Stack\n CardputerZero with the Cap LoRa-1262, from the Camillia-MT firmware.")
+set(CPACK_DEBIAN_PACKAGE_SECTION APPLaunch)
+set(CPACK_DEBIAN_PACKAGE_ARCHITECTURE arm64)
+set(CPACK_DEBIAN_PACKAGE_HOMEPAGE "https://github.com/oumike/camillia-mt")
+set(CPACK_DEBIAN_PACKAGE_SHLIBDEPS ON)
+# Wi-Fi status comes from NetworkManager, keyboards from BlueZ; both ship on the device.
+set(CPACK_DEBIAN_PACKAGE_RECOMMENDS "network-manager, bluez")
+set(CPACK_STRIP_FILES ON)
+include(CPack)

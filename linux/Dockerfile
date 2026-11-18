@@ -2,5 +2,5 @@
 # as the device, so the binary links against the glibc it will run on.
 FROM debian:trixie
 RUN apt-get update \
- && apt-get install -y --no-install-recommends build-essential cmake git ca-certificates libmbedtls-dev \
+ && apt-get install -y --no-install-recommends build-essential cmake git ca-certificates libmbedtls-dev file \
  && rm -rf /var/lib/apt/lists/*
