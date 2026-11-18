@@ -1,23 +1,20 @@
 ### New
-- About 45 settings that used to be web-config-only can now be changed on the device, each in its own Config section: Radio & Identity, Connections, Location, Mesh Services, and Device & Firmware. This covers region, TX power, hop limit, device role, custom modem, RX boosted gain, MQTT broker and options, position and GPS intervals, fixed position, telemetry, neighborhood info, auto-favorite, LOS and weather servers, time zone, NTP server, power saving, update checks and serial debug logging. A choice opens a picker and a text setting opens a text box. Region, Custom Modem, RX Boosted Gain, Node ID from Key and Node ID Override reboot to apply, and the on/off ones ask first. Not on the Cardputer, whose web config has all of these settings.
-- Node ID Override can be set for the first time, on the device and in web config. It fixes this node's ID (e.g. `!1a2b3c4d`) and takes priority over both the default ID and Node ID from Key. Leave it blank to turn it off. Changing it reboots the device. A warning comes first: other nodes will see a new node, existing DMs and favorites stay with the old ID, and two nodes with the same ID disrupt each other on the mesh. On the Cardputer it is in web config only.
-- Several config backups can be kept on the card. When the device knows the date and time, Export asks whether to replace `config.yaml` or write a new dated backup beside it (e.g. `config-20261115-143205.yaml`). If the time isn't set, Export writes `config.yaml` as before. Applies to boards with SD or internal storage.
-- When there is more than one backup on the card, Import lists them (`config.yaml` first, then the dated ones newest first) and asks again by file name before importing and rebooting.
-- Web config gains GPS standby, RX boosted gain, battery calibration, chat colors and my message color, on all boards. It also gains a keyboard light on/off switch on the T-Deck Pro and T-Display P4.
-- The Cardputer's web config now covers every setting, including Node ID from Key, signed packets and serial debug logging.
+- **M5Stack CardputerZero + Cap LoRa-1262 support.** Camillia runs as an app in the CardputerZero's launcher rather than as a flashed firmware image. It has the same screens as the other boards: chat, DMs, nodes, channels, Live, Tools, Config and the Home dashboard. Install it from the M5Stack App Store (share code `CMLA`) or install the `.deb` attached to this release with `sudo apt install ./camillia-cardputer-zero-<version>_arm64.deb`. Close the stock Cap LoRa-1262 and meshterm apps first, because only one app can use the radio at a time.
+- CardputerZero: the radio runs only while the app is open.
+- CardputerZero: Camillia uses the system's own Wi-Fi connection and shows its status. There is no Wi-Fi picker and no Wi-Fi step during setup.
+- CardputerZero: Bluetooth keyboards pair through the system's Bluetooth, from the usual Config row.
+- CardputerZero: web config runs on port 18765 and has the same pages as on the other boards. Chat and Bluetooth keep working while it is open.
+- CardputerZero: GPS from the cap's L76K module and battery level from the system fuel gauge.
+- CardputerZero: updates come from the M5Stack App Store, so the in-app update check points there.
+- CardputerZero: press Esc twice to go Home, or hold Esc for 4 seconds to quit to the launcher. Outside text entry, the number row works as shortcut keys: 1 Home, 2 Chat, 3 DMs, 4 Nodes, 5 Tools, 6 Config, 0 Help.
+- CardputerZero: larger text and taller rows in Config lists and channel grids, and a taller screen header with bigger text on every screen except Home.
 
 ### Changed
-- Config backups now also carry the Node ID Override. Restoring a backup that has one onto a second device gives both devices the same ID, the same caution that already applies to the exported private key.
-- New exports include the WiFi on/off switch, a custom My Message Color, the Node ID Override and the stored custom modem settings. Older firmware ignores these additions, so a new export still imports on an older build.
-- Changing the web config idle timeout on the device now applies to the web config session already running.
-- The LOS elevation server and weather server can now be set on the device (Config → Mesh Services) or in web config under Device, on both the full and the lite page.
-- Unused settings have been removed: Bluetooth phone pairing (enabled/mode/PIN), compass north-up, flip screen, canned messages, chat spacing, light-sleep/minimum-wake seconds, MQTT TLS and the notify LED master switch. The light-sleep/minimum-wake fields, MQTT TLS and chat spacing no longer appear in web config.
-- Older config exports still import. Removed settings are ignored, except `notifyLed: false`, which still turns both notify LED colors off.
-- No config migration is needed. Existing devices keep all their settings after updating.
+- Export Config: "Append date" is now a checkbox instead of a slider (all boards).
+- Developers with their own build environments that list `config_io.cpp` must also add the new `src/mesh_channel_plan.cpp`.
+- Three new on-screen text items are in English only for now and have not been translated yet.
 
 ### Fixed
-- Restoring a backup now restores the WiFi on/off switch. Before, WiFi could stay off after a restore, and with it any MQTT setup from the backup.
-- A custom My Message Color is now kept through export and import. Before, it came back as the default color.
-- Exporting while a modem preset was active no longer overwrites your saved custom modem settings when you import the backup.
+- Cardputer ADV: up, down, left and right now move as expected in the Config grid and in grid popups. Before, Up could move right.
 
-Pull request: #154
+Pull request: #156
