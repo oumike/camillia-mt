@@ -63842,7 +63842,14 @@ static void buildUi() {
     const int panelMargin = 2;
     const int headerTop = panelMargin;
     const int chatGap = 0;
+#if defined(DEVICE_CARDPUTER_ZERO)
+    // 35 px more height than the ADV and smaller-looking glass: a 26 px bar
+    // takes the 12 px faces (>= 25 below) for the name, clock and battery.
+    // Every screen's header copies this one (s_chatHdrGeom).
+    const int chatHeaderH = 26;
+#else
     const int chatHeaderH = 22;
+#endif
 #if HAS_NAV_BAR_TOGGLE
     // The bar costs this board more than any other: 28 px of a 135 px panel
     // against the 12 the hint strip takes, out of the shortest message list of
