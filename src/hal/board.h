@@ -41,6 +41,8 @@
 //   DEVICE_CROWPANEL_50         Elecrow CrowPanel Advance 5.0" (800x480 RGB, SX1262)
 //   DEVICE_TANMATSU             Nicolai Electronics Tanmatsu (ESP32-P4, ST7701
 //                               MIPI-DSI, LoRa via the ESP32-C6)
+//   DEVICE_CARDPUTER_ZERO       M5Stack CardputerZero + LoRa-1262 Cap (Linux,
+//                               headless; built by linux/, not PlatformIO)
 //
 // DEVICE_CROWPANEL is defined for both CrowPanels: what they share -- the
 // touch-first UI and its sizing -- keys on it, and what differs (pins, panel,
@@ -80,11 +82,14 @@
 #  include "hw_crowpanel_50.h"
 #elif defined(DEVICE_TANMATSU)
 #  include "hw_tanmatsu.h"
+#elif defined(DEVICE_CARDPUTER_ZERO)
+#  include "hw_cardputer_zero.h"
 #else
 #  error "No DEVICE_* build flag set. Define one of: DEVICE_TDECK, DEVICE_TDECK_PRO, \
 DEVICE_TLORA_PAGER_TFT, DEVICE_CARDPUTER_LORA_HAT, DEVICE_HELTEC_V4_EXPANSION, \
 DEVICE_HELTEC_R8, DEVICE_MESH_DECK, DEVICE_M9, DEVICE_WIO_TRACKER_L2, \
-DEVICE_TDISPLAY_P4, DEVICE_CROWPANEL_35, DEVICE_CROWPANEL_50, DEVICE_TANMATSU"
+DEVICE_TDISPLAY_P4, DEVICE_CROWPANEL_35, DEVICE_CROWPANEL_50, DEVICE_TANMATSU, \
+DEVICE_CARDPUTER_ZERO"
 #endif
 
 // ESP32-P4 boards share the Arduino 3.x / ESP-IDF 5.5 platform, ESP-Hosted
@@ -92,6 +97,10 @@ DEVICE_TDISPLAY_P4, DEVICE_CROWPANEL_35, DEVICE_CROWPANEL_50, DEVICE_TANMATSU"
 // on their own DEVICE_* macro.
 #if defined(DEVICE_TDISPLAY_P4) || defined(DEVICE_TANMATSU)
 #  define PLATFORM_ESP32P4 1
+#endif
+
+#if defined(DEVICE_CARDPUTER_ZERO)
+#  define PLATFORM_LINUX 1
 #endif
 
 #if defined(DEVICE_CROWPANEL_35) || defined(DEVICE_CROWPANEL_50)
@@ -134,6 +143,10 @@ DEVICE_TDISPLAY_P4, DEVICE_CROWPANEL_35, DEVICE_CROWPANEL_50, DEVICE_TANMATSU"
 // On hardware 3 (wadamesh's 270 degrees) came out upside down, so this is the
 // opposite turn.
 #  define TFT_ROTATION_DEFAULT 1
+#elif defined(DEVICE_CARDPUTER_ZERO)
+// The kernel framebuffer is already landscape (320x170); LovyanGFX's Panel_fb
+// is configured that size, so no turn is applied on top.
+#  define TFT_ROTATION_DEFAULT 0
 #elif DEVICE_UI_VERTICAL
 #  define TFT_ROTATION_DEFAULT 0
 #else
@@ -215,6 +228,18 @@ DEVICE_TDISPLAY_P4, DEVICE_CROWPANEL_35, DEVICE_CROWPANEL_50, DEVICE_TANMATSU"
 #  define TFT_ROTATION_PORTRAIT_180  (((TFT_ROTATION_PORTRAIT) + 2) & 3)
 #endif
 
+// ── Compact Cardputer UI profile ────────────────────────────────────────────
+// Short, keyboard-only landscape panels with a Cardputer keyboard: the
+// Cardputer ADV (240x135) and the CardputerZero (320x170). The generic layouts
+// assume a 240px-tall panel and run off the bottom of these, so they take the
+// compact layouts and key-driven navigation instead. Layout only: M5Cardputer
+// hardware stays on DEVICE_CARDPUTER_LORA_HAT.
+#if defined(DEVICE_CARDPUTER_LORA_HAT) || defined(DEVICE_CARDPUTER_ZERO)
+#  define UI_CARDPUTER_COMPACT 1
+#else
+#  define UI_CARDPUTER_COMPACT 0
+#endif
+
 // ── Channel list presentation ────────────────────────────────────────────────
 // Two layouts exist for the main screen. Boards with this set render channels
 // as an overlay dropdown that appears on demand, leaving the full width to the
@@ -224,7 +249,7 @@ DEVICE_TDISPLAY_P4, DEVICE_CROWPANEL_35, DEVICE_CROWPANEL_50, DEVICE_TANMATSU"
 // This used to be spelled out longhand as the same three-device condition at a
 // dozen call sites, which made adding a board a dozen chances to miss one.
 #if defined(DEVICE_TDECK) || defined(DEVICE_TDECK_PRO) || defined(DEVICE_HELTEC_V4_EXPANSION) \
-    || defined(DEVICE_CARDPUTER_LORA_HAT) || defined(DEVICE_MESH_DECK) \
+    || UI_CARDPUTER_COMPACT || defined(DEVICE_MESH_DECK) \
     || defined(DEVICE_M9) || defined(DEVICE_WIO_TRACKER_L2) \
     || defined(DEVICE_TDISPLAY_P4) || defined(DEVICE_CROWPANEL) \
     || defined(DEVICE_TANMATSU)
@@ -448,8 +473,11 @@ DEVICE_TDISPLAY_P4, DEVICE_CROWPANEL_35, DEVICE_CROWPANEL_50, DEVICE_TANMATSU"
 // board-specific — this macro plus a build_src_filter entry is the entire gate
 // — but the NimBLE stack costs 30-40 KB of internal DRAM while it is running,
 // so BLE remains an explicit per-board opt-in.
+//
+// The CardputerZero pairs through BlueZ instead (linux/app/ble_keyboard_linux.cpp),
+// behind the same API; the scan list there can include Classic keyboards too.
 #if defined(DEVICE_HELTEC_V4_EXPANSION) || defined(DEVICE_WIO_TRACKER_L2) \
-    || defined(DEVICE_CROWPANEL)
+    || defined(DEVICE_CROWPANEL) || defined(DEVICE_CARDPUTER_ZERO)
 #  define HAS_BLE_KEYBOARD 1
 #else
 #  define HAS_BLE_KEYBOARD 0

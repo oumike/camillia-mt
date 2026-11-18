@@ -64,6 +64,8 @@ jobs:
     runs-on: ubuntu-latest
     environment: release
     timeout-minutes: 120
+    outputs:
+      tag: ${{ steps.cut.outputs.tag }}
     if: >-
       github.ref == 'refs/heads/main' ||
       (github.ref == 'refs/heads/alpha' && inputs.channel == 'alpha')
@@ -231,3 +233,27 @@ jobs:
       - name: Remove the signing key
         if: always()
         run: rm -f "$RUNNER_TEMP/ota_signing_key.pem" ota_signing_key.pem
+
+  cardputer-zero:
+    # The CardputerZero runs Camillia as a Linux app, not an ESP32 image: build
+    # its .deb (linux/build.sh --deb) natively on arm64 from the release tag and
+    # attach it to the release the job above published. Nothing here is signed;
+    # the device installs it from the CardputerZero App Store or by hand.
+    name: CardputerZero .deb
+    needs: release
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 45
+    steps:
+      - name: Checkout the release tag
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.release.outputs.tag }}
+
+      - name: Build the .deb
+        run: linux/build.sh --deb
+
+      - name: Attach it to the release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ needs.release.outputs.tag }}
+        run: gh release upload "$TAG" dist/camillia-cardputer-zero-*_arm64.deb --clobber

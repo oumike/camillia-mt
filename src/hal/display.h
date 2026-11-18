@@ -38,6 +38,8 @@
 #include "tdeck_pro_display.h"
 #elif defined(DEVICE_CROWPANEL_50)
 #include "crowpanel_50_display.h"
+#elif defined(DEVICE_CARDPUTER_ZERO)
+#include "cardputer_zero_display.h"
 #else
 
 #if defined(DEVICE_HELTEC_V4_EXPANSION) && HAS_TOUCH

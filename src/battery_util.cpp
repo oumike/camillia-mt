@@ -408,6 +408,74 @@ int batteryReadMeshDeckPct() {
 } // namespace
 #endif
 
+#if defined(DEVICE_CARDPUTER_ZERO)
+#include <dirent.h>
+#include <stdio.h>
+#include <string.h>
+namespace {
+// The CardputerZero's BQ27220 belongs to the kernel (bq27220 power_supply
+// driver), so it is read through sysfs rather than over I2C. The first
+// power_supply of type Battery is used; the name has been bq27220-0.
+bool zeroBatteryDir(char *out, size_t outLen) {
+    static char cached[96] = "";
+    if (cached[0]) { snprintf(out, outLen, "%s", cached); return true; }
+    DIR *d = opendir("/sys/class/power_supply");
+    if (!d) return false;
+    bool found = false;
+    while (struct dirent *e = readdir(d)) {
+        if (e->d_name[0] == '.') continue;
+        char path[160], type[16] = "";
+        snprintf(path, sizeof(path), "/sys/class/power_supply/%s/type", e->d_name);
+        if (FILE *f = fopen(path, "r")) {
+            if (!fgets(type, sizeof(type), f)) type[0] = '\0';
+            fclose(f);
+        }
+        if (strncmp(type, "Battery", 7) == 0) {
+            snprintf(cached, sizeof(cached), "/sys/class/power_supply/%s", e->d_name);
+            found = true;
+            break;
+        }
+    }
+    closedir(d);
+    if (found) snprintf(out, outLen, "%s", cached);
+    return found;
+}
+
+bool zeroBatteryRead(const char *attr, char *buf, size_t bufLen) {
+    char dir[96];
+    if (!zeroBatteryDir(dir, sizeof(dir))) return false;
+    char path[160];
+    snprintf(path, sizeof(path), "%s/%s", dir, attr);
+    FILE *f = fopen(path, "r");
+    if (!f) return false;
+    const bool ok = fgets(buf, (int)bufLen, f) != nullptr;
+    fclose(f);
+    return ok;
+}
+
+float batteryReadZeroVolts() {
+    char buf[24];
+    if (!zeroBatteryRead("voltage_now", buf, sizeof(buf))) return 0.0f;
+    return (float)atol(buf) / 1000000.0f;   // microvolts
+}
+
+int batteryReadZeroPct() {
+    char buf[16];
+    if (!zeroBatteryRead("capacity", buf, sizeof(buf))) return -1;
+    const int pct = atoi(buf);
+    return pct < 0 ? 0 : (pct > 100 ? 100 : pct);
+}
+
+// "Discharging" is the only status that means running from the cell; Charging,
+// Full and "Not charging" all mean USB is in.
+bool batteryZeroExternalPowerPresent(bool &known) {
+    char buf[24];
+    known = zeroBatteryRead("status", buf, sizeof(buf));
+    return known && strncmp(buf, "Discharging", 11) != 0;
+}
+} // namespace
+#endif
+
 #if defined(DEVICE_HELTEC_V4_EXPANSION) && (BATT_SENSE_ENABLE_PIN >= 0)
 static int  sHeltecSenseLevel = BATT_SENSE_ENABLE_LEVEL;
 static bool sHeltecSenseLocked = false;
@@ -613,6 +681,8 @@ static float batteryReadVoltageHw() {
     return batteryReadMeshDeckVolts();
 #elif defined(DEVICE_TDISPLAY_P4)
     return batteryReadP4GaugeVolts();
+#elif defined(DEVICE_CARDPUTER_ZERO)
+    return batteryReadZeroVolts();
 #elif defined(DEVICE_TANMATSU)
     // The coprocessor samples the cell continuously; 0 means no battery.
     return tanmatsuCoprocBatteryMv() / 1000.0f;
@@ -728,6 +798,8 @@ bool batteryExternalPowerPresent(bool *known) {
     }
 #elif defined(DEVICE_TDISPLAY_P4)
     present = batteryP4ExternalPowerPresent(haveAnswer);
+#elif defined(DEVICE_CARDPUTER_ZERO)
+    present = batteryZeroExternalPowerPresent(haveAnswer);
 #elif defined(DEVICE_TANMATSU)
     bool battery = false, usb = false, charging = false;
     if (tanmatsuCoprocChargeStatus(&battery, &usb, &charging)) {
@@ -792,6 +864,13 @@ uint8_t batteryReadPercent() {
         if (gaugePct >= 0) return (uint8_t)gaugePct;
     }
     // Trimmed, or gauge silent: the shared voltage-curve estimate.
+#elif defined(DEVICE_CARDPUTER_ZERO)
+    // The kernel gauge's state of charge, for the Mesh Deck's reason: coulomb
+    // counting, honest under load. Same rule on the user's trim.
+    if (sBatteryCalTrimScale >= 0.9999f && sBatteryCalTrimScale <= 1.0001f) {
+        const int gaugePct = batteryReadZeroPct();
+        if (gaugePct >= 0) return (uint8_t)gaugePct;
+    }
 #elif defined(DEVICE_TDISPLAY_P4)
     // The keyboard expansion holds a 21700 battery board (two cells behind
     // their own protection), and its pack reaches the main board through the

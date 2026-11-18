@@ -92,6 +92,10 @@ static bool pagerPrimeLoRaRail(bool invertDirSense) {
 #include "hal/tdisplay_p4_io.h"
 #endif
 
+#if defined(DEVICE_CARDPUTER_ZERO)
+#include "hal/linux_board.h"
+#endif
+
 volatile bool MeshRadio::_rxFlag = false;
 MeshRadio Radio;
 static constexpr bool kVerboseRadioIo = false;
@@ -356,6 +360,12 @@ bool MeshRadio::init(uint8_t txPower, bool rxBoostedGain) {
         ioexp.digitalWrite(0, true);
         Serial.println("[radio] enabled Cardputer Cap LoRa-1262 IO expander");
     }
+#elif defined(DEVICE_CARDPUTER_ZERO)
+    if (!linuxCapPowerOn() || !linuxCapArmRfSwitch()) {
+        Serial.println("[radio] CardputerZero cap bring-up failed");
+        return false;
+    }
+    Serial.println("[radio] enabled CardputerZero Cap LoRa-1262 power and RF switch");
 #endif
 
 #if (LORA_FEM_POWER_PIN >= 0)
@@ -417,6 +427,8 @@ bool MeshRadio::init(uint8_t txPower, bool rxBoostedGain) {
                           LORA_CS, LORA_DIO1, LORA_RST, LORA_BUSY);
 #elif defined(DEVICE_TANMATSU)
             Serial.println("[radio] target=tanmatsu (SX1262 on the ESP32-C6; check the C6 runs the stock Tanmatsu radio firmware)");
+#elif defined(DEVICE_CARDPUTER_ZERO)
+            Serial.println("[radio] target=cardputer-zero (spidev0.1, DIO1=23 RST=26 BUSY=22; cap power via ext_5v_out)");
 #elif defined(DEVICE_TDISPLAY_P4)
             Serial.printf("[radio] target=p4-amoled-%s (shared pins: CS%d IRQ=XL9535 RST=XL9535 BUSY%d)\n",
                           MESH_RADIO_IS_LR2021 ? "lr2021" : "sx1262",

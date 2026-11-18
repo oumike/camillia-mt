@@ -30,6 +30,7 @@ Meshtastic-compatible mesh radio firmware for ESP32 handheld LoRa devices.
 - [LilyGo T-Lora Pager TFT](https://lilygo.cc/products/t-lora-pager) — ESP32-S3, SX1262 LoRa, 480x222 TFT, physical keyboard, roller wheel + click, GPS
 - [LilyGo T-Display P4](https://lilygo.cc/products/t-display-p4) — ESP32-P4, SX1262 or LR2021 LoRa, 568x1232 RM69A10 AMOLED, GT9895 touch, ESP32-C6 wireless coprocessor, optional keyboard expansion
 - [M5Stack Cardputer](https://shop.m5stack.com/products/m5stack-cardputer-kit-w-m5stamps3) + Cap LoRa/GPS module
+- M5Stack CardputerZero + Cap LoRa-1262 — Raspberry Pi CM0 running Debian, 320x170 display, QWERTY keyboard; Camillia runs as a launcher app, not a firmware image
 - [Heltec](https://heltec.org/) WiFi LoRa 32 V4 + TFT expansion kit (Heltec V4 expansion profile)
 - [Heltec](https://heltec.org/) WiFi LoRa 32 V4-R8 + Expansion Kit V2 — ESP32-S3, SX1262 LoRa, 8 MB PSRAM, 320x240 touch TFT, GPS, microSD
 - [Attaky Mesh Deck](https://shop.attaky.com/) — ESP32-S3, SX1262 LoRa, 320x240 touch display, 48-key QWERTY, D-pad, GPS
@@ -48,6 +49,7 @@ The T-Display P4's ESP32-C6 companion firmware is flashed through its dedicated
 - LilyGo T-Deck Pro (`tdeck-pro`): e-paper touch UI with a fixed black-on-white, outline-only interface, T-Deck-compatible keyboard shortcuts, microSD config import/export, GPS, and full mesh UI support. Initial port; physical display/touch/radio validation is pending.
 - LilyGo T-Lora Pager TFT (`tlora-pager-tft`): keyboard + roller wheel input, microSD config import/export, GPS, and full mesh UI support (channels, DMs, Live, map, config, web config).
 - M5Stack Cardputer + Cap LoRa/GPS (`cardputer-cap`): keyboard-driven input/navigation, microSD config import/export, GPS, and full mesh UI support (channels, DMs, Live, map, config, web config).
+- M5Stack CardputerZero + Cap LoRa-1262 (`linux/`, a `.deb`): the Cardputer interface as a Linux app from the Zero's launcher, installed from the CardputerZero App Store (share code `CMLA`) or the `.deb` on each release. Uses the system's Wi-Fi, Bluetooth keyboards, GPS and battery gauge; web config on port 18765; the radio runs while the app is open. See [docs/BUILD.md](docs/BUILD.md#m5stack-cardputerzero-linux).
 - Heltec WiFi LoRa 32 V4 + TFT expansion kit (`heltec-v4`): touch-first UI in either orientation — landscape or portrait is a setting on the device (Config → Orientation), not a separate build. GPS and full mesh UI support (channels, DMs, Live, map, config, web config); no microSD slot, so config, DM history and the node archive live in internal flash.
 - Heltec WiFi LoRa 32 V4-R8 + Expansion Kit V2 (`heltec-r8`): as above, plus a working microSD slot. 8 MB octal PSRAM. Untested on hardware — see docs/BUILD.md.
 - Attaky Mesh Deck (`mesh-deck`): keyboard + D-pad + touch input, GPS, and full mesh UI support; the keyboard is optional (detected at boot and on hot-plug; without it the touch interface and on-screen keyboards take over); no microSD — config, DM history and the node archive live in internal flash.

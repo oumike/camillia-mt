@@ -684,6 +684,82 @@ once more` on a fresh checkout, the library had not been fetched yet; build agai
 > **Hardware verification pending.** Display init, rotation, keyboard map, LoRa
 > RPC, Wi-Fi, SD and battery readings have not been checked on a unit.
 
+### M5Stack CardputerZero (Linux)
+
+The CardputerZero runs Debian on a Raspberry Pi CM0, so it gets a Linux program
+rather than a firmware image, and nothing is flashed. `linux/` compiles the
+shared firmware (`src/main_lvgl.cpp` and the modules it uses) for Linux as
+`DEVICE_CARDPUTER_ZERO` with `PLATFORM_LINUX` set, over stand-ins for the
+Arduino and ESP-IDF APIs in `linux/app/`. The result, `camillia`, is the same
+interface as the Cardputer ADV build, started from the Zero's launcher.
+
+**Build** (Docker, any host that can run `linux/arm64` containers; native on
+Apple Silicon): `linux/build.sh`. It builds a Debian 13 image, fetches the
+library versions `platformio.ini` pins, and writes `linux/build/camillia` (and a
+stripped copy for the device).
+
+**Install:** `linux/build.sh --deploy user@host --install` copies the app and
+`linux/install/` to `~/camillia/` on the Zero and runs
+`sudo ~/camillia/install.sh`, which installs the app, its launcher wrapper,
+icon and `camillia.desktop` into `/usr/share/APPLaunch` and restarts the
+launcher. It also removes the radio daemon service earlier builds installed.
+The user who starts the app needs the `spi`, `gpio`, `i2c`, `dialout`, `video`
+and `input` groups; the installer warns about any that are missing.
+`sudo ~/camillia/install.sh --remove` undoes it and keeps the data. Close the
+stock Cap LoRa-1262 and meshterm apps first: two programs cannot share the
+radio. Releases reach users through M5Stack's app store, so the firmware's OTA
+update settings are hidden on this board.
+
+**Package:** `linux/build.sh --deb` also writes
+`dist/camillia-cardputer-zero-<VERSION>_arm64.deb` (CPack, from
+`linux/CMakeLists.txt`). It installs the same files under
+`/usr/share/APPLaunch`; install it on the Zero with
+`sudo apt install ./camillia-cardputer-zero-<VERSION>_arm64.deb`, after
+`sudo ~/camillia/install.sh --remove` if a development install is there. The
+package version is `VERSION` without its `v`. `release.yml` builds it on an
+arm64 runner and attaches it to each release; `build.yml` builds it on every PR.
+
+**App Store:** the listing is `linux/packaging/app-builder.json` (package
+`camillia`, "Camillia for Meshtastic", share code `CMLA`), with its icon and
+320x170 screenshots under `linux/packaging/store/`. A store screenshot is a
+copy of `/dev/fb0` (RGB565, 640-byte stride) converted to PNG at 1:1.
+Publishing uses M5Stack's `czdev` from
+[AppBuilder](https://github.com/CardputerZero/AppBuilder): after a release, from
+`linux/packaging/`, run `czdev login` once, then
+`czdev publish --deb <path to the release .deb>`. It checks the package and the
+listing against the store's policy, uploads the .deb and opens a pull request
+on `CardputerZero/packages`. The first release of a package also needs a video
+of the app running on the device posted on that pull request.
+`czdev publish --meta-only` updates the listing alone.
+
+**Data** lives in `~/.config/camillia-app` (or `$CAMILLIA_HOME`): `nvs/` holds
+what Preferences keeps in NVS on other boards, `fs/` what they keep on SD or
+flash, and `app.log` the last run's log.
+
+**What the system provides:**
+
+- **Wi-Fi** is the Zero's own connection (NetworkManager); the firmware's Wi-Fi
+  switch only decides whether Camillia uses it.
+- **Web config** is served on port **18765**, not 80, alongside chat.
+- **Bluetooth keyboards** pair through BlueZ, from the usual config row.
+- **GPS** is the Cap's L76K on `/dev/serial0` at 115200.
+- **Battery** percent, voltage and charging come from the `bq27220` gauge in
+  `/sys/class/power_supply`; the OS handles low-battery shutdown.
+
+**Keys** are the Cardputer ADV's, plus:
+
+- **Esc** goes back; **Esc twice** quickly goes Home; **Esc held 4 s** quits
+  to the launcher.
+- Outside text entry the number row works like the T-Display P4's F-keys:
+  **1** Home, **2** Chat, **3** DMs, **4** Nodes, **5** Tools, **6** Config,
+  **0** Help.
+
+> **Hardware status** (one unit, issue #155): the app runs from the launcher
+> and from the .deb, receives and transmits on the Cap, serves web config on
+> :18765 over the system Wi-Fi, gets a GPS fix and reads the battery. Not yet
+> confirmed on the unit: Bluetooth keyboards, and the Esc-twice and number-row
+> keys.
+
 ### Seeed Wio Tracker L2 (wio-tracker-l2)
 
 - **Its own partition table**, `partitions_16mb_wio.csv`: 6 MB app slots rather

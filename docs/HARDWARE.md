@@ -74,6 +74,28 @@ and its [`src/hal/hw_*.h`](../src/hal/) pin map.
 Flashing Camillia replaces the badge.team launcher. To go back, flash the
 launcher again from <https://tanmatsu.cloud>.
 
+### M5Stack CardputerZero + Cap LoRa-1262 (Linux, WIP)
+
+The CardputerZero is a Linux handheld, not an ESP32, so it does not run the
+firmware image. `linux/` compiles the shared firmware for Linux as one app,
+`camillia`, over stand-ins for the Arduino and ESP-IDF APIs, and it is started
+from the Zero's launcher. See [BUILD.md](BUILD.md#m5stack-cardputerzero-linux)
+and issue #155.
+
+| Spec | CardputerZero |
+| --- | --- |
+| **Build** | `linux/build.sh` (Docker, Debian 13 arm64); not a PlatformIO env |
+| **Host** | Raspberry Pi CM0 (RP3A0, 4x Cortex-A53, 512 MB), Debian 13, kernel 6.18 |
+| **LoRa** | SX1262 on the Cap LoRa-1262: `/dev/spidev0.1` (CE1), DIO1 GPIO23, RST GPIO26, BUSY GPIO22 on `gpiochip0`; DIO1 is a GPIO edge event, not polled |
+| **Cap** | 5 V from the Zero's M5IOE1 `ext_5v_out` (`/sys/class/leds/ext_5v_out`); PI4IOE5V6408 at `0x43` on `/dev/i2c-1` arms the RF switch. The program does both at start |
+| **GPS** | L76K on `/dev/serial0` at 115200 (verified sending NMEA); read by the firmware's GPS module through a serial stand-in |
+| **Display** | ST7789 320x170 at `/dev/fb_lcd` (fbdev), drawn by the app with LVGL |
+| **Keyboard** | TCA8418 matrix as a Linux evdev device (`/dev/input/by-path/platform-3f804000.i2c-event`), read without grabbing so the launcher keeps Home; symbols from `/usr/share/keymaps/tca8418_keypad_m5stack_keymap.map`. Bluetooth keyboards through BlueZ |
+| **Interface** | App from the launcher (`/usr/share/APPLaunch/bin/camillia`); data in `~/.config/camillia-app`; web config on port 18765 |
+| **Battery** | bq27220 gauge via `/sys/class/power_supply`; the OS handles low-battery shutdown |
+| **Wi-Fi** | The system connection (NetworkManager); updates come from M5Stack's app store, not OTA |
+| **Status** | On one unit the app runs from the launcher, receives and transmits on the Cap, and serves web config over the system Wi-Fi. GPS, battery and Bluetooth keyboards not yet confirmed in the app |
+
 ### Elecrow CrowPanel Advance 3.5 (WIP)
 
 `crowpanel-35` targets the ESP32-S3-WROOM-1-N16R8 bundle with an ILI9488
@@ -228,6 +250,7 @@ Each board's full pin map and feature flags (`HAS_KEYBOARD`, `HAS_TOUCH`, `HAS_G
 | Nicolai Electronics Tanmatsu | [`src/hal/hw_tanmatsu.h`](../src/hal/hw_tanmatsu.h) |
 | Elecrow CrowPanel Advance 3.5" | [`src/hal/hw_crowpanel_35.h`](../src/hal/hw_crowpanel_35.h) |
 | Elecrow CrowPanel Advance 5.0" | [`src/hal/hw_crowpanel_50.h`](../src/hal/hw_crowpanel_50.h) |
+| M5Stack CardputerZero + LoRa-1262 Cap (Linux) | [`src/hal/hw_cardputer_zero.h`](../src/hal/hw_cardputer_zero.h) |
 
 ## Sources
 
@@ -239,6 +262,7 @@ Manufacturer spec pages used to verify the table above:
   `t-deck-pro` / `t-deck-pro-v1_1` variants
 - LilyGo T-LoRa Pager — <https://lilygo.cc/products/t-lora-pager> and <https://wiki.lilygo.cc/products/t-lora-series/t-lora-pager/>
 - M5Stack Cardputer — <https://shop.m5stack.com/products/m5stack-cardputer-kit-w-m5stamps3>
+- M5Stack CardputerZero — <https://docs.m5stack.com/en/core/CardputerZero> and its schematic, with the Cap LoRa-1262 pin table at <https://docs.m5stack.com/en/cap/Cap_LoRa-1262>. Pins matched by EXT header position and verified on a unit (issue #155).
 - Heltec WiFi LoRa 32 V4 — <https://heltec.org/project/wifi-lora-32-v4/> and <https://wiki.heltec.org/docs/devices/open-source-hardware/esp32-series/lora-32/wifi-lora-32-v4/>
 - Elecrow ThinkNode M9 — <https://www.elecrow.com/thinknode-m9-meshcore-communication-terminal-with-full-keyboard-2-4inch-lcd-esp32-s3-lr1110-gps-2300mah.html>. The pin map itself came from the M9 V1.0 schematic rather than this page.
 - Elecrow CrowPanel Advance 3.5" — <https://www.elecrow.com/crowpanel-advance-3-5-hmi-esp32-ai-display-for-meshtastic-320x240-ips-artificial-intelligent-screen.html>. Pins from Meshtastic `variants/esp32s3/elecrow_panel` (`CROW_SELECT == 1`) and its `elecrow-adv-35-tft` env; SD wiring cross-checked against [Elecrow's V1.0 schematic](https://github.com/Elecrow-RD/CrowPanel-Advance-HMI-ESP32-AI-Display/blob/master/3.5/schematic/ESP32%20Display%203.5%20inch%20V1.0.sch).

@@ -35,7 +35,7 @@ EmojiSlot s_slots[] = {
     { &lv_font_montserrat_40, 44, {}, nullptr, false },
     { &lv_font_montserrat_48, 52, {}, nullptr, false },
 #else
-#if !(defined(DEVICE_CARDPUTER_LORA_HAT) || defined(DEVICE_TLORA_PAGER_TFT) \
+#if !(UI_CARDPUTER_COMPACT || defined(DEVICE_TLORA_PAGER_TFT) \
       || defined(DEVICE_TDECK_PRO) || defined(DEVICE_TDISPLAY_P4))
     // Only relative 10 px bases and the CrowPanel draw Small at 8 px.
     { &lv_font_montserrat_8, 10, {}, nullptr, false },

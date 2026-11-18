@@ -20,7 +20,7 @@
 // still gets DEVICE_TDECK forced on underneath it, and because board.h tests
 // DEVICE_TDECK first, the build then silently compiles against the T-Deck pin
 // map — the real target's header is never included at all.
-#if !defined(DEVICE_TDECK) && !defined(DEVICE_TDECK_PRO) && !defined(DEVICE_TLORA_PAGER_TFT) && !defined(DEVICE_CARDPUTER_LORA_HAT) && !defined(DEVICE_HELTEC_V4_EXPANSION) && !defined(DEVICE_MESH_DECK) && !defined(DEVICE_M9) && !defined(DEVICE_WIO_TRACKER_L2) && !defined(DEVICE_TDISPLAY_P4) && !defined(DEVICE_CROWPANEL_35) && !defined(DEVICE_CROWPANEL_50) && !defined(DEVICE_TANMATSU)
+#if !defined(DEVICE_TDECK) && !defined(DEVICE_TDECK_PRO) && !defined(DEVICE_TLORA_PAGER_TFT) && !defined(DEVICE_CARDPUTER_LORA_HAT) && !defined(DEVICE_HELTEC_V4_EXPANSION) && !defined(DEVICE_MESH_DECK) && !defined(DEVICE_M9) && !defined(DEVICE_WIO_TRACKER_L2) && !defined(DEVICE_TDISPLAY_P4) && !defined(DEVICE_CROWPANEL_35) && !defined(DEVICE_CROWPANEL_50) && !defined(DEVICE_TANMATSU) && !defined(DEVICE_CARDPUTER_ZERO)
 #  define DEVICE_TDECK 1
 #endif
 
@@ -191,6 +191,9 @@
 // #else below would hand out, would put a hardware name on the mesh that does
 // not match what is transmitting.
 #define MY_HW_MODEL MESH_HW_MODEL_PRIVATE_HW
+#elif defined(DEVICE_CARDPUTER_ZERO)
+// No HardwareModel for the CardputerZero either.
+#define MY_HW_MODEL MESH_HW_MODEL_PRIVATE_HW
 #else
 #define MY_HW_MODEL MESH_HW_MODEL_T_DECK
 #endif
@@ -309,7 +312,7 @@
 // How a channel reply names the message it answers: a quoted snippet over the
 // reply, or on the smallest panels, where a quote would cost a whole line, a
 // compact "↪@Name" in the reply's own header.
-#if defined(DEVICE_CARDPUTER_LORA_HAT) || defined(DEVICE_HELTEC_V4_EXPANSION) \
+#if UI_CARDPUTER_COMPACT || defined(DEVICE_HELTEC_V4_EXPANSION) \
     || defined(DEVICE_HELTEC_R8) || defined(DEVICE_M9)
 #define CHAT_REPLY_TAG_STYLE 1
 #else
@@ -695,10 +698,13 @@
 
 // Boards whose keyboard or pad has all four arrows reaching Config as distinct
 // keys: there the grid moves like a grid, Up/Down a row and Left/Right a button.
+// The Cardputer ADV's ; . , / arrive as the four arrows outside typing
+// (remapCardputerUiKey).
 // The M9's pad folds Left/Right onto Up/Down elsewhere but not on the grid
 // (m9FourWaySelection), since walking it in reading order sent Down sideways.
 // Boards with only a wheel walk the grid in reading order (cfgMoveSelection()).
-#if defined(DEVICE_TDISPLAY_P4) || defined(DEVICE_TANMATSU) || defined(DEVICE_M9)
+#if defined(DEVICE_TDISPLAY_P4) || defined(DEVICE_TANMATSU) || defined(DEVICE_M9) \
+    || defined(DEVICE_CARDPUTER_ZERO) || defined(DEVICE_CARDPUTER_LORA_HAT)
 #define CFG_GRID_FOUR_WAY 1
 #else
 #define CFG_GRID_FOUR_WAY 0
@@ -706,9 +712,11 @@
 
 // Popups drawn as grids (font size, alert sound, message colour, Node/Message
 // Actions) and the slider with a checkbox under it are walked as drawn: Up/Down
-// a row, Left/Right a column. The M9 pad and the Tanmatsu's arrows deliver all
-// four directions; elsewhere these step through the flat index.
-#if defined(DEVICE_M9) || defined(DEVICE_TANMATSU)
+// a row, Left/Right a column. The M9 pad and the Tanmatsu's, Cardputer ADV's
+// and CardputerZero's arrows deliver all four directions; elsewhere these step
+// through the flat index.
+#if defined(DEVICE_M9) || defined(DEVICE_TANMATSU) || defined(DEVICE_CARDPUTER_ZERO) \
+    || defined(DEVICE_CARDPUTER_LORA_HAT)
 #define UI_ARROW_GRID_NAV 1
 #else
 #define UI_ARROW_GRID_NAV 0

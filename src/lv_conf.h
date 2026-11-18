@@ -64,6 +64,10 @@
 // 8 MB parts (T-Deck, Pager, M9, Mesh Deck).
 #define LV_MEM_SIZE (2048U * 1024U)
 #endif
+#elif defined(DEVICE_CARDPUTER_ZERO)
+// Linux with 512 MB: the pool is an ordinary static array, sized like the
+// 8 MB PSRAM boards' so map decodes and the emoji glyph cache fit.
+#define LV_MEM_SIZE (2048U * 1024U)
 #elif defined(DEVICE_CARDPUTER_LORA_HAT)
 // No PSRAM: keep the internal pool tighter to preserve AP/web-config headroom.
 #define LV_MEM_SIZE (80U * 1024U)
