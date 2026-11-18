@@ -77,9 +77,9 @@ launcher again from <https://tanmatsu.cloud>.
 ### M5Stack CardputerZero + Cap LoRa-1262 (Linux, WIP)
 
 The CardputerZero is a Linux handheld, not an ESP32, so it does not run the
-firmware image. `linux/` builds a radio daemon and an LVGL screen app from the
-firmware's own radio and protocol sources (`mesh_radio`, `mesh_proto`, XEdDSA, ACK proofs) with a
-small Linux HAL underneath. See [BUILD.md](BUILD.md#m5stack-cardputerzero-linux)
+firmware image. `linux/` compiles the shared firmware for Linux as one app,
+`camillia`, over stand-ins for the Arduino and ESP-IDF APIs, and it is started
+from the Zero's launcher. See [BUILD.md](BUILD.md#m5stack-cardputerzero-linux)
 and issue #155.
 
 | Spec | CardputerZero |
@@ -88,13 +88,13 @@ and issue #155.
 | **Host** | Raspberry Pi CM0 (RP3A0, 4x Cortex-A53, 512 MB), Debian 13, kernel 6.18 |
 | **LoRa** | SX1262 on the Cap LoRa-1262: `/dev/spidev0.1` (CE1), DIO1 GPIO23, RST GPIO26, BUSY GPIO22 on `gpiochip0`; DIO1 is a GPIO edge event, not polled |
 | **Cap** | 5 V from the Zero's M5IOE1 `ext_5v_out` (`/sys/class/leds/ext_5v_out`); PI4IOE5V6408 at `0x43` on `/dev/i2c-1` arms the RF switch. The program does both at start |
-| **GPS** | L76K on `/dev/serial0` at 115200 (verified sending NMEA); the daemon reads GGA/RMC and broadcasts position on the primary channel |
-| **Display** | ST7789 320x170 at `/dev/fb_lcd` (fbdev), drawn by `camillia-czero-ui` with LVGL |
-| **Keyboard** | TCA8418 matrix as a Linux evdev device (`/dev/input/by-path/platform-3f804000.i2c-event`), read without grabbing so the launcher keeps Home; symbols from `/usr/share/keymaps/tca8418_keypad_m5stack_keymap.map` |
-| **Interface** | Daemon as a systemd service (`camillia-czero`), screen app from the launcher, joined by a Unix socket at `/run/camillia/camillia.sock`; settings in `~/.config/camillia/config` |
-| **Identity** | Curve25519 key in `~/.config/camillia/identity` (0600); node ID is `crc32(public key)` as in Meshtastic 2.8; known nodes in `~/.config/camillia/nodes` |
-| **Not used** | Battery gauge, Wi-Fi/MQTT |
-| **Status** | Hardware-verified on one unit: the daemon receives, relays, broadcasts NodeInfo and GPS position (heard and relayed by a neighbour), and sends and receives PKI DMs with ACKs; the screen app runs from the launcher. Secondary channels and NAKs not yet tested |
+| **GPS** | L76K on `/dev/serial0` at 115200 (verified sending NMEA); read by the firmware's GPS module through a serial stand-in |
+| **Display** | ST7789 320x170 at `/dev/fb_lcd` (fbdev), drawn by the app with LVGL |
+| **Keyboard** | TCA8418 matrix as a Linux evdev device (`/dev/input/by-path/platform-3f804000.i2c-event`), read without grabbing so the launcher keeps Home; symbols from `/usr/share/keymaps/tca8418_keypad_m5stack_keymap.map`. Bluetooth keyboards through BlueZ |
+| **Interface** | App from the launcher (`/usr/share/APPLaunch/bin/camillia`); data in `~/.config/camillia-app`; web config on port 18765 |
+| **Battery** | bq27220 gauge via `/sys/class/power_supply`; the OS handles low-battery shutdown |
+| **Wi-Fi** | The system connection (NetworkManager); updates come from M5Stack's app store, not OTA |
+| **Status** | On one unit the app runs from the launcher, receives and transmits on the Cap, and serves web config over the system Wi-Fi. GPS, battery and Bluetooth keyboards not yet confirmed in the app |
 
 ### Elecrow CrowPanel Advance 3.5 (WIP)
 

@@ -1,0 +1,8 @@
+#!/bin/sh
+# SPDX-License-Identifier: GPL-3.0-or-later
+# Launcher entry for Camillia. Runs the app and keeps the last run's log next
+# to its data, for bug reports.
+dir="${CAMILLIA_HOME:-$HOME/.config/camillia-app}"
+mkdir -p "$dir"
+/usr/share/APPLaunch/bin/camillia >"$dir/app.log" 2>&1
+echo "exit=$?" >>"$dir/app.log"

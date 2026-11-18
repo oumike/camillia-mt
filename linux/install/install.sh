@@ -2,25 +2,40 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
 # Installs Camillia-MT on a CardputerZero. Run on the device, from the folder
 # linux/build.sh --deploy copied it to:
-#   sudo ~/camillia/install.sh            install or update, start the service
-#   sudo ~/camillia/install.sh --remove   stop and remove everything but ~/.config/camillia
+#   sudo ~/camillia/install.sh            install or update
+#   sudo ~/camillia/install.sh --remove   remove the app, keep its data
+# The app runs as whoever starts it from the launcher; that user needs the
+# spi, gpio, i2c, dialout (GPS), video (screen) and input (keyboard) groups.
 set -euo pipefail
 HERE="$(cd "$(dirname "$0")" && pwd)"
 [[ $EUID -eq 0 ]] || { echo "run with sudo" >&2; exit 1; }
 RUN_AS="${CAMILLIA_USER:-${SUDO_USER:-}}"
-if [[ -z "$RUN_AS" || "$RUN_AS" == root ]]; then
-  echo "run with sudo from the user the service should run as, or set CAMILLIA_USER" >&2; exit 1
-fi
-id -u "$RUN_AS" >/dev/null 2>&1 || { echo "no such user: $RUN_AS" >&2; exit 1; }
 LAUNCH=/usr/share/APPLaunch
-UNIT=/etc/systemd/system/camillia-czero.service
+
+# Earlier builds were a radio daemon plus a separate screen program; the app
+# replaces both. Its settings in ~/.config/camillia are left alone.
+remove_old_daemon() {
+  if [[ -f /etc/systemd/system/camillia-czero.service ]]; then
+    systemctl disable --now camillia-czero 2>/dev/null || true
+    rm -f /etc/systemd/system/camillia-czero.service
+    systemctl daemon-reload
+  fi
+  rm -f /usr/local/bin/camillia-czero "$LAUNCH/bin/camillia-czero-ui"
+}
+
+restart_launcher() {
+  # The launcher reads its app list at start; it is a user service.
+  [[ -n "$RUN_AS" && "$RUN_AS" != root ]] || return 0
+  systemctl --user -M "$RUN_AS@" try-restart APPLaunch.service 2>/dev/null || true
+}
 
 if [[ "${1:-}" == "--remove" ]]; then
-  systemctl disable --now camillia-czero 2>/dev/null || true
-  rm -f "$UNIT" /usr/local/bin/camillia-czero "$LAUNCH/bin/camillia-czero-ui" \
+  pkill -x camillia 2>/dev/null || true
+  remove_old_daemon
+  rm -f "$LAUNCH/bin/camillia" "$LAUNCH/bin/camillia-launch" \
         "$LAUNCH/applications/camillia.desktop" "$LAUNCH/share/images/camillia.png"
-  systemctl daemon-reload
-  echo "removed (settings and history kept in ~$RUN_AS/.config/camillia)"
+  restart_launcher
+  echo "removed (data kept in ~/.config/camillia-app)"
   exit 0
 fi
 
@@ -29,10 +44,16 @@ fi
 for other in Cap-LoRa-1262 meshterm; do
   if pgrep -f "$other" >/dev/null; then echo "warning: $other is running and uses the same radio" >&2; fi
 done
+if pgrep -x camillia >/dev/null; then
+  echo "note: Camillia is running; the update takes effect when it is next started" >&2
+fi
 
-install -m 0755 "$HERE/camillia-czero" /usr/local/bin/camillia-czero
+remove_old_daemon
 install -d "$LAUNCH/bin" "$LAUNCH/applications" "$LAUNCH/share/images"
-install -m 0755 "$HERE/camillia-czero-ui" "$LAUNCH/bin/camillia-czero-ui"
+# Install beside and rename over, so a running copy keeps its file.
+install -m 0755 "$HERE/camillia" "$LAUNCH/bin/.camillia.new"
+mv -f "$LAUNCH/bin/.camillia.new" "$LAUNCH/bin/camillia"
+install -m 0755 "$HERE/camillia-launch" "$LAUNCH/bin/camillia-launch"
 install -m 0644 "$HERE/camillia.png" "$LAUNCH/share/images/camillia.png"
 
 # Icon paths in the stock entries are relative to $LAUNCH; follow whichever
@@ -42,12 +63,12 @@ if grep -qh '^Icon=/' "$LAUNCH"/applications/*.desktop 2>/dev/null; then icon="$
 sed "s|@ICON@|$icon|" "$HERE/camillia.desktop" > "$LAUNCH/applications/camillia.desktop"
 chmod 0644 "$LAUNCH/applications/camillia.desktop"
 
-sed "s|@USER@|$RUN_AS|g" "$HERE/camillia-czero.service" > "$UNIT"
-systemctl daemon-reload
-systemctl enable camillia-czero >/dev/null
-systemctl restart camillia-czero
-# The launcher reads its app list at start; it is a user service of RUN_AS.
-systemctl --user -M "$RUN_AS@" try-restart APPLaunch.service 2>/dev/null || true
-sleep 2
-systemctl --no-pager --lines=12 status camillia-czero || true
-echo "installed; settings: ~$RUN_AS/.config/camillia/config"
+if [[ -n "$RUN_AS" && "$RUN_AS" != root ]]; then
+  missing=""
+  for g in spi gpio i2c dialout video input; do
+    id -nG "$RUN_AS" | tr ' ' '\n' | grep -qx "$g" || missing+=" $g"
+  done
+  [[ -z "$missing" ]] || echo "warning: $RUN_AS is not in:$missing (sudo usermod -aG <group> $RUN_AS)" >&2
+fi
+restart_launcher
+echo "installed; start Camillia from the launcher (log: ~/.config/camillia-app/app.log)"

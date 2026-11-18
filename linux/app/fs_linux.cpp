@@ -34,7 +34,7 @@ const std::string &czeroDataDir() {
     static std::string dir = [] {
         if (const char *e = getenv("CAMILLIA_HOME"); e && *e) return std::string(e);
         const char *home = getenv("HOME");
-        return std::string(home && *home ? home : "/tmp") + "/.config/camillia";
+        return std::string(home && *home ? home : "/tmp") + "/.config/camillia-app";
     }();
     return dir;
 }

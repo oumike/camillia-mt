@@ -2,6 +2,6 @@
 Type=Application
 Name=Camillia
 Comment=Meshtastic messaging over the LoRa cap
-Exec=/usr/share/APPLaunch/bin/camillia-czero-ui
+Exec=/usr/share/APPLaunch/bin/camillia-launch
 Icon=@ICON@
 Terminal=false

@@ -686,59 +686,60 @@ once more` on a fresh checkout, the library had not been fetched yet; build agai
 
 ### M5Stack CardputerZero (Linux)
 
-The CardputerZero runs Debian on a Raspberry Pi CM0, so it gets Linux programs
-rather than a firmware image. `linux/` builds them from the firmware's shared
-radio and protocol sources; nothing is flashed. There are two:
-
-- `camillia-czero`, the radio daemon. A systemd service runs it from boot: it
-  receives, relays (role CLIENT), sends NodeInfo and GPS position, retries DMs
-  until ACKed, and keeps the message history.
-- `camillia-czero-ui`, the screen app, started from the Zero's launcher. It is
-  an LVGL client of the daemon over a Unix socket, so closing it leaves the
-  radio running.
+The CardputerZero runs Debian on a Raspberry Pi CM0, so it gets a Linux program
+rather than a firmware image, and nothing is flashed. `linux/` compiles the
+shared firmware (`src/main_lvgl.cpp` and the modules it uses) for Linux as
+`DEVICE_CARDPUTER_ZERO` with `PLATFORM_LINUX` set, over stand-ins for the
+Arduino and ESP-IDF APIs in `linux/app/`. The result, `camillia`, is the same
+interface as the Cardputer ADV build, started from the Zero's launcher.
 
 **Build** (Docker, any host that can run `linux/arm64` containers; native on
-Apple Silicon): `linux/build.sh`. It builds a Debian 13 image with
-`libmbedtls-dev`, fetches RadioLib 7.8.1, LVGL 9.5.0 and the meshtastic/Crypto
-commit `platformio.ini` pins, writes both programs to `linux/build/`, and runs
-`camillia-czero-tests` (NMEA, settings, message store and socket format).
+Apple Silicon): `linux/build.sh`. It builds a Debian 13 image, fetches the
+library versions `platformio.ini` pins, writes `linux/build/camillia` (and a
+stripped copy for the device), and runs `camillia-czero-tests`.
 
-**Install:** `linux/build.sh --deploy user@host --install` copies the programs
-and `linux/install/` to `~/camillia/` on the Zero and runs
-`sudo ~/camillia/install.sh`, which:
+**Install:** `linux/build.sh --deploy user@host --install` copies the app and
+`linux/install/` to `~/camillia/` on the Zero and runs
+`sudo ~/camillia/install.sh`, which installs the app, its launcher wrapper,
+icon and `camillia.desktop` into `/usr/share/APPLaunch` and restarts the
+launcher. It also removes the radio daemon service earlier builds installed.
+The user who starts the app needs the `spi`, `gpio`, `i2c`, `dialout`, `video`
+and `input` groups; the installer warns about any that are missing.
+`sudo ~/camillia/install.sh --remove` undoes it and keeps the data. Close the
+stock Cap LoRa-1262 and meshterm apps first: two programs cannot share the
+radio. Releases reach users through M5Stack's app store, so the firmware's OTA
+update settings are hidden on this board.
 
-- installs the daemon to `/usr/local/bin` and the `camillia-czero` service,
-  running as the deploying user (who must be in the `spi`, `gpio` and `i2c`
-  groups), and starts it;
-- installs the screen app, its icon and `camillia.desktop` into
-  `/usr/share/APPLaunch`, and restarts the launcher.
+**Data** lives in `~/.config/camillia-app` (or `$CAMILLIA_HOME`): `nvs/` holds
+what Preferences keeps in NVS on other boards, `fs/` what they keep on SD or
+flash, and `app.log` the last run's log.
 
-`sudo ~/camillia/install.sh --remove` undoes it and keeps `~/.config/camillia`.
-Stop the stock Cap LoRa-1262 and meshterm apps first: two programs cannot share
-the radio.
+**What the system provides:**
 
-**Settings** are in `~/.config/camillia/config`, written with comments on first
-run; restart the service after editing. Keys: `region`, `preset`, `hop_limit`,
-`tx_power`, `role` (`CLIENT` or `CLIENT_MUTE`), `rx_only`, `gps`,
-`gps_device`, `gps_baud`, `position_interval`, `position_precision`,
-`nodeinfo_interval`, and one `channel = NAME BASE64KEY` line per channel,
-primary first (none: the preset's public channel). The same folder holds
-`identity`, `nodes` and `messages`.
+- **Wi-Fi** is the Zero's own connection (NetworkManager); the firmware's Wi-Fi
+  switch only decides whether Camillia uses it.
+- **Web config** is served on port **18765**, not 80, alongside chat.
+- **Bluetooth keyboards** pair through BlueZ, from the usual config row.
+- **GPS** is the Cap's L76K on `/dev/serial0` at 115200.
+- **Battery** percent, voltage and charging come from the `bq27220` gauge in
+  `/sys/class/power_supply`; the OS handles low-battery shutdown.
 
-**Screen app keys:** Up/Down select, Enter opens a conversation or sends,
-Tab switches between conversations and nodes, Esc goes back (and quits from the
-top). Home long-press also quits.
+**Keys** are the Cardputer ADV's, plus:
 
-**Without the service:** `camillia-czero` runs in a terminal too, with
-`[--config FILE] [--socket PATH] [--long NAME] [--short ABCD] [--hops N]
-[--power DBM] [--rx-only] [--debug]` overriding the settings. A line typed at
-the console broadcasts on the primary channel; `/help` lists commands.
+- **Esc** goes back; **Esc twice** quickly goes Home; **Esc held 4 s** quits
+  to the launcher.
+- Outside text entry the number row works like the T-Display P4's F-keys:
+  **1** Home, **2** Chat, **3** DMs, **4** Nodes, **5** Tools, **6** Config,
+  **0** Help.
 
-> **Hardware-verified on one unit** (issue #155): the service starts at boot
-> and receives, relays other nodes' packets, broadcasts NodeInfo and GPS
-> position (both relayed onward by a neighbour), and sends and receives PKI
-> DMs with the ACK coming back. The screen app runs from the launcher. Not yet
-> tested: secondary channels from the settings file, and NAK handling.
+`linux/daemon/` and the `camillia-czero-ui` target are the earlier design (a
+radio daemon and a separate screen program). They still build, but are no
+longer installed.
+
+> **Hardware status** (one unit, issue #155): the app runs from the launcher,
+> receives and transmits on the Cap, and serves web config on :18765 over the
+> system Wi-Fi. Not yet confirmed on the unit: GPS position, battery readings,
+> Bluetooth keyboards, and the Esc-twice and number-row keys.
 
 ### Seeed Wio Tracker L2 (wio-tracker-l2)
 
