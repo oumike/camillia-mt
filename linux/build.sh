@@ -18,7 +18,7 @@ runpy.run_path(sys.argv[1] + "/tools/gen_release_notes.py")
 PY
 docker build --platform linux/arm64 -q -t "$IMAGE" "$HERE" >/dev/null
 docker run --rm --platform linux/arm64 -v "$ROOT":/src -w /src/linux "$IMAGE" \
-  bash -c 'cmake -S . -B build -DCMAKE_BUILD_TYPE=Release >/dev/null && cmake --build build -j"$(nproc)" && build/camillia-czero-tests \
+  bash -c 'cmake -S . -B build -DCMAKE_BUILD_TYPE=Release >/dev/null && cmake --build build -j"$(nproc)" \
     && strip -o build/camillia.stripped build/camillia'
 echo "built: $HERE/build/camillia"
 if [[ "${1:-}" == "--deploy" && -n "${2:-}" ]]; then

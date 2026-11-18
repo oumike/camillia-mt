@@ -695,8 +695,8 @@ interface as the Cardputer ADV build, started from the Zero's launcher.
 
 **Build** (Docker, any host that can run `linux/arm64` containers; native on
 Apple Silicon): `linux/build.sh`. It builds a Debian 13 image, fetches the
-library versions `platformio.ini` pins, writes `linux/build/camillia` (and a
-stripped copy for the device), and runs `camillia-czero-tests`.
+library versions `platformio.ini` pins, and writes `linux/build/camillia` (and a
+stripped copy for the device).
 
 **Install:** `linux/build.sh --deploy user@host --install` copies the app and
 `linux/install/` to `~/camillia/` on the Zero and runs
@@ -731,10 +731,6 @@ flash, and `app.log` the last run's log.
 - Outside text entry the number row works like the T-Display P4's F-keys:
   **1** Home, **2** Chat, **3** DMs, **4** Nodes, **5** Tools, **6** Config,
   **0** Help.
-
-`linux/daemon/` and the `camillia-czero-ui` target are the earlier design (a
-radio daemon and a separate screen program). They still build, but are no
-longer installed.
 
 > **Hardware status** (one unit, issue #155): the app runs from the launcher,
 > receives and transmits on the Cap, and serves web config on :18765 over the
