@@ -781,6 +781,10 @@ struct CfgSliderPicker {
     // same decision. Both null (the default for every spec that leaves them
     // out) and there is no checkbox. Staged like the slider: *checkValue is
     // written on Save, before apply() runs, and never on Cancel.
+    //
+    // With a checkbox and count 1 there is no slider at all: the picker is a
+    // checkbox under a value label, and labelFor() may read
+    // s_cfgSliderCheckStaged to show what the box changes.
     const char *checkLabel;
     bool       *checkValue;
 };
@@ -18294,6 +18298,10 @@ static void onCfgSliderChanged(lv_event_t *e) {
     cfgSliderShow((int)lv_slider_get_value(slider));
 }
 
+static bool cfgSliderCheckOnly(const CfgSliderPicker *spec) {
+    return spec && spec->count == 1 && spec->checkLabel && spec->checkValue;
+}
+
 // Keyboard builds reach the checkbox with Space; touch builds tap it. Both land
 // here so the staged value and the box on screen cannot disagree.
 static void toggleCfgSliderCheck() {
@@ -18303,6 +18311,7 @@ static void toggleCfgSliderCheck() {
         if (s_cfgSliderCheckStaged) lv_obj_add_state(s_cfgSliderCheck, LV_STATE_CHECKED);
         else lv_obj_remove_state(s_cfgSliderCheck, LV_STATE_CHECKED);
     }
+    cfgSliderShow(s_cfgSliderStaged);   // the label may follow the box
 }
 
 #if UI_ARROW_GRID_NAV
@@ -18330,6 +18339,7 @@ static void onCfgSliderCheckChanged(lv_event_t *e) {
     lv_obj_t *box = lv_event_get_target_obj(e);
     if (!box) return;
     s_cfgSliderCheckStaged = lv_obj_has_state(box, LV_STATE_CHECKED);
+    cfgSliderShow(s_cfgSliderStaged);
 }
 
 static void onCfgSliderBackdropPressed(lv_event_t *e) {
@@ -18346,8 +18356,9 @@ static void openCfgSliderModal(const CfgSliderPicker *spec, int startIdx) {
     if (startIdx >= spec->count) startIdx = spec->count - 1;
     s_cfgSliderStaged = startIdx;
     s_cfgSliderCheckStaged = spec->checkValue ? *spec->checkValue : false;
+    const bool checkOnly = cfgSliderCheckOnly(spec);
 #if UI_ARROW_GRID_NAV
-    s_cfgSliderFocus = 0;   // always opens on the slider
+    s_cfgSliderFocus = checkOnly ? 1 : 0;   // on the slider, when there is one
 #endif
 
     const int w = lv_disp_get_hor_res(NULL);
@@ -18403,37 +18414,39 @@ static void openCfgSliderModal(const CfgSliderPicker *spec, int startIdx) {
 #endif
     lv_obj_set_style_text_align(s_cfgSliderValue, LV_TEXT_ALIGN_CENTER, 0);
 
-    s_cfgSliderCtl = lv_slider_create(s_cfgSliderModal);
-    lv_obj_set_width(s_cfgSliderCtl, modalW - 40);
-    // One stop per list entry: the slider cannot land between two real values.
-    lv_slider_set_range(s_cfgSliderCtl, 0, spec->count - 1);
-    lv_slider_set_value(s_cfgSliderCtl, startIdx, LV_ANIM_OFF);
-    lv_obj_set_style_bg_color(s_cfgSliderCtl, lv_color_hex(0x123266), LV_PART_MAIN);
-    lv_obj_set_style_bg_color(s_cfgSliderCtl, lvColorFrom565(s_ui.selectAccent),
-                              LV_PART_INDICATOR);
-    lv_obj_set_style_bg_color(s_cfgSliderCtl, lv_color_hex(0xE8F1FF), LV_PART_KNOB);
-    lv_obj_add_event_cb(s_cfgSliderCtl, onCfgSliderChanged, LV_EVENT_VALUE_CHANGED, nullptr);
+    if (!checkOnly) {
+        s_cfgSliderCtl = lv_slider_create(s_cfgSliderModal);
+        lv_obj_set_width(s_cfgSliderCtl, modalW - 40);
+        // One stop per list entry: the slider cannot land between two real values.
+        lv_slider_set_range(s_cfgSliderCtl, 0, spec->count - 1);
+        lv_slider_set_value(s_cfgSliderCtl, startIdx, LV_ANIM_OFF);
+        lv_obj_set_style_bg_color(s_cfgSliderCtl, lv_color_hex(0x123266), LV_PART_MAIN);
+        lv_obj_set_style_bg_color(s_cfgSliderCtl, lvColorFrom565(s_ui.selectAccent),
+                                  LV_PART_INDICATOR);
+        lv_obj_set_style_bg_color(s_cfgSliderCtl, lv_color_hex(0xE8F1FF), LV_PART_KNOB);
+        lv_obj_add_event_cb(s_cfgSliderCtl, onCfgSliderChanged, LV_EVENT_VALUE_CHANGED, nullptr);
 
-    // Which end is which. The value label above names the current stop, so
-    // these only have to anchor the direction of travel.
-    if (spec->leftEnd && spec->rightEnd) {
-        lv_obj_t *ends = lv_label_create(s_cfgSliderModal);
-        lv_obj_set_width(ends, lv_pct(100));
-        lv_obj_set_style_text_font(ends, &lv_font_montserrat_10, 0);
-        // A text colour, not a line colour. This was 0x8FB5E6, which
-        // themedColorHex() maps to s_ui.dividerHi -- panelAlt blended a third of
-        // the way toward the accent. On a dark theme that lands pale and reads
-        // fine, which is why it survived; on a light one panelAlt is already
-        // near-white, so the blend came out as near-white text on the
-        // near-white panel behind it and "30 sec <-> 6 hours" all but vanished.
-        //
-        // 0xD9E8FF is s_ui.textMain, the same ink the title above uses: near
-        // black on a light theme, near white on a dark one. Hard-coding black
-        // would have fixed the light themes by breaking every dark one, since
-        // this modal is one surface whose colour the theme decides.
-        lv_obj_set_style_text_color(ends, lv_color_hex(0xD9E8FF), 0);
-        lv_obj_set_style_text_align(ends, LV_TEXT_ALIGN_CENTER, 0);
-        lv_label_set_text_fmt(ends, TR("%s  <->  %s"), TR(spec->leftEnd), TR(spec->rightEnd));
+        // Which end is which. The value label above names the current stop, so
+        // these only have to anchor the direction of travel.
+        if (spec->leftEnd && spec->rightEnd) {
+            lv_obj_t *ends = lv_label_create(s_cfgSliderModal);
+            lv_obj_set_width(ends, lv_pct(100));
+            lv_obj_set_style_text_font(ends, &lv_font_montserrat_10, 0);
+            // A text colour, not a line colour. This was 0x8FB5E6, which
+            // themedColorHex() maps to s_ui.dividerHi -- panelAlt blended a third of
+            // the way toward the accent. On a dark theme that lands pale and reads
+            // fine, which is why it survived; on a light one panelAlt is already
+            // near-white, so the blend came out as near-white text on the
+            // near-white panel behind it and "30 sec <-> 6 hours" all but vanished.
+            //
+            // 0xD9E8FF is s_ui.textMain, the same ink the title above uses: near
+            // black on a light theme, near white on a dark one. Hard-coding black
+            // would have fixed the light themes by breaking every dark one, since
+            // this modal is one surface whose colour the theme decides.
+            lv_obj_set_style_text_color(ends, lv_color_hex(0xD9E8FF), 0);
+            lv_obj_set_style_text_align(ends, LV_TEXT_ALIGN_CENTER, 0);
+            lv_label_set_text_fmt(ends, TR("%s  <->  %s"), TR(spec->leftEnd), TR(spec->rightEnd));
+        }
     }
 
     const bool hasCheck = (spec->checkLabel && spec->checkValue);
@@ -18461,7 +18474,10 @@ static void openCfgSliderModal(const CfgSliderPicker *spec, int startIdx) {
         lv_obj_set_style_text_font(hint, &lv_font_montserrat_10, 0);
         lv_obj_set_style_text_color(hint, lv_color_hex(0xA7C7FF), 0);
         lv_obj_set_style_text_align(hint, LV_TEXT_ALIGN_CENTER, 0);
-        if (hasCheck) {
+        if (checkOnly) {
+            lv_label_set_text_fmt(hint, TR("Space=Toggle  Enter=Save  %s=Cancel"),
+                                  modalCloseKeyLabel());
+        } else if (hasCheck) {
 #if UI_ARROW_GRID_NAV
             lv_label_set_text_fmt(hint,
                                   TR("Up/Down=Select  Left/Right=Change  Space=Toggle  Enter=Save  %s=Cancel"),
@@ -46868,12 +46884,17 @@ static bool cfgImportHasChoice() {
     return s_cfgBackupCount > 1;
 }
 
-static const char *cfgExportPickLabel(int idx) {
-    return idx == 0 ? "config.yaml" : s_cfgExportStamp;
+// Whether Export appends the date; remembered until reboot.
+static bool s_cfgExportAppendDate = false;
+
+// Follows the checkbox while the picker is open, and the saved choice after.
+static const char *cfgExportPickLabel(int) {
+    const bool stamp = s_cfgSliderSpec ? s_cfgSliderCheckStaged : s_cfgExportAppendDate;
+    return stamp ? s_cfgExportStamp : "config.yaml";
 }
 
-static void cfgExportPickApply(int idx) {
-    const char *name = cfgExportPickLabel(idx);
+static void cfgExportPickApply(int) {
+    const char *name = cfgExportPickLabel(0);
     sdForceRescan();
     const bool ok = cfgExportAs(s_cfg, name);
     if (ok) snprintf(s_cfgStatus, sizeof(s_cfgStatus), TR("Exported to /camillia/%s"), name);
@@ -46881,14 +46902,15 @@ static void cfgExportPickApply(int idx) {
     openCfgActionMessageModal(s_cfgStatus);
 }
 
-// config.yaml, overwritten as Export always has, or a new timestamped file
-// beside it. Only offered with the clock set: a stamp from a clock that does
-// not know the date would sort as the oldest backup on the card.
+// config.yaml, overwritten as Export always has, or with "Append date" ticked
+// a new timestamped file beside it. Only offered with the clock set: a stamp
+// from a clock that does not know the date would sort as the oldest backup on
+// the card.
 static void openCfgExportPicker() {
     cfgBackupStampName(s_cfgExportStamp, sizeof(s_cfgExportStamp));
     static const CfgSliderPicker kSpec = {
-        TR_NOOP("Export Config As"), 2, cfgExportPickLabel, cfgExportPickApply,
-        TR_NOOP("replace"), TR_NOOP("new backup"),
+        TR_NOOP("Export Config As"), 1, cfgExportPickLabel, cfgExportPickApply,
+        nullptr, nullptr, TR_NOOP("Append date"), &s_cfgExportAppendDate,
     };
     openCfgSliderModal(&kSpec, 0);
 }
@@ -51148,6 +51170,15 @@ static void pumpKeyboardInput() {
             }
             if (k == ' ') {
                 toggleCfgSliderCheck();   // no-op when the picker has no checkbox
+                continue;
+            }
+            // Only the checkbox to change, so every direction toggles it: the
+            // wheel boards have no other way to reach it.
+            if (cfgSliderCheckOnly(s_cfgSliderSpec)) {
+                if (k == KEY_SCROLL_UP || k == KEY_SCROLL_DN
+                    || k == KEY_PREV_CHAN || k == KEY_NEXT_CHAN) {
+                    toggleCfgSliderCheck();
+                }
                 continue;
             }
 #if UI_ARROW_GRID_NAV
