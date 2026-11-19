@@ -155,7 +155,7 @@ set(APP_FW_SRC
   community_presets.cpp ota_update.cpp mesh_radio.cpp mesh_proto.cpp mesh_beacon.cpp
   licensed_mode.cpp cs_proto.cpp cs_client.cpp sha256_portable.cpp xeddsa_sig.cpp
   ack_proof.cpp channel_mgr.cpp dm_mgr.cpp node_db.cpp key_pin.cpp node_name_cache.cpp
-  wardrive_log.cpp live_util.cpp live_feed.cpp debug_flags.cpp ignore_list.cpp
+  wardrive_log.cpp live_util.cpp live_feed.cpp debug_flags.cpp ignore_list.cpp mecp.cpp
   fonts/lv_font_montserrat_bold_12.c)
 list(TRANSFORM APP_FW_SRC PREPEND ${FW}/)
 file(GLOB APP_FONT_SRC ${FW}/fonts/latin/*.c)
