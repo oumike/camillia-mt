@@ -55,14 +55,17 @@ Use this staged flow for feature and bug work:
    - Apply the smallest possible patch.
    - Keep board-specific logic behind existing `DEVICE_*` guards.
 3. Validate
-   - Run checks only when requested by the user.
+   - You may build the board the user is testing on; run broader checks only
+     when requested.
    - If validation is skipped, say so explicitly.
 4. Summarize
    - Report changed files, behavior impact, and any residual risk.
 
 ## Non-Negotiables
 
-- Do not run `pio run` automatically unless the user explicitly asks.
+- When the user says they are testing on a board, you may build that board
+  (`pio run -e <env>`). Build all targets only when a specific reason requires
+  it and the user has given permission. Never flash.
 - Do not claim hardware success without evidence (serial logs, measured behavior,
   or user confirmation).
 - Do not silently change behavior across all boards when only one target is
