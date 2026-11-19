@@ -36096,8 +36096,9 @@ static void openMecpForm() {
         lv_obj_set_style_pad_ver(btn, 0, 0);
         lv_obj_set_style_radius(btn, 4, 0);
         lv_obj_set_style_shadow_width(btn, 0, 0);
-        lv_obj_set_style_bg_color(btn, b == MB_SEND ? lvColorFrom565(s_ui.selectAccent)
-                                                    : lv_color_hex(0x16386F), 0);
+        lv_obj_set_style_bg_color(btn, b == MB_SEND
+                                           ? lv_color_hex(s_cfg.uiMode == UI_MODE_LIGHT ? 0xC76565 : 0x6B3030)
+                                           : lv_color_hex(0x16386F), 0);
         lv_obj_set_style_bg_opa(btn, LV_OPA_COVER, 0);
         lv_obj_set_style_border_width(btn, 1, 0);
         lv_obj_set_style_border_color(btn, lv_color_hex(0x8FB5E6), 0);
