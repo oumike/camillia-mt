@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 #pragma once
 // MECP -- Mesh Emergency Communication Protocol, v1.4.0
 // (https://github.com/mecp-org/MECP, protocol CC0).

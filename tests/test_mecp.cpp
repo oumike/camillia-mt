@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 #include "../src/mecp.h"
 #include "../src/i18n.h"
 #include "mecp_vectors.h"
