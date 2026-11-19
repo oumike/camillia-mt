@@ -26,6 +26,9 @@ Use these files as the source of truth before changing board-specific behavior:
 - `src/hal/hw_wio_tracker_l2.h`
 - `src/hal/hw_tdisplay_p4.h`
 - `src/hal/hw_crowpanel_35.h`
+- `src/hal/hw_crowpanel_50.h`
+- `src/hal/hw_tanmatsu.h`
+- `src/hal/hw_cardputer_zero.h`
 - `docs/HARDWARE.md`
 
 Do not invent pin maps, bus addresses, or peripheral wiring.
@@ -52,14 +55,17 @@ Use this staged flow for feature and bug work:
    - Apply the smallest possible patch.
    - Keep board-specific logic behind existing `DEVICE_*` guards.
 3. Validate
-   - Run checks only when requested by the user.
+   - You may build the board the user is testing on; run broader checks only
+     when requested.
    - If validation is skipped, say so explicitly.
 4. Summarize
    - Report changed files, behavior impact, and any residual risk.
 
 ## Non-Negotiables
 
-- Do not run `pio run` automatically unless the user explicitly asks.
+- When the user says they are testing on a board, you may build that board
+  (`pio run -e <env>`). Build all targets only when a specific reason requires
+  it and the user has given permission. Never flash.
 - Do not claim hardware success without evidence (serial logs, measured behavior,
   or user confirmation).
 - Do not silently change behavior across all boards when only one target is
@@ -81,14 +87,20 @@ Current PlatformIO environments include:
 - `m9`
 - `wio-tracker-l2`
 - `crowpanel-35`
+- `crowpanel-50`
 - `p4-amoled-sx1262`
 - `p4-amoled-lr2021`
+- `tanmatsu`
+
+The M5Stack CardputerZero (`DEVICE_CARDPUTER_ZERO`, `PLATFORM_LINUX`) is not a
+PlatformIO env: it builds as a Linux app with `linux/build.sh` (see
+`docs/BUILD.md`).
 
 When a request says "mesh-deck", scope changes to `DEVICE_MESH_DECK` paths
 unless asked to propagate.
 
 When a request says "p4-amoled", scope changes to `DEVICE_TDISPLAY_P4`
-paths. These are the only ESP32-P4 / Arduino 3.x targets; do not migrate the S3
+paths. These and `tanmatsu` are the only ESP32-P4 / Arduino 3.x targets; do not migrate the S3
 environments from `espressif32@7.0.1` unless explicitly requested.
 
 ## Config And Persistence

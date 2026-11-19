@@ -20,7 +20,9 @@ It is intentionally lightweight and operational.
    - Apply the smallest patch set that satisfies the requested behavior.
 
 5. Build -> Compile validation
-   - Run `pio run -e <env>` only when requested.
+   - When the user says they are testing on a board, you may build it
+     (`pio run -e <env>`). Build all targets only for a specific reason and
+     with the user's permission.
    - Report errors with actionable next edits.
 
 6. Deploy -> Flash and runtime verification support

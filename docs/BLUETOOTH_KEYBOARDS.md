@@ -1,12 +1,16 @@
 # Bluetooth Keyboards
 
 > **Status: implemented on the keyboard-less Heltec builds** (`heltec-v4`,
-> `heltec-r8`), **`wio-tracker-l2` and `crowpanel-35`**. These boards use an on-screen keyboard,
-> so an external one adds a second text-input path. Every other build is
-> unchanged and cannot pair a keyboard. Nothing in the
+> `heltec-r8`), **`wio-tracker-l2`, both CrowPanels (`crowpanel-35`,
+> `crowpanel-50`) and the CardputerZero app**. On the touch boards an external
+> keyboard adds a second text-input path beside the on-screen one; on the
+> CardputerZero it is a full-size alternative to the built-in keypad. Every other build
+> is unchanged and cannot pair a keyboard. Nothing in the ESP32
 > implementation is board-specific — the `HAS_BLE_KEYBOARD` macro in
 > `src/hal/board.h` plus one `build_src_filter` entry is the entire gate — but
-> each board has its own internal-RAM budget, so they opt in one at a time.
+> each board has its own internal-RAM budget, so they opt in one at a time. The
+> CardputerZero pairs through the Linux Bluetooth stack (BlueZ) behind the same
+> interface; see [CardputerZero](#cardputerzero).
 > Design and progress are tracked in
 > [issue #40](https://github.com/oumike/camillia-mt/issues/40).
 
@@ -15,8 +19,8 @@
 **The keyboard must be a Bluetooth *Low Energy* (BLE) keyboard.** A Bluetooth
 Classic keyboard cannot be made to work by any firmware change.
 
-Every board Camillia supports — T-Deck, T-LoRa Pager, Cardputer, Heltec V3/V4,
-Attaky Mesh Deck, Elecrow ThinkNode M9, Seeed Wio Tracker L2, and Elecrow CrowPanel 3.5 — is built on an **ESP32-S3**, and the S3
+Every ESP32 board that can pair one — Heltec V4 and V4-R8, Seeed Wio Tracker
+L2, and the Elecrow CrowPanel 3.5 and 5.0 — is built on an **ESP32-S3**, and the S3
 has no Bluetooth Classic (BR/EDR) radio at all. Only the original ESP32 in
 Espressif's lineup has one. BLE and Classic are separate protocols on shared
 spectrum: a BLE-only device and a Classic-only device
@@ -123,7 +127,7 @@ a BLE scanner before relying on any of these.**
   published sources whether it presents as BLE HID to a non-Apple host, and Apple
   peripherals carry extra pairing behavior. Scan it yourself before assuming.
 
-## Pairing one (Heltec, Wio Tracker L2 and CrowPanel builds)
+## Pairing one (Heltec, Wio Tracker L2, CrowPanel and CardputerZero builds)
 
 Two rows in **Config**, in the same shape as the Wi-Fi pair above them:
 
@@ -144,6 +148,15 @@ but it is a guess rather than a declaration.
 
 The bond is stored by the Bluetooth stack itself and survives reboots and
 turning the feature off and on, so pairing is a once-per-keyboard job.
+
+### CardputerZero
+
+The CardputerZero runs Linux, and its Bluetooth belongs to the system's BlueZ
+stack, so the ESP32 rules above do not bind it: the Zero's controller has
+Bluetooth Classic as well as BLE, and its scan list can show Classic keyboards
+too. The same two Config rows drive it. Camillia runs `bluetoothctl` to scan
+and pair (a passkey the keyboard asks for is shown on screen), and BlueZ trusts
+the keyboard so it reconnects on its own. Not yet confirmed on a unit.
 
 ### When a keyboard loses its pairing
 
