@@ -9,6 +9,9 @@
 #if defined(DEVICE_CARDPUTER_ZERO)
 #include "app/czero_keys.h"
 #endif
+#if defined(DEVICE_M9)
+#include "m9_key_guard.h"
+#endif
 #if HAS_BLE_KEYBOARD
 #include "ble_keyboard.h"
 #endif
@@ -2064,21 +2067,19 @@ char TDeckKeyboard::readKey() {
     // forever -- so on those units this cadence is not a backstop, it is the
     // whole of the polling.
     //
-    // 30 ms rather than the T-Deck's 12: readKey() runs from
-    // pumpKeyboardInput(), once per main loop pass, so the real interval is
-    // whichever is longer -- this constant, or the loop period, which is ~18 ms
-    // at its best and considerably worse while the UI repaints. Below about
-    // 20 ms the extra polls are simply masked by the loop while still costing
-    // bus traffic and battery on a device that idles most of its life. At 30 ms
-    // two keys must land inside a thirtieth of a second to collide, which is
-    // well beyond what a thumb keyboard can produce.
-    static constexpr uint32_t kIdleProbeMs   = 30;
-    // Wide enough to span two or three loop passes, but the larger effect is
-    // inside a single pass: pumpKeyboardInput() calls readKey() eight times in
-    // the same millisecond, and lastIdleProbeMs is shared across them, so
-    // without a drain window only the first of the eight ever reaches the bus --
-    // one key per pass however many are waiting.
-    static constexpr uint32_t kBurstWindowMs = 60;
+    // 15 ms: readKey() runs from pumpKeyboardInput(), once per main loop pass,
+    // so the real interval is whichever is longer -- this constant, or the loop
+    // period, which is ~18 ms at its best and considerably worse while the UI
+    // repaints. Two keys must land inside that to collide, which is beyond
+    // what a thumb keyboard produces.
+    static constexpr uint32_t kIdleProbeMs   = 15;
+    // No burst drain. pumpKeyboardInput() calls readKey() eight times in one
+    // pass, and a drain window let all eight reach the bus. The controller has
+    // one slot, so a second read straight after a key can only return nothing
+    // or that same key again before the controller clears it -- which is how
+    // keys typed twice. The read gate below holds the M9 to one bus read per
+    // kM9ReadGapMs, IRQ or not, and m9KeyGuardAccept() drops repeats.
+    static constexpr uint32_t kBurstWindowMs = 0;
 #else
     static constexpr uint32_t kIdleProbeMs   = 250;
     static constexpr uint32_t kBurstWindowMs = 0;
@@ -2130,6 +2131,16 @@ char TDeckKeyboard::readKey() {
         expireHeldKeyBestEffort(now);
         return KEY_NONE;
     }
+    // One bus read per kM9ReadGapMs whatever KB_INT says (see kBurstWindowMs).
+    static constexpr uint32_t kM9ReadGapMs = 15;
+    static uint32_t sM9LastReadMs = 0;
+    static bool sM9HaveRead = false;
+    if (sM9HaveRead && (now - sM9LastReadMs) < kM9ReadGapMs) {
+        expireHeldKeyBestEffort(now);
+        return KEY_NONE;
+    }
+    sM9HaveRead = true;
+    sM9LastReadMs = now;
     bus.beginTransmission((uint8_t)KB_ADDR);
     bus.write(sM9KeyReg);
     if (bus.endTransmission() != 0) {
@@ -2183,6 +2194,15 @@ char TDeckKeyboard::readKey() {
 #endif
         return KEY_NONE;
     }
+#if defined(DEVICE_M9)
+    // The same press delivered twice: a re-read before the controller cleared
+    // its slot, or contact chatter on a slow key (src/m9_key_guard.h).
+    static M9KeyGuard sM9Guard;
+    if (!m9KeyGuardAccept(sM9Guard, raw, now)) {
+        if (sKeyTrace) Serial.printf("[kb] raw=0x%02X  (repeat dropped)\n", raw);
+        return KEY_NONE;
+    }
+#endif
 #if (KB_INT >= 0)
     // Opens the burst-drain window above. Guarded by the same condition the
     // variable is declared under so the two cannot drift apart; where
