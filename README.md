@@ -71,6 +71,7 @@ Notes:
 - **Direct messages** — one-to-one conversations in their own tab, with delivery acks
 - **Live feed** — real-time decoded RX/TX traffic with a per-type filter
 - **Tools** — neighbor discovery, beacons, current weather, and an MQTT monitor
+- **MECP emergency codes** — decodes [MECP](https://github.com/mecp-org/MECP) messages into readable, localized text, with a composer and a repeating distress beacon
 - **Maps and line of sight** — OpenStreetMap view of a node's last position with offline tiles ([docs/MAPS.md](docs/MAPS.md)), and terrain line-of-sight checks ([docs/LOS.md](docs/LOS.md))
 - **Remote administration** — read and change another node's config from a terminal ([docs/ADMIN_TERMINAL.md](docs/ADMIN_TERMINAL.md))
 - **Browser VNC** — mirror and drive the device UI from a browser (all boards except the Cardputer)
@@ -202,6 +203,9 @@ wadamesh is GPL-3.0, the same license family this project uses.
 Thanks also to the Meshtastic project, and to the maintainers of the libraries
 this firmware stands on — LVGL, RadioLib, Arduino-ESP32, LovyanGFX and nanopb
 among them.
+
+MECP language packs © the MECP contributors, used under CC BY 4.0
+([mecp-org/MECP](https://github.com/mecp-org/MECP)); the protocol is CC0.
 
 ## License
 

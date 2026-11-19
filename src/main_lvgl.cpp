@@ -80,6 +80,7 @@ LV_FONT_DECLARE(lv_font_eink_bold_18);
 #include "licensed_mode.h"
 #include "release_notes.h"   // generated from RELEASE_NOTES.md at build time
 #include "utf8_utils.h"
+#include "mecp.h"     // MECP emergency codes: decode, compose, beacon (issue #158)
 #include "fonts/roboto_splash_fonts.h"
 #include <WiFi.h>
 #include <Preferences.h>
@@ -160,6 +161,41 @@ LV_FONT_DECLARE(lv_font_eink_bold_18);
 
 #include "hal/crowpanel_50_fonts.h"   // last: renames fonts for the rest of this file
 #include "hal/ui_coord_shim.h"        // after it: doubles coordinates and fonts (UI_COORD_SCALE)
+
+// MECP (issue #158): a message body that parses as MECP draws as its decoded,
+// localized text. Display only -- the stored line keeps the wire text, which is
+// what replies quote, what the raw-text action shows and what a language change
+// re-renders from. Returns false (out untouched) for anything that is not MECP.
+static bool mecpDecodeBody(const char *body, char *out, size_t cap, uint8_t *sevOut = nullptr) {
+    if (!body || !out || cap == 0 || !mecp::looksLikeMecp(body)) return false;
+    mecp::Envelope env;
+    if (!mecp::parse(body, env)) return false;
+    if (!mecp::render(body, i18nGetLang(), out, cap)) return false;
+    if (sevOut) *sevOut = env.severity;
+    return true;
+}
+
+// Replaces the body that follows `prefixLen` bytes of `line` with its decoded
+// form, keeping the prefix (icon, time, sender). False when the body is not MECP.
+static bool mecpDecodeLineInPlace(char *line, size_t cap, size_t prefixLen,
+                                  uint8_t *sevOut = nullptr) {
+    if (!line || prefixLen >= cap) return false;
+    char decoded[384];
+    if (!mecpDecodeBody(line + prefixLen, decoded, sizeof(decoded), sevOut)) return false;
+    utf8util::copyTruncate(line + prefixLen, cap - prefixLen, decoded);
+    return true;
+}
+
+// Severity tint for a received MECP line in the classic style.
+// Light mode gets darker shades: amber on white is unreadable.
+static uint16_t mecpSeverityColor565(uint8_t sev, bool light) {
+    switch (sev) {
+        case mecp::SEV_MAYDAY:   return light ? 0xC000 : 0xF800;   // red
+        case mecp::SEV_URGENT:   return light ? 0xC200 : 0xFC00;   // orange
+        case mecp::SEV_SAFETY:   return light ? 0x8400 : 0xFE60;   // amber
+        default:                 return light ? 0x0219 : 0x3D9F;   // blue
+    }
+}
 
 // LVGL runs entirely on the Arduino loopTask (lv_timer_handler below), and the
 // default 8 KB loopTask stack is not enough to rasterize an emoji under LVGL 9.
@@ -1978,7 +2014,9 @@ static void tdeckProNoteRecentMessage(int chanIdx, uint32_t fromNode, const char
     slot.senderNodeId = fromNode;
     slot.chanIdx      = (chanIdx >= 0 && chanIdx < MESH_CHANNELS) ? (int8_t)chanIdx : -1;
     slot.packetId     = packetId;
-    utf8util::copyTruncate(slot.text, sizeof(slot.text), text ? text : "");
+    // An MECP message previews decoded, in the language set when it arrived.
+    if (!mecpDecodeBody(text, slot.text, sizeof(slot.text)))
+        utf8util::copyTruncate(slot.text, sizeof(slot.text), text ? text : "");
     // A preview row is one line by construction, and a label given a newline
     // draws a second one straight through the row underneath it. Flatten the
     // control characters here rather than at render time, so every reader of
@@ -13272,6 +13310,34 @@ static void setSelectedReplyContext(uint32_t replyPacketId, const char *fallback
     }
 }
 
+#if HAS_MESSAGE_ACTIONS
+// The wire text of a channel message, rejoined from its stored lines with the
+// prefix stripped, when it is MECP. False for anything else or a line that has
+// scrolled out of the backlog.
+static bool mecpRawTextForPacket(uint32_t packetId, char *out, size_t cap) {
+    if (packetId == 0 || !out || cap == 0) return false;
+    size_t w = 0;
+    bool found = false;
+    out[0] = '\0';
+    for (int row = 0; row < MAX_MSG_LINES; row++) {
+        const DisplayLine *dl = Channels.getLine(s_activeChannel, row);
+        if (!dl) break;
+        if (shouldHideChatLine(dl->text)) continue;
+        if (dl->packetId != packetId) {
+            if (found) break;
+            continue;
+        }
+        const char *seg = found ? dl->text : chatStripPrefix(dl->text);
+        while (found && *seg == ' ') seg++;
+        if (found && w + 1 < cap) out[w++] = ' ';
+        w += utf8util::copyTruncate(out + w, cap - w, seg);
+        found = true;
+        if (w + 1 >= cap) break;
+    }
+    return found && mecp::looksLikeMecp(out);
+}
+#endif  // HAS_MESSAGE_ACTIONS
+
 // Drop the whole selection — reply target, preview text and sender together.
 // They are one selection and have to be cleared as one; forgetting the sender
 // here is what would leave Enter opening an action menu for a message that is
@@ -15780,11 +15846,39 @@ static void openComposePromptForDm(uint32_t nodeId) {
     composeSetTitle(false);
 }
 
+// MECP (issue #158): a MAYDAY is confirmed before it is sent, however it was
+// written. Set only for the one send the confirmation answers.
+static bool s_mecpMaydayConfirmed = false;
+static void mecpMaydayConfirmCommit(int) {
+    s_mecpMaydayConfirmed = true;
+    sendComposeMessage();
+    s_mecpMaydayConfirmed = false;
+}
+
 static void sendComposeMessage() {
     if (!s_composeInput) return;
 
     const char *msg = lv_textarea_get_text(s_composeInput);
     if (!msg || !msg[0]) return;
+
+    // MECP allows no trailing whitespace, and the composer leaves a space for
+    // free text that may never be typed.
+    char mecpTrimmed[512];
+    if (mecp::looksLikeMecp(msg)) {
+        size_t n = utf8util::copyTruncate(mecpTrimmed, sizeof(mecpTrimmed), msg);
+        while (n > 0 && (mecpTrimmed[n - 1] == ' ' || mecpTrimmed[n - 1] == '\t'
+                         || mecpTrimmed[n - 1] == '\r' || mecpTrimmed[n - 1] == '\n'))
+            mecpTrimmed[--n] = '\0';
+        msg = mecpTrimmed;
+    }
+    {
+        mecp::Envelope env;
+        if (!s_mecpMaydayConfirmed && mecp::parse(msg, env) && env.severity == mecp::SEV_MAYDAY) {
+            openCfgConfirmModal(-1, TR("Send a MAYDAY? Use it only when life is in danger."),
+                                mecpMaydayConfirmCommit, 0);
+            return;
+        }
+    }
 
     int txChan = (s_composeChannelIdx >= 0 && s_composeChannelIdx < MESH_CHANNELS)
                ? s_composeChannelIdx
@@ -20379,6 +20473,7 @@ enum LiveTool : uint8_t {
 #if FEATURE_MQTT_MONITOR
     LIVE_TOOL_MQTT,
 #endif
+    LIVE_TOOL_MECP,
     LIVE_TOOL_ANNOUNCE,
     LIVE_TOOL_COUNT
 };
@@ -20398,6 +20493,7 @@ static constexpr char kLiveToolShortcuts[LIVE_TOOL_COUNT] = {
 #if FEATURE_MQTT_MONITOR
     'M',
 #endif
+    'E',
     'A',
 };
 
@@ -34495,6 +34591,22 @@ static void openNodesActionMenuFor(uint32_t nodeId, bool msgMode, uint32_t packe
                                     : lv_color_hex(0xD9E8FF);
 #endif
 
+#if HAS_MESSAGE_ACTIONS
+    // MECP (issue #158): chat draws the decoded text, so the wire text the
+    // sender actually transmitted is shown here, one scrolling line.
+    if (s_nodesActionMsgMode) {
+        char raw[MSG_CHARS * 4 + 8];
+        if (mecpRawTextForPacket(packetId, raw, sizeof(raw))) {
+            lv_obj_t *rawLbl = lv_label_create(s_nodesActionModal);
+            lv_obj_set_width(rawLbl, lv_pct(100));
+            lv_obj_set_style_text_font(rawLbl, &lv_font_montserrat_12, 0);
+            lv_obj_set_style_text_color(rawLbl, rowTextColor, 0);
+            lv_label_set_long_mode(rawLbl, LV_LABEL_LONG_SCROLL_CIRCULAR);
+            setLabelTextEmojiSafe(rawLbl, raw);
+        }
+    }
+#endif
+
     // ── Tapback strip (message mode only) ───────────────────────────────────
     // A single row of glyph cells above the action grid: six curated reactions
     // and a "..." that hands off to the full emoji tray. They are rows 0..6 of
@@ -35361,6 +35473,276 @@ static void liveToolsAnnounceNow() {
                         liveToolsAnnounceCommit, 0);
 }
 
+// ── MECP composer and beacon (issue #158) ────────────────────────────────────
+// Composer: a chain of slider pickers -- severity, category, code (repeatable up
+// to eight), then person count with an attach-position box. The result is the
+// wire text, dropped into the compose box so free text can follow it and the
+// message is reviewed before it goes out. A MAYDAY is confirmed at send time
+// (sendComposeMessage), which also catches one typed by hand.
+//
+// Beacon: B01 with position and time, sent at once and then on the reference
+// schedule (5 min, 15 min after 6 h, 30 min after 24 h) on the channel active
+// when it started. A drill sends D01 B01 at routine severity and stops itself
+// after three. Stopping sends B03 (a drill D03 B03). Received B02/B03 are only
+// displayed: they are advisory on a channel, and this client does not slow down.
+static mecp::Draft s_mecpDraft = {};
+static int  s_mecpCategory = 0;
+static bool s_mecpAddAnother = false;
+static bool s_mecpAttachPos = true;
+static char s_mecpLabelBuf[112];
+static char s_mecpTitleBuf[64];
+
+static bool     s_mecpBeaconOn = false;
+static bool     s_mecpBeaconDrill = false;
+static int      s_mecpBeaconChan = 0;
+static uint32_t s_mecpBeaconStartMs = 0;
+static uint32_t s_mecpBeaconLastMs = 0;
+static uint16_t s_mecpBeaconSends = 0;
+static constexpr uint16_t kMecpDrillSends = 3;
+
+// GPS fix first, then the configured fixed position. Full precision: an
+// emergency message is the one place the position-precision setting must not
+// blur where help has to go, and attaching it is the user's explicit choice.
+static bool mecpSelfPosition(double &lat, double &lon) {
+#if HAS_GPS
+    if (gpsHasFix() && (gpsLatI() != 0 || gpsLonI() != 0)) {
+        lat = (double)gpsLatI() / 1e7;
+        lon = (double)gpsLonI() / 1e7;
+        return true;
+    }
+#endif
+    if (s_cfg.latI != 0 || s_cfg.lonI != 0) {
+        lat = (double)s_cfg.latI / 1e7;
+        lon = (double)s_cfg.lonI / 1e7;
+        return true;
+    }
+    return false;
+}
+
+// MECP timestamps are the sender's local time (MECP 1.4.0).
+static void mecpAttachPosTime(mecp::Draft &d) {
+    d.hasGps = mecpSelfPosition(d.lat, d.lon);
+    const time_t now = time(nullptr);
+    d.hasTime = (now >= kClockSetEpoch);
+    if (d.hasTime) {
+        struct tm lt;
+        localtime_r(&now, &lt);
+        d.hour = (uint8_t)lt.tm_hour;
+        d.minute = (uint8_t)lt.tm_min;
+    }
+}
+
+static void mecpDraftAddCode(mecp::Draft &d, const char *code) {
+    if (!code || d.codeCount >= mecp::kMaxDraftCodes) return;
+    for (int i = 0; i < d.codeCount; i++)
+        if (strncmp(d.codes[i], code, 3) == 0) return;
+    snprintf(d.codes[d.codeCount++], sizeof(d.codes[0]), "%s", code);
+}
+
+static bool mecpSendOnChannel(int chan, const mecp::Draft &d) {
+    char wire[mecp::kMaxWireBytes + 1];
+    if (!mecp::encode(d, "", i18nGetLang(), wire, sizeof(wire))) return false;
+    if (s_myNodeId == 0) deriveNodeId();
+    if (s_myNodeId == 0) return false;
+    const bool ok = Channels.sendText(s_myNodeId, wire, s_cfg.okToMqtt, chan, 0);
+    if (!ok) Channels.addMessage(chan, "", TR("! TX failed"), TFT_RED, 0);
+    refreshChatView(true);
+    return ok;
+}
+
+static void mecpBeaconSendOnce() {
+    mecp::Draft d = {};
+    d.severity = s_mecpBeaconDrill ? mecp::SEV_ROUTINE : mecp::SEV_MAYDAY;
+    if (s_mecpBeaconDrill) mecpDraftAddCode(d, "D01");
+    mecpDraftAddCode(d, "B01");
+    mecpAttachPosTime(d);
+    mecpSendOnChannel(s_mecpBeaconChan, d);
+    s_mecpBeaconSends++;
+    s_mecpBeaconLastMs = millis();
+}
+
+static void mecpBeaconStart(int drill) {
+    if (s_mecpBeaconOn) return;
+    s_mecpBeaconOn = true;
+    s_mecpBeaconDrill = (drill != 0);
+    s_mecpBeaconChan = (s_activeChannel >= 0 && s_activeChannel < MESH_CHANNELS) ? s_activeChannel : 0;
+    s_mecpBeaconStartMs = millis();
+    s_mecpBeaconSends = 0;
+    mecpBeaconSendOnce();
+}
+
+static void mecpBeaconStop() {
+    if (!s_mecpBeaconOn) return;
+    s_mecpBeaconOn = false;
+    mecp::Draft d = {};
+    d.severity = mecp::SEV_ROUTINE;
+    if (s_mecpBeaconDrill) mecpDraftAddCode(d, "D03");
+    mecpDraftAddCode(d, "B03");
+    mecpSendOnChannel(s_mecpBeaconChan, d);
+}
+
+static void serviceMecpBeacon() {
+    if (!s_mecpBeaconOn) return;
+    const uint32_t now = millis();
+    const uint32_t up = now - s_mecpBeaconStartMs;
+    const uint32_t intervalMs = (up < 6UL * 3600000UL)  ? 5UL * 60000UL
+                              : (up < 24UL * 3600000UL) ? 15UL * 60000UL
+                                                        : 30UL * 60000UL;
+    if (now - s_mecpBeaconLastMs < intervalMs) return;
+    if (s_mecpBeaconDrill && s_mecpBeaconSends >= kMecpDrillSends) {
+        mecpBeaconStop();
+        return;
+    }
+    mecpBeaconSendOnce();
+}
+
+// ── Composer chain ──
+static void mecpOpenCategoryPicker();
+
+static void mecpComposeFinish() {
+    char wire[mecp::kMaxWireBytes + 1];
+    if (!mecp::encode(s_mecpDraft, "", i18nGetLang(), wire, sizeof(wire))) {
+        openCfgActionMessageModal(TR("Could not build the MECP message."), "MECP");
+        return;
+    }
+    openComposePrompt(0, nullptr, false);
+    if (!s_composeInput) {
+        // No channel to compose on: show the text rather than lose it.
+        openCfgActionMessageModal(wire, "MECP");
+        return;
+    }
+    // A trailing space so free text typed next starts as its own token.
+    char withSpace[sizeof(wire) + 1];
+    snprintf(withSpace, sizeof(withSpace), "%s ", wire);
+    lv_textarea_set_text(s_composeInput, withSpace);
+}
+
+static const char *mecpDetailsLabel(int idx) {
+    if (idx == 0) return TR("No person count");
+    snprintf(s_mecpLabelBuf, sizeof(s_mecpLabelBuf), "%s: %d",
+             mecp::uiText(mecp::UI_PERSON_COUNT, i18nGetLang()), idx);
+    return s_mecpLabelBuf;
+}
+static void mecpDetailsApply(int idx) {
+    s_mecpDraft.pax = (uint32_t)idx;
+    s_mecpDraft.hasGps = false;
+    s_mecpDraft.hasTime = false;
+    if (s_mecpAttachPos) mecpAttachPosTime(s_mecpDraft);
+    mecpComposeFinish();
+}
+static const CfgSliderPicker kMecpDetailsPicker = {
+    TR_NOOP("MECP: people"), 51, mecpDetailsLabel, mecpDetailsApply, nullptr, nullptr,
+    TR_NOOP("Attach position and time"), &s_mecpAttachPos,
+};
+
+static const char *mecpCodeLabel(int idx) {
+    char code[4];
+    if (!mecp::categoryCode(s_mecpCategory, idx, code)) return "";
+    const char *name = mecp::codeLabel(code, i18nGetLang());
+    snprintf(s_mecpLabelBuf, sizeof(s_mecpLabelBuf), "%s %s", code, name ? name : "");
+    return s_mecpLabelBuf;
+}
+static void mecpCodeApply(int idx) {
+    char code[4];
+    if (mecp::categoryCode(s_mecpCategory, idx, code)) mecpDraftAddCode(s_mecpDraft, code);
+    if (s_mecpAddAnother && s_mecpDraft.codeCount < mecp::kMaxDraftCodes) {
+        mecpOpenCategoryPicker();
+        return;
+    }
+    openCfgSliderModal(&kMecpDetailsPicker, 0);
+}
+static CfgSliderPicker s_mecpCodePicker = {
+    nullptr, 0, mecpCodeLabel, mecpCodeApply, nullptr, nullptr,
+    TR_NOOP("Add another code"), &s_mecpAddAnother,
+};
+
+static const char *mecpCategoryLabel(int idx) {
+    snprintf(s_mecpLabelBuf, sizeof(s_mecpLabelBuf), "%c  %s",
+             mecp::categoryLetter(idx), mecp::categoryName(idx, i18nGetLang()));
+    return s_mecpLabelBuf;
+}
+static void mecpCategoryApply(int idx) {
+    s_mecpCategory = idx;
+    snprintf(s_mecpTitleBuf, sizeof(s_mecpTitleBuf), "MECP: %s",
+             mecp::categoryName(idx, i18nGetLang()));
+    s_mecpCodePicker.title = s_mecpTitleBuf;
+    s_mecpCodePicker.count = mecp::categoryCodeCount(idx);
+    s_mecpAddAnother = false;
+    openCfgSliderModal(&s_mecpCodePicker, 0);
+}
+static CfgSliderPicker s_mecpCategoryPicker = {
+    TR_NOOP("MECP: category"), 0, mecpCategoryLabel, mecpCategoryApply, nullptr, nullptr,
+    nullptr, nullptr,
+};
+static void mecpOpenCategoryPicker() {
+    s_mecpCategoryPicker.count = mecp::categoryCount();
+    openCfgSliderModal(&s_mecpCategoryPicker, s_mecpCategory);
+}
+
+static const char *mecpSeverityLabel(int idx) {
+    return mecp::severityName((uint8_t)idx, i18nGetLang());
+}
+static void mecpSeverityApply(int idx) {
+    s_mecpDraft.severity = (uint8_t)idx;
+    mecpOpenCategoryPicker();
+}
+static const CfgSliderPicker kMecpSeverityPicker = {
+    TR_NOOP("MECP: severity"), 4, mecpSeverityLabel, mecpSeverityApply,
+    nullptr, nullptr, nullptr, nullptr,
+};
+
+// Top menu. Its entries depend on whether a beacon is running.
+enum MecpMenuItem : uint8_t { MECP_MENU_COMPOSE, MECP_MENU_BEACON, MECP_MENU_DRILL, MECP_MENU_STOP };
+static uint8_t s_mecpMenuItems[3];
+static const char *mecpMenuLabel(int idx) {
+    switch (s_mecpMenuItems[idx]) {
+        case MECP_MENU_COMPOSE: return TR("Compose message");
+        case MECP_MENU_BEACON:  return TR("Start beacon");
+        case MECP_MENU_DRILL:   return TR("Beacon drill (3 sends)");
+        default:
+            snprintf(s_mecpLabelBuf, sizeof(s_mecpLabelBuf), TR("Stop: %s (%u sent)"),
+                     mecp::uiText(s_mecpBeaconDrill ? mecp::UI_BEACON_DRILL : mecp::UI_BEACON_ACTIVE,
+                                  i18nGetLang()),
+                     (unsigned)s_mecpBeaconSends);
+            return s_mecpLabelBuf;
+    }
+}
+static void mecpMenuApply(int idx) {
+    switch (s_mecpMenuItems[idx]) {
+        case MECP_MENU_COMPOSE:
+            s_mecpDraft = {};
+            s_mecpCategory = 0;
+            // Routine first: the knob should never rest on MAYDAY by default.
+            openCfgSliderModal(&kMecpSeverityPicker, mecp::SEV_ROUTINE);
+            break;
+        case MECP_MENU_BEACON:
+            openCfgConfirmModal(-1, TR("Start a MAYDAY beacon on this channel? It repeats until stopped."),
+                                mecpBeaconStart, 0);
+            break;
+        case MECP_MENU_DRILL:
+            mecpBeaconStart(1);
+            break;
+        default:
+            mecpBeaconStop();
+            break;
+    }
+}
+static CfgSliderPicker s_mecpMenuPicker = {
+    TR_NOOP("MECP"), 0, mecpMenuLabel, mecpMenuApply, nullptr, nullptr, nullptr, nullptr,
+};
+static void openMecpMenu() {
+    int n = 0;
+    s_mecpMenuItems[n++] = MECP_MENU_COMPOSE;
+    if (s_mecpBeaconOn) {
+        s_mecpMenuItems[n++] = MECP_MENU_STOP;
+    } else {
+        s_mecpMenuItems[n++] = MECP_MENU_BEACON;
+        s_mecpMenuItems[n++] = MECP_MENU_DRILL;
+    }
+    s_mecpMenuPicker.count = n;
+    openCfgSliderModal(&s_mecpMenuPicker, s_mecpBeaconOn ? 1 : 0);
+}
+
 // Opening a tool drops Tools rather than stacking it underneath, so backing out
 // of a chart lands on whatever Tools was opened over: Live when it was opened
 // from there, the chat screen when it was reached from the nav bar or L.
@@ -35389,6 +35771,7 @@ static void liveToolsActivate(int tool) {
         // Transmits rather than opening anything. Tools is already closed by
         // the time this runs, so the popup it raises stands on whatever Tools
         // was opened over, and dismissing it lands there.
+        case LIVE_TOOL_MECP:      openMecpMenu();          break;
         case LIVE_TOOL_ANNOUNCE:  liveToolsAnnounceNow();  break;
         default: break;
     }
@@ -35542,6 +35925,7 @@ static void openLiveToolsModal() {
 #if FEATURE_MQTT_MONITOR
         TR_NOOP("MQTT"),
 #endif
+        TR_NOOP("MECP"),
         TR_NOOP("Announce"),
     };
 #else
@@ -35568,6 +35952,7 @@ static void openLiveToolsModal() {
 #if FEATURE_MQTT_MONITOR
         TR_NOOP("(M)QTT"),
 #endif
+        TR_NOOP("M(E)CP"),
         TR_NOOP("(A)nnounce"),
     };
 #endif
@@ -43742,6 +44127,16 @@ static void refreshDmModal(bool force) {
             const DmLine *dl = renderRows[row];
             if (!dl) continue;
 
+            // MECP draws decoded (issue #158); the stored line keeps the wire text.
+            char dmShown[384];
+            const char *dmText = dl->text;
+            {
+                utf8util::copyTruncate(dmShown, sizeof(dmShown), dl->text);
+                if (mecpDecodeLineInPlace(dmShown, sizeof(dmShown),
+                                          (size_t)(chatStripPrefix(dl->text) - dl->text)))
+                    dmText = dmShown;
+            }
+
             // Insert a date marker before the first DM that lands on a new
             // local calendar day. DM lines store one logical message each, so
             // every line is a "first of group" candidate.
@@ -43764,7 +44159,7 @@ static void refreshDmModal(bool force) {
                 if (!dmTimeBuf[0]) formatChatClock(dl->epoch, dmTimeBuf, sizeof(dmTimeBuf));
                 if (who != 0 && !isMe) chatSenderLabel(who, dmName, sizeof(dmName));
                 chatMakeIrcRow(s_dmMsgList, dmMsgFont, who, isMe,
-                               dmTimeBuf, dmName, chatStripPrefix(dl->text),
+                               dmTimeBuf, dmName, chatStripPrefix(dmText),
                                dmAckToDisplayAck(dl->ack),
                                0, false, &lastMsgObj, nullptr, nullptr,
                                freshDot ? &dot : nullptr);
@@ -43789,7 +44184,7 @@ static void refreshDmModal(bool force) {
                                isMe,
                                dmMetaBuf,
                                nullptr,
-                               chatStripPrefix(dl->text),
+                               chatStripPrefix(dmText),
                                dmAckToDisplayAck(dl->ack),
                                0,
                                false,
@@ -43860,14 +44255,14 @@ static void refreshDmModal(bool force) {
 #endif
             lv_span_t *dotSpan = nullptr;
 #if defined(DEVICE_TDECK_PRO)
-            chatSetLineSpans(msg, dl->text, dmMsgFont, ackedLine, chatNameFont(dmMsgFont),
+            chatSetLineSpans(msg, dmText, dmMsgFont, ackedLine, chatNameFont(dmMsgFont),
                              freshDot ? &dotSpan : nullptr);
 #else
             if (spanLine) {
-                chatSetLineSpans(msg, dl->text, dmMsgFont, ackedLine, nullptr,
+                chatSetLineSpans(msg, dmText, dmMsgFont, ackedLine, nullptr,
                                  freshDot ? &dotSpan : nullptr);
             } else {
-                setLabelTextEmojiSafe(msg, dl->text);
+                setLabelTextEmojiSafe(msg, dmText);
             }
 #endif
             if (dotSpan) freshDotTrack(s_dmDots, msg, FRESH_DOT_SPAN, dotSpan);
@@ -62957,6 +63352,7 @@ static void refreshChatViewBubbles(const DisplayLine *const *rows, int rowCount,
                 bl += (size_t)snprintf(body + bl, sizeof(body) - bl, " %s", c);
             n++;
         }
+        if (rows[i]->packetId != 0) mecpDecodeLineInPlace(body, sizeof(body), 0);
 
         // Sender name tag for others (from NodeDB; fall back to hex id). Honors
         // the Chat Names setting: Long uses the advertised long name when known.
@@ -63046,6 +63442,7 @@ static uint32_t chatRenderContextSignature() {
     mix((uint32_t)s_cfg.uiMode);
     mix((uint32_t)(s_pagerChatCursorMode ? 1u : 0u));
     mix((uint32_t)s_pagerChatCursorDisplayIndex);
+    mix((uint32_t)i18nGetLang());   // MECP lines render in the UI language
     return h;
 }
 
@@ -63299,6 +63696,15 @@ static void refreshChatView(bool force) {
                         ml += (size_t)snprintf(merged + ml, sizeof(merged) - ml, " %s", c);
                     n++;
                 }
+                // MECP decodes here, before a reply tag lands between prefix
+                // and body. Packet lines only: local/system lines are never MECP.
+                bool mecpLine = false;
+                uint8_t mecpSev = 0;
+                if (rows[i]->packetId != 0) {
+                    mecpLine = mecpDecodeLineInPlace(
+                        merged, sizeof(merged), (size_t)(chatStripPrefix(merged) - merged), &mecpSev);
+                    if (mecpLine) ml = strlen(merged);
+                }
 
                 // Replies: a tag after the prefix (small panels) or a quote
                 // line above. Reactions go on a line under the message.
@@ -63415,6 +63821,10 @@ static void refreshChatView(bool force) {
                             break;
                     }
                 }
+                // A received emergency code outranks node colour; our own sent
+                // line keeps its ACK colour so delivery state stays visible.
+                if (mecpLine && rows[i]->senderNodeId != 0 && rows[i]->senderNodeId != s_myNodeId)
+                    textColor565 = mecpSeverityColor565(mecpSev, s_cfg.uiMode == UI_MODE_LIGHT);
 #if defined(DEVICE_TDECK_PRO)
                 textColor565 = TFT_BLACK;
 #endif
@@ -68425,6 +68835,8 @@ void loop() {
 #endif
     // Cheap unless due; holds itself while a preset scan has the radio parked.
     LOOP_PHASE("beacon", serviceMeshBeacon());
+    // MECP emergency beacon (issue #158): cheap unless one is running and due.
+    LOOP_PHASE("mecp", serviceMecpBeacon());
     // Append any nodes evicted from the full node table to the SD archive.
     // Placed before the screen-sleep return below so archiving keeps working
     // with the display off. No-op unless an eviction actually queued something.

@@ -185,8 +185,8 @@ CardputerZero app.
   Sym/Shift — so it has no equivalent.
 - Live screen shortcuts: C clears the log and F filters the feed by traffic type
 - **L opens Tools** — the grid holding Live, the SNR/RSSI and ChUtil charts,
-  Beacons and Announce on every board, plus Discovery, Weather and MQTT where
-  the board has them. S, U, D, B, W, M or A jumps straight to one
+  Beacons, MECP and Announce on every board, plus Discovery, Weather and MQTT
+  where the board has them. S, U, D, B, W, M, E or A jumps straight to one
 - Inside Discovery: W sweeps and P picks a preset to scan — both ask how long to
   listen first. C cancels a sweep or scan while one is running and clears the
   list when none is, and S saves a snapshot to SD. Inside Beacons: C clears.
@@ -967,6 +967,42 @@ standing next to you.
 - Refusals and results appear on the status line for a few seconds: `Sent to
   LongFast`, `Wait 43s before sending again`, or
   `Nothing recorded yet - nothing to send`
+
+### MECP emergency codes
+
+[MECP](https://github.com/mecp-org/MECP) (Mesh Emergency Communication Protocol,
+v1.4.0) is plain text that any Meshtastic client can send: `MECP/<severity>/`
+then three-character codes, then optional free text. `MECP/0/M01 M04 3pax`
+means *MAYDAY: injury, unconscious person, 3 people*.
+
+**Reading.** A channel message or DM that is MECP is drawn decoded, in the UI
+language when MECP has a pack for it (English otherwise):
+`MAYDAY: Injury · Unconscious person · Person count: 3`. Person counts, times,
+call signs and durations in the free text are made readable too. In the
+classic chat style a received MECP line is coloured by severity — red MAYDAY,
+orange urgent, amber safety, blue routine. The message itself is not changed:
+replies quote it as sent, and for a channel message the message action menu
+shows the original text on a line under its title. Received *beacon acknowledged* (B02) and *cancel
+beacon* (B03) are only displayed; Camillia does not change its own beacon rate.
+
+**Writing.** Tools → MECP (**E**) → *Compose message* walks through sliders:
+severity (it starts on routine, never MAYDAY), category, code — tick *Add
+another code* to add up to eight — and a person count, with *Attach position
+and time* to add your GPS fix (or the fixed position set in Config) and the
+local time. The result is put in the compose box on the current channel, where
+you can add free text and send it as usual. Any MAYDAY, composed this way or
+typed by hand, asks `Send a MAYDAY?` before it goes out.
+
+**Beacon.** Tools → MECP → *Start beacon* (after a confirmation) sends
+`MECP/0/B01` with position and time on the current channel, at once and then
+every 5 minutes, every 15 after 6 hours and every 30 after 24 hours. It keeps
+that channel even if you switch. *Beacon drill (3 sends)* does the same at
+routine severity, marked D01, and stops itself after three. Tools → MECP →
+*Stop* ends either and sends a cancel (B03; a drill sends D03 B03). The beacon
+stops when the device restarts.
+
+MECP language packs © the MECP contributors, CC BY 4.0
+(github.com/mecp-org/MECP); the protocol itself is CC0.
 
 ### Announce
 
