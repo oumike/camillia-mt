@@ -1,20 +1,10 @@
 ### New
-- **M5Stack CardputerZero + Cap LoRa-1262 support.** Camillia runs as an app in the CardputerZero's launcher rather than as a flashed firmware image. It has the same screens as the other boards: chat, DMs, nodes, channels, Live, Tools, Config and the Home dashboard. Install it from the M5Stack App Store (share code `CMLA`) or install the `.deb` attached to this release with `sudo apt install ./camillia-cardputer-zero-<version>_arm64.deb`. Close the stock Cap LoRa-1262 and meshterm apps first, because only one app can use the radio at a time.
-- CardputerZero: the radio runs only while the app is open.
-- CardputerZero: Camillia uses the system's own Wi-Fi connection and shows its status. There is no Wi-Fi picker and no Wi-Fi step during setup.
-- CardputerZero: Bluetooth keyboards pair through the system's Bluetooth, from the usual Config row.
-- CardputerZero: web config runs on port 18765 and has the same pages as on the other boards. Chat and Bluetooth keep working while it is open.
-- CardputerZero: GPS from the cap's L76K module and battery level from the system fuel gauge.
-- CardputerZero: updates come from the M5Stack App Store, so the in-app update check points there.
-- CardputerZero: press Esc twice to go Home, or hold Esc for 4 seconds to quit to the launcher. Outside text entry, the number row works as shortcut keys: 1 Home, 2 Chat, 3 DMs, 4 Nodes, 5 Tools, 6 Config, 0 Help.
-- CardputerZero: larger text and taller rows in Config lists and channel grids, and a taller screen header with bigger text on every screen except Home.
+- **MECP emergency codes** (all boards): received MECP messages show in plain language in your UI language, including severity, the emergency codes, the number of people, position and time. In the classic chat style, a received MECP message is coloured by severity: red for MAYDAY, orange for urgent, amber for safety and blue for routine. The original message is kept, so replies quote it as it was sent, and for a channel message the message action menu shows the original text.
+- **MECP composer** (all boards): open it from Tools → MECP, or press E in the Tools menu. One form lets you set severity, up to two emergency codes, the number of people, your position and time, an optional note and the channel to send on. The form always opens on routine severity. You choose the channel on the form, and the open chat does not change it. Any MAYDAY asks for confirmation before it is sent, including one typed by hand in the compose box. On short screens such as the T-Deck and CardputerZero, the form is split into pages with Previous and Next. Touch-only boards get an on-screen keyboard for the note.
+- **MECP beacon** (all boards): sends a MAYDAY beacon with your position and time on the chosen channel. It goes out at once, then every 5 minutes, every 15 minutes after 6 hours and every 30 minutes after 24 hours. Starting the beacon asks for confirmation. Stopping it sends a cancel, and a restart also stops it.
+- **MECP beacon drill** (all boards): a practice beacon at routine severity that stops itself after three sends.
 
 ### Changed
-- Export Config: "Append date" is now a checkbox instead of a slider (all boards).
-- Developers with their own build environments that list `config_io.cpp` must also add the new `src/mesh_channel_plan.cpp`.
-- Three new on-screen text items are in English only for now and have not been translated yet.
+- The user guide now covers the CardputerZero and the Tanmatsu, including their keyboard shortcuts, the CardputerZero's web config on port 18765 and its use of the system Wi-Fi. It also explains the Append date checkbox in Export Config and which boards can pair a Bluetooth keyboard.
 
-### Fixed
-- Cardputer ADV: up, down, left and right now move as expected in the Config grid and in grid popups. Before, Up could move right.
-
-Pull request: #156
+Pull request: #157
