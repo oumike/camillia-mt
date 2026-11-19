@@ -35474,23 +35474,17 @@ static void liveToolsAnnounceNow() {
 }
 
 // ── MECP composer and beacon (issue #158) ────────────────────────────────────
-// Composer: a chain of slider pickers -- severity, category, code (repeatable up
-// to eight), then person count with an attach-position box. The result is the
-// wire text, dropped into the compose box so free text can follow it and the
-// message is reviewed before it goes out. A MAYDAY is confirmed at send time
-// (sendComposeMessage), which also catches one typed by hand.
+// Composer: one form of dropdowns -- action, severity, one or two codes, person
+// count, position and time, an optional note and the channel -- sent straight
+// from the form. A MAYDAY is confirmed first; sendComposeMessage() confirms one
+// typed by hand the same way.
 //
 // Beacon: B01 with position and time, sent at once and then on the reference
-// schedule (5 min, 15 min after 6 h, 30 min after 24 h) on the channel active
-// when it started. A drill sends D01 B01 at routine severity and stops itself
+// schedule (5 min, 15 min after 6 h, 30 min after 24 h) on the channel chosen
+// in the form. A drill sends D01 B01 at routine severity and stops itself
 // after three. Stopping sends B03 (a drill D03 B03). Received B02/B03 are only
 // displayed: they are advisory on a channel, and this client does not slow down.
-static mecp::Draft s_mecpDraft = {};
-static int  s_mecpCategory = 0;
-static bool s_mecpAddAnother = false;
-static bool s_mecpAttachPos = true;
-static char s_mecpLabelBuf[112];
-static char s_mecpTitleBuf[64];
+static bool s_mecpAttachPos = true;   // the form's starting choice
 
 static bool     s_mecpBeaconOn = false;
 static bool     s_mecpBeaconDrill = false;
@@ -35539,9 +35533,9 @@ static void mecpDraftAddCode(mecp::Draft &d, const char *code) {
     snprintf(d.codes[d.codeCount++], sizeof(d.codes[0]), "%s", code);
 }
 
-static bool mecpSendOnChannel(int chan, const mecp::Draft &d) {
+static bool mecpSendOnChannel(int chan, const mecp::Draft &d, const char *note = "") {
     char wire[mecp::kMaxWireBytes + 1];
-    if (!mecp::encode(d, "", i18nGetLang(), wire, sizeof(wire))) return false;
+    if (!mecp::encode(d, note ? note : "", i18nGetLang(), wire, sizeof(wire))) return false;
     if (s_myNodeId == 0) deriveNodeId();
     if (s_myNodeId == 0) return false;
     const bool ok = Channels.sendText(s_myNodeId, wire, s_cfg.okToMqtt, chan, 0);
@@ -35561,11 +35555,11 @@ static void mecpBeaconSendOnce() {
     s_mecpBeaconLastMs = millis();
 }
 
-static void mecpBeaconStart(int drill) {
+static void mecpBeaconStart(int drill, int chan) {
     if (s_mecpBeaconOn) return;
     s_mecpBeaconOn = true;
     s_mecpBeaconDrill = (drill != 0);
-    s_mecpBeaconChan = (s_activeChannel >= 0 && s_activeChannel < MESH_CHANNELS) ? s_activeChannel : 0;
+    s_mecpBeaconChan = (chan >= 0 && chan < MESH_CHANNELS) ? chan : 0;
     s_mecpBeaconStartMs = millis();
     s_mecpBeaconSends = 0;
     mecpBeaconSendOnce();
@@ -35596,151 +35590,677 @@ static void serviceMecpBeacon() {
     mecpBeaconSendOnce();
 }
 
-// ── Composer chain ──
-static void mecpOpenCategoryPicker();
+// ── Composer form ──
+// Every choice is a dropdown on one form, the channel last and always chosen
+// here rather than taken from the chat screen. Where the panel is too short for
+// every row (CardputerZero, T-Deck) the rows are paged and Previous/Next walk
+// them; the form is the same object either way.
+//
+// Keys: Up/Down move between controls; Enter opens a dropdown, Up/Down then
+// change it and Enter keeps it (the close key puts it back); Left/Right change
+// a dropdown without opening it where the board has them. Enter on the note
+// moves on, Enter on a button presses it.
+enum MecpField : uint8_t {
+    MF_ACTION, MF_SEVERITY, MF_CAT1, MF_CODE1, MF_CAT2, MF_CODE2,
+    MF_PEOPLE, MF_POSITION, MF_NOTE, MF_CHANNEL, MF_COUNT
+};
+enum MecpButton : uint8_t { MB_CANCEL, MB_PREV, MB_NEXT, MB_SEND, MB_COUNT };
+enum MecpAction : uint8_t { MECP_ACT_COMPOSE, MECP_ACT_BEACON, MECP_ACT_DRILL, MECP_ACT_STOP };
 
-static void mecpComposeFinish() {
+static const uint16_t kMecpPeople[] = { 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 15, 20, 30, 50, 100 };
+static constexpr int kMecpPeopleCount = (int)(sizeof(kMecpPeople) / sizeof(kMecpPeople[0]));
+
+static lv_obj_t *s_mecpFormBackdrop = nullptr;
+static lv_obj_t *s_mecpFormModal = nullptr;
+static lv_obj_t *s_mecpFormTitle = nullptr;
+static lv_obj_t *s_mecpFormRows[MF_COUNT] = {};
+static lv_obj_t *s_mecpFormCtl[MF_COUNT] = {};
+static lv_obj_t *s_mecpFormBtns[MB_COUNT] = {};
+static lv_obj_t *s_mecpFormSendLbl = nullptr;
+#if UI_TOUCH_ONLY_PROFILE
+static lv_obj_t *s_mecpFormKeyboard = nullptr;
+#endif
+static uint8_t   s_mecpActions[3];           // the Action dropdown's entries
+static int       s_mecpActionCount = 0;
+static int8_t    s_mecpChanMap[MESH_CHANNELS];
+static int       s_mecpChanCount = 0;
+static int       s_mecpLastChan = 0;         // primary until the user picks one
+static int       s_mecpPerPage = MF_COUNT;   // rows a page holds
+static int       s_mecpPage = 0;
+static int       s_mecpPageCount = 1;
+static lv_obj_t *s_mecpFocusList[MF_COUNT + MB_COUNT];
+static int       s_mecpFocusCount = 0;
+static int       s_mecpFocus = 0;
+static bool      s_mecpEditing = false;      // a dropdown is open under the keys
+static uint32_t  s_mecpEditOrig = 0;
+
+// What the confirmation answers: captured when Send is pressed, so the send
+// is exactly what was confirmed.
+static mecp::Draft s_mecpPendDraft = {};
+static char        s_mecpPendNote[mecp::kMaxWireBytes + 1];
+static int         s_mecpPendChan = 0;
+
+static bool textFieldCaretKey(lv_obj_t *ta, char k);
+
+static void closeMecpForm() {
+    if (lvObjValid(s_mecpFormBackdrop)) lv_obj_del(s_mecpFormBackdrop);
+    s_mecpFormBackdrop = nullptr;
+    s_mecpFormModal = nullptr;
+    s_mecpFormTitle = nullptr;
+    s_mecpFormSendLbl = nullptr;
+    for (int i = 0; i < MF_COUNT; i++) { s_mecpFormRows[i] = nullptr; s_mecpFormCtl[i] = nullptr; }
+    for (int i = 0; i < MB_COUNT; i++) s_mecpFormBtns[i] = nullptr;
+#if UI_TOUCH_ONLY_PROFILE
+    s_mecpFormKeyboard = nullptr;
+#endif
+    s_mecpFocusCount = 0;
+    s_mecpEditing = false;
+}
+
+static bool mecpFormNoteFocused() {
+    return s_mecpFormModal && !s_mecpEditing && s_mecpFocus < s_mecpFocusCount
+           && s_mecpFocusList[s_mecpFocus] == s_mecpFormCtl[MF_NOTE];
+}
+
+static int mecpFormSel(MecpField f) {
+    lv_obj_t *dd = s_mecpFormCtl[f];
+    return (lvObjValid(dd) && f != MF_NOTE) ? (int)lv_dropdown_get_selected(dd) : 0;
+}
+
+static uint8_t mecpFormAction() {
+    const int i = mecpFormSel(MF_ACTION);
+    return (i >= 0 && i < s_mecpActionCount) ? s_mecpActions[i] : MECP_ACT_COMPOSE;
+}
+
+static int mecpFormChannel() {
+    const int i = mecpFormSel(MF_CHANNEL);
+    return (i >= 0 && i < s_mecpChanCount) ? s_mecpChanMap[i] : 0;
+}
+
+static bool mecpFieldShown(int f) {
+    const uint8_t act = mecpFormAction();
+    if (f == MF_ACTION) return true;
+    if (act == MECP_ACT_STOP) return false;
+    if (act != MECP_ACT_COMPOSE) return f == MF_CHANNEL;
+    if (f == MF_CODE2) return mecpFormSel(MF_CAT2) > 0;
+    return true;
+}
+
+// Fills a code dropdown with the codes of one category.
+static void mecpFillCodes(lv_obj_t *dd, int category) {
+    if (!lvObjValid(dd)) return;
+    static char opts[1600];
+    opts[0] = '\0';
+    const uint8_t lang = i18nGetLang();
+    const int n = mecp::categoryCodeCount(category);
+    for (int i = 0; i < n; i++) {
+        char code[4];
+        if (!mecp::categoryCode(category, i, code)) continue;
+        const char *name = mecp::codeLabel(code, lang);
+        char line[96];
+        snprintf(line, sizeof(line), "%s%s %s", i ? "\n" : "", code, name ? name : "");
+        strlcat(opts, line, sizeof(opts));
+    }
+    lv_dropdown_set_options(dd, opts);
+    lv_dropdown_set_selected(dd, 0);
+}
+
+static void mecpFormPaintFocus() {
+    const lv_color_t accent = lvColorFrom565(s_ui.selectAccent);
+    for (int i = 0; i < s_mecpFocusCount; i++) {
+        lv_obj_t *o = s_mecpFocusList[i];
+        if (!lvObjValid(o)) continue;
+        const bool on = (i == s_mecpFocus);
+        lv_obj_set_style_outline_width(o, on ? 2 : 0, LV_PART_MAIN);
+        lv_obj_set_style_outline_pad(o, 1, LV_PART_MAIN);
+        lv_obj_set_style_outline_color(o, accent, LV_PART_MAIN);
+        lv_obj_set_style_outline_opa(o, on ? LV_OPA_COVER : LV_OPA_TRANSP, LV_PART_MAIN);
+    }
+    if (s_mecpFocus < s_mecpFocusCount && lvObjValid(s_mecpFocusList[s_mecpFocus]))
+        lv_obj_scroll_to_view(s_mecpFocusList[s_mecpFocus], LV_ANIM_OFF);
+}
+
+// Shows the rows that apply to the chosen action on the current page, the
+// buttons that page needs, and rebuilds the order the keys move through them.
+static void mecpFormLayout() {
+    if (!s_mecpFormModal) return;
+    lv_obj_t *wasFocused = (s_mecpFocus < s_mecpFocusCount) ? s_mecpFocusList[s_mecpFocus] : nullptr;
+
+    int shown[MF_COUNT];
+    int n = 0;
+    for (int f = 0; f < MF_COUNT; f++)
+        if (mecpFieldShown(f)) shown[n++] = f;
+    const int per = s_mecpPerPage > 0 ? s_mecpPerPage : 1;
+    s_mecpPageCount = (n + per - 1) / per;
+    if (s_mecpPageCount < 1) s_mecpPageCount = 1;
+    if (s_mecpPage >= s_mecpPageCount) s_mecpPage = s_mecpPageCount - 1;
+    if (s_mecpPage < 0) s_mecpPage = 0;
+
+    for (int f = 0; f < MF_COUNT; f++)
+        if (s_mecpFormRows[f]) lv_obj_add_flag(s_mecpFormRows[f], LV_OBJ_FLAG_HIDDEN);
+    s_mecpFocusCount = 0;
+    for (int i = s_mecpPage * per; i < n && i < (s_mecpPage + 1) * per; i++) {
+        lv_obj_clear_flag(s_mecpFormRows[shown[i]], LV_OBJ_FLAG_HIDDEN);
+        s_mecpFocusList[s_mecpFocusCount++] = s_mecpFormCtl[shown[i]];
+    }
+
+    const bool last = (s_mecpPage == s_mecpPageCount - 1);
+    const bool vis[MB_COUNT] = { true, s_mecpPage > 0, !last, last };
+    // Focus order: the forward button first, so Down from the last field
+    // lands on Next or Send rather than on Cancel.
+    static const int kOrder[MB_COUNT] = { MB_NEXT, MB_SEND, MB_PREV, MB_CANCEL };
+    for (int b = 0; b < MB_COUNT; b++) {
+        if (!s_mecpFormBtns[b]) continue;
+        if (vis[b]) lv_obj_clear_flag(s_mecpFormBtns[b], LV_OBJ_FLAG_HIDDEN);
+        else        lv_obj_add_flag(s_mecpFormBtns[b], LV_OBJ_FLAG_HIDDEN);
+    }
+    for (int i = 0; i < MB_COUNT; i++)
+        if (vis[kOrder[i]] && s_mecpFormBtns[kOrder[i]])
+            s_mecpFocusList[s_mecpFocusCount++] = s_mecpFormBtns[kOrder[i]];
+
+    const uint8_t act = mecpFormAction();
+    if (s_mecpFormSendLbl) {
+        lv_label_set_text(s_mecpFormSendLbl,
+                          act == MECP_ACT_STOP ? TR("Stop")
+                          : act == MECP_ACT_COMPOSE ? TR("Send") : TR("Start"));
+    }
+    if (s_mecpFormTitle) {
+        if (s_mecpPageCount > 1)
+            lv_label_set_text_fmt(s_mecpFormTitle, "MECP  %d/%d", s_mecpPage + 1, s_mecpPageCount);
+        else
+            lv_label_set_text(s_mecpFormTitle, "MECP");
+    }
+
+    s_mecpFocus = 0;
+    for (int i = 0; i < s_mecpFocusCount; i++)
+        if (s_mecpFocusList[i] == wasFocused) { s_mecpFocus = i; break; }
+    mecpFormPaintFocus();
+}
+
+static void mecpFormFieldChanged(int f) {
+    if (f == MF_CAT1) mecpFillCodes(s_mecpFormCtl[MF_CODE1], mecpFormSel(MF_CAT1));
+    if (f == MF_CAT2) {
+        const int c = mecpFormSel(MF_CAT2);
+        if (c > 0) mecpFillCodes(s_mecpFormCtl[MF_CODE2], c - 1);
+    }
+    if (f == MF_ACTION || f == MF_CAT2) mecpFormLayout();
+}
+
+static void onMecpFormDropdownChanged(lv_event_t *e) {
+    mecpFormFieldChanged((int)(intptr_t)lv_event_get_user_data(e));
+}
+
+static void mecpFormSendCommit(int) {
+    const int chan = s_mecpPendChan;
+    closeMecpForm();
+    s_mecpLastChan = chan;
+    mecpSendOnChannel(chan, s_mecpPendDraft, s_mecpPendNote);
+    setActiveChannel(chan);
+}
+
+static void mecpFormBeaconCommit(int) {
+    closeMecpForm();
+    s_mecpLastChan = s_mecpPendChan;
+    mecpBeaconStart(0, s_mecpPendChan);
+}
+
+static void mecpFormSubmit() {
+    if (!s_mecpFormModal) return;
+    const uint8_t act = mecpFormAction();
+    s_mecpPendChan = mecpFormChannel();
+    if (act == MECP_ACT_STOP) {
+        closeMecpForm();
+        mecpBeaconStop();
+        return;
+    }
+    if (act == MECP_ACT_DRILL) {
+        closeMecpForm();
+        s_mecpLastChan = s_mecpPendChan;
+        mecpBeaconStart(1, s_mecpPendChan);
+        return;
+    }
+    if (act == MECP_ACT_BEACON) {
+        openCfgConfirmModal(-1, TR("Start a MAYDAY beacon on this channel? It repeats until stopped."),
+                            mecpFormBeaconCommit, 0);
+        return;
+    }
+
+    mecp::Draft &d = s_mecpPendDraft;
+    d = {};
+    d.severity = (uint8_t)mecpFormSel(MF_SEVERITY);
+    char code[4];
+    if (mecp::categoryCode(mecpFormSel(MF_CAT1), mecpFormSel(MF_CODE1), code))
+        mecpDraftAddCode(d, code);
+    if (mecpFormSel(MF_CAT2) > 0
+        && mecp::categoryCode(mecpFormSel(MF_CAT2) - 1, mecpFormSel(MF_CODE2), code))
+        mecpDraftAddCode(d, code);
+    const int p = mecpFormSel(MF_PEOPLE);
+    d.pax = (p >= 0 && p < kMecpPeopleCount) ? kMecpPeople[p] : 0;
+    s_mecpAttachPos = (mecpFormSel(MF_POSITION) == 0);
+    if (s_mecpAttachPos) mecpAttachPosTime(d);
+    const char *note = lvObjValid(s_mecpFormCtl[MF_NOTE])
+                           ? lv_textarea_get_text(s_mecpFormCtl[MF_NOTE]) : "";
+    snprintf(s_mecpPendNote, sizeof(s_mecpPendNote), "%s", note ? note : "");
+
     char wire[mecp::kMaxWireBytes + 1];
-    if (!mecp::encode(s_mecpDraft, "", i18nGetLang(), wire, sizeof(wire))) {
+    if (!mecp::encode(d, s_mecpPendNote, i18nGetLang(), wire, sizeof(wire))) {
         openCfgActionMessageModal(TR("Could not build the MECP message."), "MECP");
         return;
     }
-    openComposePrompt(0, nullptr, false);
-    if (!s_composeInput) {
-        // No channel to compose on: show the text rather than lose it.
-        openCfgActionMessageModal(wire, "MECP");
+    if (d.severity == mecp::SEV_MAYDAY) {
+        openCfgConfirmModal(-1, TR("Send a MAYDAY? Use it only when life is in danger."),
+                            mecpFormSendCommit, 0);
         return;
     }
-    // A trailing space so free text typed next starts as its own token.
-    char withSpace[sizeof(wire) + 1];
-    snprintf(withSpace, sizeof(withSpace), "%s ", wire);
-    lv_textarea_set_text(s_composeInput, withSpace);
+    mecpFormSendCommit(0);
 }
 
-static const char *mecpDetailsLabel(int idx) {
-    if (idx == 0) return TR("No person count");
-    snprintf(s_mecpLabelBuf, sizeof(s_mecpLabelBuf), "%s: %d",
-             mecp::uiText(mecp::UI_PERSON_COUNT, i18nGetLang()), idx);
-    return s_mecpLabelBuf;
-}
-static void mecpDetailsApply(int idx) {
-    s_mecpDraft.pax = (uint32_t)idx;
-    s_mecpDraft.hasGps = false;
-    s_mecpDraft.hasTime = false;
-    if (s_mecpAttachPos) mecpAttachPosTime(s_mecpDraft);
-    mecpComposeFinish();
-}
-static const CfgSliderPicker kMecpDetailsPicker = {
-    TR_NOOP("MECP: people"), 51, mecpDetailsLabel, mecpDetailsApply, nullptr, nullptr,
-    TR_NOOP("Attach position and time"), &s_mecpAttachPos,
-};
-
-static const char *mecpCodeLabel(int idx) {
-    char code[4];
-    if (!mecp::categoryCode(s_mecpCategory, idx, code)) return "";
-    const char *name = mecp::codeLabel(code, i18nGetLang());
-    snprintf(s_mecpLabelBuf, sizeof(s_mecpLabelBuf), "%s %s", code, name ? name : "");
-    return s_mecpLabelBuf;
-}
-static void mecpCodeApply(int idx) {
-    char code[4];
-    if (mecp::categoryCode(s_mecpCategory, idx, code)) mecpDraftAddCode(s_mecpDraft, code);
-    if (s_mecpAddAnother && s_mecpDraft.codeCount < mecp::kMaxDraftCodes) {
-        mecpOpenCategoryPicker();
-        return;
-    }
-    openCfgSliderModal(&kMecpDetailsPicker, 0);
-}
-static CfgSliderPicker s_mecpCodePicker = {
-    nullptr, 0, mecpCodeLabel, mecpCodeApply, nullptr, nullptr,
-    TR_NOOP("Add another code"), &s_mecpAddAnother,
-};
-
-static const char *mecpCategoryLabel(int idx) {
-    snprintf(s_mecpLabelBuf, sizeof(s_mecpLabelBuf), "%c  %s",
-             mecp::categoryLetter(idx), mecp::categoryName(idx, i18nGetLang()));
-    return s_mecpLabelBuf;
-}
-static void mecpCategoryApply(int idx) {
-    s_mecpCategory = idx;
-    snprintf(s_mecpTitleBuf, sizeof(s_mecpTitleBuf), "MECP: %s",
-             mecp::categoryName(idx, i18nGetLang()));
-    s_mecpCodePicker.title = s_mecpTitleBuf;
-    s_mecpCodePicker.count = mecp::categoryCodeCount(idx);
-    s_mecpAddAnother = false;
-    openCfgSliderModal(&s_mecpCodePicker, 0);
-}
-static CfgSliderPicker s_mecpCategoryPicker = {
-    TR_NOOP("MECP: category"), 0, mecpCategoryLabel, mecpCategoryApply, nullptr, nullptr,
-    nullptr, nullptr,
-};
-static void mecpOpenCategoryPicker() {
-    s_mecpCategoryPicker.count = mecp::categoryCount();
-    openCfgSliderModal(&s_mecpCategoryPicker, s_mecpCategory);
+static void mecpFormGoPage(int delta) {
+    s_mecpPage += delta;
+    s_mecpFocus = 0;
+    s_mecpFocusCount = 0;   // land on the page's first control
+    mecpFormLayout();
 }
 
-static const char *mecpSeverityLabel(int idx) {
-    return mecp::severityName((uint8_t)idx, i18nGetLang());
-}
-static void mecpSeverityApply(int idx) {
-    s_mecpDraft.severity = (uint8_t)idx;
-    mecpOpenCategoryPicker();
-}
-static const CfgSliderPicker kMecpSeverityPicker = {
-    TR_NOOP("MECP: severity"), 4, mecpSeverityLabel, mecpSeverityApply,
-    nullptr, nullptr, nullptr, nullptr,
-};
-
-// Top menu. Its entries depend on whether a beacon is running.
-enum MecpMenuItem : uint8_t { MECP_MENU_COMPOSE, MECP_MENU_BEACON, MECP_MENU_DRILL, MECP_MENU_STOP };
-static uint8_t s_mecpMenuItems[3];
-static const char *mecpMenuLabel(int idx) {
-    switch (s_mecpMenuItems[idx]) {
-        case MECP_MENU_COMPOSE: return TR("Compose message");
-        case MECP_MENU_BEACON:  return TR("Start beacon");
-        case MECP_MENU_DRILL:   return TR("Beacon drill (3 sends)");
-        default:
-            snprintf(s_mecpLabelBuf, sizeof(s_mecpLabelBuf), TR("Stop: %s (%u sent)"),
-                     mecp::uiText(s_mecpBeaconDrill ? mecp::UI_BEACON_DRILL : mecp::UI_BEACON_ACTIVE,
-                                  i18nGetLang()),
-                     (unsigned)s_mecpBeaconSends);
-            return s_mecpLabelBuf;
+static void onMecpFormButton(lv_event_t *e) {
+    switch ((int)(intptr_t)lv_event_get_user_data(e)) {
+        case MB_CANCEL: closeMecpForm(); break;
+        case MB_PREV:   mecpFormGoPage(-1); break;
+        case MB_NEXT:   mecpFormGoPage(+1); break;
+        default:        mecpFormSubmit(); break;
     }
 }
-static void mecpMenuApply(int idx) {
-    switch (s_mecpMenuItems[idx]) {
-        case MECP_MENU_COMPOSE:
-            s_mecpDraft = {};
-            s_mecpCategory = 0;
-            // Routine first: the knob should never rest on MAYDAY by default.
-            openCfgSliderModal(&kMecpSeverityPicker, mecp::SEV_ROUTINE);
-            break;
-        case MECP_MENU_BEACON:
-            openCfgConfirmModal(-1, TR("Start a MAYDAY beacon on this channel? It repeats until stopped."),
-                                mecpBeaconStart, 0);
-            break;
-        case MECP_MENU_DRILL:
-            mecpBeaconStart(1);
-            break;
-        default:
-            mecpBeaconStop();
-            break;
-    }
+
+static void onMecpFormBackdropPressed(lv_event_t *e) {
+    if (lv_event_get_target_obj(e) != s_mecpFormBackdrop) return;
+    closeMecpForm();
 }
-static CfgSliderPicker s_mecpMenuPicker = {
-    TR_NOOP("MECP"), 0, mecpMenuLabel, mecpMenuApply, nullptr, nullptr, nullptr, nullptr,
-};
-static void openMecpMenu() {
-    int n = 0;
-    s_mecpMenuItems[n++] = MECP_MENU_COMPOSE;
+
+#if UI_TOUCH_ONLY_PROFILE
+static void onMecpNoteFocused(lv_event_t *e) {
+    LV_UNUSED(e);
+    if (!lvObjValid(s_mecpFormKeyboard)) return;
+    lv_keyboard_set_textarea(s_mecpFormKeyboard, s_mecpFormCtl[MF_NOTE]);
+    lv_obj_clear_flag(s_mecpFormKeyboard, LV_OBJ_FLAG_HIDDEN);
+    lv_obj_align(s_mecpFormModal, LV_ALIGN_TOP_MID, 0, 4);
+}
+static void onMecpKeyboardDone(lv_event_t *e) {
+    LV_UNUSED(e);
+    if (lvObjValid(s_mecpFormKeyboard)) lv_obj_add_flag(s_mecpFormKeyboard, LV_OBJ_FLAG_HIDDEN);
+    if (lvObjValid(s_mecpFormModal)) lv_obj_align(s_mecpFormModal, LV_ALIGN_CENTER, 0, 0);
+}
+#endif
+
+static lv_obj_t *mecpFormRow(lv_obj_t *parent, int f, const char *label) {
+    lv_obj_t *row = lv_obj_create(parent);
+    lv_obj_remove_style_all(row);
+    lv_obj_set_width(row, lv_pct(100));
+    lv_obj_set_height(row, LV_SIZE_CONTENT);
+    lv_obj_clear_flag(row, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_set_flex_flow(row, LV_FLEX_FLOW_ROW);
+    lv_obj_set_flex_align(row, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+    lv_obj_set_style_pad_column(row, 6, 0);
+    lv_obj_set_style_pad_all(row, 2, 0);   // room for the focus outline
+    lv_obj_t *lbl = lv_label_create(row);
+    lv_obj_set_width(lbl, lv_pct(30));
+    lv_label_set_long_mode(lbl, LV_LABEL_LONG_DOT);
+    lv_obj_set_style_text_font(lbl, &lv_font_montserrat_12, 0);
+#if defined(DEVICE_TDECK_PRO)
+    lv_obj_set_style_text_color(lbl, lv_color_make(0, 0, 0), 0);
+#else
+    lv_obj_set_style_text_color(lbl, lv_color_hex(0xD9E8FF), 0);
+#endif
+    lv_label_set_text(lbl, label);
+    s_mecpFormRows[f] = row;
+    return row;
+}
+
+static lv_obj_t *mecpFormDropdown(int f, const char *label, const char *options, int sel) {
+    lv_obj_t *row = mecpFormRow(s_mecpFormModal, f, label);
+    lv_obj_t *dd = lv_dropdown_create(row);
+    lv_obj_set_flex_grow(dd, 1);
+    lv_obj_set_style_text_font(dd, &lv_font_montserrat_14, 0);
+    lv_obj_set_style_pad_ver(dd, 4, 0);
+    lv_dropdown_set_options(dd, options);
+    if (sel > 0) lv_dropdown_set_selected(dd, (uint32_t)sel);
+    lv_obj_t *list = lv_dropdown_get_list(dd);
+    if (list) lv_obj_set_style_text_font(list, &lv_font_montserrat_14, 0);
+    lv_obj_add_event_cb(dd, onMecpFormDropdownChanged, LV_EVENT_VALUE_CHANGED, (void *)(intptr_t)f);
+    s_mecpFormCtl[f] = dd;
+    return dd;
+}
+
+static void openMecpForm() {
+    if (!s_rootScreen || s_mecpFormBackdrop) return;
+    const uint8_t lang = i18nGetLang();
+
+    s_mecpActionCount = 0;
+    s_mecpActions[s_mecpActionCount++] = MECP_ACT_COMPOSE;
     if (s_mecpBeaconOn) {
-        s_mecpMenuItems[n++] = MECP_MENU_STOP;
+        s_mecpActions[s_mecpActionCount++] = MECP_ACT_STOP;
     } else {
-        s_mecpMenuItems[n++] = MECP_MENU_BEACON;
-        s_mecpMenuItems[n++] = MECP_MENU_DRILL;
+        s_mecpActions[s_mecpActionCount++] = MECP_ACT_BEACON;
+        s_mecpActions[s_mecpActionCount++] = MECP_ACT_DRILL;
     }
-    s_mecpMenuPicker.count = n;
-    openCfgSliderModal(&s_mecpMenuPicker, s_mecpBeaconOn ? 1 : 0);
+    s_mecpChanCount = 0;
+    int chanSel = 0;
+    for (int i = 0; i < MESH_CHANNELS; i++) {
+        if (CHANNEL_KEYS[i].role == 2) continue;   // disabled
+        if (i == s_mecpLastChan) chanSel = s_mecpChanCount;
+        s_mecpChanMap[s_mecpChanCount++] = (int8_t)i;
+    }
+    if (s_mecpChanCount == 0) s_mecpChanMap[s_mecpChanCount++] = 0;
+
+    const int w = lv_disp_get_hor_res(NULL);
+    const int h = lv_disp_get_ver_res(NULL);
+    int modalW = w - 8;
+    if (modalW > 440) modalW = 440;
+
+    s_mecpFormBackdrop = lv_obj_create(s_rootScreen);
+    lv_obj_set_size(s_mecpFormBackdrop, w, h);
+    lv_obj_align(s_mecpFormBackdrop, LV_ALIGN_CENTER, 0, 0);
+    lv_obj_clear_flag(s_mecpFormBackdrop, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_add_flag(s_mecpFormBackdrop, LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_set_style_bg_color(s_mecpFormBackdrop, lv_color_hex(0x000000), 0);
+    lv_obj_set_style_bg_opa(s_mecpFormBackdrop, LV_OPA_40, 0);
+    lv_obj_set_style_border_width(s_mecpFormBackdrop, 0, 0);
+    lv_obj_set_style_pad_all(s_mecpFormBackdrop, 0, 0);
+    lv_obj_add_event_cb(s_mecpFormBackdrop, onMecpFormBackdropPressed, LV_EVENT_CLICKED, nullptr);
+
+    s_mecpFormModal = lv_obj_create(s_mecpFormBackdrop);
+    lv_obj_set_size(s_mecpFormModal, modalW, LV_SIZE_CONTENT);
+    lv_obj_set_style_max_height(s_mecpFormModal, h - 8, 0);
+    lv_obj_align(s_mecpFormModal, LV_ALIGN_CENTER, 0, 0);
+    lv_obj_add_flag(s_mecpFormModal, LV_OBJ_FLAG_CLICKABLE);
+    setupVScroll(s_mecpFormModal);
+#if defined(DEVICE_TDECK_PRO)
+    lv_obj_set_style_bg_color(s_mecpFormModal, lv_color_make(255, 255, 255), 0);
+    lv_obj_set_style_border_color(s_mecpFormModal, lv_color_make(0, 0, 0), 0);
+#else
+    lv_obj_set_style_bg_color(s_mecpFormModal, lv_color_hex(0x0E285B), 0);
+    lv_obj_set_style_border_color(s_mecpFormModal, lv_color_hex(0x5C86C6), 0);
+#endif
+    lv_obj_set_style_bg_opa(s_mecpFormModal, LV_OPA_COVER, 0);
+    lv_obj_set_style_border_width(s_mecpFormModal, 1, 0);
+    lv_obj_set_style_pad_all(s_mecpFormModal, 6, 0);
+    lv_obj_set_style_pad_row(s_mecpFormModal, 2, 0);
+    lv_obj_set_flex_flow(s_mecpFormModal, LV_FLEX_FLOW_COLUMN);
+    lv_obj_set_flex_align(s_mecpFormModal, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_CENTER,
+                          LV_FLEX_ALIGN_CENTER);
+
+    s_mecpFormTitle = lv_label_create(s_mecpFormModal);
+    lv_obj_set_width(s_mecpFormTitle, lv_pct(100));
+    lv_obj_set_style_text_font(s_mecpFormTitle, &lv_font_montserrat_16, 0);
+    lv_obj_set_style_text_color(s_mecpFormTitle, lv_color_hex(0xD9E8FF), 0);
+    lv_obj_set_style_text_align(s_mecpFormTitle, LV_TEXT_ALIGN_CENTER, 0);
+    lv_label_set_text(s_mecpFormTitle, "MECP");
+
+    char opts[1600];
+    // Action
+    opts[0] = '\0';
+    for (int i = 0; i < s_mecpActionCount; i++) {
+        char line[96];
+        const char *name = TR("Compose message");
+        if (s_mecpActions[i] == MECP_ACT_BEACON) name = TR("Start beacon");
+        else if (s_mecpActions[i] == MECP_ACT_DRILL) name = TR("Beacon drill (3 sends)");
+        else if (s_mecpActions[i] == MECP_ACT_STOP) {
+            snprintf(line, sizeof(line), TR("Stop: %s (%u sent)"),
+                     mecp::uiText(s_mecpBeaconDrill ? mecp::UI_BEACON_DRILL : mecp::UI_BEACON_ACTIVE, lang),
+                     (unsigned)s_mecpBeaconSends);
+            name = line;
+        }
+        if (i) strlcat(opts, "\n", sizeof(opts));
+        strlcat(opts, name, sizeof(opts));
+    }
+    mecpFormDropdown(MF_ACTION, TR("Action"), opts, 0);
+
+    // Severity: MAYDAY first, as the protocol numbers them, but resting on
+    // Routine -- the form should never open on MAYDAY.
+    opts[0] = '\0';
+    for (int i = 0; i < mecp::kSeverityCount; i++) {
+        if (i) strlcat(opts, "\n", sizeof(opts));
+        strlcat(opts, mecp::severityName((uint8_t)i, lang), sizeof(opts));
+    }
+    mecpFormDropdown(MF_SEVERITY, TR("Severity"), opts, mecp::SEV_ROUTINE);
+
+    char cats[640] = "";
+    for (int i = 0; i < mecp::categoryCount(); i++) {
+        char line[80];
+        snprintf(line, sizeof(line), "%s%c  %s", i ? "\n" : "", mecp::categoryLetter(i),
+                 mecp::categoryName(i, lang));
+        strlcat(cats, line, sizeof(cats));
+    }
+    mecpFormDropdown(MF_CAT1, TR("Category"), cats, 0);
+    mecpFormDropdown(MF_CODE1, TR("Code"), "", 0);
+    mecpFillCodes(s_mecpFormCtl[MF_CODE1], 0);
+
+    snprintf(opts, sizeof(opts), "%s\n%s", TR("None"), cats);
+    mecpFormDropdown(MF_CAT2, TR("2nd category"), opts, 0);
+    mecpFormDropdown(MF_CODE2, TR("2nd code"), "", 0);
+    mecpFillCodes(s_mecpFormCtl[MF_CODE2], 0);
+
+    snprintf(opts, sizeof(opts), "%s", TR("None"));
+    for (int i = 1; i < kMecpPeopleCount; i++) {
+        char line[16];
+        snprintf(line, sizeof(line), "\n%u", (unsigned)kMecpPeople[i]);
+        strlcat(opts, line, sizeof(opts));
+    }
+    mecpFormDropdown(MF_PEOPLE, mecp::uiText(mecp::UI_PERSON_COUNT, lang), opts, 0);
+
+    snprintf(opts, sizeof(opts), "%s\n%s", TR("Attach"), TR("Don't attach"));
+    mecpFormDropdown(MF_POSITION, TR("Position & time"), opts, s_mecpAttachPos ? 0 : 1);
+
+    {
+        lv_obj_t *row = mecpFormRow(s_mecpFormModal, MF_NOTE, TR("Note"));
+        lv_obj_t *ta = lv_textarea_create(row);
+        lv_obj_set_flex_grow(ta, 1);
+        lv_textarea_set_one_line(ta, true);
+        lv_textarea_set_max_length(ta, 120);
+        lv_textarea_set_placeholder_text(ta, TR("Optional"));
+        lv_obj_set_style_text_font(ta, &lv_font_montserrat_14, 0);
+        lv_obj_set_style_pad_ver(ta, 4, 0);
+#if UI_TOUCH_ONLY_PROFILE
+        lv_obj_add_event_cb(ta, onMecpNoteFocused, LV_EVENT_CLICKED, nullptr);
+#endif
+        s_mecpFormCtl[MF_NOTE] = ta;
+    }
+
+    opts[0] = '\0';
+    for (int i = 0; i < s_mecpChanCount; i++) {
+        const int c = s_mecpChanMap[i];
+        const char *name = CHANNEL_KEYS[c].name;
+        char line[48];
+        snprintf(line, sizeof(line), "%s%d  %s", i ? "\n" : "", c,
+                 (name && name[0]) ? name : (c == 0 ? TR("Primary") : "-"));
+        strlcat(opts, line, sizeof(opts));
+    }
+    mecpFormDropdown(MF_CHANNEL, TR("Channel"), opts, chanSel);
+
+    lv_obj_t *btnRow = lv_obj_create(s_mecpFormModal);
+    lv_obj_remove_style_all(btnRow);
+    lv_obj_set_width(btnRow, lv_pct(100));
+    lv_obj_set_height(btnRow, LV_SIZE_CONTENT);
+    lv_obj_clear_flag(btnRow, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_set_flex_flow(btnRow, LV_FLEX_FLOW_ROW);
+    lv_obj_set_flex_align(btnRow, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+    lv_obj_set_style_pad_column(btnRow, 6, 0);
+    lv_obj_set_style_pad_all(btnRow, 3, 0);
+    static const char *const kBtnText[MB_COUNT] = {
+        TR_NOOP("Cancel"), TR_NOOP("Previous"), TR_NOOP("Next"), TR_NOOP("Send")
+    };
+    for (int b = 0; b < MB_COUNT; b++) {
+        lv_obj_t *btn = lv_btn_create(btnRow);
+        lv_obj_set_height(btn, 24);
+        lv_obj_set_width(btn, LV_SIZE_CONTENT);
+        lv_obj_set_style_pad_hor(btn, 10, 0);
+        lv_obj_set_style_pad_ver(btn, 0, 0);
+        lv_obj_set_style_radius(btn, 4, 0);
+        lv_obj_set_style_shadow_width(btn, 0, 0);
+        lv_obj_set_style_bg_color(btn, b == MB_SEND ? lvColorFrom565(s_ui.selectAccent)
+                                                    : lv_color_hex(0x16386F), 0);
+        lv_obj_set_style_bg_opa(btn, LV_OPA_COVER, 0);
+        lv_obj_set_style_border_width(btn, 1, 0);
+        lv_obj_set_style_border_color(btn, lv_color_hex(0x8FB5E6), 0);
+        lv_obj_add_event_cb(btn, onMecpFormButton, LV_EVENT_CLICKED, (void *)(intptr_t)b);
+        lv_obj_t *lbl = lv_label_create(btn);
+        lv_obj_set_style_text_font(lbl, &lv_font_montserrat_12, 0);
+        lv_obj_set_style_text_color(lbl, lv_color_hex(0xE8F1FF), 0);
+        lv_label_set_text(lbl, TR(kBtnText[b]));
+        lv_obj_center(lbl);
+        s_mecpFormBtns[b] = btn;
+        if (b == MB_SEND) s_mecpFormSendLbl = lbl;
+    }
+
+#if UI_TOUCH_ONLY_PROFILE
+    s_mecpFormKeyboard = lv_keyboard_create(s_mecpFormBackdrop);
+    configureOnScreenKeyboard(s_mecpFormKeyboard);
+    lv_obj_set_size(s_mecpFormKeyboard, w, h / 2);
+    lv_obj_align(s_mecpFormKeyboard, LV_ALIGN_BOTTOM_MID, 0, 0);
+    lv_obj_add_event_cb(s_mecpFormKeyboard, onMecpKeyboardDone, LV_EVENT_READY, nullptr);
+    lv_obj_add_event_cb(s_mecpFormKeyboard, onMecpKeyboardDone, LV_EVENT_CANCEL, nullptr);
+    lv_obj_add_flag(s_mecpFormKeyboard, LV_OBJ_FLAG_HIDDEN);
+#endif
+
+    // Page size from what was actually laid out: everything that is not a
+    // field row is chrome, and what is left of the height holds the rows.
+    lv_obj_move_foreground(s_mecpFormBackdrop);
+    lv_obj_update_layout(s_mecpFormModal);
+    const int gap = 2;
+    int rowH = 0;
+    for (int f = 0; f < MF_COUNT; f++) {
+        const int rh = lv_obj_get_height(s_mecpFormRows[f]);
+        if (rh > rowH) rowH = rh;
+    }
+    const int chrome = 12 + 2 /*border*/ + lv_obj_get_height(s_mecpFormTitle) + gap
+                       + lv_obj_get_height(btnRow) + gap;
+    const int avail = (h - 8) - chrome;
+    s_mecpPerPage = (rowH > 0) ? avail / (rowH + gap) : MF_COUNT;
+    if (s_mecpPerPage < 1) s_mecpPerPage = 1;
+    if (s_mecpPerPage > MF_COUNT) s_mecpPerPage = MF_COUNT;
+
+    s_mecpPage = 0;
+    s_mecpFocus = 0;
+    s_mecpFocusCount = 0;
+    s_mecpEditing = false;
+    mecpFormLayout();
+}
+
+static void mecpFormStepDropdown(lv_obj_t *dd, int delta) {
+    if (!lvObjValid(dd) || !delta) return;
+    const int n = (int)lv_dropdown_get_option_count(dd);
+    int next = (int)lv_dropdown_get_selected(dd) + delta;
+    if (next < 0) next = 0;
+    if (next > n - 1) next = n - 1;
+    if (next == (int)lv_dropdown_get_selected(dd)) return;
+    lv_dropdown_set_selected(dd, (uint32_t)next);
+    lv_obj_t *list = lv_dropdown_get_list(dd);
+    if (list) lv_obj_invalidate(list);
+}
+
+static int mecpFieldOf(lv_obj_t *o) {
+    for (int f = 0; f < MF_COUNT; f++) if (s_mecpFormCtl[f] == o) return f;
+    return -1;
+}
+
+// The form's keys. Always consumes: nothing may reach the screen beneath.
+static void mecpFormHandleKey(char k, bool invertScrollNav) {
+    if (!s_mecpFormModal || s_mecpFocusCount == 0) return;
+    lv_obj_t *cur = s_mecpFocusList[s_mecpFocus];
+    const int field = mecpFieldOf(cur);
+    int vdelta = 0;
+    if (k == KEY_SCROLL_UP)      vdelta = invertScrollNav ? 1 : -1;
+    else if (k == KEY_SCROLL_DN) vdelta = invertScrollNav ? -1 : 1;
+    int hdelta = 0;
+    if (k == KEY_PREV_CHAN || k == KEY_PAGE_DN)      hdelta = -1;
+    else if (k == KEY_NEXT_CHAN || k == KEY_PAGE_UP) hdelta = 1;
+
+    if (s_mecpEditing) {
+        if (k == KEY_ENTER || k == KEY_ROLLER) {
+            lv_dropdown_close(cur);
+            s_mecpEditing = false;
+            if ((uint32_t)lv_dropdown_get_selected(cur) != s_mecpEditOrig) mecpFormFieldChanged(field);
+            return;
+        }
+        if (isModalCloseKey(k)) {
+            lv_dropdown_set_selected(cur, s_mecpEditOrig);
+            lv_dropdown_close(cur);
+            s_mecpEditing = false;
+            return;
+        }
+        mecpFormStepDropdown(cur, vdelta ? vdelta : hdelta);
+        return;
+    }
+
+    if (field == MF_NOTE) {
+        if (k == KEY_ENTER || k == KEY_TAB || vdelta) {
+            const int next = s_mecpFocus + (vdelta < 0 ? -1 : 1);
+            if (next >= 0 && next < s_mecpFocusCount) { s_mecpFocus = next; mecpFormPaintFocus(); }
+            return;
+        }
+        if (textFieldCaretKey(cur, k)) return;
+        if (isBackspaceKey(k)) {
+            const char *t = lv_textarea_get_text(cur);
+            if (k != KEY_BACKSPACE) {
+                closeMecpForm();   // a hold, or the M9's Back button
+            } else if (t && t[0]) {
+                lv_textarea_delete_char(cur);
+            } else if (s_mecpFocus > 0) {
+                s_mecpFocus--;     // empty: step back, as the name fields do
+                mecpFormPaintFocus();
+            }
+            return;
+        }
+        if (k == KEY_ESCAPE) { closeMecpForm(); return; }
+        if (k >= 0x20 && k < 0x7F) {
+            char one[2] = { k, '\0' };
+            lv_textarea_add_text(cur, one);
+        }
+        return;
+    }
+
+    if (isModalCloseKey(k)) {
+        closeMecpForm();
+        return;
+    }
+    if (vdelta || k == KEY_TAB) {
+        int next = s_mecpFocus + (vdelta ? vdelta : 1);
+        if (next < 0) next = 0;
+        if (next >= s_mecpFocusCount) next = s_mecpFocusCount - 1;
+        if (next != s_mecpFocus) { s_mecpFocus = next; mecpFormPaintFocus(); }
+        return;
+    }
+    if (field >= 0) {
+        if (hdelta) {
+            mecpFormStepDropdown(cur, hdelta);
+            mecpFormFieldChanged(field);
+            return;
+        }
+        if (k == KEY_ENTER || k == KEY_ROLLER) {
+            s_mecpEditOrig = lv_dropdown_get_selected(cur);
+            s_mecpEditing = true;
+            lv_dropdown_open(cur);
+        }
+        return;
+    }
+    // A button. Left/Right follow the row as drawn, not the focus order.
+    if (hdelta) {
+        int b = 0;
+        while (b < MB_COUNT && s_mecpFormBtns[b] != cur) b++;
+        for (b += hdelta; b >= 0 && b < MB_COUNT; b += hdelta) {
+            if (!s_mecpFormBtns[b] || lv_obj_has_flag(s_mecpFormBtns[b], LV_OBJ_FLAG_HIDDEN)) continue;
+            for (int i = 0; i < s_mecpFocusCount; i++)
+                if (s_mecpFocusList[i] == s_mecpFormBtns[b]) s_mecpFocus = i;
+            mecpFormPaintFocus();
+            break;
+        }
+        return;
+    }
+    if (k == KEY_ENTER || k == KEY_ROLLER) {
+        if (cur == s_mecpFormBtns[MB_CANCEL])      closeMecpForm();
+        else if (cur == s_mecpFormBtns[MB_PREV])   mecpFormGoPage(-1);
+        else if (cur == s_mecpFormBtns[MB_NEXT])   mecpFormGoPage(+1);
+        else                                       mecpFormSubmit();
+    }
 }
 
 // Opening a tool drops Tools rather than stacking it underneath, so backing out
@@ -35771,7 +36291,7 @@ static void liveToolsActivate(int tool) {
         // Transmits rather than opening anything. Tools is already closed by
         // the time this runs, so the popup it raises stands on whatever Tools
         // was opened over, and dismissing it lands there.
-        case LIVE_TOOL_MECP:      openMecpMenu();          break;
+        case LIVE_TOOL_MECP:      openMecpForm();          break;
         case LIVE_TOOL_ANNOUNCE:  liveToolsAnnounceNow();  break;
         default: break;
     }
@@ -50393,6 +50913,7 @@ static bool prepareGlobalNavigation() {
     // left standing behind the destination, and a Tools screen left underneath
     // would reappear when that destination closed.
     closeLiveToolsModal();
+    closeMecpForm();
     closeChannelActionsModal();
     setChannelDropdownVisible(false);
 
@@ -51062,6 +51583,7 @@ static void pumpKeyboardInput() {
                              || (s_dmNodePickerModal && s_dmNodeFilterOpen)
                              || s_cfgWifiPassModal
                              || s_cfgNodeNameModal
+                             || mecpFormNoteFocused()
                              || s_chanTextModal
                              || s_nodesFilterDialog
                              // Only once the theme filter is armed. Before that
@@ -51183,6 +51705,9 @@ static void pumpKeyboardInput() {
                          // Node / Message Actions: a two-column grid, plus
                          // the tapback strip above it in message mode.
                          || s_nodesActionModal
+                         // MECP form: Left/Right change a dropdown or move
+                         // between the buttons.
+                         || s_mecpFormModal
                          // A slider picker with a checkbox under it (Sweep/Scan
                          // and MQTT Scan Settings): two rows, the same shape as
                          // Brightness just below.
@@ -51563,6 +52088,13 @@ static void pumpKeyboardInput() {
             continue;
         }
 #endif
+
+        // MECP form (Tools -> MECP). Below the confirmation, which stands over
+        // it for a MAYDAY.
+        if (s_mecpFormModal) {
+            mecpFormHandleKey(k, invertScrollNav);
+            continue;
+        }
 
         // Ordered-list slider picker (location precision, light timeout): same
         // shape as the volume slider above.
@@ -65333,6 +65865,7 @@ static void closeAllModalsForRebuild() {
 #endif
 
     closeComposePrompt();
+    closeMecpForm();
     closeChannelActionsModal();
     closeDmDeleteConfirm();
     closeDmNodePicker();

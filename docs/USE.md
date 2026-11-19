@@ -985,20 +985,27 @@ replies quote it as sent, and for a channel message the message action menu
 shows the original text on a line under its title. Received *beacon acknowledged* (B02) and *cancel
 beacon* (B03) are only displayed; Camillia does not change its own beacon rate.
 
-**Writing.** Tools → MECP (**E**) → *Compose message* walks through sliders:
-severity (it starts on routine, never MAYDAY), category, code — tick *Add
-another code* to add up to eight — and a person count, with *Attach position
-and time* to add your GPS fix (or the fixed position set in Config) and the
-local time. The result is put in the compose box on the current channel, where
-you can add free text and send it as usual. Any MAYDAY, composed this way or
-typed by hand, asks `Send a MAYDAY?` before it goes out.
+**Writing.** Tools → MECP (**E**) opens one form of dropdowns: *Action*
+(*Compose message*), *Severity* (it starts on routine, never MAYDAY),
+*Category* and *Code*, an optional *2nd category* and *2nd code*, the person
+count, *Position & time* (*Attach* adds your GPS fix, or the fixed position
+set in Config, and the local time), an optional *Note* and the *Channel* to
+send on. The channel is always chosen here, never taken from the chat screen;
+it starts on the primary channel, then on the last one you used. *Send* sends
+it. On screens too short for every row (CardputerZero, T-Deck) the form is
+split into pages with *Previous* and *Next*.
 
-**Beacon.** Tools → MECP → *Start beacon* (after a confirmation) sends
-`MECP/0/B01` with position and time on the current channel, at once and then
-every 5 minutes, every 15 after 6 hours and every 30 after 24 hours. It keeps
-that channel even if you switch. *Beacon drill (3 sends)* does the same at
-routine severity, marked D01, and stops itself after three. Tools → MECP →
-*Stop* ends either and sends a cancel (B03; a drill sends D03 B03). The beacon
+With keys: Up/Down move between controls, Enter opens a dropdown, Up/Down
+change it and Enter keeps it (the close key puts it back). Left/Right change a
+dropdown without opening it. Enter in the note moves on. Any MAYDAY, from the
+form or typed by hand, asks `Send a MAYDAY?` before it goes out.
+
+**Beacon.** In the same form, *Action* → *Start beacon* (after a confirmation)
+sends `MECP/0/B01` with position and time on the chosen channel, at once and
+then every 5 minutes, every 15 after 6 hours and every 30 after 24 hours.
+*Beacon drill (3 sends)* does the same at routine severity, marked D01, and
+stops itself after three. While one runs, *Action* → *Stop* ends it and sends
+a cancel (B03; a drill sends D03 B03). The beacon
 stops when the device restarts.
 
 MECP language packs © the MECP contributors, CC BY 4.0
