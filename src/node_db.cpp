@@ -24,9 +24,10 @@ static uint32_t s_nodePersistRetryAtMs = 0;
 //
 // Node data is a cache — re-learned from the mesh within minutes — while
 // settings are not, so the cache is what yields when the partition is tight.
-// Without this the node table simply wins the race for space: on the 16 KB NVS
-// a Launcher install runs under, a busy mesh fills the partition with node
-// blobs and every later config or channel write fails silently.
+// Without this the node table simply wins the race for space: on the 20 KB NVS
+// a Launcher install shares with Launcher and its other apps, a busy mesh fills
+// the partition with node blobs and every later config or channel write fails
+// silently.
 //
 // MUST stay above ~170. nvs_get_stats() counts the compaction page in
 // free_entries, and NVS never spends that page: at free_entries == 126 the

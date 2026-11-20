@@ -52,6 +52,12 @@ const char *otaCurrentDeviceAssetSlug();
 // skip checking and hide the update action when this is false; the install path
 // refuses regardless.
 bool otaLayoutSupportsUpdate();
+// True when bmorcelli's Launcher installed this firmware: Launcher keeps its own
+// app at 0x10000 and runs Camillia from an OTA slot it created (issue #160).
+// Updates then come through Launcher, and the NVS partition also holds
+// Launcher's and its other apps' settings. Never true when
+// otaLayoutSupportsUpdate() is.
+bool otaInstalledByLauncher();
 
 // Checks GitHub release metadata and computes the expected OTA binary URL.
 bool otaCheckLatestRelease(OtaCheckResult &out);

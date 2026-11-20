@@ -806,6 +806,7 @@ Update check failed: %s	Güncelleme denetimi başarısız: %s
 Update check needs WiFi connected	Güncelleme denetimi için WiFi bağlı olmalı
 Update check needs WiFi on	Güncelleme denetimi için WiFi açık olmalı
 Update check skipped (a dialog was open)	Güncelleme denetimi atlandı (bir iletişim kutusu açıktı)
+Update with Launcher (installed by Launcher)	Launcher ile güncelleyin (Launcher ile kuruldu)
 Uplinked by: %s	MQTT'ye gönderen: %s
 Uplinked by: the sender itself	MQTT'ye gönderen: göndericinin kendisi
 Use arrows to choose, then tap Next	Oklarla seçin, sonra İleri'ye dokunun

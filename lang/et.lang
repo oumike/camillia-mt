@@ -803,6 +803,7 @@ Update check failed: %s	Uuenduse kontroll ebaõnnestus: %s
 Update check needs WiFi connected	Uuenduse kontrolliks on vaja ühendatud WiFi-t
 Update check needs WiFi on	Uuenduse kontrolliks peab WiFi sees olema
 Update check skipped (a dialog was open)	Uuenduse kontroll vahele jäetud (dialoog oli avatud)
+Update with Launcher (installed by Launcher)	Uuenda Launcheriga (paigaldatud Launcheriga)
 Uplinked by: %s	MQTT-sse saatis: %s
 Uplinked by: the sender itself	MQTT-sse saatis: saatja ise
 Use arrows to choose, then tap Next	Valige nooltega, siis puudutage Edasi

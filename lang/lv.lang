@@ -805,6 +805,7 @@ Update check failed: %s	Atjauninājuma pārbaude neizdevās: %s
 Update check needs WiFi connected	Atjauninājuma pārbaudei vajadzīgs savienots WiFi
 Update check needs WiFi on	Atjauninājuma pārbaudei vajadzīgs ieslēgts WiFi
 Update check skipped (a dialog was open)	Atjauninājuma pārbaude izlaista (bija atvērts dialogs)
+Update with Launcher (installed by Launcher)	Atjauniniet ar Launcher (instalēts ar Launcher)
 Uplinked by: %s	Uz MQTT nosūtīja: %s
 Uplinked by: the sender itself	Uz MQTT nosūtīja: pats sūtītājs
 Use arrows to choose, then tap Next	Izvēlieties ar bultiņām, tad pieskarieties Tālāk

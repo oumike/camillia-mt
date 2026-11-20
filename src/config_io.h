@@ -1438,3 +1438,9 @@ int cfgListBackups(char (*names)[CFG_BACKUP_NAME_MAX], int max);
 // Returns true if /camillia/config.yaml is present on the configured storage.
 // Mounts it if needed; returns false if storage is unavailable.
 bool cfgSdConfigExists();
+
+// Clears the settings a factory reset removes from NVS; the caller reboots.
+// On Camillia's own flash layout that is the whole NVS partition, as before.
+// Under bmorcelli's Launcher the partition also holds Launcher's settings and
+// every other installed app's, so only Camillia's namespaces are cleared (#160).
+void cfgFactoryEraseNvs();

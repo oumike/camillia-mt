@@ -64,6 +64,7 @@ The T-Display P4's ESP32-C6 companion firmware is flashed through its dedicated
 Notes:
 - All keyboard-specific shortcuts apply to keyboard builds (`tdeck`, `tdeck-pro`, `tlora-pager-tft`, `cardputer-cap`, `m9`, `tanmatsu` and the CardputerZero app) and to `mesh-deck` and both `p4-amoled-*` builds while their detachable keyboard is present.
 - Environmental telemetry via BME280/BMP280/AHT20 is available on Heltec V4 expansion builds when a compatible sensor is present.
+- On boards bmorcelli's [Launcher](https://bmorcelli.github.io/Launcher/) supports, Camillia can also run under it alongside other firmware; updates then come through Launcher. See [docs/BUILD.md](docs/BUILD.md#installing-with-launcher).
 
 ## Features
 

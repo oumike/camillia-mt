@@ -6752,6 +6752,13 @@ static bool consumeOtaWorkerModeOnce() {
     return run;
 }
 
+// Why a non-factory flash layout gets no update: Launcher-installed devices are
+// told where updates come from instead.
+static const char *otaLayoutBlockedReason() {
+    return otaInstalledByLauncher() ? TR("Update with Launcher (installed by Launcher)")
+                                    : TR("OTA needs the factory image (flash layout)");
+}
+
 // The gates a release check cannot get past no matter who asked for it, as
 // opposed to the boot check's own policy (once per boot, and only if the user
 // wants one). Returns null when a check can proceed, otherwise a reason short
@@ -6765,7 +6772,7 @@ static const char *otaCheckBlockedReason() {
 #else
     // A third-party installer's layout keeps another firmware in the slot an
     // update would land in, so there is nothing worth checking for.
-    if (!otaLayoutSupportsUpdate()) return TR("OTA needs the factory image (flash layout)");
+    if (!otaLayoutSupportsUpdate()) return otaLayoutBlockedReason();
     if (!s_cfg.wifiEnabled) return TR("Update check needs WiFi on");
     // Also the AP/web-config case: the station is not associated there, so
     // there is no route to the release proxy.
@@ -48667,7 +48674,7 @@ static void performCfgAction(int actionId) {
             if (!otaLayoutSupportsUpdate()) {
                 snprintf(s_cfgStatus,
                          sizeof(s_cfgStatus),
-                         "%s", TR("OTA needs the factory image (flash layout)"));
+                         "%s", otaLayoutBlockedReason());
                 break;
             }
 
@@ -48877,8 +48884,7 @@ static void performCfgAction(int actionId) {
             Nodes.clearPersisted();
             clearNodeDbOnSd();
             sdRmDirRecursive("/camillia/dms");
-            nvs_flash_erase();
-            nvs_flash_init();
+            cfgFactoryEraseNvs();
             snprintf(s_cfgStatus, sizeof(s_cfgStatus), "%s", TR("Factory reset - rebooting..."));
             refreshCfgModal();
             delay(1000);
@@ -68756,7 +68762,7 @@ static void serviceOtaAutoCheck(uint32_t nowMs) {
     if (!otaLayoutSupportsUpdate()) {
         s_otaAutoCheckDone = true;
         s_otaBootCheckForced = false;
-        if (manual) abandonManual(TR("OTA needs the factory image (flash layout)"));
+        if (manual) abandonManual(otaLayoutBlockedReason());
         else Serial.println("[ota-check] skipped: flash layout cannot accept OTA updates");
         return;
     }

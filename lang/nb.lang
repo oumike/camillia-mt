@@ -793,6 +793,7 @@ Update check failed: %s	Oppdateringssjekk mislyktes: %s
 Update check needs WiFi connected	Oppdateringssjekk krever tilkoblet WiFi
 Update check needs WiFi on	Oppdateringssjekk krever at WiFi er på
 Update check skipped (a dialog was open)	Oppdateringssjekk hoppet over (en dialog var åpen)
+Update with Launcher (installed by Launcher)	Oppdater med Launcher (installert med Launcher)
 Uplinked by: %s	Sendt til MQTT av: %s
 Uplinked by: the sender itself	Sendt til MQTT av: avsenderen selv
 Use arrows to choose, then tap Next	Velg med pilene, og trykk så Neste
