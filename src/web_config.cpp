@@ -3888,6 +3888,17 @@ static void sendConfigPage(const char *msg = "", bool lite = false) {
     html += "<label>Short Name (max 4 chars)"
             "<input name='short' type='text' maxlength='4' value='";
     appendAttr(html, gCfg->nodeShort); html += "'></label>";
+    // Read-only and fixed at build time: shown so what NODEINFO advertises can
+    // be checked without a second node (issue #163).
+    snprintf(tmp, sizeof(tmp), "%s (%u)", MY_HW_MODEL_NAME, (unsigned)MY_HW_MODEL);
+    html += "<p class='hint'>Hardware model sent to other nodes: <b>";
+    html += tmp;
+#if MY_HW_MODEL == MESH_HW_MODEL_PRIVATE_HW
+    html += "</b>. Meshtastic has no ID for this board yet, so other nodes show "
+            "it as unknown hardware.</p>";
+#else
+    html += "</b></p>";
+#endif
     // The two ways to change this node's id: derive it from the public key
     // (Meshtastic 2.8's way), or fix it outright. Both are a change of identity,
     // so each says so rather than leaving the consequence to be discovered.

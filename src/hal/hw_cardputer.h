@@ -1,11 +1,13 @@
 #pragma once
 // ════════════════════════════════════════════════════════════════════════════
-// hal/hw_cardputer.h — Hardware pin definitions for the M5Stack Cardputer
-//                       with LoRa 1262 Cap accessory
+// hal/hw_cardputer.h — Hardware pin definitions for the M5Stack Cardputer-Adv
+//                       with the Cap LoRa-1262 accessory
 //
-// The Cardputer is a credit-card-sized ESP32-S3 computer with:
+// The Cardputer-Adv is a credit-card-sized ESP32-S3 computer (Stamp-S3A) with:
 //   • 1.14" ST7789V2 240×135 TFT (portrait native, landscape in use)
-//   • Full QWERTY keyboard managed by the M5Cardputer library (not I2C)
+//   • Full QWERTY keyboard managed by the M5Cardputer library: a TCA8418 on
+//     I2C. The original Cardputer scans a GPIO matrix instead, on pins this
+//     build gives the LoRa Cap and GPS, so this build is for the Adv only.
 //   • M5Stack LoRa-1262 Cap module on SPI3 (includes its own IO expander)
 //   • microSD on the same SPI bus as LoRa
 //   • M5Stack speaker driver for audio tones

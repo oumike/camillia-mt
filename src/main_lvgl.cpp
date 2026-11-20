@@ -68219,6 +68219,8 @@ void setup() {
     playSplashStartupRiff();
     recomputeChannelHashes();
     deriveNodeId();
+    // What NODEINFO advertises as this build's hardware (issue #163).
+    Serial.printf("[lvgl] hw_model: %s (%u)\n", MY_HW_MODEL_NAME, (unsigned)MY_HW_MODEL);
     bootSplashStatus("Mesh identity");
     mqttBridgeBegin(&s_cfg, s_myNodeId);
     mqttBridgeSetInject(mqttDownlinkInject);

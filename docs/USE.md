@@ -2605,6 +2605,11 @@ served on port **18765** rather than 80 — browse to `http://<address>:18765`;
 the row shows the full address. It never starts its own access point, and it
 serves the full page. Chat and Bluetooth keep running while it is on.
 
+**Node Identity** also shows, read-only, the hardware model this build announces
+to other nodes, such as `THINKNODE_M9 (131)`. Their apps turn it into the board
+name they display; see
+[Hardware model on the mesh](HARDWARE.md#hardware-model-on-the-mesh).
+
 Web Config and the **MQTT Bridge** can be on together; both use your Wi-Fi
 network. While the bridge is on, Web Config never falls back to its own access
 point, which would cut the bridge off from the broker. If your network is out of
