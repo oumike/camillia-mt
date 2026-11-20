@@ -805,6 +805,7 @@ Update check failed: %s	Atnaujinimo patikra nepavyko: %s
 Update check needs WiFi connected	Atnaujinimo patikrai reikia prijungto WiFi
 Update check needs WiFi on	Atnaujinimo patikrai reikia įjungto WiFi
 Update check skipped (a dialog was open)	Atnaujinimo patikra praleista (buvo atidarytas dialogas)
+Update with Launcher (installed by Launcher)	Atnaujinkite per Launcher (įdiegta per Launcher)
 Uplinked by: %s	Į MQTT išsiuntė: %s
 Uplinked by: the sender itself	Į MQTT išsiuntė: pats siuntėjas
 Use arrows to choose, then tap Next	Pasirinkite rodyklėmis, tada bakstelėkite Toliau

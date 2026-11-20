@@ -800,6 +800,7 @@ Update check failed: %s	Verificarea actualizării a eșuat: %s
 Update check needs WiFi connected	Verificarea actualizărilor necesită WiFi conectat
 Update check needs WiFi on	Verificarea actualizărilor necesită WiFi pornit
 Update check skipped (a dialog was open)	Verificarea actualizărilor omisă (era deschis un dialog)
+Update with Launcher (installed by Launcher)	Actualizează prin Launcher (instalat prin Launcher)
 Uplinked by: %s	Urcat de: %s
 Uplinked by: the sender itself	Urcat de: expeditorul însuși
 Use arrows to choose, then tap Next	Alege cu săgețile, apoi Următorul

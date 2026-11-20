@@ -771,6 +771,7 @@ Update check failed: %s	Updateprüfung fehlgeschlagen: %s
 Update check needs WiFi connected	Updateprüfung braucht verbundenes WLAN
 Update check needs WiFi on	Updateprüfung braucht eingeschaltetes WLAN
 Update check skipped (a dialog was open)	Updateprüfung übersprungen (ein Dialog war offen)
+Update with Launcher (installed by Launcher)	Mit Launcher aktualisieren (mit Launcher installiert)
 Uplinked by: %s	Hochgeladen von: %s
 Uplinked by: the sender itself	Hochgeladen von: dem Absender selbst
 Use arrows to choose, then tap Next	Mit den Pfeilen wählen, dann Weiter tippen

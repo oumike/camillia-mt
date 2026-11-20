@@ -814,6 +814,7 @@ Update check failed: %s	Échec de la vérification : %s
 Update check needs WiFi connected	La vérification des mises à jour requiert le WiFi connecté
 Update check needs WiFi on	La vérification des mises à jour requiert le WiFi activé
 Update check skipped (a dialog was open)	Vérification des mises à jour ignorée (une fenêtre était ouverte)
+Update with Launcher (installed by Launcher)	Mettre à jour via Launcher (installé par Launcher)
 Uplinked by: %s	Remonté par : %s
 Uplinked by: the sender itself	Remonté par : l'émetteur lui-même
 Use arrows to choose, then tap Next	Choisissez avec les flèches, puis Suivant

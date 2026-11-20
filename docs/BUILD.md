@@ -106,7 +106,9 @@ ESP32-C6 runs separate ESP-Hosted firmware; provision that image with the
 [T-Display P4 C6 procedure](#t-display-p4-esp32-c6-companion-firmware) when
 needed.
 
-Use the manual release-image steps below when Web Serial is unavailable.
+Use the manual release-image steps below when Web Serial is unavailable. To run
+Camillia alongside other firmware, see
+[Installing with Launcher](#installing-with-launcher).
 
 ### Get the files
 
@@ -254,6 +256,41 @@ pio device monitor --port <port> --baud 115200
 
 Or any serial terminal at **115200 baud** — PuTTY on Windows, `screen <port> 115200`
 on macOS/Linux.
+
+### Installing with Launcher
+
+[bmorcelli's Launcher](https://bmorcelli.github.io/Launcher/) keeps several
+firmwares on one device and starts the one you pick. Camillia runs under it,
+with these differences from a USB install:
+
+- **Install** from Launcher's **OTA** menu on boards where its online catalog
+  lists Camillia. Otherwise download the merged image
+  (`camillia-mt-<device>-vX.Y.Z.bin`, not the `-ota.bin`) and install it from
+  Launcher's SD card menu or its web interface.
+- **Update through Launcher** the same way. Camillia recognises Launcher's
+  partition layout and does not update itself there, because the slot it would
+  write may hold another app; the Config screen and web config say so.
+- **A USB flash removes Launcher.** The browser flasher and `flash.sh` write
+  Camillia's own partition table, and Launcher and every app it installed are
+  gone.
+- **Settings do not carry over** between a Launcher install and a USB install,
+  in either direction: the two layouts keep NVS in different places. Export the
+  config first and import it afterwards
+  ([USE.md](USE.md#backing-up-settings)); the export carries the node's
+  identity key.
+- **NVS is shared.** Launcher's 20 KB NVS partition holds Launcher's settings
+  and every installed app's alongside Camillia's, so a busy mesh has less room
+  for the node table. Camillia's **Factory Reset** clears only Camillia's own
+  data there. Launcher's web interface can read and edit NVS, including
+  Camillia's channel keys and the node's private key, and formatting NVS from
+  Launcher wipes them.
+- **Back up before you format NVS or reflash.** From a checkout of this
+  repository, `scripts/backup.sh` (needs esptool) reads the partition table
+  off the device, so its backup holds Launcher, every installed app and the
+  shared NVS; `--restore` writes all of it back.
+- **T-Display P4:** the ESP32-C6 still needs the matching ESP-Hosted image
+  ([above](#t-display-p4-esp32-c6-companion-firmware)); Launcher does not
+  install it.
 
 ---
 

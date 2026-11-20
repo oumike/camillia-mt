@@ -806,6 +806,7 @@ Update check failed: %s	A frissítés keresése sikertelen: %s
 Update check needs WiFi connected	A frissítés kereséséhez csatlakoztatott WiFi kell
 Update check needs WiFi on	A frissítés kereséséhez bekapcsolt WiFi kell
 Update check skipped (a dialog was open)	Frissítés keresése kihagyva (egy ablak nyitva volt)
+Update with Launcher (installed by Launcher)	Frissítés a Launcherrel (a Launcherrel telepítve)
 Uplinked by: %s	MQTT-re küldte: %s
 Uplinked by: the sender itself	MQTT-re küldte: maga a küldő
 Use arrows to choose, then tap Next	Válassz a nyilakkal, majd koppints a Tovább gombra

@@ -801,6 +801,7 @@ Update check failed: %s	Falha ao verificar atualização: %s
 Update check needs WiFi connected	Verificar atualizações requer WiFi conectado
 Update check needs WiFi on	Verificar atualizações requer WiFi ligado
 Update check skipped (a dialog was open)	Verificação de atualização pulada (havia uma janela aberta)
+Update with Launcher (installed by Launcher)	Atualize pelo Launcher (instalado pelo Launcher)
 Uplinked by: %s	Enviado ao MQTT por: %s
 Uplinked by: the sender itself	Enviado ao MQTT por: o próprio remetente
 Use arrows to choose, then tap Next	Use as setas para escolher e toque em Avançar

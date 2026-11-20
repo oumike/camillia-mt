@@ -839,6 +839,7 @@ Update check failed: %s	Falló la búsqueda de actualización: %s
 Update check needs WiFi connected	Buscar actualizaciones requiere WiFi conectado
 Update check needs WiFi on	Buscar actualizaciones requiere WiFi activado
 Update check skipped (a dialog was open)	Búsqueda de actualizaciones omitida (había un diálogo abierto)
+Update with Launcher (installed by Launcher)	Actualizar con Launcher (instalado con Launcher)
 Uplinked by: %s	Subido por: %s
 Uplinked by: the sender itself	Subido por: el propio emisor
 Use arrows to choose, then tap Next	Usa las flechas para elegir y toca Siguiente

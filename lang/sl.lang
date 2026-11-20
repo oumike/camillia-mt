@@ -803,6 +803,7 @@ Update check failed: %s	Preverjanje posodobitev ni uspelo: %s
 Update check needs WiFi connected	Preverjanje posodobitev zahteva povezan WiFi
 Update check needs WiFi on	Preverjanje posodobitev zahteva vklopljen WiFi
 Update check skipped (a dialog was open)	Preverjanje posodobitev preskočeno (odprto je bilo okno)
+Update with Launcher (installed by Launcher)	Posodobite z aplikacijo Launcher (nameščeno z njo)
 Uplinked by: %s	V MQTT poslal: %s
 Uplinked by: the sender itself	V MQTT poslal: pošiljatelj sam
 Use arrows to choose, then tap Next	Izberite s puščicami, nato tapnite Naprej

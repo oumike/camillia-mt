@@ -802,6 +802,7 @@ Update check failed: %s	Kontrola aktualizace selhala: %s
 Update check needs WiFi connected	Kontrola aktualizace vyžaduje připojenou WiFi
 Update check needs WiFi on	Kontrola aktualizace vyžaduje zapnutou WiFi
 Update check skipped (a dialog was open)	Kontrola aktualizace přeskočena (bylo otevřené okno)
+Update with Launcher (installed by Launcher)	Aktualizujte přes Launcher (instalováno přes Launcher)
 Uplinked by: %s	Do MQTT poslal: %s
 Uplinked by: the sender itself	Do MQTT poslal: sám odesílatel
 Use arrows to choose, then tap Next	Vyberte šipkami, pak klepněte na Další

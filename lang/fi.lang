@@ -805,6 +805,7 @@ Update check failed: %s	Päivitystarkistus epäonnistui: %s
 Update check needs WiFi connected	Päivitystarkistus vaatii yhdistetyn WiFin
 Update check needs WiFi on	Päivitystarkistus vaatii, että WiFi on päällä
 Update check skipped (a dialog was open)	Päivitystarkistus ohitettu (valintaikkuna oli auki)
+Update with Launcher (installed by Launcher)	Päivitä Launcherilla (asennettu Launcherilla)
 Uplinked by: %s	MQTT:hen välittänyt: %s
 Uplinked by: the sender itself	MQTT:hen välittänyt: lähettäjä itse
 Use arrows to choose, then tap Next	Valitse nuolilla ja napauta Seuraava

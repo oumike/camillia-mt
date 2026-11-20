@@ -803,6 +803,7 @@ Update check failed: %s	Sprawdzanie aktualizacji nieudane: %s
 Update check needs WiFi connected	Sprawdzanie aktualizacji wymaga połączonego WiFi
 Update check needs WiFi on	Sprawdzanie aktualizacji wymaga włączonego WiFi
 Update check skipped (a dialog was open)	Sprawdzanie aktualizacji pominięte (otwarte okno)
+Update with Launcher (installed by Launcher)	Aktualizuj przez Launcher (instalacja przez Launcher)
 Uplinked by: %s	Przesłane do MQTT przez: %s
 Uplinked by: the sender itself	Przesłane do MQTT przez: samego nadawcę
 Use arrows to choose, then tap Next	Wybierz strzałkami, potem dotknij Dalej

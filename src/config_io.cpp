@@ -10,7 +10,10 @@
 #include "ignore_list.h"
 #include "user_msg_colors.h"   // custom own-message colour, as RRGGBB
 #include "storage.h"
+#include "ota_update.h"     // otaInstalledByLauncher(): what a factory reset may erase
 #include <Preferences.h>
+#include <nvs.h>
+#include <nvs_flash.h>
 #include <Curve25519.h>      // validate an imported identity keypair
 #include <SPI.h>
 #include <Wire.h>
@@ -2840,4 +2843,39 @@ int cfgListBackups(char (*names)[CFG_BACKUP_NAME_MAX], int max) {
 bool cfgSdConfigExists() {
     if (!ensureSdMounted()) return false;
     return storageFs().exists(kPath) || storageFs().exists(kBakPath);
+}
+
+// Every NVS namespace Camillia writes. A factory reset under Launcher clears
+// these and nothing else, so a new Preferences namespace must be added here.
+static const char *const kCamilliaNvsNamespaces[] = {
+    "camillia",      // config, admin peers, ignore list, OTA flags, custom themes
+    "nodes",
+    "mesh_ch",
+    "cschan",
+    "cm_prov",
+    "cm_logo",
+#if HAS_BLE_KEYBOARD
+    // NimBLE's bond store. Clearing it forgets the keyboard, as the full erase
+    // does; Launcher apps that share this namespace may lose their bonds too.
+    "nimble_bond",
+#endif
+};
+
+void cfgFactoryEraseNvs() {
+    if (!otaInstalledByLauncher()) {
+        nvs_flash_erase();
+        nvs_flash_init();
+        return;
+    }
+    for (const char *ns : kCamilliaNvsNamespaces) {
+        nvs_handle_t h;
+        // Opening read-write would create a namespace that was never there.
+        if (nvs_open(ns, NVS_READONLY, &h) != ESP_OK) continue;
+        nvs_close(h);
+        if (nvs_open(ns, NVS_READWRITE, &h) != ESP_OK) continue;
+        nvs_erase_all(h);
+        nvs_commit(h);
+        nvs_close(h);
+    }
+    Serial.println("[cfg] factory reset: installed by Launcher, cleared Camillia's NVS namespaces only");
 }

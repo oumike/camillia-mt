@@ -782,6 +782,7 @@ Update check failed: %s	Updatecontrole mislukt: %s
 Update check needs WiFi connected	Updatecontrole heeft verbonden wifi nodig
 Update check needs WiFi on	Updatecontrole heeft wifi aan nodig
 Update check skipped (a dialog was open)	Updatecontrole overgeslagen (er stond een venster open)
+Update with Launcher (installed by Launcher)	Bijwerken met Launcher (geïnstalleerd met Launcher)
 Uplinked by: %s	Naar MQTT gestuurd door: %s
 Uplinked by: the sender itself	Naar MQTT gestuurd door: de afzender zelf
 Use arrows to choose, then tap Next	Kies met de pijlen, tik dan op Volgende

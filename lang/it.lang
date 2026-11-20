@@ -798,6 +798,7 @@ Update check failed: %s	Controllo aggiornamenti fallito: %s
 Update check needs WiFi connected	Il controllo aggiornamenti richiede il WiFi connesso
 Update check needs WiFi on	Il controllo aggiornamenti richiede il WiFi attivo
 Update check skipped (a dialog was open)	Controllo aggiornamenti saltato (era aperta una finestra)
+Update with Launcher (installed by Launcher)	Aggiorna con Launcher (installato con Launcher)
 Uplinked by: %s	Caricato da: %s
 Uplinked by: the sender itself	Caricato da: il mittente stesso
 Use arrows to choose, then tap Next	Scegli con le frecce, poi Avanti

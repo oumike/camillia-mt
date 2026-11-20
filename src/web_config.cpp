@@ -38,7 +38,7 @@
 #include <sys/socket.h>   // writeAllRaw(): bounded nonblocking socket writes
 #include "debug_flags.h"
 #include "gps.h"
-#include "ota_update.h"   // otaLayoutSupportsUpdate()
+#include "ota_update.h"   // otaLayoutSupportsUpdate(), otaInstalledByLauncher()
 #include "battery_util.h"
 #include "utf8_utils.h"
 #if defined(DEVICE_TDISPLAY_P4)
@@ -5430,7 +5430,16 @@ static void sendConfigPage(const char *msg = "", bool lite = false) {
     // leads anywhere. The update source itself is not configurable by design.
 #if !defined(DEVICE_CARDPUTER_LORA_HAT) && !defined(DEVICE_CARDPUTER_ZERO)
     section(html, lite, "Firmware Updates", "firmware", "Update checks and over-the-air updates.");
-    if (!otaLayoutSupportsUpdate()) {
+    if (otaInstalledByLauncher()) {
+        // Installed by bmorcelli's Launcher, which owns the partition table and
+        // installs updates itself (#160).
+        html += "<p class='hint'>"
+                "Camillia was installed by Launcher, which keeps its own partition "
+                "layout, so Camillia does not update itself here. Update it through "
+                "Launcher: its OTA menu, an SD card, or its web interface. Flashing "
+                "Camillia's factory image over USB removes Launcher and every app it "
+                "installed.</p>";
+    } else if (!otaLayoutSupportsUpdate()) {
         // Installed by a third-party flasher into its own partition layout: the
         // slot an update would land in belongs to another firmware. Say so
         // instead of offering a toggle that leads nowhere.
@@ -10280,9 +10289,8 @@ static void handlePostFactoryReset() {
     Channels.clearAllMessages(true);
     DMs.clearAll(true);
 
-    // Erase the entire NVS partition
-    nvs_flash_erase();
-    nvs_flash_init();
+    // Everything Camillia keeps in NVS: the whole partition, unless Launcher shares it
+    cfgFactoryEraseNvs();
     Nodes.clearPersisted();
 
     clearNodeDbFilesOnSd(/*includeArchive=*/true);

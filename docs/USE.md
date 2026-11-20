@@ -2312,7 +2312,8 @@ somebody asked it to.
 - It follows the **Release Channel** setting, exactly as the boot check does.
 - It is skipped while the battery is low, and while WiFi is off or
   disconnected — the cycle simply waits and runs once the condition clears.
-- It is skipped on a third-party partition layout, where there is no slot to
+- It is skipped on a third-party partition layout, including a
+  [Launcher](#running-under-launcher) install, where there is no slot to
   install into.
 - It will not reboot out from under an open dialog.
 - The first cycle runs shortly after boot rather than a full period later, so a
@@ -2332,6 +2333,23 @@ different release is published, and the reason is reported on the next boot.
 
 The setting round-trips through `config.yaml` as `otaAutoUpdate` (`Off`, `1h`,
 `6h`, `12h` or `24h`). Anything else in that field reads as `Off`.
+
+### Running under Launcher
+
+When [bmorcelli's Launcher](https://bmorcelli.github.io/Launcher/) installed
+Camillia, Camillia recognises Launcher's partition layout and:
+
+- **does not update itself.** The update check is skipped, the Firmware Update
+  action reports **Update with Launcher (installed by Launcher)**, and web
+  config's Firmware Updates section explains why. Update through Launcher.
+- **clears only its own settings on Factory Reset**, because Launcher's NVS
+  partition also holds Launcher's settings and the other installed apps'. On
+  boards that pair a BLE keyboard this includes the shared NimBLE bond store,
+  so other apps may need to pair again too.
+
+Settings do not carry over between a Launcher install and a USB install, so
+export the config first. Installing, and what Launcher can see of Camillia's
+data, are covered in [BUILD.md](BUILD.md#installing-with-launcher).
 
 ### Chat style
 
