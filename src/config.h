@@ -138,64 +138,91 @@
 // ── Meshtastic HardwareModel advertised in NODEINFO ─────────
 // Source: meshtastic/protobufs meshtastic/mesh.proto (HardwareModel enum).
 // Use per-target values so each firmware reports its actual hardware class.
+// Other nodes' apps turn the number into a name and picture through
+// Meshtastic's device list (api.meshtastic.org/resource/deviceHardware); see
+// "Hardware model on the mesh" in docs/HARDWARE.md. Each arm below also sets
+// MY_HW_MODEL_NAME, the enum name, for the boot log and web config.
 #define MESH_HW_MODEL_T_DECK        50
 #define MESH_HW_MODEL_T_DECK_PRO   102
 #define MESH_HW_MODEL_T_LORA_PAGER  103
 #define MESH_HW_MODEL_HELTEC_V4     110
-// Meshtastic 2.8 allocated SEEED_WIO_TRACKER_L2 = 137, so the board can
-// advertise itself honestly rather than falling back to PRIVATE_HW.
+#define MESH_HW_MODEL_M5STACK_CARDPUTER_ADV  112
+// The newest values: THINKNODE_M9 first shipped in protobufs v2.7.22,
+// HELTEC_V4_R8 in v2.7.24 and SEEED_WIO_TRACKER_L2 in v2.7.25. A peer built on
+// older protobufs shows these boards as unknown until it updates.
+#define MESH_HW_MODEL_THINKNODE_M9  131
+#define MESH_HW_MODEL_HELTEC_V4_R8  132
 #define MESH_HW_MODEL_SEEED_WIO_TRACKER_L2  137
 // CROWPANEL = 97 covers the whole CrowPanel Advance family; Meshtastic's own
 // elecrow-adv-35-tft build advertises it (custom_meshtastic_hw_model = 97).
 #define MESH_HW_MODEL_CROWPANEL      97
 // PRIVATE_HW is what Meshtastic reserves for hardware with no enum value of its
 // own, so a node advertises "custom hardware" rather than impersonating another
-// board. Three targets use it — the Mesh Deck, the M9 and the Cardputer — each
-// for its own reason, given at the #elif that selects it.
+// board. The device list has no entry for it, so apps show these nodes as
+// unknown hardware. Four targets use it — the Mesh Deck, the T-Display P4, the
+// Tanmatsu and the CardputerZero — because upstream has no value for them yet.
+// Take a real ID once one is allocated; never borrow another board's.
 #define MESH_HW_MODEL_PRIVATE_HW    255
 
 #if defined(DEVICE_TDECK)
-#define MY_HW_MODEL MESH_HW_MODEL_T_DECK
+#define MY_HW_MODEL      MESH_HW_MODEL_T_DECK
+#define MY_HW_MODEL_NAME "T_DECK"
 #elif defined(DEVICE_TDECK_PRO)
-#define MY_HW_MODEL MESH_HW_MODEL_T_DECK_PRO
+#define MY_HW_MODEL      MESH_HW_MODEL_T_DECK_PRO
+#define MY_HW_MODEL_NAME "T_DECK_PRO"
 #elif defined(DEVICE_TLORA_PAGER_TFT)
-#define MY_HW_MODEL MESH_HW_MODEL_T_LORA_PAGER
+#define MY_HW_MODEL      MESH_HW_MODEL_T_LORA_PAGER
+#define MY_HW_MODEL_NAME "T_LORA_PAGER"
 #elif defined(DEVICE_CARDPUTER_LORA_HAT)
-// Not 112. That value looks like it belongs here and does not: protobufs commit
-// d4d1508 (2025-09-15, PR #776) allocated 112 as M5STACK_CARDPUTER_ADV, and it
-// was unassigned before that — it has never meant the plain Cardputer. This
-// target is the original M5Stack Cardputer on a StampS3 (8 MB flash, no PSRAM);
-// the Adv is different hardware. Upstream has no value for the plain Cardputer
-// at all, so PRIVATE_HW is the honest answer, exactly as for the Mesh Deck and
-// the M9. Take a real ID only if one is ever allocated.
-#define MY_HW_MODEL MESH_HW_MODEL_PRIVATE_HW
+// This build is for the Cardputer-Adv, which is what 112 names (the device list
+// calls it "Cardputer Mesh Kit": the Adv with the Cap LoRa-1262). The Cap plugs
+// into the Adv's EXT 2.54-14P bus, which the original Cardputer does not have,
+// and the LoRa and GPS pins in hw_cardputer.h (3, 4, 5, 6, 13, 15) are input
+// lines of the original's keyboard matrix. They match Meshtastic's
+// m5stack_cardputer_adv variant pin for pin.
+#define MY_HW_MODEL      MESH_HW_MODEL_M5STACK_CARDPUTER_ADV
+#define MY_HW_MODEL_NAME "M5STACK_CARDPUTER_ADV"
+#elif defined(DEVICE_HELTEC_R8)
+// Ahead of the V4 arm: the heltec-r8 env defines DEVICE_HELTEC_V4_EXPANSION
+// as well, and would otherwise advertise itself as a plain V4.
+#define MY_HW_MODEL      MESH_HW_MODEL_HELTEC_V4_R8
+#define MY_HW_MODEL_NAME "HELTEC_V4_R8"
 #elif defined(DEVICE_HELTEC_V4_EXPANSION)
-#define MY_HW_MODEL MESH_HW_MODEL_HELTEC_V4
+#define MY_HW_MODEL      MESH_HW_MODEL_HELTEC_V4
+#define MY_HW_MODEL_NAME "HELTEC_V4"
 #elif defined(DEVICE_MESH_DECK)
 // The Mesh Deck has no HardwareModel of its own — it is not in the upstream
 // enum at all, which is exactly the case PRIVATE_HW exists for.
-#define MY_HW_MODEL MESH_HW_MODEL_PRIVATE_HW
+#define MY_HW_MODEL      MESH_HW_MODEL_PRIVATE_HW
+#define MY_HW_MODEL_NAME "PRIVATE_HW"
 #elif defined(DEVICE_WIO_TRACKER_L2)
-#define MY_HW_MODEL MESH_HW_MODEL_SEEED_WIO_TRACKER_L2
+#define MY_HW_MODEL      MESH_HW_MODEL_SEEED_WIO_TRACKER_L2
+#define MY_HW_MODEL_NAME "SEEED_WIO_TRACKER_L2"
 #elif defined(DEVICE_CROWPANEL_35) || defined(DEVICE_CROWPANEL_50)
-#define MY_HW_MODEL MESH_HW_MODEL_CROWPANEL
+#define MY_HW_MODEL      MESH_HW_MODEL_CROWPANEL
+#define MY_HW_MODEL_NAME "CROWPANEL"
 #elif defined(DEVICE_TDISPLAY_P4)
 // No Meshtastic HardwareModel has been allocated for the T-Display P4.
-#define MY_HW_MODEL MESH_HW_MODEL_PRIVATE_HW
+#define MY_HW_MODEL      MESH_HW_MODEL_PRIVATE_HW
+#define MY_HW_MODEL_NAME "PRIVATE_HW"
 #elif defined(DEVICE_TANMATSU)
 // Nor for the Tanmatsu.
-#define MY_HW_MODEL MESH_HW_MODEL_PRIVATE_HW
+#define MY_HW_MODEL      MESH_HW_MODEL_PRIVATE_HW
+#define MY_HW_MODEL_NAME "PRIVATE_HW"
 #elif defined(DEVICE_M9)
-// Meshtastic's HardwareModel enum has no ThinkNode M9 — the M1/M2 are in it,
-// the M9 is a MeshCore device. Advertising one of those, or the T-Deck the
-// #else below would hand out, would put a hardware name on the mesh that does
-// not match what is transmitting.
-#define MY_HW_MODEL MESH_HW_MODEL_PRIVATE_HW
+// The value Meshtastic's own ThinkNode M9 build advertises.
+#define MY_HW_MODEL      MESH_HW_MODEL_THINKNODE_M9
+#define MY_HW_MODEL_NAME "THINKNODE_M9"
 #elif defined(DEVICE_CARDPUTER_ZERO)
-// No HardwareModel for the CardputerZero either.
-#define MY_HW_MODEL MESH_HW_MODEL_PRIVATE_HW
+// No HardwareModel for the CardputerZero either. Not PORTDUINO (37), the
+// generic Linux value: upstream marks it "TODO: REPLACE" and the device list has
+// no entry for it, so apps would show unknown all the same.
+#define MY_HW_MODEL      MESH_HW_MODEL_PRIVATE_HW
+#define MY_HW_MODEL_NAME "PRIVATE_HW"
 #else
-#define MY_HW_MODEL MESH_HW_MODEL_T_DECK
+// A target without an arm used to fall back to T_DECK here, and so went on the
+// mesh as a T-Deck. Give it its own upstream value, or PRIVATE_HW.
+#error "No Meshtastic HardwareModel for this DEVICE_* target: add a MY_HW_MODEL arm in config.h"
 #endif
 
 #define MY_GPS_ENABLED  1     // runtime default (can be toggled via web config)
@@ -468,6 +495,14 @@
 #define HAS_SD_MALWARE_SCAN 1
 #else
 #define HAS_SD_MALWARE_SCAN 0
+#endif
+
+// Evicted-node archive (node_db.cpp): a CSV of the nodes a full table had to
+// drop. The file only ever grows, so by default it is offered where there is an
+// SD slot, and a board with no slot but a real disk (the CardputerZero) turns it
+// on in its HAL header. The Mesh Deck's small LittleFS partition stays without.
+#ifndef HAS_NODE_ARCHIVE
+#define HAS_NODE_ARCHIVE HAS_SD_CARD
 #endif
 
 // Remote administration terminal (issue #89): a client for Meshtastic's

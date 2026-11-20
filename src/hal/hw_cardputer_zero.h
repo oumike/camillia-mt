@@ -66,10 +66,14 @@
 #define HAS_SD_CARD                0
 #define SD_CS                     -1
 // Files an SD card would hold live in a directory on the Zero's own disk
-// (~/.config/camillia/fs), reached through storageFs() like the Mesh Deck's
-// LittleFS partition. See linux/app/fs_linux.cpp.
+// (~/.config/camillia-app/fs, or $CAMILLIA_HOME/fs), reached through
+// storageFs() like the Mesh Deck's LittleFS partition. See
+// linux/app/fs_linux.cpp.
 #define HAS_INTERNAL_FS            1
 #define INTERNAL_FS_PARTITION  "camillia"
+// That directory is on a disk, not a small flash partition, so it also holds
+// the evicted-node archive the other boards keep on SD (issue #162).
+#define HAS_NODE_ARCHIVE           1
 
 // ── Keyboard — TCA8418 @0x34, owned by the kernel (evdev). keyboard.cpp reads
 // it through linux/app/keys_linux.cpp, so the KB_* pins below are unused. ──

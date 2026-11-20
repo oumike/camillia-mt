@@ -97,6 +97,8 @@
 (unnamed)	(sin nombre)
 , SD archive NOT cleared (no card)	, archivo SD NO borrado (sin tarjeta)
 , SD archive cleared	, archivo SD borrado
+, archive NOT cleared	, archivo NO borrado
+, archive cleared	, archivo borrado
 , gusts %d	, ráfagas %d
 1 hour	1 hora
 12-hour	12 horas
@@ -370,6 +372,7 @@ Import Config	Importar configuración
 Import FAILED (no file?)	Importación FALLIDA (¿no hay archivo?)
 Import failed - enter a name	Falló la importación - escribe un nombre
 Imported OK - rebooting...	Importado correctamente - reiniciando...
+Include (A)rchived	Incluir archivados (A)
 Include (A)rchived (SD card)	Incluir archivados (A) (SD)
 Include (F)avorites	Incluir favoritos (F)
 Include MQTT Live Data	Incluir datos en vivo de MQTT
@@ -510,6 +513,7 @@ No GPS fix	Sin señal GPS
 No MQTT: %s	Sin MQTT: %s
 No beacons heard yet.\n\nA beacon is only audible while its sender has retuned onto this channel, preset and region, and it repeats on that node's own schedule - minutes to hours apart. This list keeps what it hears until you clear it. Sending your own beacon is a separate setting, under Mesh Beacons in Config.	Aún no se ha oído ninguna baliza.\n\nUna baliza solo se oye mientras su emisor está sintonizado en este canal, preajuste y región, y se repite según el calendario de ese nodo, con minutos u horas de separación. Esta lista guarda lo que oye hasta que la borres. Enviar tu propia baliza es un ajuste aparte, en Balizas de malla en Configuración.
 Only signed packets accepted (no 2.7 nodes)	Solo paquetes firmados (sin nodos 2.7)
+Open http://%s/ in a browser on the same network.\n\nType the address in full, port included: the CardputerZero serves web config on its own port, not the usual 80.	Abre http://%s/ en un navegador de la misma red.\n\nEscribe la dirección completa, con el puerto: el CardputerZero sirve la configuración web en su propio puerto, no en el 80 habitual.
 Send NODEINFO and telemetry to the mesh now?	¿Enviar NODEINFO y telemetría a la malla ahora?
 NODES	NODOS
 NODES (%d%s)	NODOS (%d%s)
@@ -877,6 +881,7 @@ Web Config: Disabled	Configuración web: Desactivada
 Web Config: Enabled	Configuración web: Activada
 Web Config: Off (WiFi off)	Configuración web: Apagada (WiFi apagado)
 Web Config: On	Config web: activada
+Web Config: On (%s)	Config web: activada (%s)
 Web Config: On (waiting for WiFi)	Config web: activada (esperando WiFi)
 Web Config: On (Lite)	Config web: activada (Lite)
 Web Config: On (chat PAUSED)	Configuración web: Activa (chat EN PAUSA)

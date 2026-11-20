@@ -21,10 +21,10 @@ Specs are cross-checked against the manufacturers' sites (see [Sources](#sources
 and reconciled with each board's build config in [platformio.ini](../platformio.ini)
 and its [`src/hal/hw_*.h`](../src/hal/) pin map.
 
-| Spec | T-Deck | T-Deck Pro | T-LoRa Pager | Cardputer + LoRa-1262 Cap | Heltec V4 (expansion) | Elecrow ThinkNode M9 | Seeed Wio Tracker L2 |
+| Spec | T-Deck | T-Deck Pro | T-LoRa Pager | Cardputer-Adv + Cap LoRa-1262 | Heltec V4 (expansion) | Elecrow ThinkNode M9 | Seeed Wio Tracker L2 |
 | --- | --- | --- | --- | --- | --- | --- | --- |
 | **Build env** | `tdeck` | `tdeck-pro` | `tlora-pager-tft` | `cardputer-cap` | `heltec-v4` | `m9` | `wio-tracker-l2` |
-| **MCU** | ESP32-S3FN16R8 | ESP32-S3, 16 MB flash | ESP32-S3 | ESP32-S3FN8 (StampS3) | ESP32-S3R2 | ESP32-S3R8 | ESP32-S3, 16 MB flash + 8 MB octal PSRAM |
+| **MCU** | ESP32-S3FN16R8 | ESP32-S3, 16 MB flash | ESP32-S3 | ESP32-S3FN8 (Stamp-S3A) | ESP32-S3R2 | ESP32-S3R8 | ESP32-S3, 16 MB flash + 8 MB octal PSRAM |
 | **PSRAM** | 8 MB octal | 8 MB QSPI | 8 MB (firmware uses quad `qio_qspi` access) | **None** | 2 MB | 8 MB octal | 8 MB octal |
 | **Flash** | 16 MB | 16 MB | 16 MB | 8 MB | 16 MB | 16 MB | 16 MB |
 | **Display** | 2.8″ ST7789 IPS, 320×240 (landscape) | 3.1″ GDEQ031T10/UC8253 e-paper, 240×320 portrait; native 1-bit LVGL framebuffer, full-frame partial updates with periodic full refresh | 2.3″ ST7796 IPS, 480×222 (landscape) | 1.14″ ST7789V2, 240×135 | Onboard 0.96″ OLED is unused; Camillia drives the **TFT expansion** — ST7789 320×240 (custom init); vertical variant rotates the UI | 2.4″ ST7789 TFT-TN, 240×320 native, driven landscape 320×240; backlight enable is **active-low** (PNP) | NV3031B, 240×320 native, driven landscape 320×240 over quad-SPI; LP5814 brightness implemented, hardware verification pending |
@@ -32,11 +32,11 @@ and its [`src/hal/hw_*.h`](../src/hal/) pin map.
 | **GNSS** | u-blox MIA-M10Q (UART1) | u-blox MIA-M10Q (UART1; enable GPIO39) | u-blox MIA-M10Q (UART1; rail via XL9555) | GPS on the LoRa/GPS cap (UART1 @ 115 200 baud) | External GNSS via SH1.25-8Pin connector (UART1) | CC1167Q (UART1 @ 115 200 baud; multi-constellation GPS/BeiDou/Galileo/GLONASS), enable + reset lines both inverted | L76K-class UART receiver; power and reset via PCA9555 |
 | **Input** | I²C QWERTY keyboard (0x55) + GT911 capacitive touch + optical trackball | TCA8418 35-key QWERTY (0x34) + CST328/CST3530 touch; T-Deck shortcut mapping; no trackball | TCA8418 matrix keyboard (backlit); no touch | Full QWERTY via M5Cardputer lib; no touch | CHSC6X capacitive touch + USER/side buttons; no keyboard | 37-key QWERTY + d-pad via a companion matrix controller on its own I²C bus (0x6c); no touch, no trackball | GT911 capacitive touch + GPIO0 button + expander Wake button; full-width on-screen keyboard + optional BLE keyboard |
 | **Audio** | I²S speaker amp (MAX98357A / NS4168) | PCM5102A path present; not yet used by Camillia | ES8311 I²S codec + speaker | M5Stack speaker driver (tones) | Passive buzzer (GPIO PWM) | Passive buzzer (GPIO PWM) | ES8311 speaker notifications with volume/style controls; ES7243E microphone not yet used |
-| **Battery sensing** | ADC resistor divider on GPIO4 | BQ25896 charger ADC (BQ27220 gauge support deferred) | BQ25896 charger / fuel-gauge over I²C (no ADC pin) | 1520 mAh (120 mAh internal + 1400 mAh in base); read via M5Unified | ADC divider on GPIO1 + switched sense-enable (auto-polarity) | 2300 mAh cell; plain 1:2 ADC divider on GPIO13, no sense gate | ADS1115 AIN0 at 0x48, `GAIN_TWO`, 2:1 divider and PCA9555 sense gate; hardware comparison pending |
+| **Battery sensing** | ADC resistor divider on GPIO4 | BQ25896 charger ADC (BQ27220 gauge support deferred) | BQ25896 charger / fuel-gauge over I²C (no ADC pin) | 1500 mAh internal; read via M5Unified | ADC divider on GPIO1 + switched sense-enable (auto-polarity) | 2300 mAh cell; plain 1:2 ADC divider on GPIO13, no sense gate | ADS1115 AIN0 at 0x48, `GAIN_TWO`, 2:1 divider and PCA9555 sense gate; hardware comparison pending |
 | **Onboard sensors / extras** | Microphone | BHI260AP IMU, light sensor, vibration motor, optional LTE modem (not yet used) | BHI260AP IMU + AI sensor, ST25R3916 NFC, RTC (onboard; not yet used by Camillia) | Microphone (via M5Unified) | BME280 / BMP280 / AHT20 — auto-detected over I²C (temp/humidity/pressure) | PCF8563 RTC, QMI8658 IMU, QMC6309 compass (peripheral I²C; not yet used by Camillia), keypad backlight | PCA9555-gated LCD, GNSS, SD, Grove, USB OTG and audio rails |
 | **microSD** | Yes (shared LoRa SPI) | Yes (shared e-paper/LoRa SPI) | Yes (shared SPI) | Yes (shared LoRa SPI) | No — a 9.5 MB LittleFS partition in flash holds the same files (`partitions_16mb_fs.csv`) | Yes (shared LoRa SPI) | Yes — 1-bit SD_MMC on CLK 2 / CMD 3 / D0 1, powered by PCA9555 bit 14 |
 | **Sensor / GPIO headroom** | Minimal — one SPI bus shared by LoRa/TFT/SD, I²C runs keyboard/touch/trackball, UART is GPS; `USER_BUTTON_PIN = -1` | Minimal — SPI is shared by e-paper/LoRa/SD and I²C by keyboard/touch/power sensors | Minimal — most rails are XL9555-managed | Grove port available (may be claimed by the LoRa/GPS cap) | **Most headers exposed** — best candidate for add-on sensors (e.g. the Detection Sensor module) | Minimal — one SPI bus shared by LoRa/TFT/SD, two I²C buses already claimed, UART is GPS | Switched Grove rail available; shared I²C bus is already heavily used |
-| **Vendor** | [LilyGo T-Deck](https://www.lilygo.cc/products/t-deck) | [LilyGo T-Deck Pro](https://lilygo.cc/products/t-deck-pro) | [LilyGo T-Lora Pager](https://lilygo.cc/products/t-lora-pager) | [M5Stack Cardputer](https://shop.m5stack.com/products/m5stack-cardputer-kit-w-m5stamps3) + Cap LoRa/GPS | [Heltec WiFi LoRa 32 V4](https://heltec.org/project/wifi-lora-32-v4/) + TFT expansion kit | [Elecrow ThinkNode M9](https://www.elecrow.com/thinknode-m9-meshcore-communication-terminal-with-full-keyboard-2-4inch-lcd-esp32-s3-lr1110-gps-2300mah.html) | Seeed Studio Wio Tracker L2 |
+| **Vendor** | [LilyGo T-Deck](https://www.lilygo.cc/products/t-deck) | [LilyGo T-Deck Pro](https://lilygo.cc/products/t-deck-pro) | [LilyGo T-Lora Pager](https://lilygo.cc/products/t-lora-pager) | [M5Stack Cardputer-Adv](https://docs.m5stack.com/en/core/Cardputer-Adv) + [Cap LoRa-1262](https://docs.m5stack.com/en/cap/Cap_LoRa-1262) | [Heltec WiFi LoRa 32 V4](https://heltec.org/project/wifi-lora-32-v4/) + TFT expansion kit | [Elecrow ThinkNode M9](https://www.elecrow.com/thinknode-m9-meshcore-communication-terminal-with-full-keyboard-2-4inch-lcd-esp32-s3-lr1110-gps-2300mah.html) | Seeed Studio Wio Tracker L2 |
 
 ### LilyGo T-Display P4 AMOLED
 
@@ -95,7 +95,7 @@ and issue #155.
 | **GPS** | L76K on `/dev/serial0` at 115200 (verified sending NMEA); read by the firmware's GPS module through a serial stand-in |
 | **Display** | ST7789 320x170 at `/dev/fb_lcd` (fbdev), drawn by the app with LVGL |
 | **Keyboard** | TCA8418 matrix as a Linux evdev device (`/dev/input/by-path/platform-3f804000.i2c-event`), read without grabbing so the launcher keeps Home; symbols from `/usr/share/keymaps/tca8418_keypad_m5stack_keymap.map`. Bluetooth keyboards through BlueZ |
-| **Interface** | App from the launcher (`/usr/share/APPLaunch/bin/camillia`); data in `~/.config/camillia-app`; web config on port 18765 |
+| **Interface** | App from the launcher (`/usr/share/APPLaunch/bin/camillia`); data in `~/.config/camillia-app`, including the node archive (`fs/camillia/nodes_archive.csv`); web config on port 18765 |
 | **Battery** | bq27220 gauge via `/sys/class/power_supply`; the OS handles low-battery shutdown |
 | **Wi-Fi** | The system connection (NetworkManager); updates come from M5Stack's app store, not OTA |
 | **Status** | Released in v6.7.0. On one unit the app runs from the launcher and from the `.deb`, receives and transmits on the Cap, serves web config over the system Wi-Fi, gets a GPS fix and reads the battery; the number-row keys were driven on the unit. Bluetooth keyboards and Esc twice for Home not yet confirmed on the unit |
@@ -234,6 +234,41 @@ boot log says the radio was not found. The UI is slow at this resolution
 >   that tolerance into the `m9` env's own RadioLib copy (pinned to 7.8.1) at
 >   build time, and fails the build if the patch no longer applies.
 
+## Hardware model on the mesh
+
+Each build announces a Meshtastic `HardwareModel` in its NodeInfo and in MQTT
+map reports. Meshtastic apps look the number up in Meshtastic's
+[device list](https://api.meshtastic.org/resource/deviceHardware) to show a
+board name and picture. The value is fixed at build time by `MY_HW_MODEL` in
+[`src/config.h`](../src/config.h). Web Config shows it under Node Identity, and
+the serial log prints it at boot (`[lvgl] hw_model: HELTEC_V4_R8 (132)`).
+
+| Build | `HardwareModel` | Name in the device list |
+| --- | --- | --- |
+| `tdeck` | `T_DECK` (50) | LILYGO T-Deck |
+| `tdeck-pro` | `T_DECK_PRO` (102) | LILYGO T-Deck Pro |
+| `tlora-pager-tft` | `T_LORA_PAGER` (103) | LILYGO T-LoRa Pager |
+| `cardputer-cap` | `M5STACK_CARDPUTER_ADV` (112) | Cardputer Mesh Kit |
+| `heltec-v4` | `HELTEC_V4` (110) | Heltec V4 |
+| `heltec-r8` | `HELTEC_V4_R8` (132) | Heltec V4 R8 |
+| `m9` | `THINKNODE_M9` (131) | Elecrow ThinkNode M9 |
+| `wio-tracker-l2` | `SEEED_WIO_TRACKER_L2` (137) | Seeed Wio Tracker L2 |
+| `crowpanel-35`, `crowpanel-50` | `CROWPANEL` (97) | One of three Crowpanel Adv entries (2.4/2.8, 3.5 and 4.3/5.0/7.0 TFT) |
+| `mesh-deck` | `PRIVATE_HW` (255) | None; shown as unknown |
+| `p4-amoled-sx1262`, `p4-amoled-lr2021` | `PRIVATE_HW` (255) | None; shown as unknown |
+| `tanmatsu` | `PRIVATE_HW` (255) | None; shown as unknown |
+| CardputerZero (`linux/`) | `PRIVATE_HW` (255) | None; shown as unknown |
+
+- **`PRIVATE_HW`** is Meshtastic's value for hardware without an ID of its own.
+  It has no device-list entry, so other nodes show these boards as unknown
+  until upstream allocates them a value. A build never borrows another board's
+  value to avoid that.
+- **Recent values.** `THINKNODE_M9`, `HELTEC_V4_R8` and `SEEED_WIO_TRACKER_L2`
+  arrived in Meshtastic 2.7.22, 2.7.24 and 2.7.25. A node or app on older
+  protobufs shows those boards as unknown until it updates.
+- **New boards** need their own `MY_HW_MODEL` arm; a target without one fails
+  to compile. See the checklist in [`src/hal/board.h`](../src/hal/board.h).
+
 ## Per-board HAL headers
 
 Each board's full pin map and feature flags (`HAS_KEYBOARD`, `HAS_TOUCH`, `HAS_GPS`,
@@ -244,7 +279,7 @@ Each board's full pin map and feature flags (`HAS_KEYBOARD`, `HAS_TOUCH`, `HAS_G
 | T-Deck | [`src/hal/hw_tdeck.h`](../src/hal/hw_tdeck.h) |
 | T-Deck Pro | [`src/hal/hw_tdeck_pro.h`](../src/hal/hw_tdeck_pro.h) |
 | T-LoRa Pager | [`src/hal/hw_tlora_pager.h`](../src/hal/hw_tlora_pager.h) |
-| Cardputer + LoRa-1262 Cap | [`src/hal/hw_cardputer.h`](../src/hal/hw_cardputer.h) |
+| Cardputer-Adv + Cap LoRa-1262 | [`src/hal/hw_cardputer.h`](../src/hal/hw_cardputer.h) |
 | Heltec V4 (expansion) | [`src/hal/hw_heltec_v4.h`](../src/hal/hw_heltec_v4.h) |
 | Heltec V4-R8 (Expansion Kit V2) | [`src/hal/hw_heltec_r8.h`](../src/hal/hw_heltec_r8.h) |
 | Attaky Mesh Deck | [`src/hal/hw_mesh_deck.h`](../src/hal/hw_mesh_deck.h) |
@@ -265,7 +300,7 @@ Manufacturer spec pages used to verify the table above:
   <https://github.com/Xinyuan-LilyGO/T-Deck-Pro>, and the Meshtastic
   `t-deck-pro` / `t-deck-pro-v1_1` variants
 - LilyGo T-LoRa Pager — <https://lilygo.cc/products/t-lora-pager> and <https://wiki.lilygo.cc/products/t-lora-series/t-lora-pager/>
-- M5Stack Cardputer — <https://shop.m5stack.com/products/m5stack-cardputer-kit-w-m5stamps3>
+- M5Stack Cardputer-Adv — <https://docs.m5stack.com/en/core/Cardputer-Adv>, with the Cap LoRa-1262 at <https://docs.m5stack.com/en/cap/Cap_LoRa-1262>. The LoRa and GPS pins match Meshtastic's `variants/esp32s3/m5stack_cardputer_adv`.
 - M5Stack CardputerZero — <https://docs.m5stack.com/en/core/CardputerZero> and its schematic, with the Cap LoRa-1262 pin table at <https://docs.m5stack.com/en/cap/Cap_LoRa-1262>. Pins matched by EXT header position and verified on a unit (issue #155).
 - Heltec WiFi LoRa 32 V4 — <https://heltec.org/project/wifi-lora-32-v4/> and <https://wiki.heltec.org/docs/devices/open-source-hardware/esp32-series/lora-32/wifi-lora-32-v4/>
 - Elecrow ThinkNode M9 — <https://www.elecrow.com/thinknode-m9-meshcore-communication-terminal-with-full-keyboard-2-4inch-lcd-esp32-s3-lr1110-gps-2300mah.html>. The pin map itself came from the M9 V1.0 schematic rather than this page.

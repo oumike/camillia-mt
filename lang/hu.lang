@@ -89,6 +89,8 @@
 (unnamed)	(névtelen)
 , SD archive NOT cleared (no card)	, SD archívum NINCS törölve (nincs kártya)
 , SD archive cleared	, SD archívum törölve
+, archive NOT cleared	, archívum NINCS törölve
+, archive cleared	, archívum törölve
 , gusts %d	, széllökés %d
 1 hour	1 óra
 12-hour	12 órás
@@ -354,6 +356,7 @@ Import Config	Beállítások importálása
 Import FAILED (no file?)	Az import SIKERTELEN (nincs fájl?)
 Import failed - enter a name	Sikertelen import - adj meg egy nevet
 Imported OK - rebooting...	Import OK - újraindítás...
+Include (A)rchived	Archiváltakkal együtt (A)
 Include (A)rchived (SD card)	Archiváltakkal együtt (A) (SD)
 Include (F)avorites	Kedvencekkel együtt (F)
 Include MQTT Live Data	Élő MQTT-adatok mutatása
@@ -484,6 +487,7 @@ NODEINFO + telemetry queued.	NODEINFO + telemetria sorba állítva.
 No GPS fix	Nincs GPS-fix
 No MQTT: %s	MQTT nélkül: %s
 Only signed packets accepted (no 2.7 nodes)	Csak aláírt csomagok (2.7-es csomópont nélkül)
+Open http://%s/ in a browser on the same network.\n\nType the address in full, port included: the CardputerZero serves web config on its own port, not the usual 80.	Nyisd meg a http://%s/ címet egy böngészőben ugyanazon a hálózaton.\n\nA teljes címet írd be, a porttal együtt: a CardputerZero a webes beállításokat saját porton szolgálja ki, nem a szokásos 80-ason.
 Send NODEINFO and telemetry to the mesh now?	Elküldöd most a NODEINFO-t és a telemetriát a hálózatra?
 NODES	CSOMÓPONTOK
 NODES (%d%s)	CSOMÓPONTOK (%d%s)
@@ -843,6 +847,7 @@ Web Config: Disabled	Webes beállítások: Kikapcsolva
 Web Config: Enabled	Webes beállítások: Engedélyezve
 Web Config: Off (WiFi off)	Webes beállítások: Ki (WiFi ki)
 Web Config: On	Webes beállítások: Be
+Web Config: On (%s)	Webes beállítások: Be (%s)
 Web Config: On (waiting for WiFi)	Webes beállítások: Be (WiFi-re vár)
 Web Config: On (Lite)	Webes beállítások: Be (Lite)
 Web Config: On (chat PAUSED)	Webes beállítások: Be (chat SZÜNETEL)

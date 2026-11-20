@@ -71,6 +71,13 @@ static constexpr uint16_t kWebCfgPort = 18765;
 static constexpr uint16_t kWebCfgPort = 80;
 #endif
 static WebServer      server(kWebCfgPort);
+// The CardputerZero keeps the node archive (HAS_NODE_ARCHIVE) with no SD slot:
+// the file is on its own disk, so the pages talk about storage, not a card.
+#if HAS_NODE_ARCHIVE && !HAS_SD_CARD
+#define NODE_ARCHIVE_ON_DISK 1
+#else
+#define NODE_ARCHIVE_ON_DISK 0
+#endif
 // No captive portal: the AP runs no DNS server and never redirects the OS's
 // portal-detection probes, so phones don't pop a captive sheet on join. Browse
 // to the AP IP directly.
@@ -3305,6 +3312,10 @@ static void sendLoginPage(const char *err = "") {
 //
 // The SSID/Password fields above it still set the active network; this is for
 // keeping the others around and swapping between them.
+//
+// None of it on the CardputerZero, where the OS owns the network (issue #162):
+// there the WiFi section only names the system's connection.
+#if !defined(PLATFORM_LINUX)
 static void appendSavedNetworks(String &html) {
     char nSsid[64], nPass[64];
     const int savedCount = cfgSavedWifiCount();
@@ -3387,6 +3398,7 @@ static void appendSavedNetworkForms(String &html) {
     }
     html += "<form id='wfadd' method='POST' action='/wifi-add'></form>";
 }
+#endif  // !PLATFORM_LINUX
 
 static void sendConfigPage(const char *msg = "", bool lite = false) {
     if (!gCfg) { server.send(500, "text/plain", "No config"); return; }
@@ -3888,6 +3900,17 @@ static void sendConfigPage(const char *msg = "", bool lite = false) {
     html += "<label>Short Name (max 4 chars)"
             "<input name='short' type='text' maxlength='4' value='";
     appendAttr(html, gCfg->nodeShort); html += "'></label>";
+    // Read-only and fixed at build time: shown so what NODEINFO advertises can
+    // be checked without a second node (issue #163).
+    snprintf(tmp, sizeof(tmp), "%s (%u)", MY_HW_MODEL_NAME, (unsigned)MY_HW_MODEL);
+    html += "<p class='hint'>Hardware model sent to other nodes: <b>";
+    html += tmp;
+#if MY_HW_MODEL == MESH_HW_MODEL_PRIVATE_HW
+    html += "</b>. Meshtastic has no ID for this board yet, so other nodes show "
+            "it as unknown hardware.</p>";
+#else
+    html += "</b></p>";
+#endif
     // The two ways to change this node's id: derive it from the public key
     // (Meshtastic 2.8's way), or fix it outright. Both are a change of identity,
     // so each says so rather than leaving the consequence to be discovered.
@@ -5363,6 +5386,24 @@ static void sendConfigPage(const char *msg = "", bool lite = false) {
     // WiFi. Collapsed by default, matching MQTT / Power / Modules. A <details>
     // only hides its contents visually — the inputs stay in the form and submit
     // either way, which is what the other collapsed sections already rely on.
+#if defined(PLATFORM_LINUX)
+    // The CardputerZero joins whatever network the OS is on (issue #162), so
+    // there is nothing to type in here: credentials saved from this page would
+    // be stored and never used. Name the connection instead.
+    section(html, lite, "WiFi", "wifi", "The system's network connection.");
+    {
+        const String sysSsid = WiFi.SSID();
+        html += "<p>Uses the system's network connection";
+        if (sysSsid.length()) {
+            html += ": <b>";
+            appendAttr(html, sysSsid.c_str());
+            html += "</b>";
+        }
+        html += ".</p>"
+                "<p class='hint'>Camillia does not manage Wi-Fi networks on the "
+                "CardputerZero; the system's network settings do.</p>";
+    }
+#else
     section(html, lite, "WiFi", "wifi", "Networks this device joins.");
     // appendAttr, not a raw append: an SSID or password containing an
     // apostrophe would close the value= attribute and mangle the rest of the
@@ -5378,6 +5419,7 @@ static void sendConfigPage(const char *msg = "", bool lite = false) {
         html += "<p class='hint'>This is the network the device joins.</p>";
         appendSavedNetworks(html);
     }
+#endif
     {
         // How long this page may sit idle before the server shuts itself down.
         // The setting has existed in the config struct and in YAML export for
@@ -5512,9 +5554,9 @@ static void sendConfigPage(const char *msg = "", bool lite = false) {
 
     // Node Management. The archive checkbox is only meaningful where the node
     // table can actually spill somewhere: the board needs an SD slot AND a
-    // mounted card. Where it can't, the box is rendered disabled with the
-    // reason shown, and handlePostSave leaves the stored preference untouched
-    // so it survives until a card is available.
+    // mounted card, or (the CardputerZero) its own disk. Where it can't, the box
+    // is rendered disabled with the reason shown, and handlePostSave leaves the
+    // stored preference untouched so it survives until a card is available.
     {
         const bool slot    = nodeArchiveSlotExists();
         const bool canArch = slot && nodeArchiveAvailable();
@@ -5531,18 +5573,33 @@ static void sendConfigPage(const char *msg = "", bool lite = false) {
         if (gCfg->nodeArchiveEnabled) html += " checked";
         if (!canArch) html += " disabled";
         html += ">"
+#if NODE_ARCHIVE_ON_DISK
+                "<span>Archive dropped nodes to storage</span></label>";
+#else
                 "<span>Archive dropped nodes to SD card</span></label>";
+#endif
 
         html += "<p class='hint'>";
         if (!slot) {
             html += "Unavailable: this board has no SD card slot. Dropped nodes "
                     "are discarded.";
         } else if (!canArch) {
+#if NODE_ARCHIVE_ON_DISK
+            html += "Unavailable: the device's storage could not be opened. "
+                    "Dropped nodes are discarded.";
+#else
             html += "Unavailable: no SD card detected. Insert a card and reboot "
                     "to enable archiving.";
+#endif
         } else {
             html += "Appends each dropped node to <code>";
+#if defined(PLATFORM_LINUX)
+            // Where the file really is on the Zero's disk, not the path inside
+            // storageFs() that every other board shows.
+            appendAttr(html, storageFs().hostPath(nodeArchiveFilePath()).c_str());
+#else
             html += nodeArchiveFilePath();
+#endif
             html += "</code> so its details are preserved after it leaves the "
                     "live list.";
         }
@@ -5563,7 +5620,11 @@ static void sendConfigPage(const char *msg = "", bool lite = false) {
         if (!slot) {
             html += "Unavailable: this board has no SD card slot.";
         } else if (!canArch) {
+#if NODE_ARCHIVE_ON_DISK
+            html += "Unavailable: the device's storage could not be opened.";
+#else
             html += "Unavailable: no SD card detected.";
+#endif
         } else {
             html += "Lists the most recently archived nodes below the live ones, "
                     "dimmed and marked <code>~</code>, and counts them in the "
@@ -5771,7 +5832,9 @@ static void sendConfigPage(const char *msg = "", bool lite = false) {
     // The forms the Saved Networks rows in the WiFi section submit through --
     // see appendSavedNetworks(). Here, after the config form has closed,
     // because a form cannot sit inside another one.
+#if !defined(PLATFORM_LINUX)
     appendSavedNetworkForms(html);
+#endif
     sendChunk(html);
 
     html += "</div></div><div class='tab-panel' id='tab-utils'><div class='tab-pane-center'>";
@@ -6180,12 +6243,20 @@ static void sendConfigPage(const char *msg = "", bool lite = false) {
         "<form method='POST' action='/clear-nodes'"
         " onsubmit=\"var f=this.favorites.checked,a=this.archive&&this.archive.checked;"
         "return confirm('This will clear all discovered nodes'+(f?' INCLUDING favorites':"
+#if NODE_ARCHIVE_ON_DISK
+        "' except favorites')+(a?' and every archived node':'')+"
+#else
         "' except favorites')+(a?' and every archived node on the SD card':'')+"
+#endif
         "', then reboot. Continue?')\">"
         "<label><input type='checkbox' name='favorites' value='1'> Include favorites</label>";
     if (nodeArchiveSlotExists()) {
         html += "<label><input type='checkbox' name='archive' value='1'>"
+#if NODE_ARCHIVE_ON_DISK
+                " Include archived nodes</label>";
+#else
                 " Include archived nodes (SD card)</label>";
+#endif
     }
     html +=
         "<button type='submit' class='btn-danger'>"
@@ -6195,7 +6266,11 @@ static void sendConfigPage(const char *msg = "", bool lite = false) {
         "Drops every non-favorited node from the persisted database and reboots. "
         "Favorited nodes are kept, with their names, keys and positions, unless "
         "<b>Include favorites</b> is ticked. <b>Include archived nodes</b> also deletes "
+#if NODE_ARCHIVE_ON_DISK
+        "the archive of dropped nodes.</p>";
+#else
         "the archive of dropped nodes on the SD card.</p>";
+#endif
 
 #if HAS_STATE_MAPS
     // Only where there is a cache to clear. Hidden on the same terms as the
@@ -9122,6 +9197,9 @@ static void handlePostSave() {
 #endif
     // WiFi credentials — save directly to NVS (not part of gCfg)
     {
+#if !defined(PLATFORM_LINUX)
+        // Not on the CardputerZero: its page has no SSID / Password fields, as
+        // the OS owns the network, so a wifi_ssid in a post is ignored.
         String ssid = server.arg("wifi_ssid");
         String pass = server.arg("wifi_pass");
         ssid.trim(); pass.trim();
@@ -9135,6 +9213,7 @@ static void handlePostSave() {
             strncpy(gCfg->wifiPass, gWifiPass, sizeof(gCfg->wifiPass) - 1);
             gCfg->wifiPass[sizeof(gCfg->wifiPass) - 1] = '\0';
         }
+#endif
 
         if (server.hasArg("webcfg_idle_s")) {
             gCfg->webCfgIdleTimeoutS =
@@ -9885,7 +9964,10 @@ static void handlePostResetChatColors() {
 // Applied straight through rather than queued: these handlers run inside
 // webCfgLoop() on the main loop thread, which is the thread that owns NVS and
 // the WiFi state everywhere else.
-
+//
+// Not built for the CardputerZero, where the OS owns the network: the routes
+// are never registered, so a post to them is a 404 and changes nothing.
+#if !defined(PLATFORM_LINUX)
 static void handlePostWifiAdd() {
     if (!isLoggedIn()) { redirect("/login"); return; }
     String ssid = server.arg("ssid");
@@ -9929,6 +10011,7 @@ static void handlePostWifiUse() {
     redirectHomeWithFlash("Switched network. Reconnecting - this page may become "
                           "unreachable until you join the new network.");
 }
+#endif  // !PLATFORM_LINUX
 
 #if HAS_ADMIN_TERMINAL
 // ── Remote admin ──────────────────────────────────────────────
@@ -10224,12 +10307,20 @@ static void handlePostClearNodes() {
     bool archiveCleared = false;
 
     char msg[128];
+#if NODE_ARCHIVE_ON_DISK
+    const char *archIncluded = ", archive included";
+    const char *archCleared  = ", archive cleared";
+    const char *archFailed   = "; archive NOT cleared";
+#else
+    const char *archIncluded = ", SD archive included";
+    const char *archCleared  = ", SD archive cleared";
+    const char *archFailed   = "; SD archive NOT cleared (no card)";
+#endif
     if (inclFavs) {
         Nodes.clearPersisted();
         archiveCleared = clearNodeDbFilesOnSd(inclArch);
         snprintf(msg, sizeof(msg), "Node database cleared%s. Rebooting now...",
-                 !inclArch ? "" : archiveCleared ? ", SD archive included"
-                                                 : "; SD archive NOT cleared (no card)");
+                 !inclArch ? "" : archiveCleared ? archIncluded : archFailed);
     } else {
         const int removed = Nodes.clearNonFavorites();
         // Not clearNodeDbFilesOnSd(): its legacy files are whole-table
@@ -10237,8 +10328,7 @@ static void handlePostClearNodes() {
         if (inclArch) archiveCleared = clearNodeArchiveFileOnSd();
         snprintf(msg, sizeof(msg), "Cleared %d nodes, kept %d favorites%s. Rebooting now...",
                  removed, Nodes.count(),
-                 !inclArch ? "" : archiveCleared ? ", SD archive cleared"
-                                                 : "; SD archive NOT cleared (no card)");
+                 !inclArch ? "" : archiveCleared ? archCleared : archFailed);
     }
     scheduleReboot(200);
     redirectHomeWithFlash(msg);
@@ -11456,9 +11546,11 @@ static void registerCommonRoutes() {
     onRoute("/reboot",            HTTP_POST, handlePostReboot);
     onRoute("/community-preset",  HTTP_POST, handlePostCommunityPreset);
     onRoute("/clear-messages",    HTTP_POST, handlePostClearMessages);
+#if !defined(PLATFORM_LINUX)
     onRoute("/wifi-add",          HTTP_POST, handlePostWifiAdd);
     onRoute("/wifi-forget",       HTTP_POST, handlePostWifiForget);
     onRoute("/wifi-use",          HTTP_POST, handlePostWifiUse);
+#endif
 #if HAS_ADMIN_TERMINAL
     // Registered here only: the AP-lite page gets none of these, same heap rule
     // as chat and the live feed.

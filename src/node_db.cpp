@@ -669,7 +669,7 @@ static bool s_archEnabled = false;   // opt-in; mirrored from config by the main
 void nodeArchiveSetEnabled(bool enabled) { s_archEnabled = enabled; }
 bool nodeArchiveIsEnabled() { return s_archEnabled; }
 
-#if HAS_SD_CARD
+#if HAS_NODE_ARCHIVE
 static const char *kArchivePath = "/camillia/nodes_archive.csv";
 static const char *kArchiveDir  = "/camillia";
 
@@ -739,7 +739,11 @@ static void nodeArchiveFlushNow() {
         s_archSdRetryAtMs = nowMs + kArchiveSdRetryMs;
         if (!s_archNoSdLogged) {
             s_archNoSdLogged = true;
+#if HAS_SD_CARD
             Serial.println("[nodedb] archive: no SD card - evicted nodes are not preserved");
+#else
+            Serial.println("[nodedb] archive: storage unavailable - evicted nodes are not preserved");
+#endif
         }
         archiveDiscardAll();
         return;
@@ -822,7 +826,7 @@ static const size_t kArchScanChunk   = 512;
 // Scaled with the index: filling 512 entries needs far more of the file in hand
 // than filling 24, and a budget that stopped first would put the "+" back on a
 // count this is meant to make exact.
-#if defined(BOARD_HAS_PSRAM) && BOARD_HAS_PSRAM
+#if NODE_ARCHIVE_INDEX_MAX >= 512
 static const size_t kArchScanMaxBytes = 512 * 1024;
 #else
 static const size_t kArchScanMaxBytes = 64 * 1024;
@@ -1139,10 +1143,11 @@ bool nodeArchiveClear() {
     return removed;
 }
 
-#else   // !HAS_SD_CARD
+#else   // !HAS_NODE_ARCHIVE
 
-// Boards with no SD slot do not expose the removable-card archive, so the
-// queue, its 1.3 KB of RAM, and the CSV writer are compiled out.
+// Boards with nowhere to keep the archive (no SD slot, and no disk like the
+// CardputerZero's) do not expose it, so the queue, its 1.3 KB of RAM, and the
+// CSV writer are compiled out.
 static inline void archiveQueue(const NodeEntry &) {}
 void     nodeArchiveFlush() {}
 int      nodeArchivePending() { return 0; }
@@ -1160,7 +1165,7 @@ const ArchivedNode *nodeArchiveIndexAt(int) { return nullptr; }
 bool nodeArchiveLoadFull(uint32_t, NodeEntry &, long *) { return false; }
 bool nodeArchiveClear() { return false; }
 
-#endif  // HAS_SD_CARD
+#endif  // HAS_NODE_ARCHIVE
 
 NodeEntry *NodeDB::upsert(uint32_t nodeId) {
     NodeEntry *e = find(nodeId);

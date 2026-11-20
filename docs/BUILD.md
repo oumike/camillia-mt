@@ -775,13 +775,16 @@ of the app running on the device posted on that pull request.
 
 **Data** lives in `~/.config/camillia-app` (or `$CAMILLIA_HOME`): `nvs/` holds
 what Preferences keeps in NVS on other boards, `fs/` what they keep on SD or
-flash, and `app.log` the last run's log.
+flash, and `app.log` the last run's log. With node archiving on, dropped nodes
+go to `fs/camillia/nodes_archive.csv`.
 
 **What the system provides:**
 
 - **Wi-Fi** is the Zero's own connection (NetworkManager); the firmware's Wi-Fi
-  switch only decides whether Camillia uses it.
-- **Web config** is served on port **18765**, not 80, alongside chat.
+  switch only decides whether Camillia uses it. Web config shows the network
+  but cannot add, switch or forget one, and config import skips Wi-Fi networks.
+- **Web config** is served on port **18765**, not 80, alongside chat. Turning it
+  on from the Config screen shows the address and a note about the port.
 - **Bluetooth keyboards** pair through BlueZ, from the usual config row.
 - **GPS** is the Cap's L76K on `/dev/serial0` at 115200.
 - **Battery** percent, voltage and charging come from the `bq27220` gauge in

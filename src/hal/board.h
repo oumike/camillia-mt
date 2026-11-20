@@ -19,7 +19,11 @@
 //      then matches DEVICE_TDECK first and the build compiles against the
 //      T-Deck pin map, with the new header never included. It builds, boots,
 //      and drives the wrong pins; the giveaway is the boot log reporting
-//      another board's pin numbers.
+//      another board's pin numbers. Miss the arm and the build fails. The arm
+//      takes the board's own value from the HardwareModel enum in
+//      meshtastic/protobufs meshtastic/mesh.proto, or PRIVATE_HW when it has
+//      none, never another board's; set MY_HW_MODEL_NAME with it, and add the
+//      board to "Hardware model on the mesh" in docs/HARDWARE.md.
 //   4. If your device needs TFT rotation different from the default (landscape),
 //      set  TFT_ROTATION_DEFAULT  in the device header or in the elif chain at
 //      the bottom of this file.
@@ -28,7 +32,7 @@
 //   DEVICE_TDECK                LilyGO T-Deck
 //   DEVICE_TDECK_PRO            LilyGO T-Deck Pro
 //   DEVICE_TLORA_PAGER_TFT      LilyGO T-LoRa Pager TFT
-//   DEVICE_CARDPUTER_LORA_HAT   M5Stack Cardputer + LoRa-1262 Cap
+//   DEVICE_CARDPUTER_LORA_HAT   M5Stack Cardputer-Adv + Cap LoRa-1262
 //   DEVICE_HELTEC_V4_EXPANSION  Heltec WiFi LoRa 32 V3 + TFT expansion
 //   DEVICE_HELTEC_R8            Heltec WiFi LoRa 32 V4-R8 + Expansion Kit V2.
 //                               Its build defines DEVICE_HELTEC_V4_EXPANSION as

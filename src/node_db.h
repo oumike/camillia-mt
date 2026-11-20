@@ -311,18 +311,20 @@ extern NodeDB Nodes;
 // nodeArchiveFlush() from the main loop. Archiving is best-effort: with no SD
 // card present the queue is discarded and counted in nodeArchiveDropped().
 // Archiving is opt-in (RhinoConfig::nodeArchiveEnabled) and only possible on a
-// board with an SD slot that currently has a card mounted. When it is off or
-// unavailable the evicted node is simply dropped — the FIFO itself is unchanged,
-// so newly heard and favorited nodes are still what the table keeps.
+// board with an SD slot that currently has a card mounted, or on the
+// CardputerZero, which keeps the file on its own disk (HAS_NODE_ARCHIVE).
+// When it is off or unavailable the evicted node is simply dropped — the FIFO
+// itself is unchanged, so newly heard and favorited nodes are still what the
+// table keeps.
 void     nodeArchiveFlush();      // call from the main loop; no-op when idle
 int      nodeArchivePending();    // records queued, not yet written
 uint32_t nodeArchiveWritten();    // lifetime records appended to the card
 uint32_t nodeArchiveDropped();    // lifetime records lost (no card / write error)
 void     nodeArchiveSetEnabled(bool enabled);
 bool     nodeArchiveIsEnabled();
-bool     nodeArchiveSlotExists();   // compile-time: board has an SD slot at all
+bool     nodeArchiveSlotExists();   // compile-time: board can keep the archive (HAS_NODE_ARCHIVE)
 bool     nodeArchiveAvailable();    // slot exists AND archive file storage is mounted
-const char *nodeArchiveFilePath();  // null when the board has no SD slot
+const char *nodeArchiveFilePath();  // null when the board cannot keep the archive
 
 // ── Node CSV schema ──────────────────────────────────────────────────────────
 // Shared by the SD archive writer and the web CSV export so the two can never
@@ -367,7 +369,10 @@ struct ArchivedNode {
 // Sized to cover a whole realistic archive rather than a recent window, so the
 // header count is a real total and the list shows every row behind it. The cap
 // is a backstop against a pathological file, not the normal case.
-#if defined(BOARD_HAS_PSRAM) && BOARD_HAS_PSRAM
+//
+// The CardputerZero defines no BOARD_HAS_PSRAM, but it is a Linux machine with
+// ordinary RAM, so it gets the large index too.
+#if (defined(BOARD_HAS_PSRAM) && BOARD_HAS_PSRAM) || defined(PLATFORM_LINUX)
 #define NODE_ARCHIVE_INDEX_MAX 512
 #else
 #define NODE_ARCHIVE_INDEX_MAX 24

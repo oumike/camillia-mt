@@ -88,6 +88,8 @@
 (unnamed)	(sans nom)
 , SD archive NOT cleared (no card)	, archive SD NON effacée (pas de carte)
 , SD archive cleared	, archive SD effacée
+, archive NOT cleared	, archive NON effacée
+, archive cleared	, archive effacée
 , gusts %d	, rafales %d
 1 hour	1 heure
 12-hour	12 heures
@@ -358,6 +360,7 @@ Import Config	Importer la config
 Import FAILED (no file?)	Import ÉCHOUÉ (pas de fichier ?)
 Import failed - enter a name	Échec de l'import - saisissez un nom
 Imported OK - rebooting...	Import réussi - redémarrage...
+Include (A)rchived	Inclure les archivés (A)
 Include (A)rchived (SD card)	Inclure les archivés (A) (SD)
 Include (F)avorites	Inclure les favoris (F)
 Include MQTT Live Data	Inclure les données MQTT en direct
@@ -494,6 +497,7 @@ No GPS fix	Pas de fix GPS
 No MQTT: %s	Sans MQTT : %s
 No beacons heard yet.\n\nA beacon is only audible while its sender has retuned onto this channel, preset and region, and it repeats on that node's own schedule - minutes to hours apart. This list keeps what it hears until you clear it. Sending your own beacon is a separate setting, under Mesh Beacons in Config.	Aucune balise entendue.\n\nUne balise n'est audible que lorsque son émetteur s'est réglé sur ce canal, ce préréglage et cette région, et elle se répète selon le calendrier du nœud - de quelques minutes à quelques heures. Cette liste garde ce qu'elle entend jusqu'à ce que vous l'effaciez. Envoyer votre propre balise est un réglage à part, sous Balises mesh dans Config.
 Only signed packets accepted (no 2.7 nodes)	Paquets signés uniquement (sans nœuds 2.7)
+Open http://%s/ in a browser on the same network.\n\nType the address in full, port included: the CardputerZero serves web config on its own port, not the usual 80.	Ouvrez http://%s/ dans un navigateur sur le même réseau.\n\nSaisissez l'adresse complète, port compris : le CardputerZero sert la config web sur son propre port, pas sur le port 80 habituel.
 Send NODEINFO and telemetry to the mesh now?	Envoyer NODEINFO et la télémétrie au maillage maintenant ?
 NODES	NŒUDS
 NODES (%d%s)	NŒUDS (%d%s)
@@ -850,6 +854,7 @@ Web Config: Disabled	Config web : Désactivée
 Web Config: Enabled	Config web : Activée
 Web Config: Off (WiFi off)	Config web : Coupée (WiFi coupé)
 Web Config: On	Config web : activée
+Web Config: On (%s)	Config web : activée (%s)
 Web Config: On (waiting for WiFi)	Config web : activée (attente du WiFi)
 Web Config: On (Lite)	Config web : activée (Lite)
 Web Config: On (chat PAUSED)	Config web : Active (chat EN PAUSE)

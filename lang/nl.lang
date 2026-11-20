@@ -85,6 +85,8 @@
 (unnamed)	(naamloos)
 , SD archive NOT cleared (no card)	, SD-archief NIET gewist (geen kaart)
 , SD archive cleared	, SD-archief gewist
+, archive NOT cleared	, archief NIET gewist
+, archive cleared	, archief gewist
 , gusts %d	, windstoten %d
 1 hour	1 uur
 12-hour	12-uurs
@@ -345,6 +347,7 @@ Import Config	Configuratie importeren
 Import FAILED (no file?)	Import MISLUKT (geen bestand?)
 Import failed - enter a name	Import mislukt - voer een naam in
 Imported OK - rebooting...	Import OK - herstarten...
+Include (A)rchived	Gearchiveerde meenemen (A)
 Include (A)rchived (SD card)	Gearchiveerde meenemen (A) (SD)
 Include (F)avorites	Favorieten meenemen (F)
 Include MQTT Live Data	MQTT-livegegevens tonen
@@ -472,6 +475,7 @@ NODEINFO + telemetry queued.	NODEINFO + telemetrie in de wachtrij.
 No GPS fix	Geen GPS-fix
 No MQTT: %s	Geen MQTT: %s
 Only signed packets accepted (no 2.7 nodes)	Alleen ondertekende pakketten (geen 2.7-nodes)
+Open http://%s/ in a browser on the same network.\n\nType the address in full, port included: the CardputerZero serves web config on its own port, not the usual 80.	Open http://%s/ in een browser op hetzelfde netwerk.\n\nTyp het volledige adres, inclusief poort: de CardputerZero biedt de webconfiguratie aan op een eigen poort, niet op de gebruikelijke 80.
 Send NODEINFO and telemetry to the mesh now?	NODEINFO en telemetrie nu naar de mesh sturen?
 Name	Naam
 Name: %s\nShort: %s\nID: !%08X\nLast heard: %s\nSNR: %.1f dB\nHops: %u\nChannel: %d\n\nPosition:\n%s\n\nTelemetry:\n%s	Naam: %s\nKort: %s\nID: !%08X\nLaatst gehoord: %s\nSNR: %.1f dB\nHops: %u\nKanaal: %d\n\nPositie:\n%s\n\nTelemetrie:\n%s
@@ -816,6 +820,7 @@ Web Config: Disabled	Webconfiguratie: Uitgeschakeld
 Web Config: Enabled	Webconfiguratie: Ingeschakeld
 Web Config: Off (WiFi off)	Webconfiguratie: Uit (wifi uit)
 Web Config: On	Webconfiguratie: Aan
+Web Config: On (%s)	Webconfiguratie: Aan (%s)
 Web Config: On (waiting for WiFi)	Webconfiguratie: Aan (wacht op wifi)
 Web Config: On (Lite)	Webconfiguratie: Aan (Lite)
 Web Config: On (chat PAUSED)	Webconfiguratie: Aan (chat GEPAUZEERD)
