@@ -1400,13 +1400,20 @@ void cfgToYaml(const RhinoConfig &cfg, String &out) {
     char tmp[96];
     out  = "# start of Meshtastic configure yaml\n";
     out += kCfgFormatMarker; out += "\n";
+#if !defined(PLATFORM_LINUX)
     // WiFi credentials (for web config export/import portability)
     out += "wifi_ssid: "; out += cfg.wifiSsid; out += "\n";
     out += "wifi_pass: "; out += cfg.wifiPass; out += "\n";
+#endif
     // The master switch. Missing from backups until now, so a restore left
     // WiFi as the device had it -- and with WiFi off the load path also turns
     // the MQTT bridge off, so a restored MQTT setup came back dead.
     snprintf(tmp, sizeof(tmp), "wifi_enabled: %s\n", cfg.wifiEnabled ? "true" : "false"); out += tmp;
+#if defined(PLATFORM_LINUX)
+    // No networks: the CardputerZero joins whatever the OS is connected to and
+    // keeps no credentials of its own (issue #162). wifi_enabled above still
+    // says whether Camillia uses that connection at all.
+#else
     // Every known network, with the active one flagged. wifi_ssid/wifi_pass
     // above stay for backward compatibility and always name the same network as
     // the `active: true` entry here; an older build reading this file ignores
@@ -1430,6 +1437,7 @@ void cfgToYaml(const RhinoConfig &cfg, String &out) {
             }
         }
     }
+#endif  // PLATFORM_LINUX
     out += "webcfg_user: "; out += kWebCfgUser; out += "\n";
     snprintf(tmp, sizeof(tmp), "webcfg_auth_enabled: %s\n", cfg.webCfgAuthEnabled ? "true" : "false"); out += tmp;
     out += "webcfg_pass: "; out += cfg.webCfgPass; out += "\n";
@@ -1943,6 +1951,12 @@ bool cfgImportFromBuf(const char *buf, size_t len, RhinoConfig &cfg) {
     static ImportedWifiNet wifiNets[1 + CFG_SAVED_WIFI_MAX];
     int         wifiNetCount   = 0;
     int         wifiNetIdx     = -1;
+#if defined(PLATFORM_LINUX)
+    // The CardputerZero joins the OS's network and keeps no credentials of its
+    // own (issue #162), so a file's networks are skipped -- and said to be, so
+    // a backup from another board does not look as if it set any.
+    bool        skippedWifi    = false;
+#endif
     bool        gotPubKey      = false;
     bool        gotPrivKey     = false;
     bool        sawKeyLine     = false;
@@ -2054,12 +2068,18 @@ bool cfgImportFromBuf(const char *buf, size_t len, RhinoConfig &cfg) {
                         utf8util::copyTruncate(cfg.callSign, sizeof(cfg.callSign), val);
                 }
                 else if (!strcmp(key, "wifi_ssid")) {
+#if defined(PLATFORM_LINUX)
+                    if (val[0]) skippedWifi = true;
+#else
                     strncpy(cfg.wifiSsid, val, sizeof(cfg.wifiSsid) - 1);
                     cfg.wifiSsid[sizeof(cfg.wifiSsid) - 1] = '\0';
+#endif
                 }
                 else if (!strcmp(key, "wifi_pass")) {
+#if !defined(PLATFORM_LINUX)
                     strncpy(cfg.wifiPass, val, sizeof(cfg.wifiPass) - 1);
                     cfg.wifiPass[sizeof(cfg.wifiPass) - 1] = '\0';
+#endif
                 }
                 else if (!strcmp(key, "wifi_enabled")) cfg.wifiEnabled = parseBoolValue(val);
                 else if (!strcmp(key, "webcfg_user")) {
@@ -2622,6 +2642,18 @@ bool cfgImportFromBuf(const char *buf, size_t len, RhinoConfig &cfg) {
     // (an older export, or a Meshtastic CLI dump) leaves the list untouched —
     // an import that says nothing about remembered networks should not wipe the
     // ones already on the device.
+#if defined(PLATFORM_LINUX)
+    for (int i = 0; i < wifiNetCount; i++) {
+        if (wifiNets[i].ssid[0]) skippedWifi = true;
+    }
+    // Set before the identity checks below, which overwrite it: a key problem
+    // matters more, and there is room for one message.
+    if (skippedWifi) {
+        snprintf(s_importWarning, sizeof(s_importWarning), "%s",
+                 "Wi-Fi networks skipped: the system manages Wi-Fi");
+        Serial.printf("[cfg] import: %s\n", s_importWarning);
+    }
+#else
     if (wifiNetCount > 0) {
         int activeIdx = -1;
         for (int i = 0; i < wifiNetCount; i++) {
@@ -2645,6 +2677,7 @@ bool cfgImportFromBuf(const char *buf, size_t len, RhinoConfig &cfg) {
         }
         cfgSavedWifiCommit();
     }
+#endif  // PLATFORM_LINUX
 
     // An imported YAML can name any role in kRoleNames; coerce the ones this
     // firmware does not offer (see cfgCoerceDeviceRole) down to CLIENT.

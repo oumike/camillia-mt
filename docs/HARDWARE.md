@@ -95,7 +95,7 @@ and issue #155.
 | **GPS** | L76K on `/dev/serial0` at 115200 (verified sending NMEA); read by the firmware's GPS module through a serial stand-in |
 | **Display** | ST7789 320x170 at `/dev/fb_lcd` (fbdev), drawn by the app with LVGL |
 | **Keyboard** | TCA8418 matrix as a Linux evdev device (`/dev/input/by-path/platform-3f804000.i2c-event`), read without grabbing so the launcher keeps Home; symbols from `/usr/share/keymaps/tca8418_keypad_m5stack_keymap.map`. Bluetooth keyboards through BlueZ |
-| **Interface** | App from the launcher (`/usr/share/APPLaunch/bin/camillia`); data in `~/.config/camillia-app`; web config on port 18765 |
+| **Interface** | App from the launcher (`/usr/share/APPLaunch/bin/camillia`); data in `~/.config/camillia-app`, including the node archive (`fs/camillia/nodes_archive.csv`); web config on port 18765 |
 | **Battery** | bq27220 gauge via `/sys/class/power_supply`; the OS handles low-battery shutdown |
 | **Wi-Fi** | The system connection (NetworkManager); updates come from M5Stack's app store, not OTA |
 | **Status** | Released in v6.7.0. On one unit the app runs from the launcher and from the `.deb`, receives and transmits on the Cap, serves web config over the system Wi-Fi, gets a GPS fix and reads the battery; the number-row keys were driven on the unit. Bluetooth keyboards and Esc twice for Home not yet confirmed on the unit |

@@ -89,6 +89,8 @@
 (unnamed)	(brez naziva)
 , SD archive NOT cleared (no card)	, arhiv SD NI počiščen (ni kartice)
 , SD archive cleared	, arhiv SD počiščen
+, archive NOT cleared	, arhiv NI počiščen
+, archive cleared	, arhiv počiščen
 , gusts %d	, sunki %d
 1 hour	1 ura
 12-hour	12-urni
@@ -353,6 +355,7 @@ Import Config	Uvozi nastavitve
 Import FAILED (no file?)	Uvoz NI USPEL (ni datoteke?)
 Import failed - enter a name	Uvoz ni uspel - vnesite ime
 Imported OK - rebooting...	Uvoz OK - vnovični zagon...
+Include (A)rchived	Vključi arhivirane (A)
 Include (A)rchived (SD card)	Vključi arhivirane (A) (SD)
 Include (F)avorites	Vključi priljubljene (F)
 Include MQTT Live Data	Vključi podatke MQTT v živo
@@ -482,6 +485,7 @@ NODEINFO + telemetry queued.	NODEINFO + telemetrija v čakalni vrsti.
 No GPS fix	Ni položaja GPS
 No MQTT: %s	Brez MQTT: %s
 Only signed packets accepted (no 2.7 nodes)	Samo podpisani paketi (brez vozlišč 2.7)
+Open http://%s/ in a browser on the same network.\n\nType the address in full, port included: the CardputerZero serves web config on its own port, not the usual 80.	Odprite http://%s/ v brskalniku v istem omrežju.\n\nVpišite celoten naslov, skupaj z vrati: CardputerZero spletne nastavitve ponuja na svojih vratih, ne na običajnih 80.
 Send NODEINFO and telemetry to the mesh now?	Pošljem zdaj NODEINFO in telemetrijo v omrežje?
 NODES	VOZLIŠČA
 NODES (%d%s)	VOZLIŠČA (%d%s)
@@ -840,6 +844,7 @@ Web Config: Disabled	Spletne nastavitve: Onemogočene
 Web Config: Enabled	Spletne nastavitve: Omogočene
 Web Config: Off (WiFi off)	Spletne nastavitve: Izkl. (WiFi izkl.)
 Web Config: On	Spletne nastavitve: Vkl.
+Web Config: On (%s)	Spletne nastavitve: Vkl. (%s)
 Web Config: On (waiting for WiFi)	Spletne nastavitve: Vkl. (čaka na WiFi)
 Web Config: On (Lite)	Spletne nastavitve: Vkl. (Lite)
 Web Config: On (chat PAUSED)	Spletne nastavitve: Vkl. (klepet ZAUSTAVLJEN)

@@ -497,6 +497,14 @@
 #define HAS_SD_MALWARE_SCAN 0
 #endif
 
+// Evicted-node archive (node_db.cpp): a CSV of the nodes a full table had to
+// drop. The file only ever grows, so by default it is offered where there is an
+// SD slot, and a board with no slot but a real disk (the CardputerZero) turns it
+// on in its HAL header. The Mesh Deck's small LittleFS partition stays without.
+#ifndef HAS_NODE_ARCHIVE
+#define HAS_NODE_ARCHIVE HAS_SD_CARD
+#endif
+
 // Remote administration terminal (issue #89): a client for Meshtastic's
 // ADMIN_APP, reached from a node's actions modal and from web config.
 //

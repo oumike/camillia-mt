@@ -89,6 +89,8 @@
 (unnamed)	(nimetu)
 , SD archive NOT cleared (no card)	, SD-arhiivi EI tühjendatud (kaarti pole)
 , SD archive cleared	, SD-arhiiv tühjendatud
+, archive NOT cleared	, arhiivi EI tühjendatud
+, archive cleared	, arhiiv tühjendatud
 , gusts %d	, puhanguid %d
 1 hour	1 tund
 12-hour	12-tunnine
@@ -352,6 +354,7 @@ Import Config	Impordi seaded
 Import FAILED (no file?)	Import EBAÕNNESTUS (faili pole?)
 Import failed - enter a name	Import ebaõnnestus - sisestage nimi
 Imported OK - rebooting...	Import OK - taaskäivitan...
+Include (A)rchived	Kaasa arhiveeritud (A)
 Include (A)rchived (SD card)	Kaasa arhiveeritud (A) (SD)
 Include (F)avorites	Kaasa lemmikud (F)
 Include MQTT Live Data	Kaasa MQTT otseandmed
@@ -481,6 +484,7 @@ NODEINFO + telemetry queued.	NODEINFO + telemeetria järjekorras.
 No GPS fix	GPS-fiks puudub
 No MQTT: %s	MQTT-ta: %s
 Only signed packets accepted (no 2.7 nodes)	Ainult allkirjastatud paketid (2.7 sõlmedeta)
+Open http://%s/ in a browser on the same network.\n\nType the address in full, port included: the CardputerZero serves web config on its own port, not the usual 80.	Avage http://%s/ samas võrgus oleva seadme brauseris.\n\nSisestage aadress täielikult koos pordiga: CardputerZero pakub veebiseadeid oma pordil, mitte tavapärasel pordil 80.
 Send NODEINFO and telemetry to the mesh now?	Kas saata NODEINFO ja telemeetria kohe võrku?
 NODES	SÕLMED
 NODES (%d%s)	SÕLMED (%d%s)
@@ -840,6 +844,7 @@ Web Config: Disabled	Veebiseaded: Keelatud
 Web Config: Enabled	Veebiseaded: Lubatud
 Web Config: Off (WiFi off)	Veebiseaded: Väljas (WiFi väljas)
 Web Config: On	Veebiseaded: Sees
+Web Config: On (%s)	Veebiseaded: Sees (%s)
 Web Config: On (waiting for WiFi)	Veebiseaded: Sees (ootab WiFi-t)
 Web Config: On (Lite)	Veebiseaded: Sees (Lite)
 Web Config: On (chat PAUSED)	Veebiseaded: Sees (vestlus PEATATUD)

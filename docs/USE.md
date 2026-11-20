@@ -2067,12 +2067,16 @@ just remembers fewer of the ones it has not heard from lately, so on a busy mesh
 expect the table to turn over sooner and **favorite the nodes you care about**.
 
 Optionally, dropped nodes can be preserved instead of discarded. In Web Config,
-**Node Management** has an *Archive dropped nodes to SD card* checkbox:
+**Node Management** has an *Archive dropped nodes to SD card* checkbox
+(*Archive dropped nodes to storage* on the CardputerZero):
 
 - It is **off by default** — archiving only happens if you turn it on
 - It cannot be enabled on a board with no SD slot, or with no card inserted; the
   reason is shown in place of the description
 - When on, each dropped node is appended to `/camillia/nodes_archive.csv`
+- The CardputerZero has no SD slot but keeps the archive on its own storage, in
+  `~/.config/camillia-app/fs/camillia/nodes_archive.csv` (under
+  `$CAMILLIA_HOME/fs` when that is set). The hint shows the full path
 
 The same section has an **Export Node List (CSV)** button, which downloads every
 node the device currently knows about plus any previously archived nodes. A
@@ -2087,11 +2091,12 @@ has two options, both unticked each time it opens:
 
 - **Include favorites** — empties the table completely, favorites included.
 - **Include archived** — also deletes the archived-node CSV above. Only on
-  boards with an SD slot.
+  boards with an SD slot, and on the CardputerZero.
 
 Up/Down (the M9's D-pad, the Pager's wheel, `;` and `.` on the Cardputer) moves the highlight between them and Space ticks or unticks the highlighted one; F and A toggle them directly. On a touch screen, tap them. The device
 reports what happened, e.g. `Cleared 214 nodes, kept 6 favorites, SD archive
-cleared`, and says so if the archive was asked for but no card was there.
+cleared` (`archive cleared` on the CardputerZero), and says so if the archive
+was asked for but no card was there.
 
 It reboots afterwards and never touches DM transcripts (that is Clear Messages).
 Under Discovery, stored neighbor reports are dropped too; the mesh rebuilds that
@@ -2604,9 +2609,13 @@ The Cardputer (`cardputer-cap`) always serves Lite, on its own network or yours,
 because it has no PSRAM to spare.
 
 **On the CardputerZero**, Web Config uses the system's Wi-Fi connection and is
-served on port **18765** rather than 80 — browse to `http://<address>:18765`;
-the row shows the full address. It never starts its own access point, and it
-serves the full page. Chat and Bluetooth keep running while it is on.
+served on port **18765** rather than 80 — browse to `http://<address>:18765`.
+Switching it on from the Config screen pops up that address with a note about
+the port, and the row keeps showing it: `Web Config: On (<address>:18765)`. It
+never starts its own access point, and it serves the full page. Chat and
+Bluetooth keep running while it is on. Its **WiFi** section only names the
+network the system is on; networks are managed in the system's own settings
+(see [Choosing a Wi-Fi network](#choosing-a-wi-fi-network)).
 
 **Node Identity** also shows, read-only, the hardware model this build announces
 to other nodes, such as `THINKNODE_M9 (131)`. Their apps turn it into the board
@@ -3164,6 +3173,10 @@ Saved Networks is not on the AP-mode Lite page — that mode serves the Config
 pane only. Use the on-device picker when you are connected to the device's own
 access point.
 
+The CardputerZero has neither: its **WiFi** section names the network the
+system is connected to, read-only, with no SSID or Password fields and no Saved
+Networks. Join, switch and forget networks in the system's own network settings.
+
 Every network travels with config export/import, under `wifi_networks:`. The one
 currently in use is flagged `active: true`:
 
@@ -3186,6 +3199,10 @@ the list. On import, the entry marked `active` becomes the configured network
 and the rest are remembered. A file with no `wifi_networks:` section at all — an
 older export, or a `meshtastic --export-config` dump — leaves the remembered
 list alone rather than clearing it.
+
+The CardputerZero leaves `wifi_ssid`, `wifi_pass` and `wifi_networks` out of its
+exports and skips them on import; if the file had any, the import result says
+so. `wifi_enabled` is still exported and restored.
 
 Note this means an exported config now carries **every** network password you
 have saved, not just one. It was already a secret because of the channel keys
@@ -3357,7 +3374,7 @@ of the last 32 nodes evicted that way are kept in memory, so when such a node
 is heard again its old key is put back: the same key is accepted quietly, and a
 different one is raised as a key change rather than trusted as new. Deleting a
 node yourself, or clearing the node list, forgets its key. This memory does not
-survive a reboot, and the SD card node archive is not consulted.
+survive a reboot, and the node archive is not consulted.
 
 ### Locate
 

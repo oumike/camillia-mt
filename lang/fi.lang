@@ -89,6 +89,8 @@
 (unnamed)	(nimetön)
 , SD archive NOT cleared (no card)	, SD-arkistoa EI tyhjennetty (ei korttia)
 , SD archive cleared	, SD-arkisto tyhjennetty
+, archive NOT cleared	, arkistoa EI tyhjennetty
+, archive cleared	, arkisto tyhjennetty
 , gusts %d	, puuskat %d
 1 hour	1 tunti
 12-hour	12 tunnin
@@ -355,6 +357,7 @@ Import Config	Tuo asetukset
 Import FAILED (no file?)	Tuonti EPÄONNISTUI (ei tiedostoa?)
 Import failed - enter a name	Tuonti epäonnistui - anna nimi
 Imported OK - rebooting...	Tuonti OK - käynnistetään uudelleen...
+Include (A)rchived	Myös arkistoidut (A)
 Include (A)rchived (SD card)	Myös arkistoidut (A) (SD)
 Include (F)avorites	Myös suosikit (F)
 Include MQTT Live Data	Sisällytä MQTT-livedata
@@ -483,6 +486,7 @@ NODEINFO + telemetry queued.	NODEINFO + telemetria jonossa.
 No GPS fix	Ei GPS-paikannusta
 No MQTT: %s	Ei MQTT: %s
 Only signed packets accepted (no 2.7 nodes)	Vain allekirjoitetut paketit (ei 2.7-solmuja)
+Open http://%s/ in a browser on the same network.\n\nType the address in full, port included: the CardputerZero serves web config on its own port, not the usual 80.	Avaa http://%s/ selaimessa samassa verkossa.\n\nKirjoita osoite kokonaan porttinumeroineen: CardputerZero tarjoaa web-asetukset omassa portissaan, ei tavallisessa portissa 80.
 Send NODEINFO and telemetry to the mesh now?	Lähetetäänkö NODEINFO ja telemetria verkkoon nyt?
 NODES	SOLMUT
 NODES (%d%s)	SOLMUT (%d%s)
@@ -842,6 +846,7 @@ Web Config: Disabled	Web-asetukset: Pois käytöstä
 Web Config: Enabled	Web-asetukset: Käytössä
 Web Config: Off (WiFi off)	Web-asetukset: Pois (WiFi pois)
 Web Config: On	Web-asetukset: Päällä
+Web Config: On (%s)	Web-asetukset: Päällä (%s)
 Web Config: On (waiting for WiFi)	Web-asetukset: Päällä (odottaa WiFiä)
 Web Config: On (Lite)	Web-asetukset: Päällä (Lite)
 Web Config: On (chat PAUSED)	Web-asetukset: Päällä (chat TAUOLLA)

@@ -5907,6 +5907,16 @@ static bool wifiBeginActiveKnown() {
     return true;
 }
 
+// What the archive rows append when it has nowhere to write: a card on the SD
+// boards, the disk on the CardputerZero (HAS_NODE_ARCHIVE without a slot).
+static const char *archiveNoStorageSuffix() {
+#if HAS_SD_CARD
+    return TR(" (no card)");
+#else
+    return TR(" (no storage)");
+#endif
+}
+
 static const char *cfgActionLabel(int actionId, char *buf, size_t bufLen) {
     if (!buf || bufLen == 0) return "";
     if (cfgGenIsAction(actionId)) return cfgGenLabel(actionId - CFG_ACTION_GEN_FIRST, buf, bufLen);
@@ -5968,8 +5978,14 @@ static const char *cfgActionLabel(int actionId, char *buf, size_t bufLen) {
                 if (webCfgChatPaused()) {
                     snprintf(buf, bufLen, "%s", TR("Web Config: On (chat PAUSED)"));
                 } else {
+#if defined(PLATFORM_LINUX)
+                    // Its own port, not 80: the row carries the whole address
+                    // so it is still in view after the start notice closes.
+                    snprintf(buf, bufLen, TR("Web Config: On (%s)"), webCfgIP());
+#else
                     snprintf(buf, bufLen, webCfgIsLite() ? TR("Web Config: On (Lite)")
                                                          : TR("Web Config: On"));
+#endif
                 }
             } else if (s_webCfgAwaitStation) {
                 snprintf(buf, bufLen, "%s", TR("Web Config: On (waiting for WiFi)"));
@@ -6332,7 +6348,7 @@ static const char *cfgActionLabel(int actionId, char *buf, size_t bufLen) {
             // the row is the only place that can keep saying so.
             snprintf(buf, bufLen, TR("Archive Dropped Nodes: %s%s"),
                      s_cfg.nodeArchiveEnabled ? TR("On") : TR("Off"),
-                     (s_cfg.nodeArchiveEnabled && !nodeArchiveAvailable()) ? TR(" (no card)") : "");
+                     (s_cfg.nodeArchiveEnabled && !nodeArchiveAvailable()) ? archiveNoStorageSuffix() : "");
             break;
         case CFG_ACTION_SHOW_ARCHIVED:
             // The card state is part of the label rather than a popup on the
@@ -6341,7 +6357,7 @@ static const char *cfgActionLabel(int actionId, char *buf, size_t bufLen) {
             // can keep saying why.
             snprintf(buf, bufLen, TR("Show Archived Nodes: %s%s"),
                      s_cfg.nodeArchiveShow ? TR("On") : TR("Off"),
-                     (s_cfg.nodeArchiveShow && !nodeArchiveAvailable()) ? TR(" (no card)") : "");
+                     (s_cfg.nodeArchiveShow && !nodeArchiveAvailable()) ? archiveNoStorageSuffix() : "");
             break;
         case CFG_ACTION_CLEAR_NODES:
             snprintf(buf, bufLen, "%s", TR("Clear Nodes"));
@@ -16221,11 +16237,11 @@ static void initCfgActions() {
     // down here and not up among the display settings.
     s_cfgActions[s_cfgActionCount++] = CFG_ACTION_BATT_CAL;
     s_cfgActions[s_cfgActionCount++] = CFG_ACTION_CLEAR_MSGS;
-#if HAS_SD_CARD
+#if HAS_NODE_ARCHIVE
     // In the order the two settings depend on each other: keep the evicted
-    // nodes, then show them. Only on boards with a slot — the archive both
-    // govern is written to the card, so elsewhere these would toggle settings
-    // with nothing behind them.
+    // nodes, then show them. Only on boards that can keep the archive (an SD
+    // slot, or the CardputerZero's disk) — elsewhere these would toggle
+    // settings with nothing behind them.
     s_cfgActions[s_cfgActionCount++] = CFG_ACTION_ARCHIVE_NODES;
     s_cfgActions[s_cfgActionCount++] = CFG_ACTION_SHOW_ARCHIVED;
 #endif
@@ -47951,6 +47967,22 @@ static void performCfgAction(int actionId) {
                         openCfgActionMessageModal(TR(kWebBleKbdExclusiveNotice));
                     }
 #endif
+#if defined(PLATFORM_LINUX)
+                    // Not on port 80, so a browser given the bare IP finds
+                    // nothing (issue #162). Only when switched on here: an
+                    // auto-start at boot stays quiet, and the row keeps the
+                    // address once this is closed.
+                    else {
+                        char note[320];
+                        snprintf(note, sizeof(note),
+                                 TR("Open http://%s/ in a browser on the same network.\n\n"
+                                    "Type the address in full, port included: the "
+                                    "CardputerZero serves web config on its own port, "
+                                    "not the usual 80."),
+                                 webCfgIP());
+                        openCfgActionMessageModal(note, TR("Web Config: On"));
+                    }
+#endif
                 } else if (webCfgStartDeferred()) {
                     s_webCfgAwaitStation = true;
                     snprintf(s_cfgStatus, sizeof(s_cfgStatus), "%s", TR("Web Config: On (waiting for WiFi)"));
@@ -48859,9 +48891,16 @@ static void performCfgAction(int actionId) {
             // Reported rather than assumed: with no card in the slot the archive
             // is still out there on a card somewhere, and claiming to have
             // cleared it would be a lie the user acts on.
+#if HAS_SD_CARD
             const char *archNote = !inclArch      ? ""
                                  : archiveCleared ? TR(", SD archive cleared")
                                                   : TR(", SD archive NOT cleared (no card)");
+#else
+            // The CardputerZero's archive is on its own disk, not a card.
+            const char *archNote = !inclArch      ? ""
+                                 : archiveCleared ? TR(", archive cleared")
+                                                  : TR(", archive NOT cleared");
+#endif
             if (inclFavs) {
                 snprintf(s_cfgStatus, sizeof(s_cfgStatus), TR("All nodes cleared%s - rebooting..."),
                          archNote);
@@ -49050,12 +49089,15 @@ static void cfgClearNodesAddOptions(lv_obj_t *parent, lv_color_t textColor) {
 #else
     s_clearNodesFavsCheck = addCheck(TR("Include (F)avorites"));
 #endif
-    // Only where there is a card slot: elsewhere there is no archive to clear.
+    // Only where the board can keep an archive: elsewhere there is none to clear.
     if (nodeArchiveSlotExists()) {
 #if UI_TOUCH_ONLY_PROFILE
         s_clearNodesArchCheck = addCheck(TR("Include archived (SD card)"));
-#else
+#elif HAS_SD_CARD
         s_clearNodesArchCheck = addCheck(TR("Include (A)rchived (SD card)"));
+#else
+        // The CardputerZero keeps the archive on its own disk.
+        s_clearNodesArchCheck = addCheck(TR("Include (A)rchived"));
 #endif
     }
 #if UI_TOUCH_ONLY_PROFILE

@@ -88,6 +88,8 @@
 (unnamed)	(bez nazwy)
 , SD archive NOT cleared (no card)	, archiwum SD NIE wyczyszczone (brak karty)
 , SD archive cleared	, archiwum SD wyczyszczone
+, archive NOT cleared	, archiwum NIE wyczyszczone
+, archive cleared	, archiwum wyczyszczone
 , gusts %d	, porywy %d
 1 hour	1 godzina
 12-hour	12-godzinny
@@ -354,6 +356,7 @@ Import Config	Importuj konfigurację
 Import FAILED (no file?)	Import NIEUDANY (brak pliku?)
 Import failed - enter a name	Import nieudany - wpisz nazwę
 Imported OK - rebooting...	Import OK - ponowne uruchamianie...
+Include (A)rchived	Uwzględnij archiwalne (A)
 Include (A)rchived (SD card)	Uwzględnij archiwalne (A) (SD)
 Include (F)avorites	Uwzględnij ulubione (F)
 Include MQTT Live Data	Uwzględnij dane MQTT na żywo
@@ -484,6 +487,7 @@ NODEINFO + telemetry queued.	NODEINFO + telemetria w kolejce.
 No GPS fix	Brak pozycji GPS
 No MQTT: %s	Bez MQTT: %s
 Only signed packets accepted (no 2.7 nodes)	Tylko podpisane pakiety (bez węzłów 2.7)
+Open http://%s/ in a browser on the same network.\n\nType the address in full, port included: the CardputerZero serves web config on its own port, not the usual 80.	Otwórz http://%s/ w przeglądarce w tej samej sieci.\n\nWpisz pełny adres razem z portem: CardputerZero udostępnia konfigurację web na własnym porcie, a nie na zwykłym 80.
 Send NODEINFO and telemetry to the mesh now?	Wysłać teraz NODEINFO i telemetrię do sieci?
 NODES	WĘZŁY
 NODES (%d%s)	WĘZŁY (%d%s)
@@ -840,6 +844,7 @@ Web Config: Disabled	Konfiguracja web: Wyłączona
 Web Config: Enabled	Konfiguracja web: Włączona
 Web Config: Off (WiFi off)	Konfiguracja web: Wył. (WiFi wył.)
 Web Config: On	Konfiguracja web: Wł.
+Web Config: On (%s)	Konfiguracja web: Wł. (%s)
 Web Config: On (waiting for WiFi)	Konfiguracja web: Wł. (czeka na WiFi)
 Web Config: On (Lite)	Konfiguracja web: Wł. (Lite)
 Web Config: On (chat PAUSED)	Konfiguracja web: Wł. (czat WSTRZYMANY)

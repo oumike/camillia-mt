@@ -87,6 +87,8 @@
 (unnamed)	(uten navn)
 , SD archive NOT cleared (no card)	, SD-arkiv IKKE tømt (intet kort)
 , SD archive cleared	, SD-arkiv tømt
+, archive NOT cleared	, arkiv IKKE tømt
+, archive cleared	, arkiv tømt
 , gusts %d	, vindkast %d
 1 hour	1 time
 12-hour	12-timers
@@ -348,6 +350,7 @@ Import Config	Importer konfigurasjon
 Import FAILED (no file?)	Import MISLYKTES (ingen fil?)
 Import failed - enter a name	Import mislyktes - skriv inn et navn
 Imported OK - rebooting...	Import OK - starter på nytt...
+Include (A)rchived	Ta med arkiverte (A)
 Include (A)rchived (SD card)	Ta med arkiverte (A) (SD)
 Include (F)avorites	Ta med favoritter (F)
 Include MQTT Live Data	Ta med MQTT-livedata
@@ -474,6 +477,7 @@ NODEINFO + telemetry queued.	NODEINFO + telemetri satt i kø.
 No GPS fix	Ingen GPS-fix
 No MQTT: %s	Uten MQTT: %s
 Only signed packets accepted (no 2.7 nodes)	Bare signerte pakker (ingen 2.7-noder)
+Open http://%s/ in a browser on the same network.\n\nType the address in full, port included: the CardputerZero serves web config on its own port, not the usual 80.	Åpne http://%s/ i en nettleser på samme nettverk.\n\nSkriv hele adressen, med port: CardputerZero kjører webkonfigurasjonen på sin egen port, ikke den vanlige 80.
 Send NODEINFO and telemetry to the mesh now?	Sende NODEINFO og telemetri til nettet nå?
 NODES	NODER
 NODES (%d%s)	NODER (%d%s)
@@ -829,6 +833,7 @@ Web Config: Disabled	Webkonfigurasjon: Deaktivert
 Web Config: Enabled	Webkonfigurasjon: Aktivert
 Web Config: Off (WiFi off)	Webkonfigurasjon: Av (WiFi av)
 Web Config: On	Webkonfigurasjon: På
+Web Config: On (%s)	Webkonfigurasjon: På (%s)
 Web Config: On (waiting for WiFi)	Webkonfigurasjon: På (venter på WiFi)
 Web Config: On (Lite)	Webkonfigurasjon: På (Lite)
 Web Config: On (chat PAUSED)	Webkonfigurasjon: På (chat PAUSET)

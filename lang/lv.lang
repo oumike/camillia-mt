@@ -89,6 +89,8 @@
 (unnamed)	(bez nosaukuma)
 , SD archive NOT cleared (no card)	, SD arhīvs NAV notīrīts (nav kartes)
 , SD archive cleared	, SD arhīvs notīrīts
+, archive NOT cleared	, arhīvs NAV notīrīts
+, archive cleared	, arhīvs notīrīts
 , gusts %d	, brāzmas %d
 1 hour	1 stunda
 12-hour	12 stundu
@@ -354,6 +356,7 @@ Import Config	Importēt iestatījumus
 Import FAILED (no file?)	Imports NEIZDEVĀS (nav faila?)
 Import failed - enter a name	Imports neizdevās - ievadiet vārdu
 Imported OK - rebooting...	Imports OK - restartē...
+Include (A)rchived	Iekļaut arhivētos (A)
 Include (A)rchived (SD card)	Iekļaut arhivētos (A) (SD)
 Include (F)avorites	Iekļaut izlasi (F)
 Include MQTT Live Data	Iekļaut MQTT tiešraides datus
@@ -483,6 +486,7 @@ NODEINFO + telemetry queued.	NODEINFO + telemetrija rindā.
 No GPS fix	Nav GPS fiksācijas
 No MQTT: %s	Bez MQTT: %s
 Only signed packets accepted (no 2.7 nodes)	Tikai parakstītas paketes (bez 2.7 mezgliem)
+Open http://%s/ in a browser on the same network.\n\nType the address in full, port included: the CardputerZero serves web config on its own port, not the usual 80.	Atveriet http://%s/ pārlūkā tajā pašā tīklā.\n\nIevadiet visu adresi kopā ar portu: CardputerZero tīmekļa iestatījumus nodrošina savā portā, nevis parastajā 80.
 Send NODEINFO and telemetry to the mesh now?	Sūtīt NODEINFO un telemetriju uz tīklu tagad?
 NODES	MEZGLI
 NODES (%d%s)	MEZGLI (%d%s)
@@ -842,6 +846,7 @@ Web Config: Disabled	Tīmekļa iestatījumi: Atspējoti
 Web Config: Enabled	Tīmekļa iestatījumi: Iespējoti
 Web Config: Off (WiFi off)	Tīmekļa iestatījumi: Izsl. (WiFi izsl.)
 Web Config: On	Tīmekļa iestatījumi: Iesl.
+Web Config: On (%s)	Tīmekļa iestatījumi: Iesl. (%s)
 Web Config: On (waiting for WiFi)	Tīmekļa iestatījumi: Iesl. (gaida WiFi)
 Web Config: On (Lite)	Tīmekļa iestatījumi: Iesl. (Lite)
 Web Config: On (chat PAUSED)	Tīmekļa iestatījumi: Iesl. (tērzēšana APTURĒTA)

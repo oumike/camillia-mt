@@ -89,6 +89,8 @@
 (unnamed)	(adsız)
 , SD archive NOT cleared (no card)	, SD arşivi TEMİZLENMEDİ (kart yok)
 , SD archive cleared	, SD arşivi temizlendi
+, archive NOT cleared	, arşiv TEMİZLENMEDİ
+, archive cleared	, arşiv temizlendi
 , gusts %d	, esinti %d
 1 hour	1 saat
 12-hour	12 saat
@@ -355,6 +357,7 @@ Import Config	Yapılandırmayı içe aktar
 Import FAILED (no file?)	İçe aktarma BAŞARISIZ (dosya yok mu?)
 Import failed - enter a name	İçe aktarma başarısız - bir ad girin
 Imported OK - rebooting...	İçe aktarma tamam - yeniden başlatılıyor...
+Include (A)rchived	Arşivlenenler dahil (A)
 Include (A)rchived (SD card)	Arşivlenenler dahil (A) (SD)
 Include (F)avorites	Favoriler dahil (F)
 Include MQTT Live Data	Canlı MQTT verilerini dahil et
@@ -484,6 +487,7 @@ NODEINFO + telemetry queued.	NODEINFO + telemetri kuyruğa alındı.
 No GPS fix	GPS konumu yok
 No MQTT: %s	MQTT yok: %s
 Only signed packets accepted (no 2.7 nodes)	Yalnızca imzalı paketler (2.7 düğümü yok)
+Open http://%s/ in a browser on the same network.\n\nType the address in full, port included: the CardputerZero serves web config on its own port, not the usual 80.	Aynı ağdaki bir tarayıcıda http://%s/ adresini açın.\n\nAdresi port dahil eksiksiz yazın: CardputerZero web yapılandırmasını olağan 80 yerine kendi portundan sunar.
 Send NODEINFO and telemetry to the mesh now?	NODEINFO ve telemetri şimdi ağa gönderilsin mi?
 NODES	DÜĞÜMLER
 NODES (%d%s)	DÜĞÜMLER (%d%s)
@@ -843,6 +847,7 @@ Web Config: Disabled	Web yapılandırması: Devre dışı
 Web Config: Enabled	Web yapılandırması: Etkin
 Web Config: Off (WiFi off)	Web yapılandırması: Kapalı (WiFi kapalı)
 Web Config: On	Web yapılandırması: Açık
+Web Config: On (%s)	Web yapılandırması: Açık (%s)
 Web Config: On (waiting for WiFi)	Web yapılandırması: Açık (WiFi bekleniyor)
 Web Config: On (Lite)	Web yapılandırması: Açık (Lite)
 Web Config: On (chat PAUSED)	Web yapılandırması: Açık (sohbet DURAKLATILDI)
