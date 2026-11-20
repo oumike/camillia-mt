@@ -54763,21 +54763,31 @@ static void pumpKeyboardInput() {
                     }
 
                     if (s_cardputerMainChatPanelFocused) {
-                        // One text line per press, rather than one whole message.
+                        // With the message cursor on, Up is the message above and
+                        // Down the one below, as on the Tanmatsu. The cursor is
+                        // what Reply and Message Actions act on; while these keys
+                        // only scrolled, it could never leave the newest message.
+                        // Esc or Backspace turns it off and gives them back to
+                        // scrolling.
+                        if (s_pagerChatCursorMode) {
+                            pagerSelectChatCursorIndex(s_pagerChatCursorDisplayIndex
+                                                       + ((k == KEY_SCROLL_UP) ? -1 : 1));
+                            refreshChannelGlow(true);
+                            continue;
+                        }
+
+                        // Cursor off: one text line per press, rather than one
+                        // whole message, for reading.
                         //
-                        // Stepping a message cursor was unusable once this board
-                        // moved to 12-18 px chat text: a single message is often
-                        // taller than the 135 px panel, so jumping cursor-to-
-                        // cursor skipped straight over the middle of it with no
-                        // way to read what was passed. Pixel scrolling is safe
-                        // here because the window grows from the scroll position
-                        // itself — reaching the top margin loads older history
-                        // through the existing scroll callback, exactly as a
-                        // touch drag does (see kChatWindowGrowScrollMargin).
-                        //
-                        // Cursor mode still exists for reply targeting, reached
-                        // with Enter as before; it is just no longer what
-                        // scrolling drives.
+                        // Stepping message to message is no way to read on these
+                        // panels: with 12-18 px chat text a single message is
+                        // often taller than the 135 px Cardputer-Adv panel, so a
+                        // step skips straight over the middle of it. Pixel
+                        // scrolling is safe here because the window grows from
+                        // the scroll position itself — reaching the top margin
+                        // loads older history through the existing scroll
+                        // callback, exactly as a touch drag does (see
+                        // kChatWindowGrowScrollMargin).
                         const lv_coord_t line = (lv_coord_t)lv_font_get_line_height(
                             scaledChatFont(kChannelChatFont));
                         // Positive dy reveals content above — scrollListClamped's

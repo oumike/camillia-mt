@@ -272,6 +272,9 @@ CardputerZero app.
 - Esc closes modals and exits chat-focus modes
 - Enter confirms actions and moves the cursor into the channel's messages;
   Space opens compose, and Fn+Enter is also accepted for the compose/reply flow
+- **In the chat, Up and Down move the cursor while it is on**, to the message
+  above or below. Esc or Backspace turns the cursor off, and Up and Down then
+  scroll the chat a line at a time
 - Compose close behavior: Esc closes compose (Backspace only deletes characters)
 - Picker modals (Chat Style, Chat Names) show option names without the
   explanatory line underneath, and scroll when they outgrow the 240x135 panel
