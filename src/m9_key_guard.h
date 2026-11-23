@@ -25,8 +25,13 @@
 //    longer, at any pace.
 //  - A pause between words is not a keystroke: a gap longer than twice the
 //    pace counts as twice the pace, so pauses barely move the window.
-//  - Arrows, Delete, Enter and the function keys keep a flat 70 ms: lists are
-//    stepped with quick taps and a held Delete repeats every 100 ms.
+//  - Arrows, Delete, Enter and Back keep a flat 70 ms: lists are stepped with
+//    quick taps and a held Delete repeats every 100 ms.
+//  - The dedicated destination buttons (Messages, Home, DMs, Tools, Map:
+//    0x81-0x85) take the full 250 ms. They are big, slow presses that chatter
+//    100-250 ms in, and a second Messages press means "toggle the channel
+//    drawer": a chattered repeat closed the drawer mid-slide and reset the
+//    channel, which showed as the drawer stalling half open.
 
 #include <stdint.h>
 
@@ -43,6 +48,7 @@ static constexpr uint32_t kM9PaceIdleMs     = 1500;  // a longer gap is a pause,
 static constexpr uint32_t kM9PacePauseRatio = 2;     // a gap counts as at most this many paces
 
 inline bool m9KeyIsChar(uint8_t key) { return key >= 0x20 && key <= 0x7E; }
+inline bool m9KeyIsNavButton(uint8_t key) { return key >= 0x81 && key <= 0x85; }
 
 inline uint32_t m9KeyGuardWindow(const M9KeyGuard &g) {
     if (!g.paceMs) return kM9GuardDefaultMs;
@@ -58,7 +64,9 @@ inline uint32_t m9KeyGuardWindow(const M9KeyGuard &g) {
 inline bool m9KeyGuardAccept(M9KeyGuard &g, uint8_t key, uint32_t nowMs) {
     const uint32_t gap = nowMs - g.lastMs;
     if (g.lastKey && key == g.lastKey) {
-        const uint32_t window = m9KeyIsChar(key) ? m9KeyGuardWindow(g) : kM9GuardMinMs;
+        const uint32_t window = m9KeyIsChar(key)      ? m9KeyGuardWindow(g)
+                                : m9KeyIsNavButton(key) ? kM9GuardMaxMs
+                                                        : kM9GuardMinMs;
         if (gap < window) return false;
     } else if (g.lastKey && m9KeyIsChar(key) && m9KeyIsChar(g.lastKey) && gap < kM9PaceIdleMs) {
         if (!g.paceMs) {

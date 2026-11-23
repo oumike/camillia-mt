@@ -99,5 +99,11 @@ int main() {
         CHECK(m9KeyGuardAccept(g, down, 1200));
     }
 
+    // A destination button chattering on release is one press (a repeated
+    // Messages closes the channel drawer it just opened), while a deliberate
+    // second press still lands.
+    CHECK(run({{0x81, 7, 180, true}}, 800) == "\x81");
+    CHECK(run({{0x81, 7, 120, false}, {0x81, 450, 120, false}}, 900) == "\x81\x81");
+
     return test::report();
 }
