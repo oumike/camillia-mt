@@ -378,7 +378,12 @@ void mqttBridgeLoop(uint32_t nowMs) {
         if (s_mqtt.connected()) s_mqtt.disconnect();
         return;
     }
+#if !defined(DEVICE_CARDPUTER_ZERO)
+    // The CardputerZero joins whatever network the OS is on (issue #162) and
+    // never has station credentials of its own, so this check would keep the
+    // bridge off for good; WiFi.status() below reflects the system link there.
     if (!s_cfg->wifiSsid[0]) return;   // no station credentials configured
+#endif
 
     if (WiFi.status() != WL_CONNECTED) return;  // station link managed by main loop
 
