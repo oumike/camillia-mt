@@ -83,14 +83,19 @@
 #define KB_ADDR                0x00
 #define KB_INT                    -1
 
+// The desktop build's mouse is its touch panel (czeroWindowPointer()).
+#if defined(CZERO_DESKTOP) && CZERO_DESKTOP
+#define HAS_TOUCH                  1
+#else
 #define HAS_TOUCH                  0
+#endif
 #define TOUCH_SDA                 -1
 #define TOUCH_SCL                 -1
 #define TOUCH_ADDR              0x00
 #define TOUCH_INT                 -1
 #define TOUCH_RST                 -1
 #define TOUCH_I2C_PORT             0
-#define TOUCH_POLL_ENABLED         0
+#define TOUCH_POLL_ENABLED         HAS_TOUCH
 
 #define HAS_TRACKBALL              0
 #define TBALL_UP                  -1
@@ -121,7 +126,19 @@
 #define MESH_TCXO_V             3.0f
 
 #define HAS_PSRAM                  1   // 512 MB system RAM
+#if defined(CZERO_DESKTOP) && CZERO_DESKTOP
+// The desktop build's window opens at the Tanmatsu's panel size, with its
+// layout (board.h), and the UI follows the window as it is resized, up to the
+// largest size below.
+#define CZERO_WINDOW_MAX_W      3840
+#define CZERO_WINDOW_MAX_H      2160
+#define DEVICE_LCD_PORTRAIT_W    480
+#define DEVICE_LCD_PORTRAIT_H    800
+#define DEVICE_LCD_LANDSCAPE_W   800
+#define DEVICE_LCD_LANDSCAPE_H   480
+#else
 #define DEVICE_LCD_PORTRAIT_W    170
 #define DEVICE_LCD_PORTRAIT_H    320
 #define DEVICE_LCD_LANDSCAPE_W   320
 #define DEVICE_LCD_LANDSCAPE_H   170
+#endif

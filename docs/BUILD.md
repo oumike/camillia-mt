@@ -792,8 +792,27 @@ go to `fs/camillia/nodes_archive.csv`.
 
 **Keys** are the Cardputer ADV's, plus:
 
-- **Esc** goes back; **Esc twice** quickly goes Home; **Esc held 4 s** quits
-  to the launcher.
+- **Esc** goes back; **Esc twice** quickly goes Home; **Esc held 3 s** quits
+  to the launcher, with a countdown ring from 0.5 s.
+
+**Desktop window:** the build makes a second binary, `camillia-desktop`
+(`CZERO_DESKTOP=1`), which the Pi desktop's **Internet** menu entry starts
+through `camillia-launch --desktop`. It runs in a resizable SDL2 window
+(800x480 minimum, `CZERO_WINDOW_MAX_W/H` maximum) instead of on the LCD. A
+settled resize resizes the panel and LVGL display and rebuilds the UI
+(`czeroFollowWindow()`); the mouse is the touch panel (`HAS_TOUCH`) and the
+wheel scrolls. It uses the Tanmatsu's large-screen layout: `UI_TANMATSU_LAYOUT`
+(`hal/board.h`) is on for the Tanmatsu and this build and gates UI-only code,
+while the Tanmatsu's hardware stays on `DEVICE_TANMATSU`. `UI_COORD_SCALE` is 2
+(`hal/ui_coord_shim.h`), so the 400x240 layout is drawn from 2x fonts.
+`MSG_CHARS` stays at the LCD's value because both binaries share the saved
+history in `~/.config/camillia-app`. `Panel_CzeroFb` draws into
+memory that `linux/app/czero_window.cpp` shows, and keys come from the window,
+not the keypad's evdev device. The LCD binary has no window code. The package keeps
+the menu entry in `/usr/share/camillia/` (the store allows nothing in
+`/usr/share/applications`), and each start copies it to
+`~/.local/share/applications`. A lock on `~/.config/camillia-app/.lock` keeps
+one copy running.
 - Outside text entry the number row works like the T-Display P4's F-keys:
   **1** Home, **2** Chat, **3** DMs, **4** Nodes, **5** Tools, **6** Config,
   **0** Help.

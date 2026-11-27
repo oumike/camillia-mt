@@ -803,7 +803,7 @@
 // (landscape only; portrait always uses the drawer). With arrow keys, Left on
 // the chat screen undocks and Right docks again (pumpKeyboardInput()). The
 // Pager stays docked: its drawer code is compiled out (UI_CHANNEL_LIST_DROPDOWN).
-#if defined(DEVICE_TANMATSU) || (defined(DEVICE_TDISPLAY_P4) && UI_LARGE_PANEL_PROFILE)
+#if UI_TANMATSU_LAYOUT || (defined(DEVICE_TDISPLAY_P4) && UI_LARGE_PANEL_PROFILE)
 #define HAS_CHANNEL_PANEL_LOCK 1
 #else
 #define HAS_CHANNEL_PANEL_LOCK 0
@@ -1104,6 +1104,10 @@ extern int VISIBLE_LINES;   // visible rows at LINE_H spacing
 #define MSG_CHARS       53   // Pager uses wider chat glyphs; keep wraps within visible row width.
 #elif defined(DEVICE_TDECK)
 #define MSG_CHARS       48   // T-Deck chat now spans the main pane; allow longer pre-wrapped rows.
+#elif defined(DEVICE_CARDPUTER_ZERO)
+// The LCD's 320 px in both builds: they share the saved history, and the LCD
+// one would cut the desktop one's longer lines short.
+#define MSG_CHARS       (320 / CHAR_W)
 #else
 #define MSG_CHARS       (LCD_W / CHAR_W)
 #endif

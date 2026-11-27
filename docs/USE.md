@@ -291,21 +291,32 @@ from the store, so the over-the-air update settings are hidden. Close the stock
 Cap LoRa-1262 and meshterm apps first: only one app can use the radio, and
 Camillia's radio runs only while it is open.
 
+On the Raspberry Pi desktop (the Zero on a monitor), Camillia is under
+**Internet** in the menu once it has been started from the launcher, and opens
+in a window there with the Tanmatsu's larger-screen layout. It works like a
+desktop app: the window resizes and maximises with the UI filling it, the mouse
+clicks and drags like a touch panel, and the wheel scrolls whatever is under the
+pointer. Only one copy runs at a time, so close it in one place before starting
+it in the other.
+
 Keys are the Cardputer's above, plus:
 
 - **Esc** goes back; **Esc twice** quickly goes to the
-  [home dashboard](#home-dashboard), which this board has; **Esc held for 4
-  seconds** quits to the launcher
+  [home dashboard](#home-dashboard), which this board has; **Esc held for 3
+  seconds** quits, with a ring counting down while it is held
 - Outside text entry the number row works like the T-Display P4's F-keys:
   **1** Home, **2** Chat, **3** DMs, **4** Nodes, **5** Tools, **6** Config,
   **0** Help
 - Up, Down, Left and Right move the Config grid and grid popups the way they are
   drawn
 
-Wi-Fi is the system's own connection, so there is no Choose WiFi row and no
-Wi-Fi step in first-time setup; see [Web Config](#web-config) for the port.
-Bluetooth keyboards pair through the system's Bluetooth from the usual Config
-rows.
+Wi-Fi, Bluetooth and GPS belong to the system: switch and set them up in its
+own settings. Camillia has no rows to turn them off or configure them (no WiFi,
+Choose WiFi, Bluetooth Keyboard or GPS toggles, no GPS poll or standby
+settings, and no Wi-Fi step in first-time setup); see [Web Config](#web-config)
+for the port. What Camillia shares stays yours to choose: position broadcast,
+its interval and precision, and the other privacy settings. A Bluetooth keyboard
+paired and connected in the system's settings types into Camillia.
 
 ### Nicolai Electronics Tanmatsu (tanmatsu)
 
@@ -3546,7 +3557,7 @@ Primary usage is keyboard.
 ### M5Stack CardputerZero (Linux app)
 
 Primary usage is keyboard, as on the Cardputer above, plus Esc twice for Home,
-Esc held 4 s to quit to the launcher, and the number row as shortcut keys
+Esc held 3 s to quit to the launcher, and the number row as shortcut keys
 outside text entry. See
 [its shortcuts](#m5stack-cardputerzero-linux-app).
 

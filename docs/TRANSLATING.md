@@ -89,7 +89,7 @@ A label whose closing `]` is missing is being cut off.
 3. Create `lang/<code>.lang` with the header of an existing one.
 4. If it needs letters outside Latin-1 / Extended-A, add their range to `tools/gen_latin_fonts.sh`
    and regenerate the fonts.
-5. Give it an accent-picker list in `main_lvgl.cpp` (`kAccentsXx`, up to four variants per base
+5. Give it an accent-picker list in `src/ui/07_compose.inc` (`kAccentsXx`, up to four variants per base
    letter, plus a `case` in `accentSetFor()`), so the keyboard offers its letters.
 6. The language picker's option buffer in `openCfgLangModal()` holds about 25 names; enlarge it
    if the list grows past that.

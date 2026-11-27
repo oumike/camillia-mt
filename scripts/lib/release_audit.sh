@@ -129,7 +129,7 @@ audit_review() {
 
     prompt="You are auditing pull request #${PR_NUMBER} of Camillia-MT, Meshtastic-compatible
 firmware for ESP32 handheld LoRa devices. Many boards build from shared sources
-(src/main_lvgl.cpp above all), with board-specific code gated on DEVICE_* macros
+(src/main_lvgl.cpp and the src/ui/*.inc fragments it includes, above all), with board-specific code gated on DEVICE_* macros
 and capability macros in src/config.h and src/hal/board.h.
 
 The current directory is a checkout of the PR's head commit. Its changes are the

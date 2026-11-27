@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # SPDX-License-Identifier: GPL-3.0-or-later
 # Build the CardputerZero app in a Debian trixie arm64 container.
-#   linux/build.sh            -> linux/build/camillia (and camillia.stripped)
+#   linux/build.sh            -> linux/build/camillia and camillia-desktop (and .stripped)
 #   linux/build.sh --deb      ...and dist/camillia-cardputer-zero-<VERSION>_arm64.deb
 #   linux/build.sh --deploy mike@host            copy it and the installer to ~/camillia/
 #   linux/build.sh --deploy mike@host --install  ...and run the installer (sudo on the device)
@@ -24,8 +24,9 @@ DEB=false
 docker build --platform linux/arm64 -q -t "$IMAGE" "$HERE" >/dev/null
 docker run --rm --platform linux/arm64 -v "$ROOT":/src -w /src/linux "$IMAGE" \
   bash -c 'cmake -S . -B build -DCMAKE_BUILD_TYPE=Release >/dev/null && cmake --build build -j"$(nproc)" \
-    && strip -o build/camillia.stripped build/camillia'"$($DEB && echo ' && cd build && rm -f ./*.deb && cpack -G DEB >/dev/null')"
-echo "built: $HERE/build/camillia"
+    && strip -o build/camillia.stripped build/camillia \
+    && strip -o build/camillia-desktop.stripped build/camillia-desktop'"$($DEB && echo ' && cd build && rm -f ./*.deb && cpack -G DEB >/dev/null')"
+echo "built: $HERE/build/camillia, $HERE/build/camillia-desktop"
 if $DEB; then
   mkdir -p "$ROOT/dist"
   for deb in "$HERE"/build/camillia-cardputer-zero-*_arm64.deb; do
@@ -36,6 +37,7 @@ fi
 if [[ "${1:-}" == "--deploy" && -n "${2:-}" ]]; then
   ssh "$2" 'mkdir -p ~/camillia'
   scp -q "$HERE/build/camillia.stripped" "$2":camillia/camillia
+  scp -q "$HERE/build/camillia-desktop.stripped" "$2":camillia/camillia-desktop
   scp -q "$HERE"/install/* "$2":camillia/
   echo "deployed to $2:~/camillia/"
   if [[ "${3:-}" == "--install" ]]; then

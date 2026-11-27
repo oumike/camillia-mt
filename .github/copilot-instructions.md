@@ -109,7 +109,8 @@ environments from `espressif32@7.0.1` unless explicitly requested.
 - Defaults and compile-time gates live in `src/config.h` and
   `src/config_io.cpp`.
 - Config import/export handling is in `src/config_io.cpp` and web form handling
-  in `src/web_config.cpp`.
+  in `src/web_config.cpp` and its `src/web_config/*.inc` fragments (the
+  config page is `05_config_page.inc`, its save handler `06_onboarding_save.inc`).
 
 When adding new config fields:
 

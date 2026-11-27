@@ -3,7 +3,9 @@
 Meshtastic-compatible firmware for ESP32 handheld LoRa devices. Most boards build
 from shared sources (`src/main_lvgl.cpp` above all), with board-specific code
 gated on `DEVICE_*` and capability macros in `src/config.h` and
-`src/hal/board.h`. See `docs/BUILD.md` for building and `docs/AI_WORKFLOW_MAP.md`
+`src/hal/board.h`. `main_lvgl.cpp` is split into ordered fragments,
+`src/ui/NN_*.inc`, that it `#include`s and compiles as one file: put new UI code
+in the fragment for its screen, after anything it uses. See `docs/BUILD.md` for building and `docs/AI_WORKFLOW_MAP.md`
 for the change checklist.
 
 ## Every change goes through a pull request

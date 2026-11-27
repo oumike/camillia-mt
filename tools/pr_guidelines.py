@@ -28,7 +28,7 @@ ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, os.path.join(ROOT, "tools"))
 import i18n_audit  # noqa: E402  (TR() key extraction, shared with the audit)
 
-SOURCE_EXTS = (".c", ".cpp", ".h", ".hpp", ".py", ".sh", ".js")
+SOURCE_EXTS = (".c", ".cpp", ".h", ".hpp", ".inc", ".py", ".sh", ".js")
 # Generated or third-party trees whose files carry their own terms.
 SPDX_EXEMPT_DIRS = ("src/fonts/",)
 SPDX_RE = re.compile(r"SPDX-License-Identifier:\s*\S")
@@ -141,7 +141,7 @@ def unpinned_dependencies(text):
 def keys_at(rev):
     keys = set()
     for path in git("ls-tree", "-r", "--name-only", rev, "src").split():
-        if not path.endswith((".cpp", ".h", ".c")) or path.endswith("i18n_builtin.h"):
+        if not path.endswith((".cpp", ".h", ".c", ".inc")) or path.endswith("i18n_builtin.h"):
             continue
         text = git("show", f"{rev}:{path}")
         for m in i18n_audit.TR_RE.finditer(text):

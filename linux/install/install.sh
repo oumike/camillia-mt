@@ -31,9 +31,11 @@ restart_launcher() {
 
 if [[ "${1:-}" == "--remove" ]]; then
   pkill -x camillia 2>/dev/null || true
+  pkill -f "$LAUNCH/bin/camillia-desktop" 2>/dev/null || true
   remove_old_daemon
-  rm -f "$LAUNCH/bin/camillia" "$LAUNCH/bin/camillia-launch" \
+  rm -f "$LAUNCH/bin/camillia" "$LAUNCH/bin/camillia-desktop" "$LAUNCH/bin/camillia-launch" \
         "$LAUNCH/applications/camillia.desktop" "$LAUNCH/share/images/camillia.png"
+  rm -rf /usr/share/camillia
   restart_launcher
   echo "removed (data kept in ~/.config/camillia-app)"
   exit 0
@@ -44,7 +46,7 @@ fi
 for other in Cap-LoRa-1262 meshterm; do
   if pgrep -f "$other" >/dev/null; then echo "warning: $other is running and uses the same radio" >&2; fi
 done
-if pgrep -x camillia >/dev/null; then
+if pgrep -x camillia >/dev/null || pgrep -f "$LAUNCH/bin/camillia-desktop" >/dev/null; then
   echo "note: Camillia is running; the update takes effect when it is next started" >&2
 fi
 
@@ -53,6 +55,8 @@ install -d "$LAUNCH/bin" "$LAUNCH/applications" "$LAUNCH/share/images"
 # Install beside and rename over, so a running copy keeps its file.
 install -m 0755 "$HERE/camillia" "$LAUNCH/bin/.camillia.new"
 mv -f "$LAUNCH/bin/.camillia.new" "$LAUNCH/bin/camillia"
+install -m 0755 "$HERE/camillia-desktop" "$LAUNCH/bin/.camillia-desktop.new"
+mv -f "$LAUNCH/bin/.camillia-desktop.new" "$LAUNCH/bin/camillia-desktop"
 install -m 0755 "$HERE/camillia-launch" "$LAUNCH/bin/camillia-launch"
 install -m 0644 "$HERE/camillia.png" "$LAUNCH/share/images/camillia.png"
 
@@ -62,6 +66,11 @@ icon="share/images/camillia.png"
 if grep -qh '^Icon=/' "$LAUNCH"/applications/*.desktop 2>/dev/null; then icon="$LAUNCH/share/images/camillia.png"; fi
 sed "s|@ICON@|$icon|" "$HERE/camillia.desktop" > "$LAUNCH/applications/camillia.desktop"
 chmod 0644 "$LAUNCH/applications/camillia.desktop"
+# The desktop menu entry (Internet), which the app copies into the user's
+# applications folder when it starts.
+install -d /usr/share/camillia
+install -m 0644 "$HERE/camillia-desktop.desktop" /usr/share/camillia/camillia.desktop
+install -m 0644 "$HERE/camillia.png" /usr/share/camillia/camillia.png
 
 if [[ -n "$RUN_AS" && "$RUN_AS" != root ]]; then
   missing=""

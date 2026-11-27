@@ -1,12 +1,11 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 // ble_keyboard.h on the CardputerZero: Bluetooth keyboards through the OS.
 //
-// BlueZ owns the controller. Scanning and pairing drive `bluetoothctl` on a
-// worker thread (pairing interactively, so a passkey the keyboard asks for can
-// be shown the way the ESP32 boards show it). Once connected, BlueZ hands the
-// keyboard to the kernel as an ordinary evdev device whose uniq is its address;
-// that device is grabbed and decoded by the same Keyboard class as the keypad,
-// in its standard-layout mode. Reconnecting a trusted keyboard is BlueZ's job.
+// The system owns Bluetooth: keyboards are paired and connected in its own
+// settings, and BlueZ hands each to the kernel as an ordinary evdev device.
+// The first one connected is grabbed and decoded by the same Keyboard class as
+// the keypad, in its standard-layout mode. The `bluetoothctl` scan and pair
+// worker below is no longer reachable from Config.
 #include "ble_keyboard.h"
 
 #include <Arduino.h>
@@ -36,8 +35,6 @@ constexpr int kScanSeconds = 10;
 constexpr int kMaxScan = 16;
 constexpr uint32_t kPairTimeoutMs = 60000;
 constexpr uint32_t kLookMs = 1000;            // evdev re-check while not connected
-constexpr uint32_t kReconnectMinMs = 15000;   // nudges for an absent keyboard
-constexpr uint32_t kReconnectMaxMs = 120000;
 
 struct ScanEntry {
     char name[32];
@@ -68,8 +65,6 @@ bool s_busy = false;   // scan / pair in flight on the worker
 // Main-thread only.
 Keyboard s_kbd;
 uint32_t s_nextLookMs = 0;
-uint32_t s_nextReconnectMs = 0;
-uint32_t s_reconnectDelay = kReconnectMinMs;
 std::deque<char> s_keys;
 
 void setStateLocked(uint8_t st, const char *detail = nullptr) {
@@ -354,65 +349,35 @@ char mapKey(const KeyEvent &e) {
 
 }  // namespace
 
+// The system pairs and connects Bluetooth keyboards (its own settings); this
+// only types from whichever one it has connected. The pairing and scan entry
+// points below stay for the shared API, but Config no longer offers them. The
+// desktop build has none of it: the desktop already delivers that keyboard to
+// the window.
 void bleKeyboardBegin(bool enabled, const char *addr, uint8_t addrType, const char *name) {
-    snprintf(s_pairedAddr, sizeof s_pairedAddr, "%s", addr ? addr : "");
-    snprintf(s_pairedName, sizeof s_pairedName, "%s", name ? name : "");
-    s_pairedAddrType = addrType;
-    if (!enabled) {
-        setState(BLE_KBD_OFF);
-        return;
-    }
-    bleKeyboardSetEnabled(true);
+    (void)enabled; (void)addr; (void)addrType; (void)name;
+    s_pairedAddr[0] = s_pairedName[0] = '\0';
+    s_enabled = !CZERO_DESKTOP;
+    setState(s_enabled ? BLE_KBD_IDLE : BLE_KBD_OFF);
 }
 
 bool bleKeyboardSetEnabled(bool on) {
-    if (on == s_enabled) return s_enabled;
-    s_enabled = on;
-    if (on) {
-        startWorkerOnce();
-        post(OP_POWER);
-        setState(s_pairedAddr[0] ? BLE_KBD_RETRYING : BLE_KBD_IDLE);
-        s_nextLookMs = 0;
-        s_nextReconnectMs = millis() + 3000;
-        s_reconnectDelay = kReconnectMinMs;
-    } else {
-        // The controller stays up for the rest of the system; just let go of
-        // the keyboard so it types into nothing of ours.
-        s_kbd.close();
-        s_keys.clear();
-        setState(BLE_KBD_OFF);
-    }
+    (void)on;
     return s_enabled;
 }
 
 bool bleKeyboardEnabled() { return s_enabled; }
 
 void bleKeyboardService(uint32_t nowMs) {
-    if (!s_enabled || !s_pairedAddr[0]) return;
+    if (!s_enabled) return;
     if (s_kbd.fd() < 0) {
         if ((int32_t)(nowMs - s_nextLookMs) < 0) return;
         s_nextLookMs = nowMs + kLookMs;
-        int fd = openKeyboardByUniq(s_pairedAddr);
-        if (fd >= 0) {
-            s_kbd.adoptStandard(fd);
-            s_reconnectDelay = kReconnectMinMs;
-            Serial.printf("[blekbd] connected: %s\n", s_pairedName[0] ? s_pairedName : s_pairedAddr);
-            std::lock_guard<std::mutex> l(s_mu);
-            if (!s_busy) setStateLocked(BLE_KBD_CONNECTED);
-        } else {
-            bool busy;
-            {
-                std::lock_guard<std::mutex> l(s_mu);
-                busy = s_busy;
-                if (!busy && s_state == BLE_KBD_CONNECTED) setStateLocked(BLE_KBD_RETRYING);
-            }
-            // Trusted keyboards normally come back on their own; nudge now and then.
-            if (!busy && (int32_t)(nowMs - s_nextReconnectMs) >= 0) {
-                post(OP_CONNECT, s_pairedAddr);
-                s_nextReconnectMs = nowMs + s_reconnectDelay;
-                s_reconnectDelay = std::min(s_reconnectDelay * 2, kReconnectMaxMs);
-            }
-        }
+        int fd = openBluetoothKeyboard(s_pairedName, sizeof s_pairedName, s_pairedAddr, sizeof s_pairedAddr);
+        if (fd < 0) return;
+        s_kbd.adoptStandard(fd);
+        Serial.printf("[blekbd] connected: %s\n", s_pairedName[0] ? s_pairedName : s_pairedAddr);
+        setState(BLE_KBD_CONNECTED);
         return;
     }
     for (;;) {
@@ -427,8 +392,8 @@ void bleKeyboardService(uint32_t nowMs) {
     }
     if (s_kbd.fd() < 0) {
         Serial.println("[blekbd] keyboard disconnected");
-        s_nextReconnectMs = nowMs + 3000;
-        setState(BLE_KBD_RETRYING);
+        s_pairedAddr[0] = s_pairedName[0] = '\0';
+        setState(BLE_KBD_IDLE);
     }
 }
 
@@ -476,7 +441,7 @@ void bleKeyboardStatusText(char *out, size_t outLen) {
         snprintf(out, outLen, "Waiting for %s%s%s", name, detail[0] ? " - " : "", detail);
         break;
     case BLE_KBD_FAILED: snprintf(out, outLen, "Failed%s%s", detail[0] ? ": " : "", detail); break;
-    case BLE_KBD_IDLE: snprintf(out, outLen, "On - no keyboard paired"); break;
+    case BLE_KBD_IDLE: snprintf(out, outLen, "No Bluetooth keyboard connected"); break;
     default: snprintf(out, outLen, "Off"); break;
     }
 }
