@@ -525,7 +525,7 @@ static void pumpKeyboardInput() {
         k = remapCardputerUiKey(k, !typingContext);
 #endif
 
-#if !UI_TOUCH_ONLY_PROFILE || defined(DEVICE_MESH_DECK)
+#if !UI_TOUCH_ONLY_PROFILE || defined(DEVICE_MESH_DECK) || CZERO_DESKTOP
         navFromJk = (k == 'j' || k == 'J' || k == 'k' || k == 'K');
         jkDirectionInvert = navFromJk;
         // Enable vim-style j/k navigation for all keyboard-capable builds.
@@ -3729,12 +3729,14 @@ static void pumpKeyboardInput() {
                 setChannelDropdownVisible(!isChannelDropdownVisible());
                 refreshChannelGlow(true);
 #endif
-#if UI_TOUCH_ONLY_PROFILE && !defined(DEVICE_TDISPLAY_P4) && !defined(DEVICE_MESH_DECK)
+#if UI_TOUCH_ONLY_PROFILE && !defined(DEVICE_TDISPLAY_P4) && !defined(DEVICE_MESH_DECK) \
+    && !CZERO_DESKTOP
             // Touch-first build: Enter keeps its original new-message behavior.
             // Not the P4: its keyboard expansion has a space bar, so it takes
             // the keyboard builds' keys below -- Space composes, Enter steps
             // into the messages. Nor the Mesh Deck, whose D-pad SELECT and
-            // optional keyboard keep those same keys.
+            // optional keyboard keep those same keys, nor the CardputerZero's
+            // desktop window, which always has its keyboard.
             } else if (k == KEY_ENTER
                        && s_activeChannel >= 0 && s_activeChannel < MESH_CHANNELS) {
 #if HAS_HOME_DASHBOARD

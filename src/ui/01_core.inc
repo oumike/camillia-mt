@@ -1300,8 +1300,10 @@ static int s_nodesTopBtn = kNodesTopSearch;
 // Where the keyboard cursor can walk onto those buttons: every keyboard board,
 // and the T-Display P4, which builds touch-only but has a keyboard expansion
 // (#116: without this its arrows had nowhere to go from an empty list). The
-// Mesh Deck likewise: touch-only build, D-pad always, keyboard optional.
-#if !UI_TOUCH_ONLY_PROFILE || defined(DEVICE_TDISPLAY_P4) || defined(DEVICE_MESH_DECK)
+// Mesh Deck likewise: touch-only build, D-pad always, keyboard optional. The
+// CardputerZero's desktop window too: touch from the mouse, keyboard always.
+#if !UI_TOUCH_ONLY_PROFILE || defined(DEVICE_TDISPLAY_P4) || defined(DEVICE_MESH_DECK) \
+    || CZERO_DESKTOP
 #  define NODES_KEYBOARD_TOP_BUTTONS 1
 #else
 #  define NODES_KEYBOARD_TOP_BUTTONS 0
@@ -2473,8 +2475,9 @@ static inline char remapCardputerUiKey(char k, bool allowScrollRemap) {
 }
 #endif
 
-// Mesh Deck builds touch-only but its keyboard is optional, so it keeps j/k.
-#if !UI_TOUCH_ONLY_PROFILE || defined(DEVICE_MESH_DECK)
+// Mesh Deck builds touch-only but its keyboard is optional, so it keeps j/k;
+// so does the CardputerZero's desktop window, which always has its keyboard.
+#if !UI_TOUCH_ONLY_PROFILE || defined(DEVICE_MESH_DECK) || CZERO_DESKTOP
 static inline char remapJkUiKey(char k, bool allowScrollRemap) {
     if (!allowScrollRemap) return k;
     // This firmware's convention is j=up, k=down — deliberately NOT vim's

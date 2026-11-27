@@ -296,7 +296,9 @@ On the Raspberry Pi desktop (the Zero on a monitor), Camillia is under
 in a window there with the Tanmatsu's larger-screen layout. It works like a
 desktop app: the window resizes and maximises with the UI filling it, the mouse
 clicks and drags like a touch panel, and the wheel scrolls whatever is under the
-pointer. Only one copy runs at a time, so close it in one place before starting
+pointer. The window has the touch boards' controls (Send and Cancel buttons in
+the composer, an X on popups, tappable headers) and always shows the nav bar,
+while the keyboard works as it does on the Zero's own screen. Only one copy runs at a time, so close it in one place before starting
 it in the other.
 
 Keys are the Cardputer's above, plus:
