@@ -17,6 +17,7 @@
 
 #include "czero_app.h"
 #include "czero_paths.h"
+#include "czero_system.h"
 #include "czero_window.h"
 
 void setup();
@@ -38,6 +39,9 @@ static void onSignal(int sig) {
 
 void czeroExit(int code) {
     linuxAppFlushBeforeExit();
+    // The launcher comes back to whatever the backlight was left at, which
+    // may be off (asleep) or the lock screen's dim level.
+    czeroSystemRestoreBacklight();
     fflush(stdout);
     fflush(stderr);
     // Not exit(): worker threads are still running, and static destructors

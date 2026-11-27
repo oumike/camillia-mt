@@ -158,7 +158,12 @@ static void initCfgActions() {
     // Font Size scales the chat and DM text in every style, so every build gets
     // it — the Cardputer arguably most of all.
     s_cfgActions[s_cfgActionCount++] = CFG_ACTION_FONT_SIZE;
+    // Where the system owns the backlight level, screen timeout, clock and
+    // battery gauge (HAS_SYSTEM_SETTINGS), their rows here and below are its
+    // Settings app's instead: applyLoadedConfigInvariants() follows it.
+#if !HAS_SYSTEM_SETTINGS
     s_cfgActions[s_cfgActionCount++] = CFG_ACTION_BRIGHTNESS;
+#endif
     #if HAS_POWER_LED_LEVEL
     s_cfgActions[s_cfgActionCount++] = CFG_ACTION_POWER_LED_LEVEL;
     #endif
@@ -195,7 +200,9 @@ static void initCfgActions() {
     // With Brightness rather than the maintenance actions: both are about the
     // backlight, and the pair is the usual reason someone opens this screen on
     // a device running on a battery.
+    #if !HAS_SYSTEM_SETTINGS
     s_cfgActions[s_cfgActionCount++] = CFG_ACTION_SCREEN_TIMEOUT;
+    #endif
     #if FEATURE_LOCK_SCREEN
     // Directly under Screen Timeout, because that is the timeout that leads
     // here: the three rows read top to bottom as the whole story of what the
@@ -260,7 +267,9 @@ static void initCfgActions() {
     #endif
 
     // ── How it reads things out ──────────────────────────────────────────────
+#if !HAS_SYSTEM_SETTINGS
     s_cfgActions[s_cfgActionCount++] = CFG_ACTION_TIME_DATE;
+#endif
     // Directly under the row that sets the clock: the two questions a person
     // asks about time in a row, what it is and how it is written.
     s_cfgActions[s_cfgActionCount++] = CFG_ACTION_CLOCK_FORMAT;
@@ -269,9 +278,11 @@ static void initCfgActions() {
     // no board this row would have nothing to show.
     s_cfgActions[s_cfgActionCount++] = CFG_ACTION_BATT_DISPLAY;
     // Where the clock comes from, and how the device runs unattended.
+#if !HAS_SYSTEM_SETTINGS
     addGen(CFG_GEN_TIMEZONE);
     addGen(CFG_GEN_NTP_SERVER);
     addGen(CFG_GEN_POWER_SAVING);
+#endif
     addGen(CFG_GEN_DEBUG_LOG);
 
     // ── Mesh modules ─────────────────────────────────────────────────────────
@@ -305,7 +316,9 @@ static void initCfgActions() {
     // ── Done once, or rarely ─────────────────────────────────────────────────
     // Hardware trim: set once per unit rather than adjusted, which is why it is
     // down here and not up among the display settings.
+#if !HAS_SYSTEM_SETTINGS
     s_cfgActions[s_cfgActionCount++] = CFG_ACTION_BATT_CAL;
+#endif
     s_cfgActions[s_cfgActionCount++] = CFG_ACTION_CLEAR_MSGS;
 #if HAS_NODE_ARCHIVE
     // In the order the two settings depend on each other: keep the evicted

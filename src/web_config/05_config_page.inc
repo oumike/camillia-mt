@@ -705,6 +705,7 @@ static void sendConfigPage(const char *msg = "", bool lite = false) {
         html += "<label>NodeInfo Interval (s)<input name='nodeinfo_intv' type='number' min='60' value='";
         html += tmp; html += "'></label>";
     }
+#if !HAS_SYSTEM_SETTINGS   // the OS's clock and zone
     // Timezone dropdown
     {
         bool tzMatched = false;
@@ -728,6 +729,7 @@ static void sendConfigPage(const char *msg = "", bool lite = false) {
     appendAttr(html, gCfg->ntpServer);
     html += "' placeholder='pool.ntp.org'></label>";
     html += "</div>";
+#endif
 
 #if HAS_NODE_LOS
     // Elevation endpoint for Node Actions -> LOS. Plain http:// only, and the
@@ -765,7 +767,9 @@ static void sendConfigPage(const char *msg = "", bool lite = false) {
     // stops both from touching the clock and uses the fields below, which are
     // read as local time in the timezone selected above.
     {
+#if !HAS_SYSTEM_SETTINGS
         const bool manual = (gCfg->timeSource == TIME_SOURCE_MANUAL);
+#endif
         // How a time reads everywhere the device shows one — the chat header,
         // message timestamps, the sleep/lock clock. Exported files keep 24-hour
         // regardless: those are read by tools, not people.
@@ -777,6 +781,7 @@ static void sendConfigPage(const char *msg = "", bool lite = false) {
         if (gCfg->clockFormat == CLOCK_FORMAT_12H) html += " selected";
         html += ">12-hour (2:32 PM)</option>"
                 "</select></label>";
+#if !HAS_SYSTEM_SETTINGS   // the OS keeps the clock; nothing here sets it
         html += "<label>Time Source<select name='time_source' id='time_source'>";
         html += "<option value='0'";
         if (!manual) html += " selected";
@@ -829,6 +834,7 @@ static void sendConfigPage(const char *msg = "", bool lite = false) {
                 "s.value='1';u();});"
                 "})();"
                 "</script>";
+#endif
     }
     sectionEnd(html, lite);
     sendChunk(html);
@@ -1232,6 +1238,8 @@ static void sendConfigPage(const char *msg = "", bool lite = false) {
 #endif
     // Brightness: a range input in the same 10% steps as the on-device slider,
     // with the value mirrored next to it since a bare range shows no number.
+    // Not where the system sets it (HAS_SYSTEM_SETTINGS).
+#if !HAS_SYSTEM_SETTINGS
     {
         char b[8];
         snprintf(b, sizeof(b), "%u", (unsigned)cfgCoerceBrightness(gCfg->brightness));
@@ -1245,6 +1253,7 @@ static void sendConfigPage(const char *msg = "", bool lite = false) {
         html += "' oninput=\"document.getElementById('briOut').textContent=this.value+'%'\">"
                 "</label>";
     }
+#endif
 #if FEATURE_LOCK_SCREEN
     // The lock screen's own level, mirroring the second row of the on-device
     // brightness modal. Same range and step as above so the two read against
@@ -1295,9 +1304,11 @@ static void sendConfigPage(const char *msg = "", bool lite = false) {
     }
 #endif
     html += "<div class='row2'>";
+#if !HAS_SYSTEM_SETTINGS
     snprintf(tmp, sizeof(tmp), "%lu", (unsigned long)gCfg->screenOnSecs);
     html += "<label>Screen Timeout (s)<input name='screen_on' type='number' min='0' value='";
     html += tmp; html += "'></label>";
+#endif
 #if FEATURE_LOCK_SCREEN
     // Two selects rather than a number box: both are short lists of stopping
     // points, and cfgCoerceLockScreenOffSecs() would silently move a typed 37
@@ -1338,6 +1349,7 @@ static void sendConfigPage(const char *msg = "", bool lite = false) {
     if (gCfg->battDisplayMode == BATT_DISPLAY_VOLTAGE) html += " selected";
     html += ">Voltage (3.94V)</option>"
             "</select></label></div>";
+#if !HAS_SYSTEM_SETTINGS   // the system's battery gauge
     html += "<label>Battery Calibration (0.1% steps)<input name='batt_cal' type='number' ";
     snprintf(tmp, sizeof(tmp), "min='%d' max='%d' step='1' value='%d'></label>",
              BATT_CAL_TRIM_MIN, BATT_CAL_TRIM_MAX, (int)cfgCoerceBattCalTrim(gCfg->battCalTrim));
@@ -1345,6 +1357,7 @@ static void sendConfigPage(const char *msg = "", bool lite = false) {
     html += "<p class='hint'>Corrects the battery voltage reading: +25 reads 2.5% "
             "higher. 0 is uncalibrated. Easier on the device (Config, Battery "
             "Calibration), which previews against a meter as you adjust.</p>";
+#endif
 #if HAS_SCROLL_INVERT
     // Trackball direction. Sits in Display rather than getting a section of its
     // own: it is a comfort preference like brightness, and one heading is heap
@@ -1773,6 +1786,9 @@ static void sendConfigPage(const char *msg = "", bool lite = false) {
     sendChunk(html);
 
     // ── Power ─────────────────────────────────────────────────
+    // Only power saving and the lite page's debug row: neither is on a device
+    // where the system owns power (HAS_SYSTEM_SETTINGS), which is never lite.
+#if !HAS_SYSTEM_SETTINGS
     section(html, lite, "Power", "power");
     html += "<label>Power Saving<select name='pwr_saving'>"
             "<option value='1'"; if ( gCfg->isPowerSaving) html += " selected"; html += ">Enabled</option>"
@@ -1790,6 +1806,7 @@ static void sendConfigPage(const char *msg = "", bool lite = false) {
     }
     sectionEnd(html, lite);
     sendChunk(html);
+#endif
 
     // ── Modules ───────────────────────────────────────────────
     section(html, lite, "Modules", "modules", "Telemetry, beacons and other optional features.");

@@ -318,6 +318,22 @@ for the port. What Camillia shares stays yours to choose: position broadcast,
 its interval and precision, and the other privacy settings. A Bluetooth keyboard
 paired and connected in the system's settings types into Camillia.
 
+The display, sound and clock are the system's too. Set them in the launcher's
+Settings app:
+- **Brightness** and **screen timeout**: Camillia uses the launcher's values
+  each time it starts and gives the screen back at the launcher's brightness
+  when it quits. The **Lock Screen** rows stay Camillia's; set the lock screen's
+  own brightness on the Web Config page.
+- **Volume**: message alerts and the splash melody play through the system's
+  sound, at the launcher's volume. **Notification Sound** and **Splash Melody**
+  still choose what plays.
+- **Clock and timezone**: these are the system's, kept by its own network time.
+  **Clock Format** is still Camillia's.
+
+Camillia has none of its own rows for these, on the device or on the Web Config
+page: no Brightness, Screen Timeout, Volume, Time & Date, Time Zone, NTP
+Server, Power Saving or Battery Calibration.
+
 ### Nicolai Electronics Tanmatsu (tanmatsu)
 
 - **F1** Home, **F2** channels, **F3** DMs, **F4** Nodes, **F5** Tools, **F6**
@@ -2018,7 +2034,8 @@ Notification Sound and Splash Melody now sit directly under My Message Color,
 with the other presentation settings.
 
 **The three tones differ by board, because the hardware does.** The T-Deck,
-Pager and Cardputer play them through a speaker or codec. The Heltec and M9
+Pager and Cardputer play them through a speaker or codec, and the CardputerZero
+through the system's sound at the system volume. The Heltec and M9
 have a passive piezo buzzer instead, which has one resonant peak around
 2-4 kHz and drops off sharply below it — so their patterns sit higher, and
 their Bass is the lowest register the part still projects, set apart by being

@@ -834,7 +834,7 @@ static const AlertNote kBuzzerBass[] = {
 
 #if HAS_AUDIO_ALERTS && (BOARD_BUZZER < 0)
 // ── Speaker melodies (Pager, Wio Tracker L2, T-Display P4, Tanmatsu, T-Deck,
-// Cardputer) ─────────────────────────────────────────────────────────────────
+// Cardputer, CardputerZero) ──────────────────────────────────────────────────
 // One set for every board with a real speaker, so a style sounds the same on
 // all of them. These used to be three sets: the T-Deck's an octave above the
 // Pager's at half the length, the Cardputer's somewhere between. These are the
@@ -870,6 +870,26 @@ static void speakerPlayMelody(const AlertMelody &m) {
         else               tdeckAudioWriteSilence(m.notes[i].durMs);
     }
     tdeckAudioStopPlayback();
+#elif defined(DEVICE_CARDPUTER_ZERO)
+    // Synthesized whole and handed to the system's sound server, which plays it
+    // at the system volume. Unlike the paths above this returns at once.
+    constexpr unsigned kRate = 22050;
+    constexpr float kAmplitude = 16000.0f;
+    constexpr unsigned kRampSamples = kRate / 500;   // 2 ms in and out: no clicks
+    std::vector<int16_t> pcm;
+    for (size_t i = 0; i < m.count; i++) {
+        const size_t n = (size_t)m.notes[i].durMs * kRate / 1000;
+        const float step = 2.0f * (float)M_PI * (float)m.notes[i].hz / (float)kRate;
+        for (size_t k = 0; k < n; k++) {
+            float env = 1.0f;
+            if (k < kRampSamples) env = (float)k / kRampSamples;
+            else if (n - k < kRampSamples) env = (float)(n - k) / kRampSamples;
+            pcm.push_back(m.notes[i].hz
+                              ? (int16_t)(kAmplitude * env * sinf(step * (float)k))
+                              : (int16_t)0);
+        }
+    }
+    czeroSystemPlayPcm(pcm.data(), pcm.size(), kRate);
 #elif defined(DEVICE_CARDPUTER_LORA_HAT)
     cardputerAudioEnsureReady();
     for (size_t i = 0; i < m.count; i++) {

@@ -575,8 +575,13 @@ static bool isDuplicate(uint32_t from, uint32_t id) {
 }
 
 static void applyTimezoneFromConfig() {
+#if HAS_SYSTEM_SETTINGS
+    // The OS's zone (/etc/localtime), as every other app on the device shows.
+    unsetenv("TZ");
+#else
     const char *tz = (s_cfg.tzDef[0]) ? s_cfg.tzDef : "UTC0";
     setenv("TZ", tz, 1);
+#endif
     tzset();
 }
 
@@ -589,6 +594,12 @@ static inline bool timeSourceIsManual() {
     return s_cfg.timeSource == TIME_SOURCE_MANUAL;
 }
 
+// Whether anything here may set the clock: not when the user has, and never
+// where the OS keeps it (HAS_SYSTEM_SETTINGS), which it does with its own NTP.
+static inline bool clockIsOursToSet() {
+    return !HAS_SYSTEM_SETTINGS && !timeSourceIsManual();
+}
+
 // Sets the system clock from a local wall-clock reading (24-hour). The fields go
 // through mktime, so the configured timezone and its DST rules are what turn the
 // time the user typed into the epoch — entering 14:30 means 14:30 where they are.
@@ -596,6 +607,7 @@ static bool applyManualClock(int year, int mon, int day, int hour, int minute) {
     if (year < 2020 || year > 2099) return false;
     if (mon < 1 || mon > 12 || day < 1 || day > 31) return false;
     if (hour < 0 || hour > 23 || minute < 0 || minute > 59) return false;
+    if (HAS_SYSTEM_SETTINGS) return false;
 
     applyTimezoneFromConfig();
 
@@ -637,7 +649,7 @@ static int64_t daysFromCivil(int y, unsigned m, unsigned d) {
 // and only when the clock is unset or an hour stale, so a fix doesn't fight NTP
 // or overwrite what the user typed.
 static void serviceGpsTimeSync(uint32_t now) {
-    if (timeSourceIsManual()) return;
+    if (!clockIsOursToSet()) return;
     if (!gpsIsEnabled() || !gpsHasFix()) return;
     if (clockIsSet() && s_gpsClockSyncMs != 0 && (now - s_gpsClockSyncMs) < 3600000UL) return;
 
@@ -661,7 +673,7 @@ static void serviceGpsTimeSync(uint32_t now) {
 }
 
 static bool wifiHasInternetTimePath() {
-    if (timeSourceIsManual()) return false;   // nothing may overwrite a set clock
+    if (!clockIsOursToSet()) return false;   // nothing may overwrite a set clock
     if (WiFi.status() != WL_CONNECTED) return false;
     wifi_mode_t mode = WiFi.getMode();
     return mode != WIFI_AP;
@@ -780,9 +792,10 @@ static bool bootTimeNtpSyncDirectSta(const char *ssidOverride, const char *passO
 static void bootTimeNtpSync() {
     // Manual clock: don't spend ten seconds bringing WiFi up at boot for a sync
     // that would be refused anyway.
-    if (timeSourceIsManual()) {
+    if (!clockIsOursToSet()) {
         applyTimezoneFromConfig();
-        Serial.println("[time] Boot time sync skipped (clock set manually)");
+        Serial.println(HAS_SYSTEM_SETTINGS ? "[time] Using the system clock"
+                                           : "[time] Boot time sync skipped (clock set manually)");
         return;
     }
 
