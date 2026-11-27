@@ -36,8 +36,8 @@ relicense other people's code; only your own additions are GPL.
   solves it, depend on it. Pin it to an exact version or commit in
   `platformio.ini`, and credit it in the README's Acknowledgments.
 - **Don't regress what ships.** Camillia runs on real devices across many
-  boards. Most of them build from the same sources (`src/main_lvgl.cpp` above
-  all), so a change for one board can break another. Gate board-specific code
+  boards. Most of them build from the same sources (`src/main_lvgl.cpp` and
+  the `src/ui/*.inc` fragments it includes, above all), so a change for one board can break another. Gate board-specific code
   on the `DEVICE_*` and capability macros in `src/config.h` and
   `src/hal/board.h`, and keep every environment building.
 - **Stay Meshtastic-compatible.** Changes to what goes over the air should
@@ -68,7 +68,8 @@ Match the code around you. In general:
   of `RhinoConfig`, give them a safe default, and keep the device UI, web
   config and import/export in step. A plain on/off, choice or text setting
   needs no hand-written Config row: add a `CfgGenId` and its entry in
-  `kCfgGenRows` (`main_lvgl.cpp`), then list it in `initCfgActions()`. A
+  `kCfgGenRows` (`src/ui/22_cfg_actions.inc`), then list it in
+  `initCfgActions()` (`src/ui/08_cfg_panel.inc`). A
   setting that nothing reads any more is retired, not deleted: rename it
   `_retired*` and keep its type, so the stored layout does not move.
 - **Identity and keys.** Never log or export private keys, and don't change

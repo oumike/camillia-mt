@@ -79,7 +79,7 @@ def source_keys():
     keys = set()
     for dirpath, _, files in os.walk(SRC):
         for name in files:
-            if not name.endswith((".cpp", ".h", ".c")) or name == "i18n_builtin.h":
+            if not name.endswith((".cpp", ".h", ".c", ".inc")) or name == "i18n_builtin.h":
                 continue
             with open(os.path.join(dirpath, name), encoding="utf-8", errors="replace") as fh:
                 for m in TR_RE.finditer(fh.read()):
