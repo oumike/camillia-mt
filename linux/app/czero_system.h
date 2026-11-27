@@ -10,9 +10,9 @@
 #include <stdint.h>
 
 // Backlight level, percent (1-100). The launcher's when it has one, else the
-// panel's current level, else 60.
+// panel's current level, else 60. Always 100 in the desktop window.
 int czeroSystemBrightnessPct();
-// Screen timeout in seconds; 0 means never.
+// Screen timeout in seconds; 0 means never, as always in the desktop window.
 uint32_t czeroSystemScreenOffSecs();
 // Puts the backlight back at the system's level, for the launcher to take over
 // a lit screen whatever Camillia left it at (asleep, lock screen).

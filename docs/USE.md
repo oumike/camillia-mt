@@ -323,7 +323,9 @@ Settings app:
 - **Brightness** and **screen timeout**: Camillia uses the launcher's values
   each time it starts and gives the screen back at the launcher's brightness
   when it quits. The **Lock Screen** rows stay Camillia's; set the lock screen's
-  own brightness on the Web Config page.
+  own brightness on the Web Config page. In the desktop window Camillia draws
+  at full brightness and never blanks; the monitor and the desktop's own
+  screen blanking take over.
 - **Volume**: message alerts and the splash melody play through the system's
   sound, at the launcher's volume. **Notification Sound** and **Splash Melody**
   still choose what plays.

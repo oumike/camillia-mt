@@ -115,13 +115,16 @@ bool runPlayer(const char *const argv[]) {
 }  // namespace
 
 int czeroSystemBrightnessPct() {
+    // A window on the desktop is lit by the monitor; dimming it would only
+    // grey out the app.
+    if (czeroWindowed()) return 100;
     long v = 0;
     if (launcherSetting("brightness", v) && v > 0) return v > 100 ? 100 : (int)v;
     // No launcher setting: keep whatever the panel is at, unless that is dark
     // (a run that ended asleep), which would read as a dead screen.
     std::string level;
     int max = 0;
-    if (!czeroWindowed() && backlightPaths(level, max)) {
+    if (backlightPaths(level, max)) {
         if (FILE *f = fopen(level.c_str(), "r")) {
             int raw = 0;
             const bool ok = fscanf(f, "%d", &raw) == 1;
@@ -136,6 +139,8 @@ int czeroSystemBrightnessPct() {
 }
 
 uint32_t czeroSystemScreenOffSecs() {
+    // On the desktop, blanking is the desktop's screensaver's job.
+    if (czeroWindowed()) return 0;
     long v = 0;
     // The launcher's "Never" is not a positive number of seconds.
     if (launcherSetting("dark_time", v)) return v > 0 ? (uint32_t)v : 0;
