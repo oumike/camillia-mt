@@ -170,32 +170,46 @@ add_library(lgfx_fb STATIC ${LGFX_SRC})
 target_include_directories(lgfx_fb PUBLIC ${lovyangfx_SOURCE_DIR}/src)
 target_compile_definitions(lgfx_fb PUBLIC LGFX_LINUX_FB=1)
 
-# LVGL with the firmware's own lv_conf.h.
-add_library(lvgl_fw STATIC ${LVGL_SRC} ${APP_FONT_SRC})
-target_include_directories(lvgl_fw PUBLIC ${FW} ${lvgl_SOURCE_DIR}
-  ${CMAKE_CURRENT_SOURCE_DIR}/app/shim)
-target_compile_definitions(lvgl_fw PUBLIC LV_CONF_INCLUDE_SIMPLE=1 DEVICE_CARDPUTER_ZERO=1
-  UI_LVGL_POC=1 I18N_ENABLED=1)
+# Two builds of the app, from the same sources:
+#   camillia          on the LCD, started from the launcher (APPLaunch);
+#   camillia-desktop  in an SDL window on the Raspberry Pi desktop, drawn at
+#                     twice the LCD's resolution (CZERO_DESKTOP, hal/board.h).
+# Each has its own LVGL: the desktop one's lv_conf.h pool is larger.
+find_package(PkgConfig REQUIRED)
+pkg_check_modules(SDL2 REQUIRED IMPORTED_TARGET sdl2)
+function(add_camillia name desktop)
+  # LVGL with the firmware's own lv_conf.h.
+  add_library(lvgl_${name} STATIC ${LVGL_SRC} ${APP_FONT_SRC})
+  target_include_directories(lvgl_${name} PUBLIC ${FW} ${lvgl_SOURCE_DIR}
+    ${CMAKE_CURRENT_SOURCE_DIR}/app/shim)
+  target_compile_definitions(lvgl_${name} PUBLIC LV_CONF_INCLUDE_SIMPLE=1 DEVICE_CARDPUTER_ZERO=1
+    UI_LVGL_POC=1 I18N_ENABLED=1 CZERO_DESKTOP=${desktop})
 
-add_executable(camillia ${APP_FW_SRC} ${APP_SHIM_SRC}
-  ${ACORE_DIR}/WString.cpp ${ACORE_DIR}/Print.cpp ${ACORE_DIR}/Stream.cpp
-  ${ACORE_DIR}/StreamString.cpp ${ACORE_DIR}/stdlib_noniso.c
-  ${tinygps_SOURCE_DIR}/src/TinyGPS++.cpp
-  ${PUBSUB_SRC}
-  ui/keyboard.cpp hal/linux_hal.cpp hal/linux_board.cpp)
-# TinyGPS++ brings its own millis() unless ARDUINO is set; the shim has one.
-set_source_files_properties(${tinygps_SOURCE_DIR}/src/TinyGPS++.cpp
-  TARGET_DIRECTORY camillia PROPERTIES COMPILE_DEFINITIONS ARDUINO=10819)
-target_compile_definitions(camillia PRIVATE APP_VERSION="${APP_VERSION}"
-  RADIOLIB_EXCLUDE_APRS=1)
-# app/shim first so its Arduino.h and ESP-IDF stand-ins win; ACORE_DIR for the
-# String/Print/Stream headers they include.
-target_include_directories(camillia PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/app/shim
-  ${ACORE_DIR} ${CMAKE_CURRENT_SOURCE_DIR} ${FW} ${FW}/hal ${tinygps_SOURCE_DIR}/src
-  ${pubsubclient_SOURCE_DIR}/src)
-target_compile_options(camillia PRIVATE $<$<COMPILE_LANGUAGE:CXX>:-std=gnu++17>)
-target_link_libraries(camillia PRIVATE lvgl_fw lgfx_fb radiolib mtcrypto
-  ${MBEDTLS} ${MBEDX509} ${MBEDCRYPTO} Threads::Threads m)
+  add_executable(${name} ${APP_FW_SRC} ${APP_SHIM_SRC}
+    ${ACORE_DIR}/WString.cpp ${ACORE_DIR}/Print.cpp ${ACORE_DIR}/Stream.cpp
+    ${ACORE_DIR}/StreamString.cpp ${ACORE_DIR}/stdlib_noniso.c
+    ${tinygps_SOURCE_DIR}/src/TinyGPS++.cpp
+    ${PUBSUB_SRC}
+    ui/keyboard.cpp hal/linux_hal.cpp hal/linux_board.cpp)
+  # TinyGPS++ brings its own millis() unless ARDUINO is set; the shim has one.
+  set_source_files_properties(${tinygps_SOURCE_DIR}/src/TinyGPS++.cpp
+    TARGET_DIRECTORY ${name} PROPERTIES COMPILE_DEFINITIONS ARDUINO=10819)
+  target_compile_definitions(${name} PRIVATE APP_VERSION="${APP_VERSION}"
+    RADIOLIB_EXCLUDE_APRS=1)
+  # app/shim first so its Arduino.h and ESP-IDF stand-ins win; ACORE_DIR for the
+  # String/Print/Stream headers they include.
+  target_include_directories(${name} PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/app/shim
+    ${ACORE_DIR} ${CMAKE_CURRENT_SOURCE_DIR} ${FW} ${FW}/hal ${tinygps_SOURCE_DIR}/src
+    ${pubsubclient_SOURCE_DIR}/src)
+  target_compile_options(${name} PRIVATE $<$<COMPILE_LANGUAGE:CXX>:-std=gnu++17>)
+  target_link_libraries(${name} PRIVATE lvgl_${name} lgfx_fb radiolib mtcrypto
+    ${MBEDTLS} ${MBEDX509} ${MBEDCRYPTO} Threads::Threads m)
+  if(desktop)
+    target_link_libraries(${name} PRIVATE PkgConfig::SDL2)
+  endif()
+endfunction()
+add_camillia(camillia 0)
+add_camillia(camillia-desktop 1)
 
 # The .deb (linux/build.sh --deb, `cpack -G DEB` in build/): what install/install.sh
 # puts on the device, under /usr/share/APPLaunch, for the CardputerZero App Store
@@ -203,10 +217,15 @@ target_link_libraries(camillia PRIVATE lvgl_fw lgfx_fb radiolib mtcrypto
 string(REGEX REPLACE "^v" "" APP_DEB_VERSION "${APP_VERSION}")
 set(ICON share/images/camillia.png)   # relative to /usr/share/APPLaunch, as the stock entries
 configure_file(install/camillia.desktop ${CMAKE_CURRENT_BINARY_DIR}/camillia.desktop @ONLY)
-install(TARGETS camillia RUNTIME DESTINATION share/APPLaunch/bin)
+install(TARGETS camillia camillia-desktop RUNTIME DESTINATION share/APPLaunch/bin)
 install(PROGRAMS install/camillia-launch DESTINATION share/APPLaunch/bin)
 install(FILES ${CMAKE_CURRENT_BINARY_DIR}/camillia.desktop DESTINATION share/APPLaunch/applications)
 install(FILES install/camillia.png DESTINATION share/APPLaunch/share/images)
+# The desktop menu entry and its icon. The store allows no files in
+# usr/share/applications, so the app copies the entry into
+# ~/.local/share/applications at each start (app/czero_window.cpp).
+install(FILES install/camillia-desktop.desktop DESTINATION share/camillia RENAME camillia.desktop)
+install(FILES install/camillia.png DESTINATION share/camillia)
 install(FILES ${CMAKE_CURRENT_SOURCE_DIR}/../LICENSE DESTINATION share/doc/camillia RENAME copyright)
 set(CPACK_GENERATOR DEB)
 set(CPACK_PACKAGE_NAME camillia)

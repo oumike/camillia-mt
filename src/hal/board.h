@@ -238,10 +238,23 @@ DEVICE_CARDPUTER_ZERO"
 // assume a 240px-tall panel and run off the bottom of these, so they take the
 // compact layouts and key-driven navigation instead. Layout only: M5Cardputer
 // hardware stays on DEVICE_CARDPUTER_LORA_HAT.
-#if defined(DEVICE_CARDPUTER_LORA_HAT) || defined(DEVICE_CARDPUTER_ZERO)
+//
+// The CardputerZero's desktop build (CZERO_DESKTOP, linux/CMakeLists.txt) is
+// the same app in an 800x480 window on the Raspberry Pi desktop. It takes the
+// Tanmatsu's layout instead: UI_TANMATSU_LAYOUT is that board's screens and
+// navigation, apart from its hardware (keyboard light, LEDs, audio, keys).
+#ifndef CZERO_DESKTOP
+#  define CZERO_DESKTOP 0
+#endif
+#if defined(DEVICE_CARDPUTER_LORA_HAT) || (defined(DEVICE_CARDPUTER_ZERO) && !CZERO_DESKTOP)
 #  define UI_CARDPUTER_COMPACT 1
 #else
 #  define UI_CARDPUTER_COMPACT 0
+#endif
+#if defined(DEVICE_TANMATSU) || (defined(DEVICE_CARDPUTER_ZERO) && CZERO_DESKTOP)
+#  define UI_TANMATSU_LAYOUT 1
+#else
+#  define UI_TANMATSU_LAYOUT 0
 #endif
 
 // ── Channel list presentation ────────────────────────────────────────────────
@@ -256,7 +269,7 @@ DEVICE_CARDPUTER_ZERO"
     || UI_CARDPUTER_COMPACT || defined(DEVICE_MESH_DECK) \
     || defined(DEVICE_M9) || defined(DEVICE_WIO_TRACKER_L2) \
     || defined(DEVICE_TDISPLAY_P4) || defined(DEVICE_CROWPANEL) \
-    || defined(DEVICE_TANMATSU)
+    || UI_TANMATSU_LAYOUT
 #  define UI_CHANNEL_LIST_DROPDOWN 1
 #else
 #  define UI_CHANNEL_LIST_DROPDOWN 0
@@ -333,7 +346,11 @@ DEVICE_CARDPUTER_ZERO"
 // working in the same logical pixels and src/ui_coord_shim.h scales them, and
 // the fonts with them, on the way into LVGL -- so LVGL renders at full panel
 // resolution without the layout being rewritten.
-#if defined(DEVICE_TANMATSU) && TANMATSU_NATIVE_UI
+//
+// The CardputerZero's desktop build (CZERO_DESKTOP) does the same in an
+// 800x480 window, with the Tanmatsu's layout (UI_TANMATSU_LAYOUT).
+#if (defined(DEVICE_TANMATSU) && TANMATSU_NATIVE_UI) \
+    || (defined(DEVICE_CARDPUTER_ZERO) && CZERO_DESKTOP)
 #  define UI_COORD_SCALE 2
 #else
 #  define UI_COORD_SCALE 1

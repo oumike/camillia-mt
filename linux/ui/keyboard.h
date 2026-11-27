@@ -45,3 +45,6 @@ private:
 // Opens and grabs the keyboard evdev device whose uniq (the Bluetooth address,
 // for BlueZ HID devices) matches `uniq`, case-insensitively. -1 if none.
 int openKeyboardByUniq(const char *uniq);
+// Opens and grabs the first Bluetooth keyboard the system has connected,
+// whatever paired it. Its name and uniq (address) are copied out. -1 if none.
+int openBluetoothKeyboard(char *name, size_t nameLen, char *uniq, size_t uniqLen);

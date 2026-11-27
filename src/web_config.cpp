@@ -4254,6 +4254,14 @@ static void sendConfigPage(const char *msg = "", bool lite = false) {
             "The device still uses your exact position locally. Receiving nodes are told "
             "how coarse the value is, so other Meshtastic clients can show it as an area. "
             "Applies to every channel this node shares position on.</p>";
+#if defined(DEVICE_CARDPUTER_ZERO)
+    // The system runs the GPS here; only what is shared of it is ours.
+    snprintf(tmp, sizeof(tmp), "%lu", (unsigned long)gCfg->posIntervalS);
+    html += "<label>GPS Broadcast Interval (s)<input name='pos_intv' type='number' min='60' value='";
+    html += tmp; html += "'></label>";
+    html += "<p class='hint'>How often your position is sent to the mesh. The "
+            "manual coordinates below are used until the GPS has a fix.</p>";
+#else
     html += "<label>"
             "<input type='checkbox' name='gpsEnabled' value='1'";
     if (gCfg->gpsEnabled) html += " checked";
@@ -4277,6 +4285,7 @@ static void sendConfigPage(const char *msg = "", bool lite = false) {
     html += "<p class='hint'>Parks the GPS receiver between polls to save power. "
             "Needs a poll interval long enough for it to reacquire; test it on your "
             "unit before relying on it.</p>";
+#endif
     html += "<div class='row2'>";
     snprintf(tmp, sizeof(tmp), "%.7f", gCfg->latI * 1e-7);
     html += "<label>Latitude&deg; (fallback)<input name='lat' type='number' step='0.0000001' value='";
@@ -8638,7 +8647,9 @@ static void handlePostSave() {
         gCfg->positionPrecision =
             positionPrecisionCoerce((uint8_t)server.arg("pos_precision").toInt());
     }
+#if !defined(DEVICE_CARDPUTER_ZERO)  // the system's GPS: always on
     gCfg->gpsEnabled = (server.arg("gpsEnabled") == "1");
+#endif
     gCfg->latI = (int32_t)(server.arg("lat").toFloat() * 1e7f);
     gCfg->lonI = (int32_t)(server.arg("lon").toFloat() * 1e7f);
     gCfg->alt  = (int32_t)server.arg("alt").toInt();

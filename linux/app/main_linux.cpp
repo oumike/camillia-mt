@@ -1,18 +1,23 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 // Entry point for Camillia on the CardputerZero: the firmware's own setup()
 // and loop() (src/main_lvgl.cpp) as a launcher app. SIGINT/SIGTERM -- the
-// launcher's Home long-press, or systemd -- persist state and leave.
+// launcher's Home long-press, or systemd -- persist state and leave. Started
+// from the desktop (a Wayland or X display), it runs in a window instead of on
+// the LCD; see czero_window.h.
 #include <Arduino.h>
 
 #include <dirent.h>
+#include <fcntl.h>
 #include <signal.h>
 #include <stdlib.h>
+#include <sys/file.h>
 #include <unistd.h>
 
 #include <atomic>
 
 #include "czero_app.h"
 #include "czero_paths.h"
+#include "czero_window.h"
 
 void setup();
 void loop();
@@ -58,6 +63,17 @@ void czeroRestart() {
     _exit(1);
 }
 
+// One Camillia at a time: the launcher's and the desktop's would share one
+// radio and one set of settings. The lock lasts as long as the process.
+static bool lockInstance() {
+    const int fd = open((czeroDataDir() + "/.lock").c_str(), O_RDWR | O_CREAT | O_CLOEXEC, 0600);
+    // A lock file that can't be made: run unlocked rather than not at all.
+    if (fd < 0) return true;
+    if (flock(fd, LOCK_EX | LOCK_NB) == 0) return true;
+    close(fd);
+    return false;
+}
+
 int main(int argc, char **argv) {
     setvbuf(stdout, nullptr, _IOLBF, 0);
     czeroSetArgv(argc, argv);
@@ -72,9 +88,16 @@ int main(int argc, char **argv) {
     signal(SIGPIPE, SIG_IGN);
 
     printf("[app] Camillia for CardputerZero, data in %s\n", czeroDataDir().c_str());
-    // LovyanGFX's Panel_fb falls back to scanning sysfs, and crashes, when the
-    // framebuffer it was given cannot be opened.
-    if (access("/dev/fb_lcd", R_OK | W_OK) != 0 && access("/dev/fb0", R_OK | W_OK) != 0) {
+    if (!lockInstance()) {
+        printf("[app] already running\n");
+        return 0;
+    }
+    czeroInstallMenuEntry();
+    if (czeroWindowed()) {
+        if (!czeroWindowOpen()) return 1;
+    } else if (access("/dev/fb_lcd", R_OK | W_OK) != 0 && access("/dev/fb0", R_OK | W_OK) != 0) {
+        // LovyanGFX's Panel_fb falls back to scanning sysfs, and crashes, when
+        // the framebuffer it was given cannot be opened.
         fprintf(stderr, "[app] no usable framebuffer (/dev/fb_lcd, /dev/fb0)\n");
         return 1;
     }
@@ -83,6 +106,10 @@ int main(int argc, char **argv) {
         loop();
         if (const int sig = s_signal.load()) {
             printf("[app] signal %d, saving and exiting\n", sig);
+            czeroExit(0);
+        }
+        if (czeroWindowClosed()) {
+            printf("[app] window closed, saving and exiting\n");
             czeroExit(0);
         }
     }

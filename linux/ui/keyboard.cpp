@@ -139,6 +139,39 @@ int openKeyboardByUniq(const char *uniq) {
     return found;
 }
 
+int openBluetoothKeyboard(char *name, size_t nameLen, char *uniq, size_t uniqLen) {
+    int found = -1;
+    if (DIR *d = opendir("/dev/input")) {
+        while (dirent *e = readdir(d)) {
+            if (strncmp(e->d_name, "event", 5)) continue;
+            std::string path = std::string("/dev/input/") + e->d_name;
+            int fd = ::open(path.c_str(), O_RDONLY | O_NONBLOCK | O_CLOEXEC);
+            if (fd < 0) continue;
+            input_id id = {};
+            unsigned long keys[KEY_MAX / (8 * sizeof(long)) + 1] = {};
+            bool match = ioctl(fd, EVIOCGID, &id) >= 0 && id.bustype == BUS_BLUETOOTH
+                && ioctl(fd, EVIOCGBIT(EV_KEY, sizeof keys), keys) >= 0
+                && (keys[KEY_A / (8 * sizeof(long))] >> (KEY_A % (8 * sizeof(long)))) & 1;
+            if (match) {
+                if (name && nameLen) {
+                    memset(name, 0, nameLen);
+                    ioctl(fd, EVIOCGNAME(nameLen - 1), name);
+                }
+                if (uniq && uniqLen) {
+                    memset(uniq, 0, uniqLen);
+                    ioctl(fd, EVIOCGUNIQ(uniqLen - 1), uniq);
+                }
+                ioctl(fd, EVIOCGRAB, 1);
+                found = fd;
+                break;
+            }
+            ::close(fd);
+        }
+        closedir(d);
+    }
+    return found;
+}
+
 void Keyboard::loadKeymap() {
     for (auto &s : kSymFallback) _sym[s.code] = s.sym;
     FILE *f = fopen(kKeymapPath, "r");

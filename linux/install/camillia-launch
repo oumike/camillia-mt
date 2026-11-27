@@ -1,8 +1,11 @@
 #!/bin/sh
 # SPDX-License-Identifier: GPL-3.0-or-later
 # Launcher entry for Camillia. Runs the app and keeps the last run's log next
-# to its data, for bug reports.
+# to its data, for bug reports. --desktop runs the window build instead, from
+# the desktop menu entry.
 dir="${CAMILLIA_HOME:-$HOME/.config/camillia-app}"
 mkdir -p "$dir"
-/usr/share/APPLaunch/bin/camillia >"$dir/app.log" 2>&1
+app=camillia
+[ "${1:-}" = --desktop ] && app=camillia-desktop
+/usr/share/APPLaunch/bin/$app >"$dir/app.log" 2>&1
 echo "exit=$?" >>"$dir/app.log"

@@ -277,9 +277,14 @@ uint8_t myDeviceRole = 0;
 
 // In LVGL pixels, which is what the draw buffer holds: panel pixels divided by
 // UI_PIXEL_SCALE (see board.h).
+#if defined(CZERO_WINDOW_MAX_W)
+// A window, which can be resized up to this.
+static constexpr uint16_t kMaxHorRes = CZERO_WINDOW_MAX_W;
+#else
 static constexpr uint16_t kMaxHorRes =
     ((DEVICE_LCD_LANDSCAPE_W > DEVICE_LCD_PORTRAIT_W) ? DEVICE_LCD_LANDSCAPE_W : DEVICE_LCD_PORTRAIT_W)
     / UI_PIXEL_SCALE;
+#endif
 #if defined(DEVICE_TLORA_PAGER_TFT)
 // Larger draw buffer -> fewer blocking SPI flushes per redraw (222px / 32 ~= 7
 // stripes instead of ~19), which removes the visible top-to-bottom "painting"
@@ -998,7 +1003,7 @@ static bool s_onboardingSdConfigPresent = false;
 // focus: Left/Right move it, Enter presses the focused one. Each stage's
 // buttons register here as they are built (renderOnboardingStage()); the
 // focus starts on the last one, the stage's primary action.
-#if defined(DEVICE_TANMATSU)
+#if UI_TANMATSU_LAYOUT
 #define ONBOARD_BUTTON_FOCUS 1
 #else
 #define ONBOARD_BUTTON_FOCUS 0
@@ -12325,6 +12330,15 @@ static void applyLoadedConfigInvariants() {
     // restored onto an older one -- reads as English rather than past the end.
     if (s_cfg.uiLanguage >= LANG_COUNT) s_cfg.uiLanguage = LANG_EN;
     i18nSetLang(s_cfg.uiLanguage);
+#if defined(DEVICE_CARDPUTER_ZERO)
+    // The system's Wi-Fi and GPS (see initCfgActions()): Camillia always uses
+    // them as the system has them, whatever an older build or an imported
+    // config stored. Whether and how precisely position is shared stays ours.
+    s_cfg.wifiEnabled         = true;
+    s_cfg.gpsEnabled          = true;
+    s_cfg.gpsDutyCycleEnabled = (bool)MY_GPS_DUTY_CYCLE;
+    s_cfg.gpsPollIntervalS    = MY_GPS_POLL_S;
+#endif
     if (!s_cfg.wifiEnabled) {
         s_cfg.mqttEnabled = false;
         s_webCfgEnabled   = false;
@@ -15279,7 +15293,7 @@ static void openComposePrompt(uint32_t replyPacketId,
     const lv_coord_t composeInputPadTop = 1;
     const lv_coord_t composeModalBottomPad = 4;
     const lv_coord_t composeModalRowPad = 1;
-#elif defined(DEVICE_TANMATSU)
+#elif UI_TANMATSU_LAYOUT
     const lv_font_t *composeBodyFont = emojiFont(&lv_font_montserrat_12);
     // Two lines, wrapping, so a message reads as you type it instead of
     // scrolling sideways out of one. The modal grows by the same amount
@@ -15526,7 +15540,7 @@ static void openComposePrompt(uint32_t replyPacketId,
     // whole display and the room goes to the message.
     modalW = lv_disp_get_hor_res(NULL);
     modalH = lv_disp_get_ver_res(NULL);
-#elif defined(DEVICE_TANMATSU)
+#elif UI_TANMATSU_LAYOUT
     // The shared size, plus what the second input line adds over the
     // one-line box it was sized for.
     modalH += (int)(composeInputH - (lv_font_get_line_height(composeBodyFont) + 8));
@@ -15676,7 +15690,7 @@ static void openComposePrompt(uint32_t replyPacketId,
     lv_obj_set_style_pad_left(s_composeInput, 3, 0);
     lv_obj_set_style_pad_right(s_composeInput, 3, 0);
 #if defined(DEVICE_TLORA_PAGER_TFT) || defined(DEVICE_TDECK) || defined(DEVICE_TDECK_PRO) || UI_CARDPUTER_COMPACT \
-    || defined(DEVICE_MESH_DECK) || defined(DEVICE_M9) || defined(DEVICE_TANMATSU)
+    || defined(DEVICE_MESH_DECK) || defined(DEVICE_M9) || UI_TANMATSU_LAYOUT
     // Wrap instead of scrolling sideways. The min/max height above pins the box
     // to its fixed number of lines, so a longer message scrolls inside it
     // rather than growing the box into the legend.
@@ -15994,13 +16008,19 @@ static void initCfgActions() {
     addGen(CFG_GEN_NODEID_PUBKEY);
     addGen(CFG_GEN_NODEID_OVERRIDE);
 
-    // The radios themselves, each with whatever picks what it talks to.
+    // The radios themselves, each with whatever picks what it talks to. The
+    // CardputerZero's are the system's (Wi-Fi, Bluetooth, GPS): it switches and
+    // configures them, and Camillia only uses them (applyLoadedConfigInvariants()).
+#if !defined(DEVICE_CARDPUTER_ZERO)
     s_cfgActions[s_cfgActionCount++] = CFG_ACTION_WIFI_TOGGLE;
+#endif
 #if !defined(PLATFORM_LINUX)
     // On Linux the OS picks the network.
     s_cfgActions[s_cfgActionCount++] = CFG_ACTION_CHOOSE_WIFI;
 #endif
-#if HAS_BLE_KEYBOARD
+#if defined(DEVICE_CARDPUTER_ZERO)
+    s_cfgActions[s_cfgActionCount++] = CFG_ACTION_WEBCFG;
+#elif HAS_BLE_KEYBOARD
     // Web Config sits with the WiFi pair on these boards instead of down in the
     // services group below. It is what most people turn WiFi on *for*, and
     // picking a network — or AP mode, which switches this row on by itself —
@@ -16014,7 +16034,9 @@ static void initCfgActions() {
     s_cfgActions[s_cfgActionCount++] = CFG_ACTION_BLE_KBD_TOGGLE;
     s_cfgActions[s_cfgActionCount++] = CFG_ACTION_BLE_KBD_PAIR;
 #endif
+#if !defined(DEVICE_CARDPUTER_ZERO)
     s_cfgActions[s_cfgActionCount++] = CFG_ACTION_GPS_TOGGLE;
+#endif
 #if HAS_FILE_STORAGE
     // Beside the GPS it depends on, so it can be switched on at the roadside
     // without a laptop. Only where there is storage for the log to land on.
@@ -16022,7 +16044,7 @@ static void initCfgActions() {
 #endif
 
     // Then the services those radios carry, which are useless without them.
-#if !HAS_BLE_KEYBOARD
+#if !HAS_BLE_KEYBOARD && !defined(DEVICE_CARDPUTER_ZERO)
     // Boards with a keyboard row listed it higher up, beside the WiFi pair.
     s_cfgActions[s_cfgActionCount++] = CFG_ACTION_WEBCFG;
 #endif
@@ -16058,8 +16080,10 @@ static void initCfgActions() {
     s_cfgActions[s_cfgActionCount++] = CFG_ACTION_POSITION_PRECISION;
     // How often, how the GPS is read, and the position used without a fix.
     addGen(CFG_GEN_POS_INTERVAL);
+#if !defined(DEVICE_CARDPUTER_ZERO)
     addGen(CFG_GEN_GPS_POLL);
     addGen(CFG_GEN_GPS_DUTY);
+#endif
     addGen(CFG_GEN_FIXED_LAT);
     addGen(CFG_GEN_FIXED_LON);
     addGen(CFG_GEN_FIXED_ALT);
@@ -16936,7 +16960,7 @@ static void refreshCfgModal() {
     const lv_font_t *cfgRowFont = &lv_font_montserrat_16;
     const int cfgPadTop = 14;
     const int cfgPadBottom = 14;
-#elif defined(DEVICE_CARDPUTER_ZERO)
+#elif defined(DEVICE_CARDPUTER_ZERO) && UI_CARDPUTER_COMPACT
     // 320x170 behind small glass: the ADV's 10 px rows are hard to read on it,
     // and the extra 35 px of height pays for bigger text and more space.
     const lv_font_t *cfgRowFont = &lv_font_montserrat_14;
@@ -17746,7 +17770,7 @@ static void onCfgColorBackdropPressed(lv_event_t *e) {
 // The Tanmatsu opts in for consistency with its other popups, where Up/Down
 // picks the row and Left/Right changes it.
 #if FEATURE_LOCK_SCREEN && (defined(DEVICE_M9) || defined(DEVICE_TLORA_PAGER_TFT) \
-                            || defined(DEVICE_TANMATSU))
+                            || UI_TANMATSU_LAYOUT)
 static constexpr bool kBrightVertPicksRow = true;
 #else
 static constexpr bool kBrightVertPicksRow = false;
@@ -50898,7 +50922,7 @@ static void onboardingFinalize() {
     (defined(DEVICE_M9) || defined(DEVICE_TDECK) || defined(DEVICE_TDECK_PRO) \
      || defined(DEVICE_MESH_DECK) || defined(DEVICE_TLORA_PAGER_TFT) \
      || UI_CARDPUTER_COMPACT || defined(DEVICE_TDISPLAY_P4) \
-     || defined(DEVICE_TANMATSU))
+     || UI_TANMATSU_LAYOUT)
 
 #if HAS_GLOBAL_NAV_SHORTCUTS
 static bool prepareGlobalNavigation() {
@@ -51219,7 +51243,7 @@ static bool handleGlobalNavigationKey(char key) {
 
 #if defined(DEVICE_TDECK) || defined(DEVICE_TDECK_PRO) || defined(DEVICE_MESH_DECK) \
     || defined(DEVICE_TLORA_PAGER_TFT) || UI_CARDPUTER_COMPACT \
-    || defined(DEVICE_TANMATSU)
+    || UI_TANMATSU_LAYOUT
 // Alt+H is "close everything and get back to chat", and it deliberately does
 // NOT open the channel list the way the M9's dedicated Home button does.
 //
@@ -51559,7 +51583,7 @@ static void pumpKeyboardInput() {
 
 #if defined(DEVICE_TDECK) || defined(DEVICE_TDECK_PRO) || defined(DEVICE_MESH_DECK) \
     || defined(DEVICE_TLORA_PAGER_TFT) || UI_CARDPUTER_COMPACT \
-    || defined(DEVICE_TANMATSU)
+    || UI_TANMATSU_LAYOUT
         // The Cardputer belongs on this list and was missing from it, which made
         // Alt+H a dead key on that board alone: altNavShortcut() raised
         // KEY_OPEN_HOME, nothing here caught it, and handleGlobalNavigationKey()
@@ -53481,7 +53505,7 @@ static void pumpKeyboardInput() {
         }
 
 #if defined(DEVICE_TLORA_PAGER_TFT) || defined(DEVICE_M9) || defined(DEVICE_MESH_DECK) \
-    || defined(DEVICE_TDISPLAY_P4) || defined(DEVICE_TANMATSU) \
+    || defined(DEVICE_TDISPLAY_P4) || UI_TANMATSU_LAYOUT \
     || (defined(DEVICE_TDECK) && HAS_TRACKBALL)
         // Steps the caret through the message being typed.
         //
@@ -53510,7 +53534,7 @@ static void pumpKeyboardInput() {
             }
 #endif
 #if defined(DEVICE_M9) || defined(DEVICE_MESH_DECK) || defined(DEVICE_TDISPLAY_P4) \
-    || defined(DEVICE_TDECK) || defined(DEVICE_TANMATSU)
+    || defined(DEVICE_TDECK) || UI_TANMATSU_LAYOUT
 #if HAS_SCROLL_INVERT
             // T-Deck: the trackball rolls the caret the way the ball moves, so
             // the list-scroll invert applied where trackball input enters the
@@ -54568,7 +54592,7 @@ static void pumpKeyboardInput() {
                         // key came from j/k — which, via the arrow-parity rule
                         // in this function, meant the arrows flipped too.
                         next += (k == KEY_SCROLL_UP) ? -1 : 1;
-#elif defined(DEVICE_TANMATSU)
+#elif UI_TANMATSU_LAYOUT
                         // Real arrow keys, not a trackball: up is up the list.
                         next += (k == KEY_SCROLL_UP) ? -1 : 1;
 #else
@@ -54923,7 +54947,7 @@ static void pumpKeyboardInput() {
                 }
                 continue;
             }
-#elif defined(DEVICE_TANMATSU)
+#elif UI_TANMATSU_LAYOUT
             // Real arrow keys and no main-nav scroll mode, so nothing else on
             // the chat screen claims them. With the cursor on (Enter), Up is
             // the message above and Down the one below; without it they scroll
@@ -56401,6 +56425,8 @@ static void lvglTouchRead(lv_indev_t *indev, lv_indev_data_t *data) {
     int32_t ty = 0;
 #if defined(DEVICE_MESH_DECK)
     const bool touched = meshDeckReadTouch(&tx, &ty);
+#elif defined(DEVICE_CARDPUTER_ZERO)
+    const bool touched = czeroWindowPointer(tx, ty);
 #else
     const bool touched = displayDev().getTouch(&tx, &ty);
 #endif
@@ -56978,8 +57004,7 @@ static void drawBootSplash() {
         return drawn;
     };
 
-#if !defined(DEVICE_TLORA_PAGER_TFT) && !defined(DEVICE_CARDPUTER_LORA_HAT) \
-    && !defined(DEVICE_CARDPUTER_ZERO)
+#if !defined(DEVICE_TLORA_PAGER_TFT) && !UI_CARDPUTER_COMPACT
     // Native-size Roboto GFX fonts (crisp at this size, no bitmap upscaling).
     int splashContentBottom = cardY + 40;
     splashDev().setTextColor(titleCol, cardBg);
@@ -57021,7 +57046,7 @@ static void drawBootSplash() {
 #endif
 
 
-#if defined(DEVICE_CARDPUTER_LORA_HAT) || defined(DEVICE_CARDPUTER_ZERO)
+#if UI_CARDPUTER_COMPACT
     // Cardputer splash, ADV and Zero alike: centered flower with version
     // directly underneath.
     const int flowerCx = cardX + (cardW / 2);
@@ -57568,7 +57593,7 @@ static void setActiveChannel(int channelIdx) {
     s_cardputerMainChatPanelFocused = false;
 #endif
 #if defined(DEVICE_TDECK) || defined(DEVICE_TDECK_PRO) || UI_CARDPUTER_COMPACT || defined(DEVICE_M9) \
-    || defined(DEVICE_TANMATSU)
+    || UI_TANMATSU_LAYOUT
     s_cardputerDropdownSelection = channelIdx;
 #endif
     clearSelectedMsgContext();
@@ -57620,7 +57645,7 @@ static void refreshChannelSelectorLabel() {
 
     const char *name = channelName(s_activeChannel);
 #if defined(DEVICE_TDECK) || defined(DEVICE_TDECK_PRO) || UI_CARDPUTER_COMPACT || defined(DEVICE_MESH_DECK) \
-    || defined(DEVICE_M9) || defined(DEVICE_TANMATSU)
+    || defined(DEVICE_M9) || UI_TANMATSU_LAYOUT
     if (isChannelDropdownVisible()
         && s_cardputerDropdownSelection >= 0
         && s_cardputerDropdownSelection < MESH_CHANNELS) {
@@ -57639,7 +57664,7 @@ static void refreshChannelSelectorLabel() {
 // which matters more here than on the T-Deck — same 320x240 pixels, smaller
 // glass, so channel names have less room to be legible in.
 #if defined(DEVICE_TDECK) || defined(DEVICE_TDECK_PRO) || defined(DEVICE_MESH_DECK) || defined(DEVICE_M9) \
-    || defined(DEVICE_TANMATSU)
+    || UI_TANMATSU_LAYOUT
     const bool showSelectorCaret = false;
 #elif UI_TOUCH_ONLY_PROFILE
     // The caret said "this opens"; the selector no longer does (it is only the
@@ -57695,7 +57720,7 @@ static void refreshChannelSelectorLabel() {
 
             // Measure button width from text + equal edge padding (+ optional caret room).
             lv_coord_t desiredW = textW + (showSelectorCaret ? 26 : (selectorEdgePad * 2 + selectorAntiClip));
-#if defined(DEVICE_TDECK) || defined(DEVICE_M9) || defined(DEVICE_TANMATSU)
+#if defined(DEVICE_TDECK) || defined(DEVICE_M9) || UI_TANMATSU_LAYOUT
             if (desiredW < 56) desiredW = 56;
 #elif UI_CARDPUTER_COMPACT
             if (desiredW < 60) desiredW = 60;
@@ -57926,7 +57951,7 @@ static void setChannelDropdownVisible(bool visible) {
     if (visible) {
         channelDrawerSlide(true);
 #if defined(DEVICE_TDECK) || defined(DEVICE_TDECK_PRO) || UI_CARDPUTER_COMPACT || defined(DEVICE_MESH_DECK) \
-    || defined(DEVICE_M9) || defined(DEVICE_TANMATSU)
+    || defined(DEVICE_M9) || UI_TANMATSU_LAYOUT
         if (s_cardputerDropdownSelection < 0 || s_cardputerDropdownSelection >= MESH_CHANNELS) {
             s_cardputerDropdownSelection = s_activeChannel;
         }
@@ -57938,7 +57963,7 @@ static void setChannelDropdownVisible(bool visible) {
     } else {
         channelDrawerSlide(false);
 #if defined(DEVICE_TDECK) || defined(DEVICE_TDECK_PRO) || UI_CARDPUTER_COMPACT || defined(DEVICE_MESH_DECK) \
-    || defined(DEVICE_M9) || defined(DEVICE_TANMATSU)
+    || defined(DEVICE_M9) || UI_TANMATSU_LAYOUT
         s_cardputerDropdownSelection = -1;
 #endif
     }
@@ -64746,11 +64771,11 @@ static void buildUi() {
 // dropdown (UI_CHANNEL_LIST_DROPDOWN) instead of an anchored list, so reserving
 // a column for one leaves an empty strip down the side.
 #if defined(DEVICE_TDECK) || defined(DEVICE_TDECK_PRO) || UI_TOUCH_ONLY_PROFILE || defined(DEVICE_MESH_DECK) \
-    || defined(DEVICE_M9) || defined(DEVICE_TANMATSU)
+    || defined(DEVICE_M9) || UI_TANMATSU_LAYOUT
 #if defined(DEVICE_TDECK) || defined(DEVICE_TDECK_PRO) || defined(DEVICE_MESH_DECK) || defined(DEVICE_M9) \
-    || defined(DEVICE_TANMATSU)
+    || UI_TANMATSU_LAYOUT
     const int panelMargin = 6;
-#if defined(DEVICE_TANMATSU)
+#if UI_TANMATSU_LAYOUT
     // Height is what this panel is short of: the header sits near the top edge
     // and the chat close under it, the side margins as on the T-Deck.
     const int headerTop = 2;
@@ -64791,7 +64816,7 @@ static void buildUi() {
     // header is read at arm's length. Every screen's header copies this one
     // (s_chatHdrGeom), so they all grow together.
     const int chatHeaderH = 50;
-#elif defined(DEVICE_TANMATSU)
+#elif UI_TANMATSU_LAYOUT
     // Native resolution: 20 units is 40 px, around the 24 px name and clock
     // (montserrat_12, below) with the 10s beside them. The selector
     // (chatHeaderH - 6) is 28 px, which holds the 12's 27 px line, descenders
@@ -65001,7 +65026,7 @@ static void buildUi() {
     // Cardputer keeps the original clock size to fit its narrow header.
 #if UI_CARDPUTER_COMPACT
     const lv_font_t *clockTextFont = headerTextFont;
-#elif defined(DEVICE_TDECK_PRO) || defined(DEVICE_TANMATSU)
+#elif defined(DEVICE_TDECK_PRO) || UI_TANMATSU_LAYOUT
     const lv_font_t *clockTextFont = &lv_font_montserrat_12;
 #else
     const lv_font_t *clockTextFont = (chatHeaderH >= 25) ? &lv_font_montserrat_16 : &lv_font_montserrat_14;
@@ -65047,7 +65072,7 @@ static void buildUi() {
 // which matters more here than on the T-Deck — same 320x240 pixels, smaller
 // glass, so channel names have less room to be legible in.
 #if defined(DEVICE_TDECK) || defined(DEVICE_TDECK_PRO) || defined(DEVICE_MESH_DECK) || defined(DEVICE_M9) \
-    || defined(DEVICE_TANMATSU)
+    || UI_TANMATSU_LAYOUT
     const bool showSelectorCaret = false;
 #elif UI_TOUCH_ONLY_PROFILE
     const bool showSelectorCaret = false;   // see refreshChannelSelectorLabel()
@@ -65057,7 +65082,7 @@ static void buildUi() {
     const bool showSelectorCaret = true;
 #endif
 
-#if UI_CARDPUTER_COMPACT || defined(DEVICE_TANMATSU)
+#if UI_CARDPUTER_COMPACT || UI_TANMATSU_LAYOUT
     const lv_coord_t selectorTextYOffset = 0;
 #else
     const lv_coord_t selectorTextYOffset = 1;
@@ -65312,7 +65337,7 @@ static void buildUi() {
     // Same size as the selector button's own label, so the open list reads as
     // that button unfolded rather than as a smaller menu below it.
     channelNavFont = &lv_font_montserrat_14;
-#elif defined(DEVICE_TDECK) || defined(DEVICE_TDECK_PRO) || defined(DEVICE_M9) || defined(DEVICE_TANMATSU)
+#elif defined(DEVICE_TDECK) || defined(DEVICE_TDECK_PRO) || defined(DEVICE_M9) || UI_TANMATSU_LAYOUT
     channelNavFont = &lv_font_montserrat_14; // nearest built-in to requested size 13
 #if HAS_CHANNEL_PANEL_LOCK
     // Docked, the column is read down at native resolution: 10 is drawn as a
@@ -65330,7 +65355,7 @@ static void buildUi() {
     // 2 px of border per side, and anything shorter clips the glyphs.
     const int channelNavBtnH =
         max(kMainScreenChannelBtnHeight, (int)lv_font_get_line_height(channelNavFont) + 8);
-#elif HAS_CHANNEL_PANEL_LOCK && defined(DEVICE_TANMATSU)
+#elif HAS_CHANNEL_PANEL_LOCK && UI_TANMATSU_LAYOUT
     // Docked rows shrink with their font: 2 px padding and up to 2 px of border
     // a side around an 11-unit line still clears in 20.
     const int channelNavBtnH = channelListIsDropdown() ? kMainScreenChannelBtnHeight : 20;
@@ -66032,6 +66057,51 @@ static void rebuildUiForThemeChange(bool reopenCfg) {
         refreshCfgModal();
     }
 }
+
+#if defined(DEVICE_CARDPUTER_ZERO) && CZERO_DESKTOP
+// The desktop window (linux/app/czero_window.cpp). The wheel scrolls whatever
+// scrolls under the mouse. A new window size, once it settles, becomes the
+// panel's and LVGL's, and the UI is laid out again for it, back on the screen
+// that was open.
+static void czeroFollowWindow() {
+    if (const int notches = czeroWindowTakeWheel()) {
+        int32_t x = 0, y = 0;
+        (void)czeroWindowPointer(x, y);
+        const lv_point_t pt{x, y};
+        lv_obj_t *obj = lv_indev_search_obj(lv_layer_top(), (lv_point_t *)&pt);
+        if (!obj) obj = lv_indev_search_obj(lv_screen_active(), (lv_point_t *)&pt);
+        for (; obj; obj = lv_obj_get_parent(obj)) {
+            if (!lv_obj_has_flag(obj, LV_OBJ_FLAG_SCROLLABLE)) continue;
+            if ((lv_obj_get_scroll_top)(obj) <= 0 && (lv_obj_get_scroll_bottom)(obj) <= 0) continue;
+            // 30 layout pixels a notch; the shim doubles them.
+            lv_obj_scroll_by(obj, 0, notches * 30, LV_ANIM_ON);
+            s_lastActivityMs = millis();
+            break;
+        }
+    }
+
+    int w = 0, h = 0;
+    if (!czeroWindowSize(w, h)) return;
+    if (w == (int)displayDev().width() && h == (int)displayDev().height()) return;
+    // As processPendingUiRebuild(): these own the screen, so wait them out.
+    if (s_onboardingModal) return;
+
+    char reopen = KEY_NONE;
+    if (lvObjValid(s_cfgModal))            reopen = KEY_OPEN_CONFIG;
+    else if (lvObjValid(s_nodesModal))     reopen = KEY_OPEN_NODES;
+    else if (lvObjValid(s_liveToolsModal)) reopen = KEY_OPEN_TOOLS;
+    else if (lvObjValid(s_dmModal))        reopen = KEY_OPEN_DMS;
+    else if (lvObjValid(s_legendModal))    reopen = KEY_OPEN_HELP;
+    else if (lvObjValid(s_homeDash))       reopen = KEY_OPEN_HOME;
+
+    displayDev().czeroResize(w, h);
+    lv_display_set_resolution(s_lvDisplay, w, h);
+    czeroWindowShow(w, h);
+    Serial.printf("[app] window %dx%d\n", w, h);
+    rebuildUiForThemeChange(false);
+    if (reopen != KEY_NONE) (void)handleGlobalNavigationKey(reopen);
+}
+#endif
 
 static void scheduleUiRebuild(bool reopenCfg) {
     s_uiRebuildPending = true;
@@ -67511,7 +67581,7 @@ static void serviceSerialCommands() {
 #endif
 }
 
-#if defined(DEVICE_TANMATSU)
+#if UI_TANMATSU_LAYOUT
 // ── Scrollbar gutters ────────────────────────────────────────────────────────
 // LVGL draws a scrollbar inside its container's right edge, on top of the
 // children, so anything laid out to that edge is painted over. Rather than
@@ -68130,7 +68200,7 @@ void setup() {
                   (long)dispW, (long)dispH, UI_PIXEL_SCALE, UI_BOTTOM_SAFE_H);
 #endif
     s_lvDisplay = lv_display_create(dispW, dispH);
-#if defined(DEVICE_TANMATSU)
+#if UI_TANMATSU_LAYOUT
     if (s_lvDisplay) {
         lv_display_add_event_cb(s_lvDisplay, onRefrReadyReserveGutters,
                                 LV_EVENT_REFR_READY, nullptr);
@@ -69313,6 +69383,9 @@ void loop() {
     }
 #endif
     LOOP_PHASE("ui", processPendingUiRebuild());
+#if defined(DEVICE_CARDPUTER_ZERO) && CZERO_DESKTOP
+    LOOP_PHASE("ui", czeroFollowWindow());
+#endif
     // lv_timer_handler() deliberately runs below the screen-asleep gate now —
     // there is nothing to draw with the panel in SLPIN, and its indev timer
     // would otherwise keep polling the touch controller over I2C the whole

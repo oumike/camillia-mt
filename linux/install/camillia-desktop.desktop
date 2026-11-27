@@ -1,0 +1,15 @@
+# SPDX-License-Identifier: GPL-3.0-or-later
+# The Raspberry Pi desktop's menu entry (Internet): opens Camillia in a window.
+# Installed to /usr/share/camillia/; the app copies it to
+# ~/.local/share/applications at each start. TryExec hides it once the
+# package is removed.
+[Desktop Entry]
+Type=Application
+Name=Camillia
+Comment=Meshtastic messaging over the LoRa cap
+TryExec=/usr/share/APPLaunch/bin/camillia-desktop
+Exec=/usr/share/APPLaunch/bin/camillia-launch --desktop
+Icon=/usr/share/camillia/camillia.png
+Terminal=false
+Categories=Network;Chat;
+StartupWMClass=Camillia
