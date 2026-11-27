@@ -13,8 +13,8 @@ It is intentionally lightweight and operational.
 
 3. UI -> Interaction updates
    - For UI/config changes, update both on-device UI (`main_lvgl.cpp` and
-     its `src/ui/*.inc` fragments) and web
-     UI (`web_config.cpp`) when applicable. A setting must also be reachable on
+     its `src/ui/*.inc` fragments) and web UI (`web_config.cpp` and its
+     `src/web_config/*.inc` fragments) when applicable. A setting must also be reachable on
      the lite web page, which is all the Cardputer serves.
 
 4. Codegen -> Implementation

@@ -4,7 +4,8 @@
 # leaves part of the page in the old theme (dark inputs under light text).
 set -euo pipefail
 root="$(cd "$(dirname "$0")/../.." && pwd)"
-apply="$(sed -n '/"function apply(){"/,/^        "}"/p' "$root/src/web_config.cpp")"
+apply="$(cat "$root/src/web_config.cpp" "$root"/src/web_config/*.inc \
+  | sed -n '/"function apply(){"/,/^        "}"/p')"
 fail=0
 for v in --bg --panel --panel-2 --panel-3 --line --line-hi --input --text --dim --accent --on-accent; do
   grep -q "setProperty('$v'" <<<"$apply" || { echo "apply() does not set $v"; fail=1; }
