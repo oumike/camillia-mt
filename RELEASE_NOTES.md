@@ -1,10 +1,8 @@
-### New
-- CardputerZero: Camillia can now run in a resizable window on the Raspberry Pi desktop (the Zero on a monitor). It appears under **Internet** in the menu and uses the large-screen layout; the mouse acts as touch, the wheel scrolls, and only one copy runs at a time.
-
 ### Changed
-- CardputerZero: Wi-Fi, Bluetooth keyboard and GPS are now set up in the system's own settings. The WiFi, Choose WiFi, Bluetooth Keyboard, GPS, GPS poll and standby rows are gone from Config, and first-time setup no longer has a Wi-Fi step. A Bluetooth keyboard connected in the system settings types into Camillia. Position sharing and the privacy settings stay in Camillia.
-- CardputerZero: a saved config that had Wi-Fi or GPS turned off is overridden to on.
-- CardputerZero: holding Esc now quits to the launcher after 3 s (was 4 s), with a countdown ring that appears after 0.5 s.
-- Contributors: `main_lvgl.cpp` and `web_config.cpp` are split into ordered fragments under `src/ui/*.inc` and `src/web_config/*.inc`, with no behaviour change. Open branches that edit either file must move their edits to the matching fragment when they rebase.
+- CardputerZero: brightness and screen timeout now follow the launcher's Settings. Camillia picks them up each time it starts and hands the screen back at the launcher's brightness when it quits. The Lock Screen rows stay Camillia's; set the lock screen's brightness on the Web Config page. A system brightness below 10% shows as 10%.
+- CardputerZero: message alerts and the splash melody now play through the system's sound at the launcher's volume. Notification Sound and Splash Melody still choose what plays.
+- CardputerZero: the clock and timezone are the system's, kept by its own network time. Clock Format stays in Camillia.
+- CardputerZero: Brightness, Screen Timeout, Volume, Time & Date, Time Zone, NTP Server, Power Saving and Battery Calibration are gone from Config and from the Web Config page.
+- CardputerZero desktop window: it now has the touch boards' controls for the mouse (Send and Cancel buttons in the composer, an X on popups, tappable headers) and always shows the nav bar. The keyboard works as before. The window also draws at full brightness and never blanks, leaving both to the monitor and the desktop.
 
-Pull request: #167
+Pull request: #169
