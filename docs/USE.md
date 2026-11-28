@@ -296,7 +296,9 @@ On the Raspberry Pi desktop (the Zero on a monitor), Camillia is under
 in a window there with the Tanmatsu's larger-screen layout. It works like a
 desktop app: the window resizes and maximises with the UI filling it, the mouse
 clicks and drags like a touch panel, and the wheel scrolls whatever is under the
-pointer. Only one copy runs at a time, so close it in one place before starting
+pointer. The window has the touch boards' controls (Send and Cancel buttons in
+the composer, an X on popups, tappable headers) and always shows the nav bar,
+while the keyboard works as it does on the Zero's own screen. Only one copy runs at a time, so close it in one place before starting
 it in the other.
 
 Keys are the Cardputer's above, plus:
@@ -317,6 +319,24 @@ settings, and no Wi-Fi step in first-time setup); see [Web Config](#web-config)
 for the port. What Camillia shares stays yours to choose: position broadcast,
 its interval and precision, and the other privacy settings. A Bluetooth keyboard
 paired and connected in the system's settings types into Camillia.
+
+The display, sound and clock are the system's too. Set them in the launcher's
+Settings app:
+- **Brightness** and **screen timeout**: Camillia uses the launcher's values
+  each time it starts and gives the screen back at the launcher's brightness
+  when it quits. The **Lock Screen** rows stay Camillia's; set the lock screen's
+  own brightness on the Web Config page. In the desktop window Camillia draws
+  at full brightness and never blanks; the monitor and the desktop's own
+  screen blanking take over.
+- **Volume**: message alerts and the splash melody play through the system's
+  sound, at the launcher's volume. **Notification Sound** and **Splash Melody**
+  still choose what plays.
+- **Clock and timezone**: these are the system's, kept by its own network time.
+  **Clock Format** is still Camillia's.
+
+Camillia has none of its own rows for these, on the device or on the Web Config
+page: no Brightness, Screen Timeout, Volume, Time & Date, Time Zone, NTP
+Server, Power Saving or Battery Calibration.
 
 ### Nicolai Electronics Tanmatsu (tanmatsu)
 
@@ -2018,7 +2038,8 @@ Notification Sound and Splash Melody now sit directly under My Message Color,
 with the other presentation settings.
 
 **The three tones differ by board, because the hardware does.** The T-Deck,
-Pager and Cardputer play them through a speaker or codec. The Heltec and M9
+Pager and Cardputer play them through a speaker or codec, and the CardputerZero
+through the system's sound at the system volume. The Heltec and M9
 have a passive piezo buzzer instead, which has one resonant peak around
 2-4 kHz and drops off sharply below it — so their patterns sit higher, and
 their Bass is the lowest register the part still projects, set apart by being

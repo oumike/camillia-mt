@@ -621,6 +621,17 @@
 #define VOLUME_PCT_STEP  10
 #define MY_VOLUME_PCT    50
 
+// Settings the operating system owns. The CardputerZero's launcher sets the
+// backlight level, the screen timeout and the volume, and the OS keeps the
+// clock, timezone and battery gauge. Camillia follows those
+// (linux/app/czero_system.h) and offers no settings of its own for them:
+// two places to set one thing would disagree.
+#if defined(DEVICE_CARDPUTER_ZERO)
+#define HAS_SYSTEM_SETTINGS 1
+#else
+#define HAS_SYSTEM_SETTINGS 0
+#endif
+
 // Whether the board can make a sound at all. Mirrors the branches that actually
 // exist in triggerMessageAlert() and playSplashStartupRiff(): the boards with a
 // synthesized-audio path, plus anything with a passive buzzer on a GPIO. The Mesh
@@ -629,7 +640,7 @@
 // and volume settings were UI for hardware that does not exist.
 #if defined(DEVICE_TLORA_PAGER_TFT) || defined(DEVICE_TDECK) || defined(DEVICE_WIO_TRACKER_L2) \
     || defined(DEVICE_CARDPUTER_LORA_HAT) || defined(DEVICE_TDISPLAY_P4) \
-    || defined(DEVICE_TANMATSU) || (BOARD_BUZZER >= 0)
+    || defined(DEVICE_TANMATSU) || defined(DEVICE_CARDPUTER_ZERO) || (BOARD_BUZZER >= 0)
 #define HAS_AUDIO_ALERTS 1
 #else
 #define HAS_AUDIO_ALERTS 0
@@ -642,7 +653,9 @@
 // The HAS_AUDIO_ALERTS term matters: this used to be "no buzzer", which is true
 // of a board with a codec *and* of a board with no audio hardware whatsoever,
 // so the Mesh Deck was offered a volume slider for silence.
-#define HAS_VOLUME_CONTROL (HAS_AUDIO_ALERTS && (BOARD_BUZZER < 0))
+//
+// Not where the system owns the volume (HAS_SYSTEM_SETTINGS).
+#define HAS_VOLUME_CONTROL (HAS_AUDIO_ALERTS && (BOARD_BUZZER < 0) && !HAS_SYSTEM_SETTINGS)
 
 // Offer a scroll-direction preference for the trackball. Named by board rather
 // than derived from HAS_TRACKBALL on purpose: the T-Deck is the only build this

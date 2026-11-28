@@ -597,6 +597,18 @@ static void applyLoadedConfigInvariants() {
     s_cfg.gpsDutyCycleEnabled = (bool)MY_GPS_DUTY_CYCLE;
     s_cfg.gpsPollIntervalS    = MY_GPS_POLL_S;
 #endif
+#if HAS_SYSTEM_SETTINGS
+    // The system's display, clock and battery settings: taken from the
+    // launcher each load, whatever was stored or imported, so a change made in
+    // its Settings app holds the next time Camillia starts. The clock is the
+    // OS's, kept by its own NTP; Camillia never sets it. Power saving is the
+    // ESP32's light sleep, and the gauge needs no trim.
+    s_cfg.brightness    = cfgCoerceBrightness(czeroSystemBrightnessPct());
+    s_cfg.screenOnSecs  = czeroSystemScreenOffSecs();
+    s_cfg.timeSource    = TIME_SOURCE_AUTO;
+    s_cfg.battCalTrim   = 0;
+    s_cfg.isPowerSaving = false;
+#endif
     if (!s_cfg.wifiEnabled) {
         s_cfg.mqttEnabled = false;
         s_webCfgEnabled   = false;

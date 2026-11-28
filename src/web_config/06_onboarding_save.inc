@@ -239,10 +239,12 @@ static void handlePostSave() {
         uint32_t oldMs = (uint32_t)oldMsSigned;
         gCfg->gpsPollIntervalS = (oldMs == 0) ? 0 : (uint32_t)constrain((long)((oldMs + 999UL) / 1000UL), (long)0, (long)3600);
     }
+#if !HAS_SYSTEM_SETTINGS   // the OS's clock and zone: not on the page
     strncpy(gCfg->tzDef, server.arg("tzdef").c_str(), sizeof(gCfg->tzDef) - 1);
     gCfg->tzDef[sizeof(gCfg->tzDef) - 1] = '\0';
     strncpy(gCfg->ntpServer, server.arg("ntp_server").c_str(), sizeof(gCfg->ntpServer) - 1);
     gCfg->ntpServer[sizeof(gCfg->ntpServer) - 1] = '\0';
+#endif
 #if HAS_NODE_LOS
     // Trailing slashes are stripped by the fetcher, so both forms are accepted.
     strncpy(gCfg->losElevServer, server.arg("los_elev").c_str(),
@@ -460,7 +462,9 @@ static void handlePostSave() {
             cfgCoerceBrightness(server.arg("lock_brightness").toInt());
     }
 #endif
+#if !HAS_SYSTEM_SETTINGS   // the system's screen timeout: not on the page
     gCfg->screenOnSecs    = (uint32_t)server.arg("screen_on").toInt();
+#endif
 #if FEATURE_LOCK_SCREEN
     // hasArg-guarded like volume and brightness above: a lite page that does not
     // render these must leave the stored values alone rather than zero them —
@@ -685,7 +689,9 @@ static void handlePostSave() {
 #endif
 
     // Power
+#if !HAS_SYSTEM_SETTINGS   // no Power section on the page
     gCfg->isPowerSaving = server.arg("pwr_saving").toInt() != 0;
+#endif
     if (server.hasArg("dbg_lite")) setMonitorDebugEnabled(server.arg("dbg_lite") == "1");
 
     // Modules

@@ -2054,7 +2054,7 @@ static bool chatServerHandleRx(const MeshPacket &pkt) {
                       n ? (unsigned long)items[0].seq : 0UL, n ? (unsigned long)items[n - 1].seq : 0UL,
                       (unsigned long)s_csClient.state(pkt.chanIdx).cursor,
                       (unsigned long)s_csClient.state(pkt.chanIdx).epoch);
-        if ((h.flags & csp::FLAG_TIME_VALID) && !clockIsSet() && !timeSourceIsManual()) {
+        if ((h.flags & csp::FLAG_TIME_VALID) && !clockIsSet() && clockIsOursToSet()) {
             struct timeval tv = {(time_t)h.serverTime, 0};
             settimeofday(&tv, nullptr);
             csLive("[cs] clock set from chat server", TFT_DARKGREY);

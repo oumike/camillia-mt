@@ -24,6 +24,10 @@
 #include "hal/tanmatsu_lora.h"
 #include "hal/tanmatsu_coproc.h"
 #endif
+#if HAS_SYSTEM_SETTINGS
+#include "app/czero_system.h"   // the launcher's display settings, system audio
+#include <vector>
+#endif
 #include "live_util.h"
 #include "live_feed.h"
 #include "cs_client.h"
@@ -381,7 +385,13 @@ void setup() {
 #else
     displayDev().setRotation(TFT_ROTATION_DEFAULT);
 #endif
+#if HAS_SYSTEM_SETTINGS
+    // At the system's level from the first frame, rather than a default that
+    // the loaded config then moves away from.
+    displayDev().setBrightness(cfgBrightnessDuty(cfgCoerceBrightness(czeroSystemBrightnessPct())));
+#else
     displayDev().setBrightness(TFT_BRIGHTNESS_DEFAULT);
+#endif
     displayDev().fillScreen(TFT_BLACK);
     s_keyboard.begin();
 #if defined(DEVICE_TDECK_PRO)

@@ -93,7 +93,9 @@ and issue #155.
 | **LoRa** | SX1262 on the Cap LoRa-1262: `/dev/spidev0.1` (CE1), DIO1 GPIO23, RST GPIO26, BUSY GPIO22 on `gpiochip0`; DIO1 is a GPIO edge event, not polled |
 | **Cap** | 5 V from the Zero's M5IOE1 `ext_5v_out` (`/sys/class/leds/ext_5v_out`); PI4IOE5V6408 at `0x43` on `/dev/i2c-1` arms the RF switch. The program does both at start |
 | **GPS** | L76K on `/dev/serial0` at 115200 (verified sending NMEA); read by the firmware's GPS module through a serial stand-in |
-| **Display** | ST7789 320x170 at `/dev/fb_lcd` (fbdev), drawn by the app with LVGL |
+| **Display** | ST7789 320x170 at `/dev/fb_lcd` (fbdev), drawn by the app with LVGL. Backlight `/sys/class/backlight/backlight` (0-100), at the launcher's brightness and screen timeout from `~/.config/cardputerzero/config.json` |
+| **Audio** | ES8389 codec behind PipeWire; alerts and the splash melody are played with `pw-play` (then `paplay`, `aplay`) at the system volume |
+| **Clock** | The system's (systemd-timesyncd NTP, system timezone); the app never sets it |
 | **Keyboard** | TCA8418 matrix as a Linux evdev device (`/dev/input/by-path/platform-3f804000.i2c-event`), read without grabbing so the launcher keeps Home; symbols from `/usr/share/keymaps/tca8418_keypad_m5stack_keymap.map`. Bluetooth keyboards through BlueZ |
 | **Interface** | App from the launcher (`/usr/share/APPLaunch/bin/camillia`); data in `~/.config/camillia-app`, including the node archive (`fs/camillia/nodes_archive.csv`); web config on port 18765 |
 | **Battery** | bq27220 gauge via `/sys/class/power_supply`; the OS handles low-battery shutdown |

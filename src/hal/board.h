@@ -283,9 +283,13 @@ DEVICE_CARDPUTER_ZERO"
 // The T-Display P4 and the Mesh Deck are here because their keyboards are
 // optional modules (HAS_OPTIONAL_KEYBOARD): the touch UI is what works with or
 // without one, and keyboardAttached() says at run time which it is.
+//
+// The CardputerZero's desktop window (CZERO_DESKTOP) is here too: the mouse is
+// its touch panel, so it gets the tap-first controls, with the keyboard always
+// attached. That also keeps its nav bar on, with no setting to hide it.
 #if defined(DEVICE_HELTEC_V4_EXPANSION) || defined(DEVICE_WIO_TRACKER_L2) \
     || defined(DEVICE_TDISPLAY_P4) || defined(DEVICE_CROWPANEL) \
-    || defined(DEVICE_MESH_DECK)
+    || defined(DEVICE_MESH_DECK) || (defined(DEVICE_CARDPUTER_ZERO) && CZERO_DESKTOP)
 #  define UI_TOUCH_ONLY_PROFILE 1
 #else
 #  define UI_TOUCH_ONLY_PROFILE 0
